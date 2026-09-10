@@ -544,6 +544,19 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId, output.Scene);
             ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: emitted {output.Nodes} vector nodes, {output.Scene.Length} chars");
+            if (!_sceneLive)
+            {
+                // The first structure: data that arrived before it was dropped by the vector
+                // mod (no scene to attach to), so everything forwarded so far goes again.
+                _sceneLive = true;
+                if (_forwarded.Count > 0)
+                {
+                    var all = new List<SS.UiProp>(_forwarded.Count);
+                    foreach (var kv in _forwarded)
+                        all.Add(new SS.UiProp { Key = kv.Key, Value = kv.Value });
+                    SendData(all);
+                }
+            }
         }
     }
 
@@ -688,16 +701,28 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// is `$co2_gasFill`). The vector mod eases scalars between ticks, so an SVG
     /// expression over $data moves smoothly at any tick rate with nothing re-emitted.
     /// </summary>
+    /// <summary>Everything forwarded so far, merged: the scene may not exist yet when data arrives.</summary>
+    private readonly Dictionary<string, SS.UiValue> _forwarded = new(StringComparer.Ordinal);
+    private bool _sceneLive;
+
     private void ForwardData(List<KeyValuePair<string, SS.UiValue>> entries)
     {
-        if (string.IsNullOrEmpty(DataElementId) || State is not SS.BoardState state)
-            return;
         var flat = new List<SS.UiProp>();
         foreach (var e in entries)
             Flatten(flat, e.Key, e.Value);
         if (flat.Count == 0)
             return;
-        var map = new SS.UiValue { Type = SS.UiValueType.Map, Map = flat.ToArray() };
+        foreach (var p in flat)
+            _forwarded[p.Key] = p.Value;
+        if (_sceneLive)
+            SendData(flat);
+    }
+
+    private void SendData(List<SS.UiProp> props)
+    {
+        if (string.IsNullOrEmpty(DataElementId) || State is not SS.BoardState state)
+            return;
+        var map = new SS.UiValue { Type = SS.UiValueType.Map, Map = props.ToArray() };
         VectorBridge.Data(Board, Cartridge, Visor, state, Surface, DataElementId, "html:" + ElementId, map, null);
     }
 

@@ -406,8 +406,19 @@ internal static class StyleApplier
         return list;
     }
 
+    /// <summary>Handled outside the style object: by the grid layout, the emitter, or by the box model itself.</summary>
+    private static readonly HashSet<string> Elsewhere = new(StringComparer.Ordinal)
+    {
+        "gap", "row-gap", "column-gap", "grid-gap", "grid-row-gap", "grid-column-gap",
+        "grid-template-columns", "grid-template-rows", "grid-auto-rows", "grid-auto-columns", "grid-auto-flow",
+        "grid-column", "grid-row", "grid-column-start", "grid-column-end", "grid-row-start", "grid-row-end",
+        "line-height", "text-transform", "z-index", "box-sizing",
+    };
+
     private static void Unknown(CssDeclaration d, Action<string>? warn)
     {
+        if (Elsewhere.Contains(d.Name))
+            return;
         if (Reported.Add(d.Name + ":" + d.Value))
             warn?.Invoke($"css: \"{d.Name}: {d.Value}\" not supported");
     }
