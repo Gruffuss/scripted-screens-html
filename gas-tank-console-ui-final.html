@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gas tank console — UI reference (final)</title>
+<style>
+  /* ------------------------------------------------------------------
+     Sizes are px at a 768x768 surface (Large console).
+
+     NO ALPHA is used anywhere in the gauge rendering. The Stationeers
+     Lua canvas REPLACES rather than composites, so every colour that
+     would have been a translucent layer is pre-computed opaque in
+     gasRamp() / liqPal().
+     ------------------------------------------------------------------ */
+  :root {
+    --screen:  #060B11;  /* console background           */
+    --tile:    #0D151E;  /* tile panel                   */
+    --tank:    #071019;  /* empty gauge interior         */
+    --value:   #E4F1F7;  /* value numerals               */
+    --unit:    #5F7C8C;  /* unit suffix                  */
+    --zero:    #3C5262;  /* a value that is exactly zero */
+    --caption: #435C6B;  /* GAS / LIQ under the gauges   */
+    --flowlb:  #40586A;  /* In / Out / mol-per-second    */
+    --flowin:  #5FD9A8;  /* inbound rate, non-zero       */
+    --flowout: #E2A94E;  /* outbound rate, non-zero      */
+    --flow0:   #3A4F5E;  /* either rate at zero          */
+    --badgeln: #F2F6F9;  /* badge outline                */
+  }
+
+  body { background:#02060A; margin:0; padding:34px;
+         display:flex; flex-direction:column; align-items:center; gap:16px;
+         font-family:'Segoe UI',system-ui,sans-serif; color:#5C7280; }
+  .hint { font-size:13px; max-width:768px; line-height:1.6; }
+  code { color:#9FE8D8; }
+  button { background:#131c26; color:#c8d4dd; border:1px solid #2a3846; border-radius:6px;
+           padding:8px 18px; font:14px system-ui; cursor:pointer; min-width:260px; }
+
+  .scr { background:var(--screen); border-radius:14px; padding:16px;
+         width:768px; height:768px; box-sizing:border-box;
+         display:grid; grid-template-columns:1fr 1fr; grid-template-rows:repeat(4,1fr);
+         gap:10px; font-family:'Segoe UI',system-ui,-apple-system,sans-serif; }
+
+  .tile { background:var(--tile); border-radius:10px; padding:9px 11px;
+          display:flex; overflow:hidden; }
+
+  /* gauge columns: 50px, gas at the left edge, liquid at the right */
+  .col { width:50px; flex:0 0 auto; display:flex; flex-direction:column;
+         align-items:center; gap:3px; min-height:0; }
+  .col canvas { width:100%; flex:1; border-radius:5px; background:var(--tank); display:block; }
+  .col em { font-style:normal; font-size:8.5px; letter-spacing:1.2px;
+            color:var(--caption); font-weight:600; }
+
+  /* middle: flow row, three value rows, flow row; badge spans the centre column */
+  .mid { flex:1; display:grid; grid-template-columns:1fr 54px 1fr;
+         grid-template-rows:24px 1fr 1fr 1fr 24px;
+         align-items:center; min-width:0; margin:0 9px; }
+
+  .fio { grid-column:1 / -1; display:flex; align-items:center; justify-content:center;
+         gap:5px; font:600 15px ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums; }
+  .fio i { font-style:normal; font-size:12px; }
+  .fio u { text-decoration:none; font-size:8.5px; letter-spacing:.5px; color:var(--flowlb);
+           font-family:'Segoe UI',system-ui,sans-serif; font-weight:600; text-transform:uppercase; }
+  .fin { color:var(--flowin); } .fout { color:var(--flowout); } .fzero { color:var(--flow0); }
+
+  .val { font:600 16px ui-monospace,Menlo,monospace; color:var(--value); text-align:center;
+         font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; }
+  .val small { font-size:8.5px; color:var(--unit); font-weight:400; margin-left:1px; }
+  .dim { color:var(--zero); }
+
+  .badge { grid-column:2; grid-row:2 / 5; display:flex; align-items:center; justify-content:center; }
+  .dia { width:34px; height:34px; transform:rotate(45deg); border-radius:5px;
+         border:2px solid var(--badgeln); display:flex; align-items:center; justify-content:center; }
+  .dia span { transform:rotate(-45deg); font-size:11px; font-weight:700;
+              line-height:1; white-space:nowrap; }
+</style>
+</head>
+<body>
+
+<div class="scr" id="grid"></div>
+<button id="driftBtn"></button>
+
+<p class="hint">
+  Reference only. The drift button below cycles neutral / condensing / evaporating so the
+  phase-change animation can be judged; in the real build drift is a per-gas signed number
+  pushed in through <code>View.update()</code>. Nothing here decides anything.
+</p>
+
+<script>
+/* ==================================================================
+   GAS TABLE
+   c  = badge colour, matching the in-game hazard diamond
+   c2 = right half of a split badge (H2 only)
+   t  = tank fill colour. Defaults to c. Overridden only where two
+        gases would be indistinguishable once pre-blended:
+          n2  black badge would be an invisible fill; cool dark grey
+          co2 warmed and lightened to separate it from n2
+          h2  deepened so it does not read as ch4
+   ================================================================== */
+const GAS = [
+  { key:'o2',  sym:'O\u2082',  c:'#DCE6EE' },
+  { key:'n2',  sym:'N\u2082',  c:'#141414', t:'#2E3A4A' },
+  { key:'co2', sym:'CO\u2082', c:'#5B6672', t:'#6E6A64' },
+  { key:'x',   sym:'X',        c:'#E4BE22' },
+  { key:'ch4', sym:'CH\u2084', c:'#CE3E2C' },
+  { key:'n2o', sym:'N\u2082O', c:'#3FA95C' },
+  { key:'h2',  sym:'H\u2082',  c:'#B5352C', c2:'#9DA1A4', t:'#7C1A15' },
+  { key:'o3',  sym:'O\u2083',  c:'#8E5AC6' }
+];
+
+/* ==================================================================
+   RENDER CONSTANTS
+   ================================================================== */
+const TANK  = [7, 16, 25];
+const MARKC = [190, 214, 228];
+const MARKA = 0.15;
+const MARKS = [0.25, 0.50, 0.75];
+
+const STEPS    = 8;     // density ramp steps for the gas gauge
+const GAS_MAX  = 0.62;  // gas density at a full tank
+const FADE     = 18;    // px over which the gas edge fades in
+const LIQ_OP   = [0.72, 0.94];
+const LWAVE = [
+  { amp: 2.8, k: 0.19, sp:  1.0, off: 3 },
+  { amp: 2.0, k: 0.29, sp: -1.4, off: 0 }
+];
+const GEDGE = [
+  { amp: 3, k: 0.11, sp:  0.7 },   // broad, slow — must not look like chop
+  { amp: 2, k: 0.19, sp: -0.5 }
+];
+
+const DRIFT_SPEED  = 26;
+const MOTES_GAS    = 42;
+const MOTES_LIQ    = 26;
+const MOTE_POOL    = 64;
+const PHI = 0.6180339, RT2 = 0.4142136;   // irrational seed steps
+
+const rgbOf = h => [parseInt(h.substr(1,2),16), parseInt(h.substr(3,2),16), parseInt(h.substr(5,2),16)];
+const mix   = (a,b,t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+const css   = c => 'rgb(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ')';
+
+const tankHex = g => g.t || g.c;
+const badgeBg = g => g.c2 ? 'linear-gradient(45deg,' + g.c + ' 50%,' + g.c2 + ' 50%)' : g.c;
+
+function inkFor(hex) {
+  const c = rgbOf(hex);
+  return (0.299*c[0] + 0.587*c[1] + 0.114*c[2]) / 255 > 0.58 ? '#0A1016' : '#FFFFFF';
+}
+
+/* Gas gauge: a ramp of STEPS+1 density levels, over plain tank and over
+   a graduation mark. Resolved once per gas at load. */
+function gasRamp(hex) {
+  const col = rgbOf(hex);
+  const over = base => {
+    const out = [];
+    for (let i = 0; i <= STEPS; i++) out.push(css(mix(base, col, GAS_MAX * i / STEPS)));
+    return out;
+  };
+  return { plain: over(TANK), marked: over(mix(TANK, MARKC, MARKA)),
+           mote: css(mix(mix(TANK, col, 0.86), [255,255,255], 0.12)) };
+}
+
+/* Liquid gauge: four band states, over the same two backdrops. */
+function liqPal(hex) {
+  const col = rgbOf(hex);
+  const [a0, a1] = LIQ_OP;
+  const over = base => {
+    const c0 = mix(base, col, a0);
+    return { none: css(base), only0: css(c0),
+             only1: css(mix(base, col, a1)), both: css(mix(c0, col, a1)) };
+  };
+  return { plain: over(TANK), marked: over(mix(TANK, MARKC, MARKA)),
+           mote: css(mix(mix(TANK, col, 0.82), [255,255,255], 0.14)) };
+}
+
+const GP = {}, LP = {};
+GAS.forEach(g => { GP[g.key] = gasRamp(tankHex(g)); LP[g.key] = liqPal(tankHex(g)); });
+
+/* ==================================================================
+   MOTE POOL — ONE shared table for all sixteen gauges.
+   Each gauge passes a seed that offsets the home positions and the
+   wiggle phases, so no two gauges look alike while the constants stay
+   a single table. Sixteen separate particle lists would be sixteen
+   times the data for no visual gain.
+   Sizes are mostly 1px with some 2px.
+   ================================================================== */
+const MOTES = [];
+for (let i = 0; i < MOTE_POOL; i++) {
+  MOTES.push({
+    hx: Math.random(), hy: Math.random(),
+    fx1: 0.6 + Math.random()*1.1, fx2: 1.5 + Math.random()*1.4,
+    fy1: 0.5 + Math.random()*1.0, fy2: 1.3 + Math.random()*1.6,
+    px1: Math.random()*6.283, px2: Math.random()*6.283,
+    py1: Math.random()*6.283, py2: Math.random()*6.283,
+    ax: 2.0 + Math.random()*3.0, ay: 2.4 + Math.random()*3.8,
+    s: Math.random() < 0.62 ? 1 : 2
+  });
+}
+
+/* Motes wiggle around a home position — two sines per axis at different
+   frequencies, so the path is an irregular loop rather than a circle.
+   Fully deterministic from `phase`: no stored velocity, nothing to
+   integrate, nothing to reseed. `drift` slides the home position and
+   wraps it; sign gives condensation (down) or evaporation (up). */
+function paintMotes(ctx, colour, n, top, bottom, w, drift, seed) {
+  const span = bottom - top;
+  if (span < 6) return;
+  const sx = seed * PHI, sy = seed * RT2, sp = seed * 2.399;
+  ctx.fillStyle = colour;
+  for (let m = 0; m < n; m++) {
+    const p = MOTES[m];
+    const hx = (p.hx + sx) % 1, hy = (p.hy + sy) % 1;
+    let mx = hx * w + Math.sin(phase*p.fx1 + p.px1 + sp) * p.ax
+                    + Math.sin(phase*p.fx2 + p.px2 + sp) * p.ax * 0.45;
+    const wob = Math.sin(phase*p.fy1 + p.py1 + sp) * p.ay
+              + Math.sin(phase*p.fy2 + p.py2 + sp) * p.ay * 0.45;
+    const base = hy * span + (drift ? -drift * phase * DRIFT_SPEED : 0);
+    let my = top + (((base % span) + span) % span) + wob;
+    if (my < top) my = top;
+    if (my > bottom - p.s) my = bottom - p.s;
+    if (mx < 0) mx = 0;
+    if (mx > w - p.s) mx = w - p.s;
+    ctx.fillRect(Math.floor(mx), Math.floor(my), p.s, p.s);
+  }
+}
+
+/* ==================================================================
+   BUILD
+   ================================================================== */
+const FIELDS = [
+  ['gasMol','mol',1], ['liqL','L',1],
+  ['gasKpa','kPa',0], ['liqKpa','kPa',0],
+  ['gasT','\u00B0C',1], ['liqT','\u00B0C',1]
+];
+
+document.getElementById('grid').innerHTML = GAS.map(g => `
+  <div class="tile">
+    <div class="col"><canvas data-key="${g.key}" data-phase="gas"></canvas><em>GAS</em></div>
+    <div class="mid">
+      <div class="fio" id="${g.key}-in"></div>
+      <div class="val" id="${g.key}-gasMol"></div>
+      <div class="badge">
+        <span class="dia" style="background:${badgeBg(g)}">
+          <span style="color:${inkFor(g.c)}">${g.sym}</span></span>
+      </div>
+      <div class="val" id="${g.key}-liqL"></div>
+      <div class="val" id="${g.key}-gasKpa"></div><div class="val" id="${g.key}-liqKpa"></div>
+      <div class="val" id="${g.key}-gasT"></div><div class="val" id="${g.key}-liqT"></div>
+      <div class="fio" id="${g.key}-out"></div>
+    </div>
+    <div class="col"><canvas data-key="${g.key}" data-phase="liq"></canvas><em>LIQ</em></div>
+  </div>`).join('');
+
+const canvases = [...document.querySelectorAll('canvas')];
+
+/* ==================================================================
+   VIEW API — the whole surface the tank logic needs.
+   data: { gasMol, gasKpa, gasT, liqL, liqKpa, liqT,
+           molIn, molOut, gasFill (0..1), liqFill (0..1),
+           drift }   drift: 0 steady, <0 condensing, >0 evaporating
+   Temperatures are expected already converted to Celsius.
+   ================================================================== */
+const STATE = {};
+
+const View = {
+  update(key, data) {
+    STATE[key] = Object.assign(STATE[key] || {}, data);
+    const s = STATE[key];
+
+    FIELDS.forEach(([f, unit, dp]) => {
+      if (data[f] === undefined) return;
+      const el = document.getElementById(key + '-' + f);
+      if (!el) return;
+      el.className = 'val' + (data[f] === 0 ? ' dim' : '');
+      el.innerHTML = data[f].toFixed(dp) + '<small>' + unit + '</small>';
+    });
+
+    const flow = (id, v, cls, glyph, label) => {
+      const el = document.getElementById(key + '-' + id);
+      if (!el || v === undefined) return;
+      el.innerHTML = '<u>' + label + '</u><span class="' + (v > 0.001 ? cls : 'fzero') +
+        '"><i>' + glyph + '</i> ' + v.toFixed(2) + '</span><u>mol/s</u>';
+    };
+    flow('in',  s.molIn,  'fin',  '\u25BC', 'In');
+    flow('out', s.molOut, 'fout', '\u25B2', 'Out');
+  }
+};
+
+/* ==================================================================
+   GAUGE RENDER — pre-blended, no alpha
+   ================================================================== */
+let phase = 0;
+
+function markRows(w, h) {
+  return MARKS.map(m => {
+    const full = m === 0.5;
+    const x0 = full ? 0 : Math.round(w * 0.28);
+    return { y: Math.round(h - h * m), x0, x1: full ? w : x0 + Math.round(w * 0.44) };
+  });
+}
+
+function drawGauge(cv, seed) {
+  const key = cv.dataset.key, isGas = cv.dataset.phase === 'gas';
+  const st = STATE[key] || {};
+  const frac = Math.max(0, Math.min(1, (isGas ? st.gasFill : st.liqFill) || 0));
+  const drift = st.drift || 0;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const ctx = cv.getContext('2d');
+
+  const rows = markRows(w, h);
+  const isMark = (x, y) => rows.some(r => r.y === y && x >= r.x0 && x < r.x1);
+  const lvl = h - h * frac;
+
+  if (!isGas) {
+    const P = LP[key];
+    for (let x = 0; x < w; x++) {
+      const c0 = lvl + LWAVE[0].off + Math.sin(x*LWAVE[0].k + phase*LWAVE[0].sp) * LWAVE[0].amp;
+      const c1 = lvl + LWAVE[1].off + Math.sin(x*LWAVE[1].k + phase*LWAVE[1].sp) * LWAVE[1].amp;
+      let hi = Math.max(0, Math.round(Math.min(c0, c1)));
+      let lo = Math.max(0, Math.round(Math.max(c0, c1)));
+      if (frac <= 0.001) { hi = h; lo = h; }
+      const single = c0 < c1 ? 'only0' : 'only1';
+      for (let y = 0; y < h; y++) {
+        const band = y >= lo ? 'both' : (y >= hi ? single : 'none');
+        ctx.fillStyle = (isMark(x, y) ? P.marked : P.plain)[band];
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+    // phase-change motes live ONLY in the headspace above the liquid
+    if (drift !== 0) paintMotes(ctx, P.mote, MOTES_LIQ, 2, Math.max(2, lvl - 6), w, drift, seed);
+    return;
+  }
+
+  const R = GP[key];
+  for (let x = 0; x < w; x++) {
+    const edge = lvl + Math.sin(x*GEDGE[0].k + phase*GEDGE[0].sp) * GEDGE[0].amp
+                     + Math.sin(x*GEDGE[1].k + phase*GEDGE[1].sp) * GEDGE[1].amp;
+    for (let y = 0; y < h; y++) {
+      let idx = 0;
+      if (frac > 0.001) {
+        if (y >= edge + FADE) idx = STEPS;
+        else if (y >= edge) idx = Math.round((y - edge) / FADE * STEPS);
+      }
+      ctx.fillStyle = (isMark(x, y) ? R.marked : R.plain)[idx];
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+  // gas motes fill the WHOLE container, not just the filled portion
+  paintMotes(ctx, R.mote, MOTES_GAS, 2, h - 2, w, drift, seed);
+}
+
+function frame() {
+  phase += 0.02;
+  canvases.forEach((cv, i) => drawGauge(cv, i));
+  requestAnimationFrame(frame);
+}
+
+/* ==================================================================
+   DEMO DRIVER — delete entirely in the real build
+   ================================================================== */
+const DEMO = {
+  o2:  { gasMol:412.6,  gasKpa:2841, gasT:21.4, liqL:12.4, liqKpa:5210, liqT:-118.6, molIn:2.41, molOut:0.83, gasFill:.62, liqFill:.31 },
+  n2:  { gasMol:1204.8, gasKpa:5117, gasT:19.8, liqL:34.7, liqKpa:6880, liqT:-146.2, molIn:0.00, molOut:1.94, gasFill:.81, liqFill:.58 },
+  co2: { gasMol:88.3,   gasKpa:611,  gasT:24.9, liqL:1.9,  liqKpa:4102, liqT:-56.4,  molIn:1.12, molOut:0.00, gasFill:.18, liqFill:.09 },
+  x:   { gasMol:37.9,   gasKpa:264,  gasT:31.2, liqL:0.0,  liqKpa:0,    liqT:0.0,    molIn:0.44, molOut:0.00, gasFill:.08, liqFill:.00 },
+  ch4: { gasMol:642.1,  gasKpa:3388, gasT:18.6, liqL:22.8, liqKpa:5940, liqT:-161.5, molIn:3.06, molOut:2.20, gasFill:.55, liqFill:.44 },
+  n2o: { gasMol:210.4,  gasKpa:1466, gasT:22.1, liqL:5.6,  liqKpa:4780, liqT:-88.5,  molIn:0.00, molOut:0.31, gasFill:.29, liqFill:.16 },
+  h2:  { gasMol:1811.2, gasKpa:7902, gasT:17.4, liqL:48.1, liqKpa:7410, liqT:-252.8, molIn:5.62, molOut:4.98, gasFill:.93, liqFill:.71 },
+  o3:  { gasMol:16.2,   gasKpa:112,  gasT:26.7, liqL:0.0,  liqKpa:0,    liqT:0.0,    molIn:0.00, molOut:0.12, gasFill:.04, liqFill:.00 }
+};
+Object.keys(DEMO).forEach(k => View.update(k, Object.assign({ drift: 0 }, DEMO[k])));
+
+const DRIFTS = [
+  { n:'neutral', v: 0 }, { n:'condensing', v:-1 }, { n:'evaporating', v: 1 }
+];
+let d = 0;
+const btn = document.getElementById('driftBtn');
+const label = () => btn.textContent = 'Drift: ' + DRIFTS[d].n;
+btn.onclick = () => {
+  d = (d + 1) % DRIFTS.length;
+  Object.keys(DEMO).forEach(k => View.update(k, { drift: DRIFTS[d].v }));
+  label();
+};
+label();
+
+frame();
+</script>
+</body>
+</html>

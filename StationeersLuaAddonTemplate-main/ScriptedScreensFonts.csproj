@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <ModName>ScriptedScreensFonts</ModName>
+        <AssemblyName>$(ModName)</AssemblyName>
+        <RootNamespace>$(ModName)</RootNamespace>
+        <TargetFramework>netstandard2.1</TargetFramework>
+        <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+        <Version>0.1.0.0</Version>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    </PropertyGroup>
+    <Import Project="$(MSBuildThisFileDirectory)Stationeers.VS.props" />
+    <Import Project="$(MSBuildThisFileDirectory)Stationeers.VS.References.props" />
+    <PropertyGroup>
+        <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+        <AssemblyVersion>$(Version)</AssemblyVersion>
+        <FileVersion>$(Version)</FileVersion>
+        <!-- CA1031: mod load must never throw into the host. CA1812: Unity instantiates MonoBehaviours via AddComponent, which the analyzer cannot see.
+             CA1508: Unity assemblies carry no nullable annotations, so every null check on a Unity return value reads as dead code. -->
+        <NoWarn>$(NoWarn);CA1031;CA1812;CA1508</NoWarn>
+    </PropertyGroup>
+    <ItemGroup>
+        <!-- FontEngine.TryAddGlyphsToTexture and ResetAtlasTexture are internal; building a
+             font asset from a .ttf on disk is impossible without them. Compile-time only. -->
+        <PackageReference Include="BepInEx.AssemblyPublicizer.MSBuild" Version="0.4.3" PrivateAssets="all" ExcludeAssets="runtime" />
+        <Reference Update="UnityEngine.TextCoreFontEngineModule" Publicize="true" />
+        <Reference Update="Unity.TextMeshPro" Publicize="true" />
+    </ItemGroup>
+    <ItemGroup>
+        <Reference Include="StationeersMods.Interface">
+            <HintPath>$(StationeersLaunchPadDirectory)\StationeersMods.Interface.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+    </ItemGroup>
+    <ItemGroup>
+        <CopyItemsAbout Include="$(ProjectDir)\About\**\*.*" />
+        <CopyItemsGameData Include="$(ProjectDir)\GameData\**\*.*" />
+        <CopyItemsAssets Include="$(ProjectDir)\Assets\**\*.*" />
+    </ItemGroup>
+    <Target Name="CopyAssetsToMods" AfterTargets="PostBuild">
+        <Copy SourceFiles="@(CopyItemsAbout)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)\About\%(RecursiveDir)" ContinueOnError="true" />
+        <Copy SourceFiles="@(CopyItemsGameData)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)\GameData\%(RecursiveDir)" ContinueOnError="true" />
+        <Copy SourceFiles="@(CopyItemsAssets)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)\Assets\%(RecursiveDir)" ContinueOnError="true" />
+    </Target>
+    <Target Name="CopyRuntimeDependenciesToMods" AfterTargets="PostBuild">
+        <ItemGroup>
+            <_RuntimeDependencyDlls Include="@(ReferenceCopyLocalPaths)" Exclude="$(TargetPath)" />
+            <_RuntimeDependencyDlls Remove="@(_RuntimeDependencyDlls)" Condition="'$(Configuration)' == 'Release' and '%(Extension)' == '.pdb'" />
+        </ItemGroup>
+        <Copy SourceFiles="@(_RuntimeDependencyDlls)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)" ContinueOnError="true" Retries="0" RetryDelayMilliseconds="0" />
+    </Target>
+    <Target Name="GenerateVersionConst" BeforeTargets="CoreCompile">
+        <PropertyGroup>
+            <_VersionConstFile>$(IntermediateOutputPath)PluginVersionConst.g.cs</_VersionConstFile>
+        </PropertyGroup>
+        <WriteLinesToFile File="$(_VersionConstFile)" Overwrite="true" Lines="namespace $(RootNamespace) { internal static partial class PluginInfo { internal const string PLUGIN_VERSION_CONST = %22$(Version)%22%3B } }" />
+        <ItemGroup>
+            <Compile Include="$(_VersionConstFile)" />
+        </ItemGroup>
+    </Target>
+</Project>

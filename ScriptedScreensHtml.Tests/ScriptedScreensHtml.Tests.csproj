@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net8.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <LangVersion>latest</LangVersion>
+        <RootNamespace>ScriptedScreensHtml.Tests</RootNamespace>
+        <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+        <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    </PropertyGroup>
+    <ItemGroup>
+        <!-- The parsers are Unity-free on purpose so they compile here from source. -->
+        <Compile Include="..\ScriptedScreensHtml\HtmlParser.cs" />
+        <Compile Include="..\ScriptedScreensHtml\CssParser.cs" />
+        <Compile Include="Program.cs" />
+        <Compile Include="Probe.cs" />
+        <Compile Include="JsBench.cs" />
+    </ItemGroup>
+    <ItemGroup>
+      <PackageReference Include="Jint" Version="4.16.2" />
+    </ItemGroup>
+</Project>

@@ -1,0 +1,26 @@
+# Build output
+bin/
+obj/
+dist/
+
+# Machine-specific build paths (Steam library, Documents override)
+Stationeers.VS.User.props
+
+# Decompiled third-party code, never published
+decompiled/
+
+# The vector mod has its own repository: github.com/Gruffuss/scripted-screens-vector.
+# It sits beside this one on disk because the HTML mod drives it at runtime.
+ScriptedScreensVector/
+ScriptedScreensVector.Tests/
+vector-format-spec.md
+
+# Editor backups, IDE, OS
+*.bak-*
+.vs/
+.idea/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
+.DS_Store

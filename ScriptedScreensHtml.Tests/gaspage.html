@@ -1,0 +1,51 @@
+<html><head><style>
+  body { background: #060B11; padding: 8px; }
+  .grid { flex-grow: 1; flex-direction: column; }
+  .row  { flex-direction: row; flex-grow: 1; }
+  .tile { flex: 1; margin: 3px; padding: 5px 6px; background: #0D151E; border-radius: 6px;
+          flex-direction: row; overflow: hidden; }
+
+  /* gauge columns */
+  .col { width: 30px; flex-direction: column; align-items: center; }
+  .col em { font-size: 6px; letter-spacing: 1px; color: #435C6B; font-weight: bold; margin-top: 2px; }
+  .tank { flex-grow: 1; width: 30px; background: #071019; border-radius: 3px; overflow: hidden;
+          justify-content: flex-end; }
+  .mark { position: absolute; left: 28%; width: 44%; height: 1px; background: rgba(190,214,228,0.15); }
+  .mark.mid { left: 0; width: 100%; }
+  .fill { height: 0%; justify-content: flex-start; transition: height 0.5s linear; }
+  .wave { height: 6px; flex-direction: row; overflow: hidden; }
+  .wave svg { width: 200%; height: 6px; }
+  .wave1 svg { animation: wave 2.6s linear infinite; }
+  .wave2 svg { animation: wave 3.7s linear infinite reverse; opacity: 0.6; }
+  .fade { height: 11px; }
+  .body { flex-grow: 1; }
+  .motes { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+  .mote { position: absolute; width: 1px; height: 1px; }
+  .mote.big { width: 2px; height: 2px; }
+
+  @keyframes wave { from { transform: translate(0%, 0px); } to { transform: translate(-50%, 0px); } }
+  @keyframes m1 { 0% { transform: translate(0px,0px); } 25% { transform: translate(2px,-1px); } 50% { transform: translate(-1px,2px); } 75% { transform: translate(-2px,-2px); } 100% { transform: translate(0px,0px); } }
+  @keyframes m2 { 0% { transform: translate(0px,0px); } 30% { transform: translate(-2px,1px); } 55% { transform: translate(1px,-2px); } 80% { transform: translate(2px,2px); } 100% { transform: translate(0px,0px); } }
+  @keyframes m3 { 0% { transform: translate(0px,0px); } 20% { transform: translate(1px,2px); } 45% { transform: translate(-2px,-1px); } 70% { transform: translate(2px,-2px); } 100% { transform: translate(0px,0px); } }
+  @keyframes m4 { 0% { transform: translate(0px,0px); } 35% { transform: translate(-1px,-2px); } 60% { transform: translate(2px,1px); } 85% { transform: translate(-2px,2px); } 100% { transform: translate(0px,0px); } }
+  @keyframes m5 { 0% { transform: translate(0px,0px); } 25% { transform: translate(-2px,-1px); } 50% { transform: translate(2px,-1px); } 75% { transform: translate(1px,2px); } 100% { transform: translate(0px,0px); } }
+  @keyframes m6 { 0% { transform: translate(0px,0px); } 40% { transform: translate(2px,2px); } 65% { transform: translate(-1px,-2px); } 90% { transform: translate(-2px,1px); } 100% { transform: translate(0px,0px); } }
+
+  /* middle */
+  .mid { flex: 1; margin: 0 5px; flex-direction: column; }
+  .fio { height: 13px; flex-direction: row; justify-content: center; align-items: center; font-size: 9px; font-weight: bold; }
+  .vals { flex-grow: 1; flex-direction: row; align-items: center; }
+  .vcol { flex: 1; justify-content: space-around; }
+  .val { font-size: 10px; font-weight: bold; color: #E4F1F7; text-align: center; white-space: nowrap; overflow: hidden; height: 13px; }
+  .badge { width: 32px; align-items: center; justify-content: center; }
+  .dia { width: 20px; height: 20px; border-radius: 3px; border: 2px solid #F2F6F9; transform: rotate(45deg);
+         align-items: center; justify-content: center; }
+  .dia div { transform: rotate(-45deg); font-size: 7px; font-weight: bold; white-space: nowrap; }
+</style></head><body><div class="grid"><div class="row"><div class="tile">
+<div class="col"><div class="tank"><div class="mark" style="top:75%"></div><div class="mark mid" style="top:50%"></div>
+<div class="fill" id="o2-gas"><div class="wave wave1"><svg viewBox="0 0 200 6" preserveAspectRatio="none"><polygon points="0,3 12.5,1 200,6 0,6" fill="rgba(220,230,238,0.25)"/></svg></div>
+<div class="fade" style="background: linear-gradient(to top, rgba(220,230,238,0.62), rgba(220,230,238,0.00))"></div><div class="body" style="background:rgba(220,230,238,0.62)"></div></div>
+<div class="motes"><div class="mote big" style="left:12%; top:40%; background:rgba(1,2,3,0.55); animation: m3 4.1s ease-in-out infinite; animation-delay: -2.3s"></div></div>
+</div><em>GAS</em></div>
+<div class="mid"><div class="fio" id="o2-in">--</div><div class="vals"><div class="vcol"><div class="val" id="o2-gasMol">--</div></div>
+<div class="badge"><div class="dia" style="background:linear-gradient(to right, #B5352C 50%, #9DA1A4 50%)"><div style="color:#FFFFFF">H<sub>2</sub></div></div></div></div></div></div></div></div></body></html>

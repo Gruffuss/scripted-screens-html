@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.csproj text eol=crlf
+*.props  text eol=crlf
+*.sln    text eol=crlf

@@ -1,0 +1,71 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <ModName>ScriptedScreensHtml</ModName>
+        <AssemblyName>$(ModName)</AssemblyName>
+        <RootNamespace>$(ModName)</RootNamespace>
+        <TargetFramework>netstandard2.1</TargetFramework>
+        <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+        <Version>0.0.1.0</Version>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    </PropertyGroup>
+    <!-- Shared with the fonts mod so build paths and the Documents-directory override
+         live in exactly one place (that folder's Stationeers.VS.User.props). -->
+    <Import Project="..\StationeersLuaAddonTemplate-main\Stationeers.VS.props" />
+    <Import Project="..\StationeersLuaAddonTemplate-main\Stationeers.VS.References.props" />
+    <PropertyGroup>
+        <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+        <AssemblyVersion>$(Version)</AssemblyVersion>
+        <FileVersion>$(Version)</FileVersion>
+        <!-- CA1031: mod load must never throw into the host.
+             CA1812: Unity instantiates MonoBehaviours and Harmony calls patch classes
+             reflectively, neither of which the analyzer can see. -->
+        <NoWarn>$(NoWarn);CA1031;CA1812;CA1001;CA2213;CA1307;CA1308;CA2249;CA1305;CA1304;CA1310;CA1865;CA1867;CA1861;CA1846</NoWarn>
+        <ScriptedScreensDirectory>$(SteamLibraryDirectory)\..\workshop\content\$(StationeersSteamAppId)\3666779631</ScriptedScreensDirectory>
+    </PropertyGroup>
+    <Target Name="EnsureScriptedScreensDll" BeforeTargets="ResolveAssemblyReferences">
+        <Error Text="ScriptedScreens.dll not found at $(ScriptedScreensDirectory). Subscribe to the workshop item or set ScriptedScreensDirectory." Condition="!Exists('$(ScriptedScreensDirectory)\ScriptedScreens.dll')" />
+    </Target>
+    <ItemGroup>
+        <!-- ScriptedScreensScriptableUiSystem and every type we touch are internal, so the
+             reference has to be publicised. IgnoresAccessChecksTo does NOT work here:
+             Roslyn does not honour it at compile time. Publicising is build-time only;
+             the shipped DLL is never modified. -->
+        <PackageReference Include="BepInEx.AssemblyPublicizer.MSBuild" Version="0.4.3" PrivateAssets="all" />
+        <PackageReference Include="Jint" Version="4.16.2" />
+        <Reference Include="ScriptedScreens" Publicize="true">
+            <HintPath>$(ScriptedScreensDirectory)\ScriptedScreens.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <!-- FontAsset's table setters are internal; the publicised reference lets the
+             font library mirror a TextMeshPro asset into a UI Toolkit one. Compile-time only. -->
+        <Reference Remove="UnityEngine.TextCoreTextEngineModule" />
+        <Reference Include="UnityEngine.TextCoreTextEngineModule" Publicize="true">
+            <HintPath>$(StationeersManagedDirectory)\UnityEngine.TextCoreTextEngineModule.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="StationeersMods.Interface">
+            <HintPath>$(StationeersLaunchPadDirectory)\StationeersMods.Interface.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+    </ItemGroup>
+    <ItemGroup>
+        <CopyItemsAbout Include="$(ProjectDir)\About\**\*.*" />
+    </ItemGroup>
+    <ItemGroup>
+        <!-- The JS engine and its parser ship next to the plugin; LaunchPad resolves them from the mod folder. -->
+        <CopyItemsDeps Include="$(TargetDir)Jint.dll;$(TargetDir)Acornima.dll" />
+    </ItemGroup>
+    <Target Name="CopyAssetsToMods" AfterTargets="PostBuild">
+        <Copy SourceFiles="@(CopyItemsDeps)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)" ContinueOnError="true" />
+        <Copy SourceFiles="@(CopyItemsAbout)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)\About\%(RecursiveDir)" ContinueOnError="true" />
+    </Target>
+    <Target Name="GenerateVersionConst" BeforeTargets="CoreCompile">
+        <PropertyGroup>
+            <_VersionConstFile>$(IntermediateOutputPath)PluginVersionConst.g.cs</_VersionConstFile>
+        </PropertyGroup>
+        <WriteLinesToFile File="$(_VersionConstFile)" Overwrite="true" Lines="namespace $(RootNamespace) { internal static partial class PluginInfo { internal const string PLUGIN_VERSION_CONST = %22$(Version)%22%3B } }" />
+        <ItemGroup>
+            <Compile Include="$(_VersionConstFile)" />
+        </ItemGroup>
+    </Target>
+</Project>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetadata xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>ScriptedScreens Html [StationeersLaunchPad]</Name>
+	<Author>Gruffuss</Author>
+	<Version>0.0.1.0</Version>
+	<Description>Probe: renders a UI Toolkit panel to a texture on an "html" ScriptedScreens element. Client-side only.</Description>
+	<Tags>
+		<Tag>Mod</Tag>
+		<Tag>BepInEx</Tag>
+		<Tag>StationeersLaunchPad</Tag>
+	</Tags>
+	<ModID>gruffuss.stationeers.scriptedscreens.html</ModID>
+	<Dependencies>
+		<Mod>
+			<Id>3666779631</Id>
+		</Mod>
+	</Dependencies>
+</ModMetadata>
