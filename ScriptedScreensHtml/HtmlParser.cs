@@ -13,6 +13,8 @@ internal sealed class HtmlNode
     public readonly Dictionary<string, string> Attributes = new(StringComparer.OrdinalIgnoreCase);
     public readonly List<HtmlNode> Children = new();
     public HtmlNode? Parent;
+    /// <summary>Custom properties (--name) declared on this node; lookups walk up the tree.</summary>
+    public Dictionary<string, string>? Vars;
 
     public bool IsText => Tag == null;
 

@@ -43,8 +43,6 @@ internal static class HtmlRenderer
         public HtmlNode Document = new();
         /// <summary>display: grid containers, laid out by GridLayout once attached.</summary>
         public readonly List<VisualElement> Grids = new();
-        /// <summary>Custom properties (--name) declared per node; lookups walk up the tree.</summary>
-        public readonly Dictionary<HtmlNode, Dictionary<string, string>> Vars = new();
         /// <summary>Computed font size per node, for em units on its children.</summary>
         public readonly Dictionary<HtmlNode, float> FontSizes = new();
 
@@ -549,8 +547,16 @@ internal static class HtmlRenderer
             case "mark": colour = "#FFD54F"; break;
         }
 
-        void Take(CssDeclaration d)
+        void Take(CssDeclaration raw)
         {
+            if (raw.Name.StartsWith("--", StringComparison.Ordinal))
+            {
+                (node.Vars ??= new Dictionary<string, string>(StringComparer.Ordinal))[raw.Name] = raw.Value.Trim();
+                return;
+            }
+            var d = raw.Value.IndexOf("var(", StringComparison.Ordinal) >= 0
+                ? new CssDeclaration(raw.Name, ResolveVars(raw.Value, node), raw.Important)
+                : raw;
             switch (d.Name)
             {
                 case "color": colour = d.Value; break;
@@ -664,7 +670,7 @@ internal static class HtmlRenderer
     }
 
     /// <summary>Substitute var(--name[, fallback]) from this node's chain of custom properties.</summary>
-    private static string ResolveVars(string value, HtmlNode node, Result result)
+    internal static string ResolveVars(string value, HtmlNode node)
     {
         var sb = new StringBuilder();
         var i = 0;
@@ -687,8 +693,8 @@ internal static class HtmlRenderer
             var fallback = comma >= 0 ? inner.Substring(comma + 1).Trim() : null;
             string? found = null;
             for (var n = node; n != null && found == null; n = n.Parent)
-                if (result.Vars.TryGetValue(n, out var map) && map.TryGetValue(name, out var v)) found = v;
-            found ??= fallback != null ? ResolveVars(fallback, node, result) : string.Empty;
+                if (n.Vars != null && n.Vars.TryGetValue(name, out var v)) found = v;
+            found ??= fallback != null ? ResolveVars(fallback, node) : string.Empty;
             sb.Append(found);
             i = j + 1;
         }
@@ -777,13 +783,11 @@ internal static class HtmlRenderer
             // so everything downstream (the emitter included) sees the substituted value.
             if (raw.Name.StartsWith("--", StringComparison.Ordinal))
             {
-                if (!result.Vars.TryGetValue(node, out var own))
-                    result.Vars[node] = own = new Dictionary<string, string>(StringComparer.Ordinal);
-                own[raw.Name] = raw.Value.Trim();
+                (node.Vars ??= new Dictionary<string, string>(StringComparer.Ordinal))[raw.Name] = raw.Value.Trim();
                 continue;
             }
             var d = raw.Value.IndexOf("var(", StringComparison.Ordinal) >= 0
-                ? new CssDeclaration(raw.Name, ResolveVars(raw.Value, node, result), raw.Important)
+                ? new CssDeclaration(raw.Name, ResolveVars(raw.Value, node), raw.Important)
                 : raw;
             record[d.Name] = d.Value;
             if (d.Name == "font-size")
