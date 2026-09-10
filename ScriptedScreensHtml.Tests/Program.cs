@@ -52,14 +52,15 @@ Console.WriteLine("CssParser");
         "a:hover { color: red }\n" +
         "div.k { border: 1px solid red !important }",
         warnings.Add);
-    Check(rules.Count == 3, $"three usable rules (got {rules.Count})");
+    Check(rules.Count == 4, $"four rules, a:hover kept as never-matching (got {rules.Count})");
     Check(rules[0].Declarations.Count == 2 && rules[0].Declarations[1].Value == "rgba(1, 2, 3, .5)", "semicolon inside rgba() not split");
     Check(rules[1].Selectors.Count == 2, "selector list split on comma");
     var sel = rules[1].Selectors[1];
     Check(sel.Chain.Count == 2 && sel.Chain[0].Id == "main" && sel.Chain[1].Classes.Count == 2, "descendant chain #main .row.big");
     Check(sel.Specificity == 10000 + 200, $"specificity ids/classes (got {sel.Specificity})");
-    Check(rules[2].Declarations[0].Value == "1px solid red", "!important stripped");
-    Check(warnings.Count == 2, $"@media and :hover each warn once (got {warnings.Count})");
+    Check(rules[3].Declarations[0].Value == "1px solid red", "!important stripped");
+    Check(warnings.Count == 1, $"@media warns once, :hover does not (got {warnings.Count})");
+    Check(rules[2].Selectors[0].Chain[0].Pseudos.Count == 1, ":hover parsed as a pseudo-class");
 
     var doc = HtmlParser.Parse("<div id=main><div class='row big'><span class=row>t</span></div></div>");
     var main = doc.Children[0];

@@ -41,6 +41,12 @@ internal static class HtmlRenderer
         public List<CssRule> Rules = new();
         public readonly Dictionary<VisualElement, HtmlNode> NodeOf = new();
         public HtmlNode Document = new();
+        /// <summary>display: grid containers, laid out by GridLayout once attached.</summary>
+        public readonly List<VisualElement> Grids = new();
+        /// <summary>Custom properties (--name) declared per node; lookups walk up the tree.</summary>
+        public readonly Dictionary<HtmlNode, Dictionary<string, string>> Vars = new();
+        /// <summary>Computed font size per node, for em units on its children.</summary>
+        public readonly Dictionary<HtmlNode, float> FontSizes = new();
 
         /// <summary>The declarations that won the cascade per element, for the vector emitter (gradients, transforms, fonts).</summary>
         private readonly Dictionary<VisualElement, Dictionary<string, string>> _css = new();
@@ -106,6 +112,8 @@ internal static class HtmlRenderer
 
         var body = Find(doc, "body") ?? Find(doc, "html") ?? doc;
         result.ViewportWidth = ReadViewport(doc);
+        StyleApplier.ViewportW = result.ViewportWidth > 0f ? result.ViewportWidth : 460f;
+        StyleApplier.ViewportH = StyleApplier.ViewportW * SurfaceAspect;
 
         var root = new VisualElement { name = "body" };
         root.style.flexGrow = 1;
@@ -118,9 +126,13 @@ internal static class HtmlRenderer
         ApplyStyles(root, body, rules, result);
         foreach (var child in body.Children)
             Append(root, child, rules, result);
+        ApplyGap(root, result.CssOf(root));
 
         return result;
     }
+
+    /// <summary>Height over width of the surface being built, for vh; set by the surface before Build.</summary>
+    internal static float SurfaceAspect = 1f;
 
     private static void Collect(HtmlNode node, List<CssRule> rules, StringBuilder script, Dictionary<string, CssKeyframes> keyframes, Action<string> warn)
     {
@@ -254,6 +266,7 @@ internal static class HtmlRenderer
         {
             foreach (var child in node.Children)
                 Append(ve, child, rules, result);
+            ApplyGap(ve, result.CssOf(ve));
             return;
         }
 
@@ -643,6 +656,83 @@ internal static class HtmlRenderer
         }
     }
 
+    private static float InheritedFontSize(HtmlNode? node, Result result)
+    {
+        for (var n = node; n != null; n = n.Parent)
+            if (result.FontSizes.TryGetValue(n, out var px)) return px;
+        return StyleApplier.RootFontSize;
+    }
+
+    /// <summary>Substitute var(--name[, fallback]) from this node's chain of custom properties.</summary>
+    private static string ResolveVars(string value, HtmlNode node, Result result)
+    {
+        var sb = new StringBuilder();
+        var i = 0;
+        while (i < value.Length)
+        {
+            var at = value.IndexOf("var(", i, StringComparison.Ordinal);
+            if (at < 0) { sb.Append(value, i, value.Length - i); break; }
+            sb.Append(value, i, at - i);
+            var depth = 0;
+            var j = at + 3;
+            while (j < value.Length)
+            {
+                if (value[j] == '(') depth++;
+                else if (value[j] == ')' && --depth == 0) break;
+                j++;
+            }
+            var inner = value.Substring(at + 4, Math.Max(0, j - at - 4));
+            var comma = inner.IndexOf(',');
+            var name = (comma >= 0 ? inner.Substring(0, comma) : inner).Trim();
+            var fallback = comma >= 0 ? inner.Substring(comma + 1).Trim() : null;
+            string? found = null;
+            for (var n = node; n != null && found == null; n = n.Parent)
+                if (result.Vars.TryGetValue(n, out var map) && map.TryGetValue(name, out var v)) found = v;
+            found ??= fallback != null ? ResolveVars(fallback, node, result) : string.Empty;
+            sb.Append(found);
+            i = j + 1;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Flex `gap` on a layout engine without it: margins on the children along the main
+    /// axis, and on the cross axis when the container wraps.
+    /// </summary>
+    private static void ApplyGap(VisualElement ve, Dictionary<string, string> css)
+    {
+        if (css.TryGetValue("display", out var display) && display.Trim() == "grid") return;
+        var rowGap = 0f; var colGap = 0f;
+        if (css.TryGetValue("gap", out var gap))
+        {
+            var parts = gap.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            rowGap = StyleApplier.Num(parts[0]);
+            colGap = parts.Length > 1 ? StyleApplier.Num(parts[1]) : rowGap;
+        }
+        if (css.TryGetValue("row-gap", out var rg)) rowGap = StyleApplier.Num(rg);
+        if (css.TryGetValue("column-gap", out var cg)) colGap = StyleApplier.Num(cg);
+        if (rowGap <= 0f && colGap <= 0f) return;
+        var dir = ve.style.flexDirection.value;
+        var row = dir == FlexDirection.Row || dir == FlexDirection.RowReverse;
+        var wrap = ve.style.flexWrap.value == UnityEngine.UIElements.Wrap.Wrap;
+        var count = ve.childCount;
+        for (var i = 0; i < count; i++)
+        {
+            var child = ve[i];
+            var last = i == count - 1;
+            if (row)
+            {
+                if (!last && colGap > 0f) child.style.marginRight = child.resolvedStyle.marginRight + colGap;
+                if (wrap && rowGap > 0f) child.style.marginBottom = child.resolvedStyle.marginBottom + rowGap;
+            }
+            else
+            {
+                if (!last && rowGap > 0f) child.style.marginBottom = child.resolvedStyle.marginBottom + rowGap;
+                if (wrap && colGap > 0f) child.style.marginRight = child.resolvedStyle.marginRight + colGap;
+            }
+        }
+    }
+
     private static void ApplyStyles(VisualElement ve, HtmlNode node, List<CssRule> rules, Result result)
     {
         void Warn(string m) => result.Warnings.Add(m);
@@ -680,9 +770,28 @@ internal static class HtmlRenderer
 
         AnimationSpec? anim = null;
         var record = result.CssOf(ve);
-        foreach (var d in ordered)
+        StyleApplier.EmSize = InheritedFontSize(node.Parent, result);
+        foreach (var raw in ordered)
         {
+            // Custom properties are stored, not applied; var() in a value is resolved here,
+            // so everything downstream (the emitter included) sees the substituted value.
+            if (raw.Name.StartsWith("--", StringComparison.Ordinal))
+            {
+                if (!result.Vars.TryGetValue(node, out var own))
+                    result.Vars[node] = own = new Dictionary<string, string>(StringComparer.Ordinal);
+                own[raw.Name] = raw.Value.Trim();
+                continue;
+            }
+            var d = raw.Value.IndexOf("var(", StringComparison.Ordinal) >= 0
+                ? new CssDeclaration(raw.Name, ResolveVars(raw.Value, node, result), raw.Important)
+                : raw;
             record[d.Name] = d.Value;
+            if (d.Name == "font-size")
+            {
+                var fs = d.Value.Trim();
+                var px = fs.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.EmSize * StyleApplier.Num(fs) / 100f : StyleApplier.Num(fs);
+                if (px > 0f) { result.FontSizes[node] = px; StyleApplier.EmSize = px; }
+            }
             if (d.Name.StartsWith("animation", StringComparison.Ordinal))
             {
                 anim ??= new AnimationSpec();
@@ -691,6 +800,8 @@ internal static class HtmlRenderer
             }
             StyleApplier.Apply(ve, d, Warn);
         }
+        if (record.TryGetValue("display", out var display) && display.Trim() == "grid")
+            result.Grids.Add(ve);
 
         if (anim != null && anim.Name.Length > 0 && anim.Name != "none")
         {

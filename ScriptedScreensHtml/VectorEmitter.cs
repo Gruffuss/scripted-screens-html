@@ -160,7 +160,7 @@ internal static class VectorEmitter
                 Warn(ctx, "html: <canvas> is not drawn in vector mode; use <svg> with expressions");
                 break;
             default:
-                foreach (var child in ve.Children())
+                foreach (var child in ByZIndex(ctx, ve))
                     EmitElement(ctx, child, new Vector2(x, y), depth + groups);
                 break;
         }
@@ -204,6 +204,24 @@ internal static class VectorEmitter
         if (r1 > 0.01f) d.Append(" A ").Append(F(r1)).Append(' ').Append(F(r1)).Append(" 0 0 1 ").Append(F(to.x)).Append(' ').Append(F(to.y));
         ctx.Body.Append(indent).Append("P d=\"").Append(d).Append("\" f=none s=").Append(Hex(c)).Append(" sw=").Append(F(bw)).Append(" cap=butt\n");
         ctx.Out.Nodes++;
+    }
+
+    /// <summary>Children in paint order: z-index ascending, document order within a value.</summary>
+    private static List<VisualElement> ByZIndex(Ctx ctx, VisualElement ve)
+    {
+        var list = new List<(int z, int i, VisualElement c)>();
+        var i = 0;
+        foreach (var child in ve.Children())
+        {
+            var z = 0;
+            if (ctx.Built.CssOf(child).TryGetValue("z-index", out var zs))
+                int.TryParse(zs.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out z);
+            list.Add((z, i++, child));
+        }
+        list.Sort((a, b) => a.z != b.z ? a.z.CompareTo(b.z) : a.i.CompareTo(b.i));
+        var result = new List<VisualElement>(list.Count);
+        foreach (var e in list) result.Add(e.c);
+        return result;
     }
 
     private static void Side(Ctx ctx, string indent, float x, float y, float w, float h, Color c)
@@ -449,6 +467,8 @@ internal static class VectorEmitter
         var text = label.text ?? string.Empty;
         if (text.Length == 0)
             return;
+        if (css.TryGetValue("text-transform", out var tt))
+            text = Transform(text, tt.Trim().ToLowerInvariant());
         // Scene text escapes (vector mod 0.10.1.0): backslash first, then the quote; a line
         // break in the text becomes the two characters backslash-n.
         text = text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n");
@@ -513,6 +533,29 @@ internal static class VectorEmitter
         sb.Append(NodeId(ctx, label)).Append('\n');
         ctx.Body.Append(sb);
         ctx.Out.Nodes++;
+    }
+
+    /// <summary>text-transform over the text outside rich-text tags.</summary>
+    private static string Transform(string text, string mode)
+    {
+        if (mode != "uppercase" && mode != "lowercase" && mode != "capitalize")
+            return text;
+        var sb = new StringBuilder(text.Length);
+        var inTag = false;
+        var wordStart = true;
+        foreach (var ch in text)
+        {
+            if (ch == '<') inTag = true;
+            if (inTag) { sb.Append(ch); if (ch == '>') inTag = false; continue; }
+            sb.Append(mode switch
+            {
+                "uppercase" => char.ToUpperInvariant(ch),
+                "lowercase" => char.ToLowerInvariant(ch),
+                _ => wordStart ? char.ToUpperInvariant(ch) : ch,
+            });
+            wordStart = char.IsWhiteSpace(ch);
+        }
+        return sb.ToString();
     }
 
     private static bool NamedWeight(string family)

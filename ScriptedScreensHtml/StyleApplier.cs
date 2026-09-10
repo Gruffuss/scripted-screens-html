@@ -52,7 +52,12 @@ internal static class StyleApplier
             case "inset": Sides(v, out var it, out var ir, out var ib, out var il); s.top = it; s.right = ir; s.bottom = ib; s.left = il; break;
 
             // Flex
-            case "display": s.display = v == "none" ? DisplayStyle.None : DisplayStyle.Flex; break;
+            case "display":
+                s.display = v == "none" ? DisplayStyle.None : DisplayStyle.Flex;
+                // CSS: a flex container lays out in a row unless told otherwise; a block (or
+                // grid, whose children are placed absolutely) stacks. Later declarations win.
+                if (v == "flex" || v == "inline-flex") s.flexDirection = FlexDirection.Row;
+                break;
             case "flex-direction":
                 s.flexDirection = v switch { "row" => FlexDirection.Row, "row-reverse" => FlexDirection.RowReverse, "column-reverse" => FlexDirection.ColumnReverse, _ => FlexDirection.Column };
                 break;
@@ -411,12 +416,36 @@ internal static class StyleApplier
 
     public static bool IsNumber(string v) => float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
 
+    /// <summary>Unit context for em, rem, vw and vh: set per element by the cascade, per page by the renderer.</summary>
+    internal static float EmSize = 16f;
+    internal static float RootFontSize = 16f;
+    internal static float ViewportW = 460f;
+    internal static float ViewportH = 460f;
+
+    /// <summary>A number in px (or the bare number of a percentage). Units: px pt em rem vw vh; calc().</summary>
     public static float Num(string v)
     {
         v = v.Trim();
+        if (v.StartsWith("calc(", StringComparison.OrdinalIgnoreCase))
+        {
+            Calc(v, out var px, out var pct);
+            return Mathf.Abs(px) > 0.0001f || Mathf.Abs(pct) < 0.0001f ? px : pct;
+        }
+        return Unit(v);
+    }
+
+    private static float Unit(string v)
+    {
+        var scale = 1f;
         if (v.EndsWith("px", StringComparison.OrdinalIgnoreCase)) v = v.Substring(0, v.Length - 2);
         else if (v.EndsWith("%", StringComparison.Ordinal)) v = v.Substring(0, v.Length - 1);
-        return float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f : 0f;
+        else if (v.EndsWith("rem", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 3); scale = RootFontSize; }
+        else if (v.EndsWith("em", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize; }
+        else if (v.EndsWith("vw", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = ViewportW / 100f; }
+        else if (v.EndsWith("vh", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = ViewportH / 100f; }
+        else if (v.EndsWith("vmin", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = Mathf.Min(ViewportW, ViewportH) / 100f; }
+        else if (v.EndsWith("pt", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 4f / 3f; }
+        return float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f * scale : 0f;
     }
 
     public static StyleLength Len(string v)
@@ -424,8 +453,77 @@ internal static class StyleApplier
         v = v.Trim();
         if (v == "auto") return StyleKeyword.Auto;
         if (v == "initial" || v == "unset") return StyleKeyword.Initial;
+        if (v.StartsWith("calc(", StringComparison.OrdinalIgnoreCase))
+        {
+            // px and % cannot be mixed in one length here; whichever part is non-zero wins.
+            Calc(v, out var px, out var pct);
+            return Mathf.Abs(px) > 0.0001f || Mathf.Abs(pct) < 0.0001f ? new Length(px, LengthUnit.Pixel) : new Length(pct, LengthUnit.Percent);
+        }
         if (v.EndsWith("%", StringComparison.Ordinal)) return new Length(Num(v), LengthUnit.Percent);
         return new Length(Num(v), LengthUnit.Pixel);
+    }
+
+    /// <summary>calc(): + - * / and parentheses over lengths; px and % accumulate separately.</summary>
+    private static void Calc(string v, out float px, out float pct)
+    {
+        var inner = v.Substring(5, v.Length - 6);
+        var pos = 0;
+        (px, pct) = CalcExpr(inner, ref pos);
+    }
+
+    private static (float px, float pct) CalcExpr(string s, ref int i)
+    {
+        var (px, pct) = CalcTerm(s, ref i);
+        while (true)
+        {
+            SkipWs(s, ref i);
+            if (i >= s.Length || (s[i] != '+' && s[i] != '-')) break;
+            var op = s[i++];
+            var (p2, c2) = CalcTerm(s, ref i);
+            if (op == '+') { px += p2; pct += c2; } else { px -= p2; pct -= c2; }
+        }
+        return (px, pct);
+    }
+
+    private static (float px, float pct) CalcTerm(string s, ref int i)
+    {
+        var (px, pct) = CalcFactor(s, ref i);
+        while (true)
+        {
+            SkipWs(s, ref i);
+            if (i >= s.Length || (s[i] != '*' && s[i] != '/')) break;
+            var op = s[i++];
+            var (p2, c2) = CalcFactor(s, ref i);
+            // one side must be a bare number: it is whichever carries no unit
+            var k = Mathf.Abs(p2) > 0f || Mathf.Abs(c2) > 0f ? p2 + c2 : 0f;
+            if (op == '*') { px *= k; pct *= k; }
+            else if (Mathf.Abs(k) > 0.00001f) { px /= k; pct /= k; }
+        }
+        return (px, pct);
+    }
+
+    private static (float px, float pct) CalcFactor(string s, ref int i)
+    {
+        SkipWs(s, ref i);
+        if (i < s.Length && s[i] == '(')
+        {
+            i++;
+            var r = CalcExpr(s, ref i);
+            SkipWs(s, ref i);
+            if (i < s.Length && s[i] == ')') i++;
+            return r;
+        }
+        var start = i;
+        if (i < s.Length && (s[i] == '-' || s[i] == '+')) i++;
+        while (i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '.' || s[i] == '%')) i++;
+        var tok = s.Substring(start, i - start);
+        if (tok.EndsWith("%", StringComparison.Ordinal)) return (0f, Unit(tok));
+        return (Unit(tok), 0f);
+    }
+
+    private static void SkipWs(string s, ref int i)
+    {
+        while (i < s.Length && s[i] == ' ') i++;
     }
 
     private static Length OriginLen(string v)

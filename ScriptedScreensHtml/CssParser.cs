@@ -33,11 +33,15 @@ internal sealed class CssCompound
     public bool ChildOfPrevious;
     /// <summary>True when preceded by '+': the previous compound must be the immediately preceding element sibling.</summary>
     public bool SiblingOfPrevious;
+    /// <summary>Pseudo-class tests: :root, :first-child, :last-child, :nth-child(), :not().</summary>
+    public readonly List<Func<HtmlNode, bool>> Pseudos = new();
 
     public bool Matches(HtmlNode node)
     {
         if (Tag != null && !string.Equals(Tag, node.Tag, StringComparison.OrdinalIgnoreCase))
             return false;
+        foreach (var p in Pseudos)
+            if (!p(node)) return false;
         if (Id != null && !string.Equals(Id, node.Attr("id"), StringComparison.Ordinal))
             return false;
         if (Classes.Count > 0)
@@ -68,7 +72,7 @@ internal sealed class CssSelector
         {
             var s = 0;
             foreach (var c in Chain)
-                s += (c.Id != null ? 10000 : 0) + c.Classes.Count * 100 + (c.Tag != null ? 1 : 0);
+                s += (c.Id != null ? 10000 : 0) + (c.Classes.Count + c.Pseudos.Count) * 100 + (c.Tag != null ? 1 : 0);
             return s;
         }
     }
@@ -299,17 +303,18 @@ internal static class CssParser
     {
         if (text.Length == 0)
             return null;
-        if (text.IndexOf(':') >= 0 || text.IndexOf('[') >= 0 || text.IndexOf('~') >= 0)
+        if (text.IndexOf('[') >= 0 || text.IndexOf('~') >= 0)
         {
-            warn?.Invoke($"css: selector \"{text}\" not supported (only tag, .class, #id, descendant, > child, + sibling)");
+            warn?.Invoke($"css: selector \"{text}\" not supported (attribute selectors and ~ are not implemented)");
             return null;
         }
 
         var selector = new CssSelector();
         var childNext = false;
         var siblingNext = false;
-        foreach (var part in text.Replace(">", " > ").Replace("+", " + ").Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var rawPart in text.Replace(">", " > ").Replace("+", " + ").Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
+            var part = rawPart;
             if (part == ">")
             {
                 childNext = true;
@@ -323,6 +328,17 @@ internal static class CssParser
             var compound = new CssCompound { ChildOfPrevious = childNext, SiblingOfPrevious = siblingNext };
             childNext = false;
             siblingNext = false;
+            var pseudoAt = PseudoStart(part);
+            if (pseudoAt >= 0)
+            {
+                if (!ParsePseudos(part.Substring(pseudoAt), compound, warn))
+                {
+                    warn?.Invoke($"css: selector \"{text}\" skipped: pseudo not supported");
+                    return null;
+                }
+                part = part.Substring(0, pseudoAt);
+                if (part.Length == 0) part = "*";
+            }
             var i = 0;
             while (i < part.Length)
             {
@@ -345,6 +361,126 @@ internal static class CssParser
             selector.Chain.Add(compound);
         }
         return selector.Chain.Count > 0 ? selector : null;
+    }
+
+    /// <summary>Index of the first ':' outside parentheses, or -1.</summary>
+    private static int PseudoStart(string part)
+    {
+        var depth = 0;
+        for (var i = 0; i < part.Length; i++)
+        {
+            if (part[i] == '(') depth++;
+            else if (part[i] == ')') depth--;
+            else if (part[i] == ':' && depth == 0) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// ":root", ":first-child", ":last-child", ":nth-child(an+b|odd|even)", ":not(compound)".
+    /// State pseudo-classes (:hover, :active, :focus, ...) never match: there is no pointer.
+    /// Pseudo-elements and anything else are unsupported and skip the rule.
+    /// </summary>
+    private static bool ParsePseudos(string text, CssCompound compound, Action<string>? warn)
+    {
+        var i = 0;
+        while (i < text.Length)
+        {
+            if (text[i] != ':') return false;
+            i++;
+            if (i < text.Length && text[i] == ':') return false; // pseudo-element
+            var start = i;
+            while (i < text.Length && text[i] != ':' && text[i] != '(') i++;
+            var name = text.Substring(start, i - start).ToLowerInvariant();
+            var arg = string.Empty;
+            if (i < text.Length && text[i] == '(')
+            {
+                var depth = 0;
+                var open = i;
+                while (i < text.Length)
+                {
+                    if (text[i] == '(') depth++;
+                    else if (text[i] == ')' && --depth == 0) break;
+                    i++;
+                }
+                arg = text.Substring(open + 1, i - open - 1).Trim();
+                i++;
+            }
+            switch (name)
+            {
+                case "root":
+                    compound.Pseudos.Add(n => n.Tag == "html" || n.Tag == "body");
+                    break;
+                case "first-child":
+                    compound.Pseudos.Add(n => ElementIndex(n) == 0);
+                    break;
+                case "last-child":
+                    compound.Pseudos.Add(n => ElementIndex(n) == ElementCount(n) - 1);
+                    break;
+                case "nth-child":
+                {
+                    var (a, b) = ParseNth(arg);
+                    compound.Pseudos.Add(n =>
+                    {
+                        var k = ElementIndex(n) + 1;
+                        if (a == 0) return k == b;
+                        var m = k - b;
+                        return m % a == 0 && m / a >= 0;
+                    });
+                    break;
+                }
+                case "not":
+                {
+                    var inner = ParseSelector(arg, warn);
+                    if (inner == null || inner.Chain.Count != 1) return false;
+                    var c = inner.Chain[0];
+                    compound.Pseudos.Add(n => !c.Matches(n));
+                    break;
+                }
+                case "hover": case "active": case "focus": case "focus-visible": case "focus-within":
+                case "visited": case "link": case "checked": case "disabled": case "enabled":
+                    compound.Pseudos.Add(_ => false);
+                    break;
+                default:
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    private static (int a, int b) ParseNth(string arg)
+    {
+        arg = arg.Replace(" ", string.Empty).ToLowerInvariant();
+        if (arg == "odd") return (2, 1);
+        if (arg == "even") return (2, 0);
+        var n = arg.IndexOf('n');
+        if (n < 0) return (0, int.TryParse(arg, out var only) ? only : 0);
+        var aText = arg.Substring(0, n);
+        var a = aText.Length == 0 || aText == "+" ? 1 : aText == "-" ? -1 : int.TryParse(aText, out var av) ? av : 1;
+        var bText = arg.Substring(n + 1);
+        var b = bText.Length == 0 ? 0 : int.TryParse(bText, out var bv) ? bv : 0;
+        return (a, b);
+    }
+
+    private static int ElementIndex(HtmlNode node)
+    {
+        if (node.Parent == null) return 0;
+        var idx = 0;
+        foreach (var sib in node.Parent.Children)
+        {
+            if (sib == node) return idx;
+            if (!sib.IsText) idx++;
+        }
+        return idx;
+    }
+
+    private static int ElementCount(HtmlNode node)
+    {
+        if (node.Parent == null) return 1;
+        var count = 0;
+        foreach (var sib in node.Parent.Children)
+            if (!sib.IsText) count++;
+        return count;
     }
 
     private static string StripComments(string css)

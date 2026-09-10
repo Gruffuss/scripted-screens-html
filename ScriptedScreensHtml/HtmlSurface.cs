@@ -442,6 +442,10 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     private void BuildInner()
     {
+        {
+            var size = LayoutSize();
+            HtmlRenderer.SurfaceAspect = size.x > 0f ? size.y / size.x : 1f;
+        }
         var built = HtmlRenderer.Build(_source, FindFont());
         foreach (var w in built.Warnings)
             ScriptedScreensHtmlPlugin.Log?.LogWarning(w);
@@ -457,6 +461,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         _byId = built.ById;
         _shapes = built.Shapes;
         _built = built;
+        foreach (var grid in built.Grids)
+            GridLayout.Attach(grid, built);
 
         _script?.Dispose();
         _script = null;
