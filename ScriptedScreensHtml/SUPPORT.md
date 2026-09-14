@@ -127,7 +127,7 @@ Easings: `linear`, `ease-in`, `ease-out`, everything else is smoothstep.
 | Feature | Why |
 |---|---|
 | `display: inline`, `inline-block`, `float`, inline flow | no inline formatting context. A block is either all text (one label, rich text) or all boxes (a container); mixed content becomes a wrapping row |
-| `transition` on `color`/`background-color` | a colour is not a scalar in the vector expression language; colour changes snap. Layout, opacity and transform transitions animate |
+| `transition` on `color`/`background-color`, colour keyframes | the vector mod animates a colour by sampling a gradient at an expression (`f = { grad, at }`), but that form exists only as a structured prop and the page reaches the vector mod through the scene text, which has no map syntax; colour changes snap until the text form gains it (asked for as `fat=`/`sat=`). Layout, opacity and transform transitions animate |
 | `filter`, `backdrop-filter`, `mix-blend-mode` | per-pixel effects on the page need an offscreen pass; the vector layer is geometry |
 | `box-shadow: inset`, more than one `text-shadow` | the vector shadow is a drop shadow only; the text underlay is a single layer (a second is reported in the log) |
 | `outline` | not mapped; use a border |
