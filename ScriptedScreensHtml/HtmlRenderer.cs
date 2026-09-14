@@ -699,7 +699,18 @@ internal static class HtmlRenderer
             _ => "\u2022 ",
         };
         if (marker == null) return;
-        li.Children.Insert(0, new HtmlNode { Text = marker, Parent = li });
+        var m = new HtmlNode { Text = marker, Parent = li };
+        if (type is "disc" or "circle" or "square" || !char.IsLetterOrDigit(marker[0]))
+        {
+            // Text faces rarely carry the geometric shapes; the game's punctuation face does.
+            var span = new HtmlNode { Tag = "span", Parent = li };
+            span.Attributes["style"] = "font-family: noto-punc";
+            m.Parent = span;
+            span.Children.Add(m);
+            li.Children.Insert(0, span);
+            return;
+        }
+        li.Children.Insert(0, m);
     }
 
     /// <summary>Text-like test for an inline element's own children (its own id/class do not matter).</summary>
@@ -775,6 +786,7 @@ internal static class HtmlRenderer
         var close = new StringBuilder();
         string? colour = null;
         string? size = null;
+        string? face = null;
         var bold = node.Tag == "b" || node.Tag == "strong";
         var italic = node.Tag == "i" || node.Tag == "em";
         var underline = node.Tag == "u" || node.Tag == "a";
@@ -803,6 +815,7 @@ internal static class HtmlRenderer
             {
                 case "color": colour = d.Value; break;
                 case "font-size": size = d.Value; break;
+                case "font-family": face = d.Value.Split(',')[0].Trim().Trim('"', '\''); break;
                 case "font-weight": bold = d.Value == "bold" || d.Value == "bolder" || (StyleApplier.IsNumber(d.Value) && StyleApplier.Num(d.Value) >= 600); break;
                 case "font-style": italic = d.Value == "italic" || d.Value == "oblique"; break;
                 case "text-decoration": underline = d.Value.Contains("underline"); strike = d.Value.Contains("line-through"); break;
@@ -846,6 +859,8 @@ internal static class HtmlRenderer
         }
         colour = node.Attr("color") ?? colour;
         size = node.Attr("size") ?? size;
+        face = node.Attr("face") ?? face;
+        if (face != null) { open.Append("<font=\"").Append(face).Append("\">"); close.Insert(0, "</font>"); }
 
         if (bold) { open.Append("<b>"); close.Insert(0, "</b>"); }
         if (italic) { open.Append("<i>"); close.Insert(0, "</i>"); }

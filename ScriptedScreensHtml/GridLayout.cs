@@ -38,6 +38,7 @@ internal sealed class GridLayout
     private readonly HtmlRenderer.Result _built;
     private readonly Dictionary<VisualElement, Rect> _placed = new();
     private float _minHeight = -1f;
+    private float _minWidth = -1f;
     private bool _placing;
 
     private GridLayout(VisualElement ve, HtmlRenderer.Result built)
@@ -70,7 +71,13 @@ internal sealed class GridLayout
         var padL = rs.paddingLeft; var padT = rs.paddingTop;
         var w = _ve.layout.width - padL - rs.paddingRight;
         var h = _ve.layout.height - padT - rs.paddingBottom;
-        if (float.IsNaN(w) || w <= 0f)
+        // A grid in a flex row (a table beside a list) has no width of its own: its children
+        // are absolute and contribute nothing. Then auto columns take their content width and
+        // the container gets that as its minimum, the way auto rows already work.
+        var definiteWidth = HasDefiniteWidth(css) || !ParentIsRow();
+        if (!definiteWidth)
+            w = float.IsNaN(w) ? 0f : Mathf.Max(0f, w);
+        else if (float.IsNaN(w) || w <= 0f)
             return;
         var definiteHeight = HasDefiniteHeight(css) && !float.IsNaN(h) && h > 0f;
 
@@ -144,8 +151,18 @@ internal sealed class GridLayout
             items[i] = it;
         }
 
-        // Column widths.
-        var colW = Resolve(cols, w, colGap, true, out _);
+        // Column widths. Content-sized auto columns measure the widest single-column child.
+        var colW = Resolve(cols, w, colGap, definiteWidth, out _);
+        if (!definiteWidth)
+        {
+            foreach (var it in items)
+            {
+                if (it.ColSpan != 1 || it.Col >= cols.Count || !cols[it.Col].Auto) continue;
+                var iw = it.Ve.layout.width;
+                if (float.IsNaN(iw)) continue;
+                colW[it.Col] = Mathf.Max(colW[it.Col], iw);
+            }
+        }
 
         // Row heights: explicit tracks, implicit rows from grid-auto-rows; auto rows measure
         // the tallest single-row child in them.
@@ -186,7 +203,8 @@ internal sealed class GridLayout
                 chh += rowH[r] + (r > it.Row ? rowGap : 0f);
                 if (rows[r].Auto || (!definiteHeight && rows[r].Fr > 0f)) fixedRow = false;
             }
-            var rect = new Rect(padL + colX[it.Col], padT + rowY[it.Row], cw, fixedRow ? chh : -1f);
+            var contentCol = !definiteWidth && it.ColSpan == 1 && it.Col < cols.Count && cols[it.Col].Auto;
+            var rect = new Rect(padL + colX[it.Col], padT + rowY[it.Row], contentCol ? -1f : cw, fixedRow ? chh : -1f);
             if (_placed.TryGetValue(it.Ve, out var prev) && Same(prev, rect))
                 continue;
             _placed[it.Ve] = rect;
@@ -194,7 +212,7 @@ internal sealed class GridLayout
             s.position = Position.Absolute;
             s.left = rect.x;
             s.top = rect.y;
-            s.width = rect.width;
+            if (contentCol) s.width = StyleKeyword.Auto; else s.width = rect.width;
             if (fixedRow) s.height = rect.height;
             else s.height = StyleKeyword.Auto;
         }
@@ -208,7 +226,30 @@ internal sealed class GridLayout
                 _ve.style.minHeight = min;
             }
         }
+        if (!definiteWidth)
+        {
+            var min = padL + (cols.Count > 0 ? x - colGap : 0f) + rs.paddingRight;
+            if (Mathf.Abs(min - _minWidth) > 0.5f)
+            {
+                _minWidth = min;
+                _ve.style.minWidth = min;
+            }
+        }
         _ = anyFr;
+    }
+
+    private static bool HasDefiniteWidth(Dictionary<string, string> css)
+    {
+        return (Get(css, "width") is { } w && w.Trim() != "auto") || Get(css, "flex") != null || Get(css, "flex-grow") != null || Get(css, "flex-basis") != null;
+    }
+
+    /// <summary>In a column parent a grid stretches to the parent's width; in a row it has only its content.</summary>
+    private bool ParentIsRow()
+    {
+        var p = _ve.parent;
+        if (p == null) return false;
+        var dir = p.resolvedStyle.flexDirection;
+        return dir == FlexDirection.Row || dir == FlexDirection.RowReverse;
     }
 
     private static bool Same(Rect a, Rect b)
