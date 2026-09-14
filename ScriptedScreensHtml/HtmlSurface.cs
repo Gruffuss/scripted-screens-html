@@ -755,17 +755,15 @@ internal sealed class HtmlSurface : MonoBehaviour
     private void ApplyPairs(List<KeyValuePair<string, SS.UiValue>> entries)
     {
         ForwardData(entries);
+        // Ids bind first, always: a key naming an element is the simplest contract a page
+        // has. A script's data handler gets the same payload as an event afterwards; keys
+        // it consumes that match no id are not warned about when a script is present.
+        BindById(entries, quiet: _script != null);
         if (_script != null)
         {
-            // The worker decides after the page script has run: a data handler gets the
-            // event; otherwise the id-binding below runs on the main thread. Queue order
-            // keeps data after the script even when it arrives first.
-            _script.EmitData(ToJson(entries), () => BindById(entries));
+            _script.EmitData(ToJson(entries));
             Wake(DataAwakeFrames);
-            return;
         }
-
-        BindById(entries);
     }
 
     /// <summary>
@@ -818,7 +816,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         }
     }
 
-    private void BindById(List<KeyValuePair<string, SS.UiValue>> entries)
+    private void BindById(List<KeyValuePair<string, SS.UiValue>> entries, bool quiet = false)
     {
         _dirty = true;
         foreach (var entry in entries)
@@ -858,7 +856,7 @@ internal sealed class HtmlSurface : MonoBehaviour
 
             if (string.IsNullOrEmpty(entry.Key) || !_byId.TryGetValue(entry.Key, out var ve))
             {
-                if (!string.IsNullOrEmpty(entry.Key))
+                if (!string.IsNullOrEmpty(entry.Key) && !quiet)
                     ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: data key \"{entry.Key}\" matches no element id");
                 continue;
             }

@@ -96,7 +96,7 @@ internal sealed class ScriptHost : IDisposable
     /// Deliver a chip payload. If the page has a data handler it gets a `data` event;
     /// otherwise the fallback runs on the main thread. Ordered after Run by the queue.
     /// </summary>
-    public void EmitData(string json, Action fallbackOnMain)
+    public void EmitData(string json)
     {
         _toEngine.Enqueue(() =>
         {
@@ -104,10 +104,6 @@ internal sealed class ScriptHost : IDisposable
             {
                 _engine!.Invoke("__emit", "data", json);
                 AfterRun();
-            }
-            else
-            {
-                _toMain.Enqueue(fallbackOnMain);
             }
         });
         _wake.Set();

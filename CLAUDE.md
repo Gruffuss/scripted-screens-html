@@ -2171,3 +2171,42 @@ emission and a scene with live tweens must be resent even when its text is uncha
 
 **Test pages:** `HtmlTest.lua` (563, motion), `HtmlTest2.lua` (561: grid, paint, units,
 `<img>`, a counting `<button>`, script-made pills), `GasUI-html3.lua` (586, the mockup).
+
+
+### Capture, diagnostics, clicks (2026-09-14)
+
+**Captures show HTML pages now**, through the vector mod (its 0.10.2.x clone carries the
+mesh and builds inline). What the HTML side needed: emit the first structure
+**synchronously at build**, because a capture rebuilds the surface and clones it inside one
+call, and a scene handed over in the next `Update` is too late. The texture-era capture path
+(RawImage snapshot, twin-finding, `TryCaptureSurfaceShared` patch) was dead in vector mode
+and is deleted. The vector session's cross-mod analysis was right that the two paths could
+not share code; the resolution is that the HTML mod no longer has one. Worth keeping from
+that analysis: `Harmony.PatchAll(Type)` registers one class and silently skips nested patch
+classes; this mod uses `PatchAll(Assembly)`.
+
+**Diagnostics config** (`HtmlConfig.cs`), the vector mod's shape: `Diagnostics.Enabled`
+(per-page line every second: emits/s, layout + translate ms, nodes, KB, tweens, script
+ms/frame, externals; also the informational lines) and `Diagnostics.DumpScenes`
+(`scenes/<page>.txt` beside the DLL, the emitter's exact output). Both bind into
+`ModBehaviour.Config`, read live, off by default. The dump answered the click question in
+one look: `R ... id=bump click=1` was there.
+
+**Two click findings.** (1) The 2x2 test page hit the 60,000-vertex cap with 48 shapes: one
+90x50 `radial-gradient` box costs ~50,000 vertices (rings of the whole outline, one per 2.5
+screen px), a blurred `box-shadow` ~13,000, the rest of the page 4,000; the button, late in
+document order, was dropped with its hit region. Measured by ablation (four pushes, no
+restart). The vector mod's own gradient demo costs 16,000 on a 1x1. A ring cap belongs on
+the vector side; the page uses a solid until then. (2) With the button back, clicks reached
+Lua (chip log) but the count stayed at zero: a page with a script data handler skipped the
+id-binding entirely, a rule from the texture days. Ids now always bind and the script gets
+the event afterwards; "matches no element id" is silent when a script is present.
+
+**Image element.** `<img>` through ScriptedScreens' `image` element works (raw GitHub URL;
+Wikimedia answers 400 to Unity's request). It was re-downloaded on every emit because the
+element was re-applied unconditionally; now re-applied only when rect or attributes change.
+A surface rebuild (a click on the console triggers one) recreates the host and the image
+with it.
+
+**Seen in the capture, a text-layer limit:** all text paints above all geometry, so a label
+from a low `z-index` box shows over a higher box. Documented in SUPPORT.md.

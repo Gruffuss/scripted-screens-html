@@ -41,7 +41,7 @@ keyframe, which compiles to the same thing.
 | `<button id>` (also any element with `onclick` or `data-click`) | a click region in the vector scene. The click arrives at the page element's Lua `on_click(nodeId, player)` with the button's id. Page JS does not see clicks; bounce them through `data` if the page needs them |
 | `<svg>` with `line polyline polygon rect circle ellipse path g defs linearGradient radialGradient` | translated one-to-one to vector nodes; `viewBox`, `preserveAspectRatio="none"` (strokes keep one width: the scale is baked into coordinates), `fill stroke stroke-width opacity fill-opacity stroke-opacity stroke-linecap stroke-linejoin`, `fill="url(#id)"` |
 | SVG extensions | any attribute may be `="expression"`; `n="36"` on `polygon`/`polyline` makes a sampled band/line (`x y y2` per sample `i`); `n="42"` on `circle`/`rect`/`ellipse`/`path` repeats it (`hash(i)` for per-instance randoms); `fo2 fea fea_edge lod dash dofs` pass through to the vector layer |
-| Data binding by id | `data = { id = value }` from Lua: string/number → text, table → CSS, bool → display; an svg shape id takes `points`, an attribute table, or a **number array**, which binds the shape to `$id[i]` so the vector mod scrolls it between ticks; the whole payload is also forwarded flattened to the scene as `$a_b` |
+| Data binding by id | `data = { id = value }` from Lua: string/number → text, table → CSS, bool → display; an svg shape id takes `points`, an attribute table, or a **number array**, which binds the shape to `$id[i]` so the vector mod scrolls it between ticks. Ids always bind, and a page script's `data` handler gets the same payload afterwards; the whole payload is also forwarded flattened to the scene as `$a_b` |
 
 ### Does not work
 
@@ -53,6 +53,7 @@ keyframe, which compiles to the same thing.
 | `<iframe> <object>` | no meaning here |
 | List markers on `<ul>/<ol>` | no marker generation; write the bullet |
 | Text clipped to a rounded shape | a label under a rounded `overflow: hidden` box is clipped to the box's rectangle, not its rounded outline (the vector text layer masks with a rectangle). Standing limit; invisible at the radii dashboards use |
+| Text under a later box | the vector layer draws all text above all geometry, so a box with a higher `z-index` still paints under a label from a lower one. Standing limit of the text layer |
 
 ---
 
@@ -88,7 +89,7 @@ their cells; auto rows take the tallest child. Not: named lines and areas, dense
 
 **Paint:** `color`, `background`/`background-color`, `linear-gradient(...)` (angle or `to
 side`, any number of stops, **hard stops** split geometrically so the edge is exact),
-`radial-gradient(...)` (`circle`/`ellipse`, `at x y`, size keywords approximated by radius),
+`radial-gradient(...)` (`circle`/`ellipse`, `at x y`, size keywords approximated by radius; **expensive**: a 90x50 box costs ~50,000 vertices of the 60,000 mesh cap in vector mod 0.10.2.0, pending a ring-count cap on the vector side),
 `border` shorthand, per-side `border-*-width` and `border-*-color`, a rounded box with a
 differently coloured side (drawn as arcs), `border-style: dashed | dotted`, `border-radius`
 and per-corner (CSS overflow clamp applied), `box-shadow` (offset, blur, spread, colour,
