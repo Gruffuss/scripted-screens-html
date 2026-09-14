@@ -832,15 +832,19 @@ internal static class HtmlRenderer
         AnimationSpec? anim = null;
         var record = result.CssOf(ve);
         StyleApplier.EmSize = InheritedFontSize(node.Parent, result);
+        // Custom properties first, whatever rule they came from: `:root { --pad }` sorts after
+        // `body { padding: var(--pad) }` by specificity, and the variable must exist by then.
         foreach (var raw in ordered)
         {
-            // Custom properties are stored, not applied; var() in a value is resolved here,
-            // so everything downstream (the emitter included) sees the substituted value.
             if (raw.Name.StartsWith("--", StringComparison.Ordinal))
-            {
                 (node.Vars ??= new Dictionary<string, string>(StringComparer.Ordinal))[raw.Name] = raw.Value.Trim();
+        }
+        foreach (var raw in ordered)
+        {
+            // var() in a value is resolved here, so everything downstream (the emitter
+            // included) sees the substituted value.
+            if (raw.Name.StartsWith("--", StringComparison.Ordinal))
                 continue;
-            }
             var d = raw.Value.IndexOf("var(", StringComparison.Ordinal) >= 0
                 ? new CssDeclaration(raw.Name, ResolveVars(raw.Value, node), raw.Important)
                 : raw;

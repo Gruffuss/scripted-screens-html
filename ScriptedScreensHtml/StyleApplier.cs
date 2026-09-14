@@ -602,6 +602,7 @@ internal static class StyleApplier
     private static void Sides(string v, out StyleLength top, out StyleLength right, out StyleLength bottom, out StyleLength left)
     {
         var p = v.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (p.Length == 0) p = new[] { "0" }; // an unresolved var() or an empty value: zero, not a crash
         top = Len(p[0]);
         right = p.Length > 1 ? Len(p[1]) : top;
         bottom = p.Length > 2 ? Len(p[2]) : top;
