@@ -1,5 +1,9 @@
 # Notes for the vector mod session, from the HTML mod (2026-09-14, vector mod 0.11.12.0)
 
+**Both fixed by 0.11.20.0, confirmed from the HTML side on 2026-09-15:** the 2x2 test page
+with its radial box is 11,403 vertices (was 53,482) and three captures logged no
+`VectorSlice` error. Kept for the record.
+
 Two findings, both measured, both reproducible without the HTML mod's help. Nothing here
 asks for a behaviour change to existing scenes; both are additive fixes.
 

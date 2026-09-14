@@ -41,9 +41,9 @@ local page = [[
   .c { left: 80px; top: 20px; background: #E2A94E; z-index: 2; color: #111; }
 
   .row { display: flex; gap: 10px; align-items: center; }
-  /* radial-gradient costs ~49,000 vertices for this one box (vector mod 0.11.12.0: a ring
-     per 2.5 screen px of the whole outline), which nearly fills the 60,000-vertex mesh; at
-     nose distance the button after it drops out. Kept in so the cost stays visible. */
+  /* radial-gradient: this box alone cost ~49,000 vertices on vector mod 0.11.12.0 and pushed
+     the button after it past the 60,000-vertex cap; since 0.11.20.0 the whole page is ~11,400.
+     Kept in so a regression shows up here first. */
   .radial { width: 90px; height: 50px; border-radius: 8px;
             background: radial-gradient(circle at 30% 30%, #7DD3FC, #0369A1 70%); }
   .dashed { width: 90px; height: 50px; border: 2px dashed var(--accent); border-radius: 8px; }

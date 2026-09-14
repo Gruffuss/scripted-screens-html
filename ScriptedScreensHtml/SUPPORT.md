@@ -1,6 +1,6 @@
 # What works from HTML5, CSS and JS, and what does not — and why
 
-State as of 2026-09-15, vector back-end, vector mod 0.11.12.0, everything below confirmed on a console. The pipeline decides everything below:
+State as of 2026-09-15, vector back-end, vector mod 0.11.20.0, everything below confirmed on a console. The pipeline decides everything below:
 
 ```
 HTML + CSS  →  parse, cascade  →  UI Toolkit lays the boxes out (layout ONLY; grid is ours)
@@ -90,7 +90,7 @@ their cells; auto rows take the tallest child. Not: named lines and areas, dense
 
 **Paint:** `color`, `background`/`background-color`, `linear-gradient(...)` (angle or `to
 side`, any number of stops, **hard stops** split geometrically so the edge is exact),
-`radial-gradient(...)` (`circle`/`ellipse`, `at x y`, size keywords approximated by radius; **expensive**: a 90x50 rounded box with an off-centre focus costs ~49,000 vertices, re-measured on vector mod 0.11.12.0; a ring-count cap on the vector side is still the answer),
+`radial-gradient(...)` (`circle`/`ellipse`, `at x y`, size keywords approximated by radius; affordable since vector mod 0.11.20.0: the whole 2x2 test page including its 90x50 radial box is 11,403 vertices at 1,408 px on screen, where it was 53,482 before),
 `border` shorthand, per-side `border-*-width` and `border-*-color`, a rounded box with a
 differently coloured side (drawn as arcs), `border-style: dashed | dotted`, `border-radius`
 and per-corner (CSS overflow clamp applied), `box-shadow` (offset, blur, spread, colour,
@@ -180,15 +180,10 @@ Everything above runs on the vector mod as it is, plus these additions it gained
 front-end (all additive): `wrap=1`, `lh`, string escapes (0.10.1.0); `sh` on closed shapes
 and on `T` (0.10.2.0).
 
-Reported to the vector side, open there (2026-09-14, `FOR-VECTOR-SESSION.md`):
-
-- **Radial fill vertex count.** One 90x50 rounded box with a radial gradient costs ~49,000
-  of the 60,000-vertex mesh cap at a 2x2's on-screen size; past the cap the last shapes in
-  the scene are dropped silently, and on the test page that was the click button. Until a
-  ring cap lands, a page with a radial gradient should keep its buttons early in document
-  order or use a linear gradient.
-- **Error spam on capture.** 66 Unity errors about `VectorSlice` per screen capture of a
-  page whose text forces mesh cuts. Cosmetic: the capture and the console are fine.
+Reported to the vector side on 2026-09-14 and fixed there by 0.11.20.0, both confirmed on
+the 2x2 test page on 2026-09-15: the radial fill vertex count (page 53,482 → 11,403
+vertices, so the button after the radial box no longer drops past the 60,000 cap) and the
+`VectorSlice` error spam on capture (three captures, zero errors).
 
 Still open, only if a page needs it: non-convex clips by convex decomposition of the clip
 polygon on the existing geometric path. A stencil pass does not fit a one-mesh, one-material

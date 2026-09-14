@@ -2259,3 +2259,8 @@ capture: built inline ... across 7 mesh(es)". The capture-time `BuildNow()` runs
 `UpdateGeometry` (the canvas rebuild loop) and now calls `ApplySlices()`, which creates
 `VectorSlice` graphics there; one mesh never needed a slice, draw-order text does. Fix on the
 vector side: defer slice creation out of the rebuild loop when building inline.
+
+**Both vector-side items above are fixed in vector mod 0.11.20.0, confirmed 2026-09-15:** the
+2x2 test page with its radial box is 11,403 vertices at 1,408 px on screen (was 53,482), and
+three captures produced no `VectorSlice` error. The page keeps its radial box so a regression
+shows there first.
