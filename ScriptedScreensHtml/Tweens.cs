@@ -129,6 +129,7 @@ internal sealed class Tweens
     private readonly List<VisualElement> _scratch = new();
 
     public bool Any => _live.Count > 0;
+    public int Count => _live.Count;
 
     /// <summary>After layout, before emitting: start a tween for every element that changed and has a transition.</summary>
     public void Diff(VisualElement root, HtmlRenderer.Result built, float now)

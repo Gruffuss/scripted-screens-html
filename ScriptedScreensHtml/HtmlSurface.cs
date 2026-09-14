@@ -78,6 +78,8 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal void SetSource(string source)
     {
         _source = source;
+        if (!Surfaces.Contains(this))
+            Surfaces.Add(this);
         EnsurePanel();
         Build();
     }
@@ -91,6 +93,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         if (_panel == null)
             return;
+        ReportIfDue();
 
         // A texture created last frame has been painted into (offscreen panels repaint
         // after LateUpdate), so it can be shown now. Showing it the frame it was created
@@ -199,7 +202,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         // the emitter derives from that layout; the vector mod renders it as geometry.
 
         ReportShaders();
-        ScriptedScreensHtmlPlugin.Log?.LogInfo(
+        if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo(
             $"html surface created: {w}x{h} at scale {_scale}, layout {LayoutSize()} for rect {((RectTransform)transform).rect.size}, theme={(_panel.themeStyleSheet == null ? "none" : _panel.themeStyleSheet.name)}");
     }
 
@@ -260,7 +263,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         _panel.scale = scale;
         _pending = fresh;
         Wake();
-        ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: resized to {w}x{h} at scale {scale}");
+        if (HtmlConfig.Diagnostics)
+            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: resized to {w}x{h} at scale {scale}");
     }
 
     private (int w, int h) TextureSize(float scale)
@@ -277,7 +281,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             var field = typeof(PanelSettings).GetField(f, BindingFlags.NonPublic | BindingFlags.Instance);
             var shader = field?.GetValue(_panel) as Shader;
-            ScriptedScreensHtmlPlugin.Log?.LogInfo($"  {f}: {(shader == null ? "NULL" : shader.name)}");
+            if (HtmlConfig.Diagnostics)
+                ScriptedScreensHtmlPlugin.Log?.LogInfo($"  {f}: {(shader == null ? "NULL" : shader.name)}");
         }
     }
 
@@ -380,7 +385,7 @@ internal sealed class HtmlSurface : MonoBehaviour
 
         _script?.Dispose();
         _script = null;
-        ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: page built, script {built.Script.Length} chars, {built.ById.Count} elements");
+        if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: page built, script {built.Script.Length} chars, {built.ById.Count} elements");
         if (!string.IsNullOrWhiteSpace(built.Script))
         {
             _script = new ScriptHost(
@@ -543,10 +548,44 @@ internal sealed class HtmlSurface : MonoBehaviour
         }
     }
 
+    // ---- diagnostics: what each page costs, reported once a second when enabled ----
+    private static readonly List<HtmlSurface> Surfaces = new();
+    private static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
+    private static double _nextReport;
+    private const double ReportIntervalSeconds = 1.0;
+    private int _emits;
+    private int _emitsAtReport;
+    private double _lastLayoutMs;
+    private double _lastTranslateMs;
+    private int _lastNodes;
+    private int _lastChars;
+
+    private static void ReportIfDue()
+    {
+        if (!HtmlConfig.Diagnostics)
+            return;
+        var now = Clock.Elapsed.TotalSeconds;
+        if (now < _nextReport)
+            return;
+        _nextReport = now + ReportIntervalSeconds;
+        foreach (var page in Surfaces)
+        {
+            if (page == null || page._built == null)
+                continue;
+            var emits = page._emits - page._emitsAtReport;
+            page._emitsAtReport = page._emits;
+            ScriptedScreensHtmlPlugin.Log?.LogInfo(
+                $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
+                + $"(layout {page._lastLayoutMs:0.0} + translate {page._lastTranslateMs:0.0}), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
+                + $"{page._tweens.Count} tweens, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals");
+        }
+    }
+
     private void EmitToVector()
     {
         if (_content == null || _document == null || _built == null)
             return;
+        var t0 = Clock.Elapsed.TotalMilliseconds;
         Wake();
         UpdateRuntimePanels?.Invoke(null, null);
         var root = _document.rootVisualElement;
@@ -555,7 +594,13 @@ internal sealed class HtmlSurface : MonoBehaviour
 
         var layout = LayoutSize();
         _tweens.Diff(_content, _built, Time.time);
+        var t1 = Clock.Elapsed.TotalMilliseconds;
         var output = VectorEmitter.Emit(_built, _content, layout.x, layout.y, _tweens, Time.time);
+        _lastLayoutMs = t1 - t0;
+        _lastTranslateMs = Clock.Elapsed.TotalMilliseconds - t1;
+        _lastNodes = output.Nodes;
+        _lastChars = output.Scene.Length;
+        _emits++;
         foreach (var w in output.Warnings)
             ScriptedScreensHtmlPlugin.Log?.LogWarning(w);
         // An identical scene is normally not resent. While tweens are live it must be: the
@@ -568,8 +613,10 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (State is SS.BoardState state)
         {
             VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId, output.Scene);
-            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: emitted {output.Nodes} vector nodes, {output.Scene.Length} chars");
-            DumpScene(output.Scene);
+            if (HtmlConfig.Diagnostics)
+                ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: emitted {output.Nodes} vector nodes, {output.Scene.Length} chars");
+            if (HtmlConfig.DumpScenes)
+                DumpScene(output.Scene);
             if (!_sceneLive)
             {
                 // The first structure: data that arrived before it was dropped by the vector
@@ -853,6 +900,7 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     private void OnDestroy()
     {
+        Surfaces.Remove(this);
         _script?.Dispose();
         if (_document != null)
             Destroy(_document.gameObject);

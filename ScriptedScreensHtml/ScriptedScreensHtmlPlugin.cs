@@ -39,6 +39,11 @@ public sealed class ScriptedScreensHtmlPlugin : ModBehaviour
                 return;
             }
 
+            // base.OnLoaded created Config; LaunchPad surfaces that instance in its settings UI.
+            if (Config != null)
+                HtmlConfig.Load(Config);
+            Log.LogInfo(Config != null ? "Diagnostics settings registered with LaunchPad." : "No ConfigFile from LaunchPad; diagnostics stay off.");
+
             _harmony = new Harmony(PluginInfo.PLUGIN_GUID);
             _harmony.PatchAll(typeof(HtmlElementPatch).Assembly);
             Log.LogInfo($"Patched ScriptedScreens; element type \"{HtmlElementPatch.ElementType}\" is live.");

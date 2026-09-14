@@ -84,10 +84,10 @@ internal sealed class ScriptHost : IDisposable
     {
         _toEngine.Enqueue(() =>
         {
-            ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: running page script ({script.Length} chars)");
+            if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: running page script ({script.Length} chars)");
             _engine!.Execute(script);
             AfterRun();
-            ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: page script done, data handler {_hasDataHandler}, pending work {_hasPendingWork}");
+            if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: page script done, data handler {_hasDataHandler}, pending work {_hasPendingWork}");
         });
         _wake.Set();
     }
@@ -205,7 +205,7 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__canvasFrame", new Action<string, double[], string[], int>(CanvasFrame));
             _engine.SetValue("__now", new Func<double>(() => _frameNow * 1000.0));
             _engine.Execute(Prelude);
-            ScriptedScreensHtmlPlugin.Log?.LogInfo("js: engine ready (worker thread)");
+            if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo("js: engine ready (worker thread)");
         }
         catch (Exception ex)
         {

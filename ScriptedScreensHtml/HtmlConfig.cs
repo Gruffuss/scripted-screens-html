@@ -1,0 +1,52 @@
+using BepInEx.Configuration;
+
+namespace ScriptedScreensHtml;
+
+/// <summary>
+/// Settings in <c>BepInEx/config/&lt;ModID&gt;.cfg</c>, shown by LaunchPad's settings UI.
+/// </summary>
+/// <remarks>
+/// Same shape as the vector mod's <c>VectorConfig</c>, for the same reason: it binds into
+/// <c>ModBehaviour.Config</c>, the one <c>ConfigFile</c> LaunchPad reports to its UI. A
+/// privately constructed file writes a valid .cfg that LaunchPad never shows. Values are
+/// read live, so editing the file takes effect without a restart.
+/// </remarks>
+internal static class HtmlConfig
+{
+    private static ConfigFile? _file;
+    private static ConfigEntry<bool>? _diagnostics;
+    private static ConfigEntry<bool>? _dumpScenes;
+
+    /// <summary>
+    /// Per-page statistics every five seconds and the informational log lines (page built,
+    /// scene emitted, script started). Off by default: warnings and errors always log, and
+    /// the rest is noise in an ordinary session. The instrumentation stays compiled in.
+    /// </summary>
+    internal static bool Diagnostics => _diagnostics?.Value ?? false;
+
+    /// <summary>
+    /// Write the last emitted scene text of every page to <c>scenes/&lt;page&gt;.txt</c> beside
+    /// the mod DLL. Answers "what did the emitter produce" without a debugger.
+    /// </summary>
+    internal static bool DumpScenes => _dumpScenes?.Value ?? false;
+
+    internal static void Load(ConfigFile file)
+    {
+        if (_file != null || file == null)
+            return;
+        _file = file;
+
+        _diagnostics = _file.Bind(
+            "Diagnostics", "Enabled", false,
+            "Log a line per page every 5 seconds and the informational lines (page built, " +
+            "scene emitted, script started). Development tool; leave off for normal play. " +
+            "Lines look like: 'html \"gas\": 2.0 emits/s, last 1.4 ms (layout 0.6 + translate " +
+            "0.8), 226 nodes / 43 KB, 3 tweens, script 0.3 ms/frame, 0 externals'.");
+
+        _dumpScenes = _file.Bind(
+            "Diagnostics", "DumpScenes", false,
+            "Write each page's last emitted vector scene to scenes/<page>.txt next to the mod " +
+            "DLL, on every emit. Development tool for reading exactly what the translation " +
+            "produced.");
+    }
+}
