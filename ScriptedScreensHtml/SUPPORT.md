@@ -37,7 +37,7 @@ keyframe, which compiles to the same thing.
 | Comments, entities (`&amp; &lt; &nbsp; &#x25BC;`) | |
 | `<hr>` | a 1px rule |
 | `<table>` with `thead/tbody/tfoot/tr/td/th/caption`, `colspan` | laid out as a grid, one column per cell of the widest row, columns of equal width (size them with CSS on the cells); `tr` is transparent, so a rule on `tr` styles nothing |
-| `<ul>/<ol>/<li>` | marker text at the front of each item: `list-style-type` disc/circle/square/decimal/lower-alpha/upper-alpha, `none` for no marker |
+| `<ul>/<ol>/<li>` | markers at the front of each item, as a browser draws them: disc, circle and square are shapes in the text colour (no font involved), decimal/alpha/roman are text; `list-style-type` on the list or the item, `none` for no marker |
 | `<a href>` | underlined link-coloured text; there is nowhere to navigate, so `href` is inert |
 | `<img src>` | a ScriptedScreens `image` element placed over the box (URLs load through ScriptedScreens; raw GitHub works, Wikimedia refuses Unity's request); `width`/`height` attributes or CSS size the box. Confirmed 2026-09-15: stays through clicks and surface rebuilds. Host and single player only: the element is written to the local surface model, not sent to remote clients |
 | `<video src autoplay loop muted>`, `<audio src autoplay loop>` | ScriptedScreens `media` and `sound` elements, placed the same way as `<img>`; ScriptedScreens' own multiplayer and video gating applies. Not yet seen on a console |
