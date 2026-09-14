@@ -2,7 +2,7 @@
 -- batches added. Push to a 2x2 console (561). What to look for is in each block's heading.
 --
 --   grid      a 3-column grid with gap, a spanning cell, nth-child striping, z-index overlap
---   paint     dashed and dotted borders, box-shadow, underline/strike (radial: see the CSS note)
+--   paint     radial gradient (see the CSS note on cost), dashed and dotted borders, box-shadow, underline/strike
 --   units     calc(), em, vw, a :root variable with a fallback
 --   img       a ScriptedScreens image element placed over the page's box
 --   button    a click region: the page's on_click gets the button id; Lua bumps a counter
@@ -41,10 +41,11 @@ local page = [[
   .c { left: 80px; top: 20px; background: #E2A94E; z-index: 2; color: #111; }
 
   .row { display: flex; gap: 10px; align-items: center; }
-  /* radial-gradient works but costs ~50,000 vertices for this one box in vector mod
-     0.10.2.0 (a ring per 2.5 screen px of the whole outline), which alone fills the
-     60,000-vertex mesh and drops everything after it. Solid until the ring count is capped. */
-  .radial { width: 90px; height: 50px; border-radius: 8px; background: #0369A1; }
+  /* radial-gradient costs ~49,000 vertices for this one box (vector mod 0.11.12.0: a ring
+     per 2.5 screen px of the whole outline), which nearly fills the 60,000-vertex mesh; at
+     nose distance the button after it drops out. Kept in so the cost stays visible. */
+  .radial { width: 90px; height: 50px; border-radius: 8px;
+            background: radial-gradient(circle at 30% 30%, #7DD3FC, #0369A1 70%); }
   .dashed { width: 90px; height: 50px; border: 2px dashed var(--accent); border-radius: 8px; }
   .dotted { width: 90px; height: 50px; border: 3px dotted #E2A94E; border-radius: 8px; }
   .shadow { width: 90px; height: 50px; background: #1E293B; border-radius: 8px;
