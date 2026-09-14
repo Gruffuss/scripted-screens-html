@@ -197,7 +197,7 @@ internal sealed class ScriptHost : IDisposable
 
     private void Snapshot(Dictionary<string, VisualElement> elements)
     {
-        var origin = elements.TryGetValue("body", out var body) ? body.worldBound.position : Vector2.zero;
+        var origin = elements.TryGetValue("body", out var body) ? body.worldBound.position : UnityEngine.Vector2.zero;
         foreach (var kv in elements)
         {
             var r = kv.Value.contentRect;
