@@ -29,7 +29,7 @@ internal sealed class HtmlNode
 /// </summary>
 internal static class HtmlParser
 {
-    private static readonly HashSet<string> Void = new(StringComparer.OrdinalIgnoreCase)
+    internal static readonly HashSet<string> Void = new(StringComparer.OrdinalIgnoreCase)
     {
         "br", "hr", "img", "input", "meta", "link", "col", "wbr", "source",
     };

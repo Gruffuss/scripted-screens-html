@@ -60,11 +60,16 @@ internal sealed class ScriptHost : IDisposable
     private readonly Action<string> _remove;
     private readonly Action<string, string> _setValue;
     private readonly Action<string> _wantClicks;
+    private readonly Action<string, string, string> _insertHtml;
+    /// <summary>Layout rects per id, relative to the page, refreshed every frame for getBoundingClientRect.</summary>
+    private readonly ConcurrentDictionary<string, (float x, float y, float w, float h)> _rects = new(StringComparer.Ordinal);
 
     public ScriptHost(Func<string, VisualElement?> find, Func<string, SvgShape?> findShape, Func<string, HtmlNode?> findNode,
         Func<string, List<string>> query, Action<VisualElement, string> setClass, List<CssRule> rules, Action<string> warn,
-        Action<string, string> appendHtml, Action<string> remove, Action<string, string> setValue, Action<string> wantClicks)
+        Action<string, string> appendHtml, Action<string> remove, Action<string, string> setValue, Action<string> wantClicks,
+        Action<string, string, string> insertHtml)
     {
+        _insertHtml = insertHtml;
         _appendHtml = appendHtml;
         _remove = remove;
         _setValue = setValue;
@@ -192,12 +197,54 @@ internal sealed class ScriptHost : IDisposable
 
     private void Snapshot(Dictionary<string, VisualElement> elements)
     {
+        var origin = elements.TryGetValue("body", out var body) ? body.worldBound.position : Vector2.zero;
         foreach (var kv in elements)
         {
             var r = kv.Value.contentRect;
             if (!float.IsNaN(r.width) && !float.IsNaN(r.height))
                 _sizes[kv.Key] = (r.width, r.height);
+            var wb = kv.Value.worldBound;
+            if (!float.IsNaN(wb.width) && !float.IsNaN(wb.height))
+                _rects[kv.Key] = (wb.x - origin.x, wb.y - origin.y, wb.width, wb.height);
         }
+    }
+
+    // ---- reads over the node tree, on the worker; the tree is written on the main thread and read here ----
+    private string TextOf(string id) => _findNode(id) is { } n ? Text(n).Trim() : string.Empty;
+    private static string Text(HtmlNode n)
+    {
+        if (n.IsText) return n.Text;
+        var sb = new System.Text.StringBuilder();
+        foreach (var c in n.Children) if (c.Attr("data-pseudo") == null && c.Attr("data-marker") == null) sb.Append(Text(c));
+        return sb.ToString();
+    }
+    private string HtmlOf(string id, bool outer) => _findNode(id) is { } n ? HtmlRenderer.ToHtml(n, outer) : string.Empty;
+    private string[] ChildrenOf(string id)
+    {
+        var list = new List<string>();
+        if (_findNode(id) is { } n)
+            foreach (var c in n.Children)
+                if (!c.IsText && c.Attr("data-pseudo") == null && c.Attr("data-marker") == null && c.Attr("id") is { } cid) list.Add(cid);
+        return list.ToArray();
+    }
+    private string? ParentOf(string id) => _findNode(id)?.Parent?.Attr("id");
+    private string[] AttrsOf(string id)
+    {
+        var list = new List<string>();
+        if (_findNode(id) is { } n)
+            foreach (var kv in n.Attributes)
+                if (kv.Key != "id" && !kv.Key.StartsWith("data-listed", StringComparison.Ordinal) && kv.Key != "data-control" && kv.Key != "data-pseudo") { list.Add(kv.Key); list.Add(kv.Value); }
+        return list.ToArray();
+    }
+    private bool Contains(string ancestorId, string id)
+    {
+        for (var n = _findNode(id)?.Parent; n != null; n = n.Parent)
+            if (n.Attr("id") == ancestorId) return true;
+        return false;
+    }
+    private double[] RectOf(string id)
+    {
+        return _rects.TryGetValue(id, out var r) ? new[] { (double)r.x, (double)r.y, (double)r.w, (double)r.h } : new[] { 0.0, 0.0, 0.0, 0.0 };
     }
 
     // ---------------- worker thread ----------------
@@ -225,6 +272,15 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__remove", new Action<string>(id => _toMain.Enqueue(() => _remove(id))));
             _engine.SetValue("__setValue", new Action<string, string>((id, v) => _toMain.Enqueue(() => _setValue(id, v))));
             _engine.SetValue("__wantClicks", new Action<string>(id => _toMain.Enqueue(() => _wantClicks(id))));
+            _engine.SetValue("__textOf", new Func<string, string>(TextOf));
+            _engine.SetValue("__htmlOf", new Func<string, bool, string>(HtmlOf));
+            _engine.SetValue("__children", new Func<string, string[]>(ChildrenOf));
+            _engine.SetValue("__parent", new Func<string, string?>(ParentOf));
+            _engine.SetValue("__attrs", new Func<string, string[]>(AttrsOf));
+            _engine.SetValue("__contains", new Func<string, string, bool>(Contains));
+            _engine.SetValue("__rect", new Func<string, double[]>(RectOf));
+            _engine.SetValue("__insertHtml", new Action<string, string, string>((parent, html, before) => _toMain.Enqueue(() => _insertHtml(parent, html, before))));
+            _engine.SetValue("__removeAttr", new Action<string, string>((id, name) => { _attrCache.TryRemove(id + "\n" + name, out _); _toMain.Enqueue(() => _findNode(id)?.Attributes.Remove(name)); }));
             _engine.SetValue("__size", new Func<string, double[]>(Size));
             _engine.SetValue("__canvasFrame", new Action<string, double[], string[], int>(CanvasFrame));
             _engine.SetValue("__now", new Func<double>(() => _frameNow * 1000.0));
@@ -320,6 +376,11 @@ internal sealed class ScriptHost : IDisposable
             var label = ve != null ? HtmlSurface.TextTargetFor(ve, id) : null;
             if (label != null)
                 label.text = text;
+            if (_findNode(id) is { } node && !node.IsText)
+            {
+                node.Children.Clear();
+                node.Children.Add(new HtmlNode { Text = text, Parent = node });
+            }
         });
     }
 
@@ -333,6 +394,11 @@ internal sealed class ScriptHost : IDisposable
             var label = ve != null ? HtmlSurface.TextTargetFor(ve, id) : null;
             if (label != null)
                 label.text = rich;
+            if (_findNode(id) is { } node && !node.IsText)
+            {
+                node.Children.Clear();
+                foreach (var c in HtmlParser.Parse(html, _ => { }).Children) { c.Parent = node; node.Children.Add(c); }
+            }
         });
     }
 
@@ -499,6 +565,17 @@ function __ctx(id){
 }
 function __flushCanvases(){ for (var k in __canvases) { var c = __canvases[k]; if (c.__cmds.length) c.__flush(); } }
 
+var __textCache = {}, __htmlCache = {};
+function __sibling(id, step){
+  var p = __parent(id); if (!p) return null;
+  var c = __children(p); var i = c.indexOf(id) + step;
+  return i >= 0 && i < c.length ? __el(c[i]) : null;
+}
+// Observers a page may construct: nothing to observe here, so they never fire.
+function MutationObserver(){ this.observe = function(){}; this.disconnect = function(){}; this.takeRecords = function(){ return []; }; }
+function ResizeObserver(){ this.observe = function(){}; this.unobserve = function(){}; this.disconnect = function(){}; }
+function IntersectionObserver(){ this.observe = function(){}; this.unobserve = function(){}; this.disconnect = function(){}; }
+
 // ---- controls: values, per-element listeners, events ----
 var __values = {}, __elListeners = {}, __elHandlers = {};
 function __fire(id, type, detail){
@@ -536,11 +613,34 @@ function __el(id){
     get onchange(){ return (__elHandlers[id] || {}).onchange; }, set onchange(f){ (__elHandlers[id] = __elHandlers[id] || {}).onchange = f; },
     get onclick(){ return (__elHandlers[id] || {}).onclick; }, set onclick(f){ (__elHandlers[id] = __elHandlers[id] || {}).onclick = f; __wantClicks(id); },
     get oninput(){ return (__elHandlers[id] || {}).oninput; }, set oninput(f){ (__elHandlers[id] = __elHandlers[id] || {}).oninput = f; },
-    focus: function(){}, blur: function(){}, select: function(){},
+    select: function(){},
     get style(){ return new Proxy({}, { set: function(o, p, v){ __setStyle(id, String(p), String(v)); return true; }, get: function(){ return ''; } }); },
-    set textContent(v){ __setText(id, String(v)); }, get textContent(){ return ''; },
-    set innerText(v){ __setText(id, String(v)); },
-    set innerHTML(v){ __setHtml(id, String(v)); }, get innerHTML(){ return ''; },
+    set textContent(v){ __textCache[id] = String(v); delete __htmlCache[id]; __setText(id, String(v)); }, get textContent(){ return __textCache[id] !== undefined ? __textCache[id] : __textOf(id); },
+    set innerText(v){ el.textContent = v; }, get innerText(){ return el.textContent; },
+    set innerHTML(v){ __htmlCache[id] = String(v); delete __textCache[id]; __setHtml(id, String(v)); }, get innerHTML(){ return __htmlCache[id] !== undefined ? __htmlCache[id] : __htmlOf(id, false); },
+    get outerHTML(){ return __htmlOf(id, true); },
+    get children(){ return __children(id).map(__el); }, get childNodes(){ return __children(id).map(__el); },
+    get childElementCount(){ return __children(id).length; },
+    get firstChild(){ var c = __children(id); return c.length ? __el(c[0]) : null; }, get firstElementChild(){ return el.firstChild; },
+    get lastChild(){ var c = __children(id); return c.length ? __el(c[c.length - 1]) : null; }, get lastElementChild(){ return el.lastChild; },
+    get parentElement(){ var p = __parent(id); return p ? __el(p) : null; }, get parentNode(){ return el.parentElement; },
+    get nextElementSibling(){ return __sibling(id, 1); }, get nextSibling(){ return __sibling(id, 1); },
+    get previousElementSibling(){ return __sibling(id, -1); }, get previousSibling(){ return __sibling(id, -1); },
+    get isConnected(){ return __has(id); }, get nodeType(){ return 1; }, get nodeName(){ return el.tagName; },
+    getBoundingClientRect: function(){ var r = __rect(id); return { x: r[0], y: r[1], left: r[0], top: r[1], width: r[2], height: r[3], right: r[0] + r[2], bottom: r[1] + r[3] }; },
+    get offsetLeft(){ return __rect(id)[0]; }, get offsetTop(){ return __rect(id)[1]; },
+    hasAttribute: function(n){ return __getAttr(id, n) !== null; },
+    removeAttribute: function(n){ __removeAttr(id, n); },
+    get attributes(){ var a = __attrs(id), out = []; for (var i = 0; i < a.length; i += 2) out.push({ name: a[i], value: a[i + 1] }); return out; },
+    matches: function(sel){ return __query(sel).indexOf(id) >= 0; },
+    closest: function(sel){ var hits = __query(sel); for (var p = id; p; p = __parent(p)) if (hits.indexOf(p) >= 0) return __el(p); return null; },
+    contains: function(o){ return !!o && (o.id === id || __contains(id, o.id)); },
+    querySelectorAll: function(sel){ return __query(sel).filter(function(c){ return __contains(id, c); }).map(__el); },
+    querySelector: function(sel){ var r = __query(sel).filter(function(c){ return __contains(id, c); }); return r.length ? __el(r[0]) : null; },
+    insertBefore: function(n, ref){ if (!ref) return el.appendChild(n); __insertHtml(id, __serialize(n), ref.id); if (n.__adopt) n.__adopt(); return n; },
+    replaceChild: function(n, old){ el.insertBefore(n, old); __remove(old.id); return old; },
+    cloneNode: function(deep){ var c = __detached(el.tagName); var a = __attrs(id); for (var i = 0; i < a.length; i += 2) { if (a[i] === 'class') c.className = a[i + 1]; else c.__attrs[a[i]] = a[i + 1]; } if (deep) c.__html = __htmlOf(id, false); return c; },
+    focus: function(){}, blur: function(){},
     set className(v){ __setClass(id, String(v)); },
     classList: { add: function(){ }, remove: function(){ } },
     get clientWidth(){ return __size(id)[0]; }, get clientHeight(){ return __size(id)[1]; },
@@ -608,6 +708,10 @@ var document = {
   querySelector: function(sel){ var r = __query(sel); return r.length ? __el(r[0]) : null; },
   createElement: __detached,
   createTextNode: function(t){ return { textContent: String(t) }; },
+  createDocumentFragment: function(){ return __detached('div'); },
+  get documentElement(){ return __el('body'); },
+  get title(){ return ''; }, set title(v){},
+  contains: function(o){ return !!o && __has(o.id); },
   addEventListener: addEventListener,
   body: __el('body')
 };

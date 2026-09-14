@@ -209,6 +209,61 @@ internal static class HtmlRenderer
         }
     }
 
+    /// <summary>
+    /// Script insertBefore: the fragment's nodes go before `beforeId` in both trees. With no
+    /// such child it appends. Text nodes are labels without ids, so only elements move.
+    /// </summary>
+    internal static void InsertFragment(VisualElement parent, HtmlNode parentNode, string html, string beforeId, Result result)
+    {
+        result.ById.TryGetValue(beforeId, out var beforeVe);
+        HtmlNode? beforeNode = null;
+        if (beforeVe != null) result.NodeOf.TryGetValue(beforeVe, out beforeNode);
+        if (beforeVe == null || beforeNode == null || beforeVe.parent != parent)
+        {
+            AppendFragment(parent, parentNode, html, result);
+            return;
+        }
+        var frag = HtmlParser.Parse(html, m => result.Warnings.Add(m));
+        foreach (var child in frag.Children)
+        {
+            child.Parent = parentNode;
+            var at = parentNode.Children.IndexOf(beforeNode);
+            parentNode.Children.Insert(at < 0 ? parentNode.Children.Count : at, child);
+            Append(parent, child, result.Rules, result);
+            var id = child.Attr("id");
+            if (id != null && result.ById.TryGetValue(id, out var made) && made.parent == parent)
+                made.PlaceBehind(beforeVe);
+        }
+    }
+
+    /// <summary>The node's markup back as HTML: its children (inner) or itself with them (outer). Generated content, markers and synthetic ids are left out.</summary>
+    internal static string ToHtml(HtmlNode node, bool outer)
+    {
+        var sb = new StringBuilder();
+        if (outer) WriteNode(sb, node); else foreach (var c in node.Children) WriteNode(sb, c);
+        return sb.ToString();
+    }
+
+    private static void WriteNode(StringBuilder sb, HtmlNode node)
+    {
+        if (node.IsText) { sb.Append(EscapeHtml(node.Text)); return; }
+        if (node.Attr("data-pseudo") != null || node.Attr("data-marker") != null) return;
+        sb.Append('<').Append(node.Tag);
+        foreach (var kv in node.Attributes)
+        {
+            if (kv.Key == "data-listed" || kv.Key == "data-control") continue;
+            if (kv.Key == "id" && kv.Value.StartsWith("__", StringComparison.Ordinal)) continue;
+            sb.Append(' ').Append(kv.Key);
+            if (kv.Value.Length > 0) sb.Append("=\"").Append(EscapeHtml(kv.Value)).Append('"');
+        }
+        sb.Append('>');
+        if (HtmlParser.Void.Contains(node.Tag!)) return;
+        foreach (var c in node.Children) WriteNode(sb, c);
+        sb.Append("</").Append(node.Tag).Append('>');
+    }
+
+    private static string EscapeHtml(string s) => s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
+
     /// <summary>Script removal: the element, its node, and every id under it.</summary>
     internal static void Remove(VisualElement ve, Result result)
     {

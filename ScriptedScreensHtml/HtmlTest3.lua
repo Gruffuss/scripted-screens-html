@@ -103,7 +103,16 @@ local page = [[
   </div>
   <script>
     var echo = document.getElementById('echo');
-    document.getElementById('ping').addEventListener('click', function(e){ echo.textContent = 'js: click listener on ' + e.target.id; });
+    document.getElementById('ping').addEventListener('click', function(e){
+      // tree reads and writes a browser page takes for granted
+      var log = document.querySelector('.log');
+      var first = log.firstElementChild;
+      var c = first.cloneNode(true);
+      c.textContent = 'cloned, now ' + (log.children.length + 1) + ' rows';
+      log.insertBefore(c, first);
+      var r = log.getBoundingClientRect();
+      echo.textContent = 'js: click on ' + e.target.id + '; log has ' + log.children.length + ' rows, first "' + log.children[0].textContent + '", parent is ' + log.parentElement.tagName + ', top ' + Math.round(r.top);
+    });
     document.getElementById('anyel').addEventListener('click', function(){ echo.textContent = 'js: the span was clicked'; });
     ['room', 'alarm', 'target', 'mode', 'kpa', 'mpa', 'custom'].forEach(function(id){
       document.getElementById(id).addEventListener('change', function(e){

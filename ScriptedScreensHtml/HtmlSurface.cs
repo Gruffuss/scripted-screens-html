@@ -416,7 +416,16 @@ internal sealed class HtmlSurface : MonoBehaviour
                     }
                 },
                 SetInputValue,
-                WantClicks);
+                WantClicks,
+                (parentId, html, beforeId) =>
+                {
+                    if (_byId.TryGetValue(parentId, out var p) && built.NodeOf.TryGetValue(p, out var pn))
+                    {
+                        HtmlRenderer.InsertFragment(p, pn, html, beforeId, built);
+                        _dirty = true;
+                        Wake();
+                    }
+                });
         }
         _svgs.Clear();
         foreach (var shape in _shapes.Values)
