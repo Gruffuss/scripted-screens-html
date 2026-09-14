@@ -46,9 +46,12 @@ local page = [[
   label { color: var(--dim); font-size: 12px; }
   input[type=text] { width: 150px; height: 26px; background: #172033; color: var(--ink); font-size: 14px; }
   input[type=range] { width: 120px; accent-color: var(--accent); }
-  input[type=checkbox] { accent-color: #2E8B6E; }
+  input[type=checkbox], input[type=radio] { width: 16px; height: 16px; accent-color: #2E8B6E; }
   select { width: 110px; height: 26px; background: #172033; color: var(--ink); }
   #echo { margin-top: 6px; color: var(--accent); font-size: 13px; }
+  /* the browser way to restyle a checkbox: appearance none, then your own box and a :checked rule */
+  .pill-check { appearance: none; width: 34px; height: 18px; border-radius: 9px; background: #24314A; border: 1px solid var(--dim); }
+  .pill-check:checked { background: #2E8B6E; border-color: #2E8B6E; }
   @media (min-width: 600px) { .media { color: #2E8B6E; } }
   @media (max-width: 300px) { .media { color: #B5352C; } }
 </style>
@@ -80,11 +83,13 @@ local page = [[
     <label>alarm</label><input type="checkbox" id="alarm" name="alarm" checked>
     <label>target</label><input type="range" id="target" name="target" min="0" max="200" value="120">
     <label>mode</label><select id="mode" name="mode"><option value="auto">Auto</option><option value="manual" selected>Manual</option><option value="off">Off</option></select>
+    <label>unit</label><input type="radio" id="kpa" name="unit" value="kPa" checked><label>kPa</label><input type="radio" id="mpa" name="unit" value="MPa"><label>MPa</label>
+    <label>custom</label><input type="checkbox" id="custom" name="custom" class="pill-check">
   </form>
   <div id="echo">js: nothing changed yet</div>
   <script>
     var echo = document.getElementById('echo');
-    ['room', 'alarm', 'target', 'mode'].forEach(function(id){
+    ['room', 'alarm', 'target', 'mode', 'kpa', 'mpa', 'custom'].forEach(function(id){
       document.getElementById(id).addEventListener('change', function(e){
         echo.textContent = 'js: ' + id + ' = ' + e.target.value + (id === 'alarm' ? ' (checked ' + e.target.checked + ')' : '');
       });

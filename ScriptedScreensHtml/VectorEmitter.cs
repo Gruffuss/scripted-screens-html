@@ -197,6 +197,9 @@ internal static class VectorEmitter
 
         switch (ve)
         {
+            case not Label when ctx.Built.NodeOf.TryGetValue(ve, out var cnode) && cnode.Attr("data-control") is { } control:
+                EmitCheck(ctx, control, cnode, css, rs, x, y, w, h, indent);
+                break;
             case Label when ctx.Built.NodeOf.TryGetValue(ve, out var mnode) && mnode.Attr("data-marker") is { } markerShape:
                 EmitMarker(ctx, markerShape, rs.color, x, y, w, h, indent);
                 break;
@@ -1035,6 +1038,58 @@ internal static class VectorEmitter
         return " rx=[" + F(tl) + "," + F(tr) + "," + F(br) + "," + F(bl) + "]";
     }
 
+    /// <summary>
+    /// A checkbox or radio as a browser draws one: unchecked, a ring or rounded box stroked in
+    /// the text colour; checked, filled with the accent (`accent-color`, else the page's link
+    /// blue) with a white tick or dot. The click region is the background rect emitted above.
+    /// </summary>
+    private static void EmitCheck(Ctx ctx, string control, HtmlNode node, Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h, string indent)
+    {
+        // appearance: none, the browser way to restyle a control: the page's own
+        // background, border and :checked rules draw it, and nothing is added here.
+        if ((css.TryGetValue("appearance", out var ap) || css.TryGetValue("-webkit-appearance", out ap)) && ap.Trim() == "none")
+            return;
+        var on = node.Attr("checked") != null;
+        var accent = css.TryGetValue("accent-color", out var ac) && StyleApplier.TryColor(ac.Trim(), out var a) ? a : new Color(0.31f, 0.63f, 1f);
+        var ink = rs.color;
+        var size = Mathf.Min(w, h);
+        var cx = x + w * 0.5f;
+        var cy = y + h * 0.5f;
+        var left = cx - size * 0.5f;
+        var top = cy - size * 0.5f;
+        var sw = Mathf.Max(1f, size * 0.09f);
+        if (control == "radio")
+        {
+            var r = size * 0.5f - sw * 0.5f;
+            if (on)
+            {
+                ctx.Body.Append(indent).Append("C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(size * 0.5f)).Append(" ry=").Append(F(size * 0.5f)).Append(" f=").Append(Hex(accent)).Append('\n');
+                ctx.Body.Append(indent).Append("C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(size * 0.2f)).Append(" ry=").Append(F(size * 0.2f)).Append(" f=#FFFFFF\n");
+                ctx.Out.Nodes += 2;
+            }
+            else
+            {
+                ctx.Body.Append(indent).Append("C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(r)).Append(" ry=").Append(F(r)).Append(" f=none s=").Append(Hex(ink)).Append(" sw=").Append(F(sw)).Append('\n');
+                ctx.Out.Nodes++;
+            }
+            return;
+        }
+        var rx = Mathf.Max(0f, rs.borderTopLeftRadius > 0.01f ? rs.borderTopLeftRadius : size * 0.18f);
+        if (on)
+        {
+            ctx.Body.Append(indent).Append("R x=").Append(F(left)).Append(" y=").Append(F(top)).Append(" w=").Append(F(size)).Append(" h=").Append(F(size)).Append(" rx=").Append(F(rx)).Append(" f=").Append(Hex(accent)).Append('\n');
+            // The tick: two strokes from the left third, down to the bottom, up to the top right.
+            var d = "M" + F(left + size * 0.24f) + " " + F(top + size * 0.52f) + " L" + F(left + size * 0.43f) + " " + F(top + size * 0.72f) + " L" + F(left + size * 0.78f) + " " + F(top + size * 0.3f);
+            ctx.Body.Append(indent).Append("P d=\"").Append(d).Append("\" f=none s=#FFFFFF sw=").Append(F(Mathf.Max(1.2f, size * 0.13f))).Append(" cap=round join=round\n");
+            ctx.Out.Nodes += 2;
+        }
+        else
+        {
+            ctx.Body.Append(indent).Append("R x=").Append(F(left + sw * 0.5f)).Append(" y=").Append(F(top + sw * 0.5f)).Append(" w=").Append(F(size - sw)).Append(" h=").Append(F(size - sw)).Append(" rx=").Append(F(Mathf.Max(0f, rx - sw * 0.5f))).Append(" f=none s=").Append(Hex(ink)).Append(" sw=").Append(F(sw)).Append('\n');
+            ctx.Out.Nodes++;
+        }
+    }
+
     /// <summary>A list marker in the text colour: a filled disc, a hollow circle or a filled square.</summary>
     private static void EmitMarker(Ctx ctx, string shape, Color colour, float x, float y, float w, float h, string indent)
     {
@@ -1072,7 +1127,7 @@ internal static class VectorEmitter
     private static bool IsButton(Ctx ctx, VisualElement ve)
     {
         return ctx.Built.NodeOf.TryGetValue(ve, out var node)
-               && (node.Tag == "button" || node.Attr("onclick") != null || node.Attr("data-click") != null)
+               && (node.Tag == "button" || node.Attr("onclick") != null || node.Attr("data-click") != null || node.Attr("data-control") != null)
                && !(ctx.Built.CssOf(ve).TryGetValue("pointer-events", out var pe) && pe.Trim() == "none");
     }
 

@@ -272,6 +272,20 @@ internal static class HtmlRenderer
             }
             else if (kind == "hidden")
                 return;
+            else if (kind is "checkbox" or "radio")
+            {
+                // Drawn by the page: a box (or ring) the size CSS says, a tick (or dot) when
+                // checked, and a click region. State lives on the node as the `checked` attribute.
+                node.Attributes["data-control"] = kind;
+                var check = new VisualElement();
+                check.style.width = 16;
+                check.style.height = 16;
+                check.style.flexShrink = 0;
+                Register(check, node, result);
+                ApplyStyles(check, node, rules, result);
+                parent.Add(check);
+                return;
+            }
         }
 
         if (node.Tag == "img" || node.Tag == "video" || node.Tag == "audio" || node.Tag == "input" || node.Tag == "select" || node.Tag == "textarea")

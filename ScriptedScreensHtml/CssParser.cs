@@ -611,8 +611,17 @@ internal static class CssParser
                     compound.Pseudos.Add(n => !c.Matches(n));
                     break;
                 }
+                case "checked":
+                    compound.Pseudos.Add(n => n.Attr("checked") != null || n.Attr("selected") != null);
+                    break;
+                case "disabled":
+                    compound.Pseudos.Add(n => n.Attr("disabled") != null);
+                    break;
+                case "enabled":
+                    compound.Pseudos.Add(n => n.Attr("disabled") == null);
+                    break;
                 case "hover": case "active": case "focus": case "focus-visible": case "focus-within":
-                case "visited": case "link": case "checked": case "disabled": case "enabled":
+                case "visited": case "link":
                     compound.Pseudos.Add(_ => false);
                     break;
                 default:

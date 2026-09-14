@@ -417,7 +417,7 @@ internal static class StyleApplier
         "line-height", "text-transform", "z-index", "box-sizing",
         "box-shadow", "text-shadow", "border-style", "text-decoration",
         "outline", "outline-width", "outline-color", "outline-style", "outline-offset",
-        "pointer-events", "cursor", "user-select", "content",
+        "pointer-events", "cursor", "user-select", "content", "appearance", "-webkit-appearance", "-moz-appearance", "accent-color",
         "list-style", "list-style-type", "list-style-position", "border-collapse", "border-spacing",
     };
 

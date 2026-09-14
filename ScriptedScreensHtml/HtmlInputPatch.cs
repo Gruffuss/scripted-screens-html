@@ -18,29 +18,44 @@ namespace ScriptedScreensHtml;
 [HarmonyPatch(typeof(SS), "DispatchUiInput")]
 internal static class HtmlInputPatch
 {
-    private static void Prefix(Motherboard? board, CartridgeIntegratedCircuitLua? cartridge, ProgrammableVisorGlasses? visor, string text)
+    private static bool Prefix(Motherboard? board, CartridgeIntegratedCircuitLua? cartridge, ProgrammableVisorGlasses? visor, string text)
     {
         try
         {
             if (string.IsNullOrEmpty(text) || !SS.TryDeserializeUiInput(text, out var input) || input == null)
-                return;
+                return true;
             var id = input.Id ?? string.Empty;
+            var surface = input.Surface ?? string.Empty;
             var slash = id.IndexOf('/');
-            if (slash <= 0 || slash == id.Length - 1)
-                return;
+            if (slash < 0)
+            {
+                // A click on the page itself with a node id: a page-drawn checkbox or radio
+                // becomes a change on the page and the click is not delivered as a click.
+                if (!string.Equals(input.Event, "click", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(input.Value))
+                    return true;
+                var owner = HtmlSurface.Find(board, cartridge, visor, surface, id);
+                if (owner == null || !owner.OnControlClick(input.Value, out var cname, out var cvalue))
+                    return true;
+                SS.DispatchUiInput(board, cartridge, visor, SS.SerializeUiInput(new SS.UiInput { Surface = surface, Id = id, Event = "change", Value = cname + "=" + cvalue }));
+                return false;
+            }
+            if (slash == 0 || slash == id.Length - 1)
+                return true;
             var pageId = id.Substring(0, slash);
             var key = id.Substring(slash + 1);
-            var page = HtmlSurface.Find(board, cartridge, visor, input.Surface ?? string.Empty, pageId);
+            var page = HtmlSurface.Find(board, cartridge, visor, surface, pageId);
             if (page == null)
-                return;
+                return true;
             if (!page.OnExternalInput(key, input.Event ?? string.Empty, input.Value ?? string.Empty, out var name, out var value))
-                return;
-            var forward = new SS.UiInput { Surface = input.Surface ?? string.Empty, Id = pageId, Event = "change", Value = name + "=" + value };
+                return true;
+            var forward = new SS.UiInput { Surface = surface, Id = pageId, Event = "change", Value = name + "=" + value };
             SS.DispatchUiInput(board, cartridge, visor, SS.SerializeUiInput(forward));
+            return true;
         }
         catch (Exception ex)
         {
             ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: control event failed: {ex}");
+            return true;
         }
     }
 }

@@ -517,13 +517,6 @@ internal sealed class HtmlSurface : MonoBehaviour
                     break;
             }
             var rect = new SS.UiRect { Unit = SS.UiRectUnit.Pixels, X = ext.X * sx, Y = ext.Y * sy, W = ext.W * sx, H = ext.H * sy };
-            if (type is "checkbox" or "radio")
-            {
-                // The control's box is a fixed 18 units centred 5 in from the element's left
-                // edge and on its vertical middle, whatever the rect says: place the element so
-                // that box sits on the page's box.
-                rect = new SS.UiRect { Unit = SS.UiRectUnit.Pixels, X = ext.X * sx + 4f, Y = (ext.Y + ext.H * 0.5f) * sy - 9f, W = 20f, H = 18f };
-            }
             var element = new SS.UiElement
             {
                 Id = id,
@@ -718,20 +711,6 @@ internal sealed class HtmlSurface : MonoBehaviour
         string type;
         switch (kind)
         {
-            case "checkbox":
-            case "radio":
-            {
-                type = kind;
-                var on = current != null ? current == "true" : node.Attr("checked") != null;
-                props.Add(new SS.UiProp { Key = kind == "radio" ? "selected" : "checked", Value = SS.UiValue.FromString(on ? "true" : "false") });
-                props.Add(new SS.UiProp { Key = "text", Value = SS.UiValue.FromString(string.Empty) });
-                // ScriptedScreens paints the box, its outline and the mark in one check_color,
-                // so an accent there turns the control into a solid square. Its defaults (a
-                // coloured box with a white mark) read as a checkbox; only the element's own
-                // background is ours, and that is transparent unless the page set one.
-                if (rs.backgroundColor.a <= 0.002f) style.Add(new SS.UiProp { Key = "bg", Value = SS.UiValue.FromString("#00000000") });
-                break;
-            }
             case "range":
             {
                 type = "slider";
@@ -833,26 +812,6 @@ internal sealed class HtmlSurface : MonoBehaviour
         string stored;
         switch (kind)
         {
-            case "checkbox":
-            case "radio":
-            {
-                if (!string.Equals(evt, "click", StringComparison.OrdinalIgnoreCase)) return false;
-                var on = _inputValues.TryGetValue(key, out var cur) ? cur == "true" : node.Attr("checked") != null;
-                on = kind == "radio" || !on;
-                stored = on ? "true" : "false";
-                if (kind == "radio" && node.Attr("name") is { } group)
-                {
-                    // One radio on per group; the group is the page's business, so it is kept here.
-                    foreach (var kv in _externalNodes)
-                    {
-                        if (kv.Key == key || kv.Value.Tag != "input" || kv.Value.Attr("name") != group) continue;
-                        _inputValues[kv.Key] = "false";
-                        _externalState.Remove(ElementId + "/" + kv.Key);
-                    }
-                }
-                delivered = stored;
-                break;
-            }
             case "select":
             {
                 if (!string.Equals(evt, "change", StringComparison.OrdinalIgnoreCase)) return false;
@@ -876,9 +835,56 @@ internal sealed class HtmlSurface : MonoBehaviour
         return true;
     }
 
+    /// <summary>
+    /// A click on a page-drawn checkbox or radio (it arrives as the page's own click with the
+    /// node id as value). Flips the node's `checked`, re-emits, tells the script, and returns
+    /// the name and value for Lua. False when the id is not such a control.
+    /// </summary>
+    internal bool OnControlClick(string key, out string name, out string delivered)
+    {
+        name = key;
+        delivered = string.Empty;
+        if (_built == null || !_byId.TryGetValue(key, out var ve) || !_built.NodeOf.TryGetValue(ve, out var node))
+            return false;
+        var control = node.Attr("data-control");
+        if (control == null)
+            return false;
+        name = node.Attr("name") ?? key;
+        var on = control == "radio" || node.Attr("checked") == null;
+        SetChecked(node, on);
+        if (control == "radio" && on && node.Attr("name") is { } group)
+        {
+            foreach (var kv in _built.NodeOf)
+                if (kv.Value != node && kv.Value.Attr("data-control") == "radio" && kv.Value.Attr("name") == group)
+                    SetChecked(kv.Value, false);
+        }
+        delivered = on ? "true" : "false";
+        _dirty = true;
+        Wake();
+        _script?.EmitInput(key, delivered);
+        return true;
+    }
+
+    /// <summary>Sets the node's checked state and re-runs its cascade, so `:checked` rules take effect.</summary>
+    private void SetChecked(HtmlNode node, bool on)
+    {
+        if (on) node.Attributes["checked"] = string.Empty;
+        else node.Attributes.Remove("checked");
+        if (_built != null)
+            foreach (var kv in _built.NodeOf)
+                if (kv.Value == node) { _built.Reclass(kv.Key, node.Attr("class") ?? string.Empty); break; }
+    }
+
     /// <summary>The page script set a control's value or checked state.</summary>
     private void SetInputValue(string key, string value)
     {
+        if (_built != null && _byId.TryGetValue(key, out var ve) && _built.NodeOf.TryGetValue(ve, out var node) && node.Attr("data-control") != null)
+        {
+            SetChecked(node, value == "true");
+            _dirty = true;
+            Wake();
+            return;
+        }
         if (!_externalNodes.ContainsKey(key))
             return;
         _inputValues[key] = value;
