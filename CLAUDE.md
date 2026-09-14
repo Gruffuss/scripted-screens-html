@@ -2240,7 +2240,9 @@ counter took a long time to register; later clicks were fast.** After the image-
 (the element in the surface model) the user reports no slow first click. The most likely
 link is that the earlier page re-applied the image element on every emit, so the first
 click's emit also queued a download; not measured, so if it comes back, measure it. The
-original notes follow.**Reported 2026-09-14:** Candidates, in the
+original notes follow.
+
+**Reported 2026-09-14:** Candidates, in the
 order to test: the panel wake after sleep (the document is disabled after three idle frames
 and the first write re-enables, re-attaches and lays out from cold); the first JS `data`
 event on the worker (engine warm-up); ScriptedScreens' own 0.25 s click debounce would not
