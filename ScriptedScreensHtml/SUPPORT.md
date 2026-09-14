@@ -36,6 +36,9 @@ keyframe, which compiles to the same thing.
 | `id`, `class`, inline `style` | |
 | Comments, entities (`&amp; &lt; &nbsp; &#x25BC;`) | |
 | `<hr>` | a 1px rule |
+| `<table>` with `thead/tbody/tfoot/tr/td/th/caption`, `colspan` | laid out as a grid, one column per cell of the widest row, columns of equal width (size them with CSS on the cells); `tr` is transparent, so a rule on `tr` styles nothing |
+| `<ul>/<ol>/<li>` | marker text at the front of each item: `list-style-type` disc/circle/square/decimal/lower-alpha/upper-alpha, `none` for no marker |
+| `<a href>` | underlined link-coloured text; there is nowhere to navigate, so `href` is inert |
 | `<img src>` | a ScriptedScreens `image` element placed over the box (URLs load through ScriptedScreens; raw GitHub works, Wikimedia refuses Unity's request); `width`/`height` attributes or CSS size the box. Confirmed 2026-09-15: stays through clicks and surface rebuilds. Host and single player only: the element is written to the local surface model, not sent to remote clients |
 | `<video src autoplay loop muted>`, `<audio src autoplay loop>` | ScriptedScreens `media` and `sound` elements, placed the same way as `<img>`; ScriptedScreens' own multiplayer and video gating applies. Not yet seen on a console |
 | `<button id>` (also any element with `onclick` or `data-click`) | a click region in the vector scene. The click arrives at the page element's Lua `on_click(nodeId, player)` with the button's id, and a `data` write from there updates the page. Page JS does not see clicks; bounce them through `data` if the page needs them. Confirmed 2026-09-15 with no noticeable delay on the first click |
@@ -48,10 +51,8 @@ keyframe, which compiles to the same thing.
 | Feature | Why |
 |---|---|
 | `<canvas>` | its whole model is "script repaints pixels every frame". The vector layer draws geometry once and animates it with expressions. A canvas is laid out but draws nothing. Use `<svg>` with expressions |
-| `<input> <select> <textarea> <form> <a>` | no text or pointer input path into the page beyond button clicks. ScriptedScreens has its own `textinput`; layer it over the page |
-| `<table>` | no table layout. Build tables from grid or flex rows |
+| `<input> <select> <textarea> <form>` | no text or pointer input path into the page beyond button clicks. ScriptedScreens has its own `textinput`, `checkbox`, `slider` and `select`; mapping the tags onto them the way `<img>` is mapped is the next batch |
 | `<iframe> <object>` | no meaning here |
-| List markers on `<ul>/<ol>` | no marker generation; write the bullet |
 | Text clipped to a rounded shape | a label under a rounded `overflow: hidden` box is clipped to the box's rectangle, not its rounded outline (the vector text layer masks with a rectangle). Standing limit; invisible at the radii dashboards use |
 | `<img>` etc. for remote players | the image, media and sound elements are written into the host's local surface model, not sent as Lua ops, so a remote client never receives them. Single player and the host see them. The route, if needed: issue them as upsert ops |
 
@@ -74,7 +75,7 @@ element, inherited) and `var(--x, fallback)`.
 **Box model:** `width height min-* max-*`, `margin` and per-side, `padding` and per-side,
 `position: absolute | relative`, `top right bottom left`, `inset`, `display: none | block |
 flex | grid`, `overflow: hidden` (a clip, rounded corners honoured), `visibility`,
-`opacity` (whole subtree), `z-index` (siblings painted in z order, document order within
+`outline` / `outline-offset` (a stroke outside the border box, `outline-style` solid only), `pointer-events: none` (the element is no click region), `opacity` (whole subtree), `z-index` (siblings painted in z order, document order within
 a value; text obeys it too, since vector mod 0.11.12.0 draws labels in scene order),
 `box-sizing` (always border-box, as UI Toolkit is).
 
@@ -124,10 +125,10 @@ Easings: `linear`, `ease-in`, `ease-out`, everything else is smoothstep.
 | `filter`, `backdrop-filter`, `mix-blend-mode` | per-pixel effects on the page need an offscreen pass; the vector layer is geometry |
 | `box-shadow: inset`, more than one `text-shadow` | the vector shadow is a drop shadow only; the text underlay is a single layer (a second is reported in the log) |
 | `outline` | not mapped; use a border |
-| `@media`, `@font-face`, `@import` | one screen, one design width; fonts come from the Fonts mod folder |
-| Pseudo-elements (`::before`, `::after`), attribute selectors (`[data-x]`), `~` | not implemented (the first two are feasible: generated content and attribute matching on the parsed node) |
+| `@font-face`, `@import` | fonts come from the Fonts mod folder; there is nothing to import from. `@media` **works**: decided once against the design size (`min/max-width/height`, `orientation`, `aspect-ratio`, `screen`, `print`, `not`, `and`, commas); `@supports` is taken as true |
+| Pseudo-elements other than `::before`/`::after` | `::before` and `::after` **work** with `content` (quoted strings with `\25B2` escapes, `attr(name)`, `none`), as a generated inline child that takes the rule's own styles, so a decorative dot with `width`/`height`/`background` is a box; `counter()` does not exist. Attribute selectors (`[a]`, `[a=v]`, `~= |= ^= $= *=`) and the `~` combinator **work** |
 | `background-image: url()`, `background-size/position/repeat`, multiple backgrounds | images are elements (`<img>`), not paint |
-| `cursor`, `user-select`, `pointer-events`, `scroll-*` | no pointer or scrolling |
+| `cursor`, `user-select`, `scroll-*` | no pointer or scrolling; accepted silently. `pointer-events: none` is honoured (see above) |
 
 ---
 
@@ -165,11 +166,11 @@ rates (0.5 s), wrong at frame rates. JS decides *what* is shown; expressions mov
 | `requestAnimationFrame` **as an animation loop** | it runs, at 30 Hz, but each frame's DOM writes re-emit the scene, which is the cost that killed the texture back-end. Use it for logic only |
 | Pointer and keyboard events (`click`, `mousemove`, `keydown`) on elements | clicks on buttons go to Lua, not to page script; bounce them through `data` if the page needs them |
 | `fetch`, `XMLHttpRequest`, `WebSocket` | no network from a page by design; data comes from the chip |
-| `localStorage`, `sessionStorage`, `IndexedDB`, cookies | no persistence in the page; keep state in Lua or in JS variables |
+| `localStorage`, `sessionStorage`, `IndexedDB`, cookies | no persistence in the page; keep state in Lua or in JS variables. `localStorage`/`sessionStorage` exist as in-memory stores so a page using them runs; they forget on rebuild |
 | `insertBefore`, `replaceChild`, `cloneNode`, reading `.innerHTML`/`.textContent` back, `parentElement`, `children` | the tree lives on the main thread; the worker only writes to it. Appending is at the end of the parent |
 | `getComputedStyle`, `getBoundingClientRect` (beyond client sizes), CSSOM | no layout query API beyond the sizes above |
 | Web Animations, `IntersectionObserver`, `ResizeObserver`, `MutationObserver` | not implemented |
-| `window.location`, `history`, `navigator`, `alert`, `import()` | no browser, no modules |
+| `window.location`, `history`, `navigator`, `alert`/`confirm`/`prompt`, `import()` | no browser, no modules. The globals exist as inert stubs (`alert` writes to the log, `confirm` answers true) so a script that touches them does not throw |
 | Timers driving visual motion | same reason as rAF: a timer that writes the DOM every 30 ms re-emits the scene 30 times a second |
 
 ---

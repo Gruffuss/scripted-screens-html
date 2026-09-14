@@ -7,6 +7,8 @@
 --   img       a ScriptedScreens image element placed over the page's box
 --   button    a click region: the page's on_click gets the button id; Lua bumps a counter
 --   script    document.createElement / appendChild / remove from the page script
+--   web       a table, a list, a link, ::before content, an outline, an attribute selector,
+--             a @media rule that applies (design width 640) and one that does not
 
 local ui = ss.ui.surface("main")
 ss.ui.activate("main")
@@ -64,6 +66,19 @@ local page = [[
   #count { font-size: 14px; margin-left: 10px; }
   #made { font-size: 13px; color: var(--accent); }
   .pill { display: flex; padding: 2px 8px; border-radius: 10px; background: #24314A; margin-right: 6px; font-size: 12px; }
+
+  /* web habits: table, list, link, generated content, outline, attribute selector, @media */
+  .web { display: flex; gap: 14px; align-items: flex-start; font-size: 13px; }
+  table { background: #172033; border-radius: 6px; }
+  th { color: var(--dim); text-transform: uppercase; font-size: 11px; }
+  td[data-state="ok"] { color: #2E8B6E; }
+  td[data-state="warn"] { color: #E2A94E; }
+  .live::before { content: "\25CF "; color: #2E8B6E; }
+  ul { list-style: square; }
+  .focus { padding: 4px 8px; border-radius: 4px; background: #24314A; outline: 2px solid var(--accent); outline-offset: 3px; }
+  .media { color: #B5352C; }
+  @media (min-width: 600px) { .media { color: #2E8B6E; } }
+  @media (max-width: 300px) { .media { color: #B5352C; } }
 </style>
 </head>
 <body>
@@ -91,6 +106,21 @@ local page = [[
     <div>
       <div class="row"><button id="bump">click me</button><span id="count">0 clicks</span></div>
       <div id="made" class="row"></div>
+    </div>
+  </div>
+  <h2>web habits</h2>
+  <div class="web">
+    <table>
+      <tr><th>tank</th><th>kPa</th><th>state</th></tr>
+      <tr><td>O2</td><td>4 200</td><td data-state="ok">ok</td></tr>
+      <tr><td>CO2</td><td>190</td><td data-state="warn">low</td></tr>
+      <tr><td colspan="3" class="live">live, generated dot before</td></tr>
+    </table>
+    <div>
+      <ul><li>square marker</li><li>with <a href="#">a link</a></li></ul>
+      <ol><li>first</li><li>second</li></ol>
+      <div class="focus">outline, offset 3</div>
+      <div class="media">@media: green at width 600 and up</div>
     </div>
   </div>
   <script>

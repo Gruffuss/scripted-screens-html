@@ -33,6 +33,10 @@ internal sealed class CssCompound
     public bool ChildOfPrevious;
     /// <summary>True when preceded by '+': the previous compound must be the immediately preceding element sibling.</summary>
     public bool SiblingOfPrevious;
+    /// <summary>True when preceded by '~': the previous compound must match some earlier element sibling.</summary>
+    public bool GeneralSiblingOfPrevious;
+    /// <summary>"before" or "after": the subject is the generated child (data-pseudo) of the element this compound describes.</summary>
+    public string? PseudoElement;
     /// <summary>Pseudo-class tests: :root, :first-child, :last-child, :nth-child(), :not().</summary>
     public readonly List<Func<HtmlNode, bool>> Pseudos = new();
 
@@ -72,7 +76,7 @@ internal sealed class CssSelector
         {
             var s = 0;
             foreach (var c in Chain)
-                s += (c.Id != null ? 10000 : 0) + (c.Classes.Count + c.Pseudos.Count) * 100 + (c.Tag != null ? 1 : 0);
+                s += (c.Id != null ? 10000 : 0) + (c.Classes.Count + c.Pseudos.Count) * 100 + (c.Tag != null ? 1 : 0) + (c.PseudoElement != null ? 1 : 0);
             return s;
         }
     }
@@ -80,6 +84,18 @@ internal sealed class CssSelector
     public bool Matches(HtmlNode node)
     {
         var idx = Chain.Count - 1;
+        // ::before/::after: the subject is a generated child carrying data-pseudo; the
+        // selector proper is matched against its parent. Generated children match nothing else.
+        var pseudoElement = Chain[idx].PseudoElement;
+        var generated = node.Attr("data-pseudo");
+        if (pseudoElement != null)
+        {
+            if (node.Parent == null || !string.Equals(generated, pseudoElement, StringComparison.Ordinal))
+                return false;
+            node = node.Parent;
+        }
+        else if (generated != null)
+            return false;
         if (!Chain[idx].Matches(node))
             return false;
         var ancestor = node.Parent;
@@ -88,10 +104,14 @@ internal sealed class CssSelector
         {
             var direct = Chain[idx].ChildOfPrevious;
             var sibling = Chain[idx].SiblingOfPrevious;
+            var general = Chain[idx].GeneralSiblingOfPrevious;
             idx--;
-            if (sibling)
+            if (sibling || general)
             {
                 var prev = HtmlNodeExtensions.PreviousElementSibling(subject);
+                if (general)
+                    while (prev != null && !Chain[idx].Matches(prev))
+                        prev = HtmlNodeExtensions.PreviousElementSibling(prev);
                 if (prev == null || !Chain[idx].Matches(prev))
                     return false;
                 subject = prev;
@@ -199,6 +219,19 @@ internal static class CssParser
                     if (keyframes != null)
                         keyframes[name] = kf;
                 }
+                else if (header.StartsWith("media", StringComparison.OrdinalIgnoreCase) || header.StartsWith("supports", StringComparison.OrdinalIgnoreCase))
+                {
+                    // One screen, one design width: a media query is decided once, here.
+                    var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
+                    if (header.StartsWith("supports", StringComparison.OrdinalIgnoreCase) || MediaMatches(header.Substring(5)))
+                    {
+                        foreach (var r in ParseStylesheet(inner, warn, keyframes))
+                        {
+                            r.Order = order++;
+                            rules.Add(r);
+                        }
+                    }
+                }
                 else
                 {
                     warn?.Invoke($"css: @{header.Split(' ')[0]} skipped");
@@ -231,6 +264,70 @@ internal static class CssParser
             rules.Add(rule);
         }
         return rules;
+    }
+
+    /// <summary>The page's design size, for @media; set by the renderer before parsing.</summary>
+    public static float ViewportWidth = 460f, ViewportHeight = 460f;
+
+    /// <summary>
+    /// A media query list against the design size: min/max-width/height, orientation,
+    /// screen/all (true), print (false), "not", "and", commas. Unknown features are false,
+    /// as in a browser.
+    /// </summary>
+    public static bool MediaMatches(string query)
+    {
+        foreach (var alternative in query.Split(','))
+        {
+            var q = alternative.Trim().ToLowerInvariant();
+            if (q.Length == 0) continue;
+            var negate = false;
+            if (q.StartsWith("not ", StringComparison.Ordinal)) { negate = true; q = q.Substring(4); }
+            if (q.StartsWith("only ", StringComparison.Ordinal)) q = q.Substring(5);
+            var ok = true;
+            foreach (var clause in q.Split(new[] { " and " }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var c = clause.Trim().Trim('(', ')').Trim();
+                if (c == "screen" || c == "all" || c.Length == 0) continue;
+                if (c == "print") { ok = false; break; }
+                var colon = c.IndexOf(':');
+                if (colon < 0) { ok = false; break; }
+                var feature = c.Substring(0, colon).Trim();
+                var value = c.Substring(colon + 1).Trim();
+                var n = Px(value);
+                var pass = feature switch
+                {
+                    "min-width" => ViewportWidth >= n,
+                    "max-width" => ViewportWidth <= n,
+                    "width" => Math.Abs(ViewportWidth - n) < 0.5f,
+                    "min-height" => ViewportHeight >= n,
+                    "max-height" => ViewportHeight <= n,
+                    "height" => Math.Abs(ViewportHeight - n) < 0.5f,
+                    "orientation" => value == "landscape" ? ViewportWidth >= ViewportHeight : ViewportWidth < ViewportHeight,
+                    "min-aspect-ratio" or "max-aspect-ratio" or "aspect-ratio" => AspectClause(feature, value),
+                    _ => false,
+                };
+                if (!pass) { ok = false; break; }
+            }
+            if (ok != negate) return true;
+        }
+        return false;
+    }
+
+    /// <summary>A px length or plain number as a float, NaN otherwise. Unity-free on purpose: this file is tested headless.</summary>
+    private static float Px(string value)
+    {
+        var v = value.Trim();
+        if (v.EndsWith("px", StringComparison.OrdinalIgnoreCase)) v = v.Substring(0, v.Length - 2);
+        return float.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : float.NaN;
+    }
+
+    private static bool AspectClause(string feature, string value)
+    {
+        var parts = value.Split('/');
+        if (parts.Length != 2 || float.IsNaN(Px(parts[0])) || float.IsNaN(Px(parts[1])) || Px(parts[1]) == 0f) return false;
+        var want = Px(parts[0]) / Px(parts[1]);
+        var have = ViewportWidth / ViewportHeight;
+        return feature == "min-aspect-ratio" ? have >= want : feature == "max-aspect-ratio" ? have <= want : Math.Abs(have - want) < 0.01f;
     }
 
     /// <summary>Body of a @keyframes block: "from { } 50% { } to { }". Frames sorted by percent.</summary>
@@ -303,16 +400,11 @@ internal static class CssParser
     {
         if (text.Length == 0)
             return null;
-        if (text.IndexOf('[') >= 0 || text.IndexOf('~') >= 0)
-        {
-            warn?.Invoke($"css: selector \"{text}\" not supported (attribute selectors and ~ are not implemented)");
-            return null;
-        }
-
         var selector = new CssSelector();
         var childNext = false;
         var siblingNext = false;
-        foreach (var rawPart in text.Replace(">", " > ").Replace("+", " + ").Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        var generalNext = false;
+        foreach (var rawPart in SplitSelector(text))
         {
             var part = rawPart;
             if (part == ">")
@@ -325,9 +417,25 @@ internal static class CssParser
                 siblingNext = true;
                 continue;
             }
-            var compound = new CssCompound { ChildOfPrevious = childNext, SiblingOfPrevious = siblingNext };
+            if (part == "~")
+            {
+                generalNext = true;
+                continue;
+            }
+            var compound = new CssCompound { ChildOfPrevious = childNext, SiblingOfPrevious = siblingNext, GeneralSiblingOfPrevious = generalNext };
             childNext = false;
             siblingNext = false;
+            generalNext = false;
+            // [attr], [attr=v], [attr~=v], [attr|=v], [attr^=v], [attr$=v], [attr*=v]
+            int open;
+            while ((open = part.IndexOf('[')) >= 0)
+            {
+                var closeAt = part.IndexOf(']', open);
+                if (closeAt < 0) { warn?.Invoke($"css: selector \"{text}\" skipped: unclosed ["); return null; }
+                if (!AttributeTest(part.Substring(open + 1, closeAt - open - 1), compound)) { warn?.Invoke($"css: selector \"{text}\" skipped: bad attribute test"); return null; }
+                part = part.Substring(0, open) + part.Substring(closeAt + 1);
+            }
+            if (part.Length == 0) part = "*";
             var pseudoAt = PseudoStart(part);
             if (pseudoAt >= 0)
             {
@@ -363,6 +471,64 @@ internal static class CssParser
         return selector.Chain.Count > 0 ? selector : null;
     }
 
+    /// <summary>Compounds and combinators, split on whitespace and on > + ~ outside brackets and parentheses.</summary>
+    private static List<string> SplitSelector(string text)
+    {
+        var parts = new List<string>();
+        var sb = new System.Text.StringBuilder();
+        var depth = 0;
+        void Flush() { if (sb.Length > 0) { parts.Add(sb.ToString()); sb.Clear(); } }
+        foreach (var ch in text)
+        {
+            if (ch == '[' || ch == '(') depth++;
+            else if (ch == ']' || ch == ')') depth--;
+            if (depth == 0 && (ch == '>' || ch == '+' || ch == '~')) { Flush(); parts.Add(ch.ToString()); continue; }
+            if (depth == 0 && char.IsWhiteSpace(ch)) { Flush(); continue; }
+            sb.Append(ch);
+        }
+        Flush();
+        return parts;
+    }
+
+    private static bool AttributeTest(string body, CssCompound compound)
+    {
+        body = body.Trim();
+        var op = -1;
+        for (var i = 0; i < body.Length; i++)
+            if (body[i] == '=') { op = i; break; }
+        string name, value = string.Empty, kind = "exists";
+        if (op < 0) name = body;
+        else
+        {
+            var before = body.Substring(0, op);
+            var last = before.Length > 0 ? before[before.Length - 1] : ' ';
+            kind = last switch { '~' => "word", '|' => "dash", '^' => "prefix", '$' => "suffix", '*' => "contains", _ => "equals" };
+            name = kind == "equals" ? before : before.Substring(0, before.Length - 1);
+            value = body.Substring(op + 1).Trim();
+            if (value.EndsWith(" i", StringComparison.OrdinalIgnoreCase)) value = value.Substring(0, value.Length - 2).Trim();
+            if (value.Length >= 2 && (value[0] == '"' || value[0] == '\'') && value[value.Length - 1] == value[0]) value = value.Substring(1, value.Length - 2);
+        }
+        name = name.Trim();
+        if (name.Length == 0) return false;
+        compound.Pseudos.Add(n =>
+        {
+            var have = n.Attr(name);
+            if (have == null) return false;
+            return kind switch
+            {
+                "exists" => true,
+                "equals" => have == value,
+                "word" => Array.IndexOf(have.Split(' ', StringSplitOptions.RemoveEmptyEntries), value) >= 0,
+                "dash" => have == value || have.StartsWith(value + "-", StringComparison.Ordinal),
+                "prefix" => value.Length > 0 && have.StartsWith(value, StringComparison.Ordinal),
+                "suffix" => value.Length > 0 && have.EndsWith(value, StringComparison.Ordinal),
+                "contains" => value.Length > 0 && have.Contains(value, StringComparison.Ordinal),
+                _ => false,
+            };
+        });
+        return true;
+    }
+
     /// <summary>Index of the first ':' outside parentheses, or -1.</summary>
     private static int PseudoStart(string part)
     {
@@ -388,7 +554,8 @@ internal static class CssParser
         {
             if (text[i] != ':') return false;
             i++;
-            if (i < text.Length && text[i] == ':') return false; // pseudo-element
+            var element = false;
+            if (i < text.Length && text[i] == ':') { element = true; i++; }
             var start = i;
             while (i < text.Length && text[i] != ':' && text[i] != '(') i++;
             var name = text.Substring(start, i - start).ToLowerInvariant();
@@ -405,6 +572,13 @@ internal static class CssParser
                 }
                 arg = text.Substring(open + 1, i - open - 1).Trim();
                 i++;
+            }
+            if (element || name == "before" || name == "after")
+            {
+                // ::before / ::after (and the legacy one-colon spelling); other pseudo-elements skip the rule.
+                if (name != "before" && name != "after") return false;
+                compound.PseudoElement = name;
+                continue;
             }
             switch (name)
             {

@@ -152,6 +152,17 @@ internal static class VectorEmitter
                 ctx.Out.Nodes++;
             }
 
+            if (Outline(css, out var ow, out var oc, out var ooff) && ow > 0.01f && oc.a > 0.002f)
+            {
+                // Outside the border box, offset by outline-offset, stroke centred on its path.
+                var od = ooff + ow * 0.5f;
+                ctx.Body.Append(indent).Append("R x=").Append(F(x - od)).Append(" y=").Append(F(y - od))
+                    .Append(" w=").Append(F(w + 2f * od)).Append(" h=").Append(F(h + 2f * od))
+                    .Append(Radius(rs, w + 2f * od, h + 2f * od, od)).Append(" f=none s=").Append(Hex(oc)).Append(" sw=").Append(F(ow))
+                    .Append('\n');
+                ctx.Out.Nodes++;
+            }
+
             var bw = rs.borderTopWidth;
             var sameWidth = Mathf.Approximately(bw, rs.borderRightWidth) && Mathf.Approximately(bw, rs.borderBottomWidth) && Mathf.Approximately(bw, rs.borderLeftWidth);
             var sameColour = rs.borderTopColor == rs.borderRightColor && rs.borderTopColor == rs.borderBottomColor && rs.borderTopColor == rs.borderLeftColor;
@@ -1036,7 +1047,51 @@ internal static class VectorEmitter
     private static bool IsButton(Ctx ctx, VisualElement ve)
     {
         return ctx.Built.NodeOf.TryGetValue(ve, out var node)
-               && (node.Tag == "button" || node.Attr("onclick") != null || node.Attr("data-click") != null);
+               && (node.Tag == "button" || node.Attr("onclick") != null || node.Attr("data-click") != null)
+               && !(ctx.Built.CssOf(ve).TryGetValue("pointer-events", out var pe) && pe.Trim() == "none");
+    }
+
+    /// <summary>outline / outline-width / outline-color / outline-offset; false for none.</summary>
+    private static bool Outline(Dictionary<string, string> css, out float width, out Color colour, out float offset)
+    {
+        width = 0f; colour = Color.white; offset = 0f;
+        var any = false;
+        if (css.TryGetValue("outline", out var shorthand))
+        {
+            var v = shorthand.Trim();
+            if (v == "none" || v == "0") return false;
+            foreach (var part in SplitParts(v))
+            {
+                if (part is "solid" or "dashed" or "dotted" or "double" or "auto") { any = true; continue; }
+                if (StyleApplier.IsNumber(part) || part.EndsWith("px", StringComparison.OrdinalIgnoreCase)) { width = StyleApplier.Num(part); any = true; }
+                else if (StyleApplier.TryColor(part, out var c)) { colour = c; any = true; }
+            }
+            if (any && width <= 0f) width = 3f; // medium
+        }
+        if (css.TryGetValue("outline-width", out var wv)) { width = StyleApplier.Num(wv); any = true; }
+        if (css.TryGetValue("outline-color", out var cv) && StyleApplier.TryColor(cv, out var cc)) { colour = cc; any = true; }
+        if (css.TryGetValue("outline-style", out var sv) && sv.Trim() == "none") return false;
+        if (css.TryGetValue("outline-offset", out var ov)) offset = StyleApplier.Num(ov);
+        return any;
+    }
+
+    private static List<string> SplitParts(string v)
+    {
+        var parts = new List<string>();
+        var depth = 0;
+        var start = 0;
+        for (var i = 0; i <= v.Length; i++)
+        {
+            if (i < v.Length)
+            {
+                if (v[i] == '(') depth++;
+                else if (v[i] == ')') depth--;
+                if (v[i] != ' ' || depth > 0) continue;
+            }
+            if (i > start) parts.Add(v.Substring(start, i - start));
+            start = i + 1;
+        }
+        return parts;
     }
 
     private static void Warn(Ctx ctx, string message)

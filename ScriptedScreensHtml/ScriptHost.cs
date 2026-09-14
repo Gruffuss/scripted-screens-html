@@ -387,6 +387,27 @@ var console = {
 };
 var performance = { now: function(){ return __now(); } };
 
+// ---- browser globals a page script may touch; none of them do anything here ----
+function __storage(){
+  var m = {};
+  return {
+    getItem: function(k){ return Object.prototype.hasOwnProperty.call(m, k) ? m[k] : null; },
+    setItem: function(k, v){ m[k] = String(v); },
+    removeItem: function(k){ delete m[k]; },
+    clear: function(){ m = {}; },
+    key: function(i){ return Object.keys(m)[i] || null; },
+    get length(){ return Object.keys(m).length; }
+  };
+}
+var localStorage = __storage(), sessionStorage = __storage();
+function alert(m){ __log('log', 'alert: ' + m); }
+function confirm(m){ __log('log', 'confirm: ' + m); return true; }
+function prompt(m){ __log('log', 'prompt: ' + m); return null; }
+var location = { href: 'about:page', protocol: 'about:', host: '', hostname: '', port: '', pathname: '/page', search: '', hash: '', origin: 'null',
+                 reload: function(){}, assign: function(){}, replace: function(){}, toString: function(){ return this.href; } };
+var navigator = { userAgent: 'ScriptedScreensHtml', language: 'en', languages: ['en'], onLine: false, platform: 'stationeers', clipboard: { writeText: function(){ return Promise.resolve(); } } };
+var history = { length: 1, pushState: function(){}, replaceState: function(){}, back: function(){}, forward: function(){} };
+
 // ---- timers and animation frames ----
 var __timers = [], __rafs = [], __nextId = 1, __now_ms = 0;
 function setTimeout(fn, ms){ var id = __nextId++; __timers.push({id:id, fn:fn, at:__now_ms + (ms||0), every:0, args:Array.prototype.slice.call(arguments,2)}); return id; }

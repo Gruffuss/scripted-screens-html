@@ -414,6 +414,9 @@ internal static class StyleApplier
         "grid-column", "grid-row", "grid-column-start", "grid-column-end", "grid-row-start", "grid-row-end",
         "line-height", "text-transform", "z-index", "box-sizing",
         "box-shadow", "text-shadow", "border-style", "text-decoration",
+        "outline", "outline-width", "outline-color", "outline-style", "outline-offset",
+        "pointer-events", "cursor", "user-select", "content",
+        "list-style", "list-style-type", "list-style-position", "border-collapse", "border-spacing",
     };
 
     private static void Unknown(CssDeclaration d, Action<string>? warn)

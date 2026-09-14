@@ -59,7 +59,20 @@ Console.WriteLine("CssParser");
     Check(sel.Chain.Count == 2 && sel.Chain[0].Id == "main" && sel.Chain[1].Classes.Count == 2, "descendant chain #main .row.big");
     Check(sel.Specificity == 10000 + 200, $"specificity ids/classes (got {sel.Specificity})");
     Check(rules[3].Declarations[0].Value == "1px solid red", "!important stripped");
-    Check(warnings.Count == 1, $"@media warns once, :hover does not (got {warnings.Count})");
+    Check(warnings.Count == 0, $"@media with an unknown feature is dropped silently, :hover does not warn (got {warnings.Count})");
+
+    CssParser.ViewportWidth = 640f; CssParser.ViewportHeight = 640f;
+    var media = CssParser.ParseStylesheet("@media (min-width: 600px) { .w { color: red } } @media screen and (max-width: 300px) { .n { color: red } } @media not print { .p { color: red } }", warnings.Add);
+    Check(media.Count == 2 && media[0].Selectors[0].Chain[0].Classes[0] == "w" && media[1].Selectors[0].Chain[0].Classes[0] == "p", $"@media decided against the design width (got {media.Count} rules)");
+    var attrDoc = HtmlParser.Parse("<div><span data-k=\"x y\">a</span><b>b</b><i>c</i><i lang=\"en-GB\">d</i></div>");
+    var d0 = attrDoc.Children[0];
+    Check(CssParser.ParseSelector("[data-k]", null)!.Matches(d0.Children[0]) && !CssParser.ParseSelector("[data-k]", null)!.Matches(d0.Children[1]), "[attr] presence");
+    Check(CssParser.ParseSelector("span[data-k~=y]", null)!.Matches(d0.Children[0]) && CssParser.ParseSelector("[data-k^=\"x \"]", null)!.Matches(d0.Children[0]) && !CssParser.ParseSelector("[data-k=x]", null)!.Matches(d0.Children[0]), "[attr~=], [attr^=], [attr=] value tests");
+    Check(CssParser.ParseSelector("i[lang|=en]", null)!.Matches(d0.Children[3]), "[attr|=] dash match");
+    Check(CssParser.ParseSelector("span ~ i", null)!.Matches(d0.Children[2]) && CssParser.ParseSelector("span ~ i", null)!.Matches(d0.Children[3]) && !CssParser.ParseSelector("span + i", null)!.Matches(d0.Children[2]), "~ reaches any later sibling, + only the next");
+    var before = CssParser.ParseSelector(".tag::before", null)!;
+    var gen = new HtmlNode { Tag = "span", Parent = d0 }; gen.Attributes["data-pseudo"] = "before"; d0.Attributes["class"] = "tag";
+    Check(before.Chain[0].PseudoElement == "before" && before.Matches(gen) && !before.Matches(d0) && !CssParser.ParseSelector("span", null)!.Matches(gen), "::before matches the generated child only, and plain rules skip it");
     Check(rules[2].Selectors[0].Chain[0].Pseudos.Count == 1, ":hover parsed as a pseudo-class");
 
     var doc = HtmlParser.Parse("<div id=main><div class='row big'><span class=row>t</span></div></div>");
