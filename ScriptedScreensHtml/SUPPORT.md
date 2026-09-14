@@ -1,6 +1,6 @@
 # What works from HTML5, CSS and JS, and what does not — and why
 
-State as of 2026-09-14, vector back-end, vector mod 0.10.2.0. The pipeline decides everything below:
+State as of 2026-09-14, vector back-end, vector mod 0.11.12.0. The pipeline decides everything below:
 
 ```
 HTML + CSS  →  parse, cascade  →  UI Toolkit lays the boxes out (layout ONLY; grid is ours)
@@ -53,7 +53,6 @@ keyframe, which compiles to the same thing.
 | `<iframe> <object>` | no meaning here |
 | List markers on `<ul>/<ol>` | no marker generation; write the bullet |
 | Text clipped to a rounded shape | a label under a rounded `overflow: hidden` box is clipped to the box's rectangle, not its rounded outline (the vector text layer masks with a rectangle). Standing limit; invisible at the radii dashboards use |
-| Text under a later box | the vector layer draws all text above all geometry, so a box with a higher `z-index` still paints under a label from a lower one. Standing limit of the text layer |
 
 ---
 
@@ -75,7 +74,8 @@ element, inherited) and `var(--x, fallback)`.
 `position: absolute | relative`, `top right bottom left`, `inset`, `display: none | block |
 flex | grid`, `overflow: hidden` (a clip, rounded corners honoured), `visibility`,
 `opacity` (whole subtree), `z-index` (siblings painted in z order, document order within
-a value), `box-sizing` (always border-box, as UI Toolkit is).
+a value; text obeys it too, since vector mod 0.11.12.0 draws labels in scene order),
+`box-sizing` (always border-box, as UI Toolkit is).
 
 **Flexbox:** `flex-direction`, `flex-wrap`, `flex`, `flex-grow/shrink/basis`,
 `justify-content`, `align-items`, `align-self`, `align-content`, `gap` / `row-gap` /
@@ -89,7 +89,7 @@ their cells; auto rows take the tallest child. Not: named lines and areas, dense
 
 **Paint:** `color`, `background`/`background-color`, `linear-gradient(...)` (angle or `to
 side`, any number of stops, **hard stops** split geometrically so the edge is exact),
-`radial-gradient(...)` (`circle`/`ellipse`, `at x y`, size keywords approximated by radius; **expensive**: a 90x50 box costs ~50,000 vertices of the 60,000 mesh cap in vector mod 0.10.2.0, pending a ring-count cap on the vector side),
+`radial-gradient(...)` (`circle`/`ellipse`, `at x y`, size keywords approximated by radius; **expensive**: a 90x50 rounded box with an off-centre focus costs ~49,000 vertices, re-measured on vector mod 0.11.12.0; a ring-count cap on the vector side is still the answer),
 `border` shorthand, per-side `border-*-width` and `border-*-color`, a rounded box with a
 differently coloured side (drawn as arcs), `border-style: dashed | dotted`, `border-radius`
 and per-corner (CSS overflow clamp applied), `box-shadow` (offset, blur, spread, colour,

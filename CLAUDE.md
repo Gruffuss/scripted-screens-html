@@ -2208,8 +2208,24 @@ element was re-applied unconditionally; now re-applied only when rect or attribu
 A surface rebuild (a click on the console triggers one) recreates the host and the image
 with it.
 
-**Seen in the capture, a text-layer limit:** all text paints above all geometry, so a label
-from a low `z-index` box shows over a higher box. Documented in SUPPORT.md.
+**Seen in the capture, a text-layer limit — since fixed on the vector side (0.11.11.0).** All
+text painted above all geometry, so a label from a low `z-index` box showed over a higher box.
+The vector mod now takes **`ztext = 1`** on the scene (or `SCENE ztext=1` in the `src` form,
+which needed no renderer change — `SCENE` already copies every prop through). Labels then obey
+scene order: a `T` forces a mesh cut where a later shape's bounds actually overlap its box, and
+the label's mask is parented between the two slices.
+
+**On by default since 0.11.12.0** (`ztext = 0` opts out). It shipped opt-in and was flipped
+the same day once measured: bounds tracking is ~0.19 ms per 40,000 vertices (.NET 8), on the
+worker. The emitter needs to do nothing for `z-index` to work; SUPPORT.md's limitation note is
+now simply wrong. The vector mod is a standalone mod and its docs describe it on its own terms,
+not as the HTML mod's back end.
+
+Cost is one extra mesh, so one draw call, **per label a later shape actually covers** — not per
+label. That distinction is the whole design: pinned by `TextOrderTests`, where thirty labelled
+tiles stay in one mesh and the naive "cut at every label" version turns them into thirty. One
+case it cannot serve: a label declared before any shape, since the surface's own renderer always
+draws before its children; it stays on top rather than vanishing.
 
 **Open, reported 2026-09-14 (not yet investigated):** on `HtmlTest2.lua` the **first click on
 the counter takes a long time to register; later clicks are fast.** Candidates, in the
@@ -2218,3 +2234,14 @@ and the first write re-enables, re-attaches and lays out from cold); the first J
 event on the worker (engine warm-up); ScriptedScreens' own 0.25 s click debounce would not
 explain "long". Measure with `Diagnostics.Enabled`: the per-page line shows layout and
 translate ms per emit, and the chip log timestamps the click.
+
+**Verified 2026-09-14 evening, vector mod 0.11.12.0:** text draw order works end to end for
+pages (capture: the "z 1" label hides under the z-3 box); nothing to do in the emitter.
+Re-measured the radial box: 53,482 vertices with it, 4,786 without, so ~49,000 for one 90x50
+rounded box with an off-centre focus; the vector-side radial change did not reach this case.
+**Error spam on capture, vector side:** 66 x Unity "Trying to add VectorSlice for graphic
+rebuild while we are already inside a graphic rebuild loop", starting right after "vector
+capture: built inline ... across 7 mesh(es)". The capture-time `BuildNow()` runs inside
+`UpdateGeometry` (the canvas rebuild loop) and now calls `ApplySlices()`, which creates
+`VectorSlice` graphics there; one mesh never needed a slice, draw-order text does. Fix on the
+vector side: defer slice creation out of the rebuild loop when building inline.
