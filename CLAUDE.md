@@ -2210,3 +2210,11 @@ with it.
 
 **Seen in the capture, a text-layer limit:** all text paints above all geometry, so a label
 from a low `z-index` box shows over a higher box. Documented in SUPPORT.md.
+
+**Open, reported 2026-09-14 (not yet investigated):** on `HtmlTest2.lua` the **first click on
+the counter takes a long time to register; later clicks are fast.** Candidates, in the
+order to test: the panel wake after sleep (the document is disabled after three idle frames
+and the first write re-enables, re-attaches and lays out from cold); the first JS `data`
+event on the worker (engine warm-up); ScriptedScreens' own 0.25 s click debounce would not
+explain "long". Measure with `Diagnostics.Enabled`: the per-page line shows layout and
+translate ms per emit, and the chip log timestamps the click.
