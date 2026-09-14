@@ -98,26 +98,6 @@ internal static class HtmlElementPatch
         }
     }
 
-    /// <summary>Board state and surface being screen-captured right now, else null.</summary>
-    internal static object? CapturingState { get; private set; }
-    internal static string CapturingSurface { get; private set; } = string.Empty;
-
-    [HarmonyPatch(typeof(SS), "TryCaptureSurfaceShared")]
-    private static class CapturePatch
-    {
-        private static void Prefix(SS.BoardState state, string surface)
-        {
-            CapturingState = state;
-            CapturingSurface = surface ?? string.Empty;
-        }
-
-        private static void Postfix()
-        {
-            CapturingState = null;
-            CapturingSurface = string.Empty;
-        }
-    }
-
     private static void Remember(string key, SS.UiValue data)
     {
         if (data.Type != SS.UiValueType.Map || data.Map == null)

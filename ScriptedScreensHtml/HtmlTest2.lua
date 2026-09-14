@@ -2,7 +2,7 @@
 -- batches added. Push to a 2x2 console (561). What to look for is in each block's heading.
 --
 --   grid      a 3-column grid with gap, a spanning cell, nth-child striping, z-index overlap
---   paint     radial gradient, dashed and dotted borders, box-shadow, underline/strike
+--   paint     dashed and dotted borders, box-shadow, underline/strike (radial: see the CSS note)
 --   units     calc(), em, vw, a :root variable with a fallback
 --   img       a ScriptedScreens image element placed over the page's box
 --   button    a click region: the page's on_click gets the button id; Lua bumps a counter
@@ -39,8 +39,10 @@ local page = [[
   .c { left: 80px; top: 20px; background: #E2A94E; z-index: 2; color: #111; }
 
   .row { display: flex; gap: 10px; align-items: center; }
-  .radial { width: 90px; height: 50px; border-radius: 8px;
-            background: radial-gradient(circle at 30% 30%, #7DD3FC, #0369A1 70%); }
+  /* radial-gradient works but costs ~50,000 vertices for this one box in vector mod
+     0.10.2.0 (a ring per 2.5 screen px of the whole outline), which alone fills the
+     60,000-vertex mesh and drops everything after it. Solid until the ring count is capped. */
+  .radial { width: 90px; height: 50px; border-radius: 8px; background: #0369A1; }
   .dashed { width: 90px; height: 50px; border: 2px dashed var(--accent); border-radius: 8px; }
   .dotted { width: 90px; height: 50px; border: 3px dotted #E2A94E; border-radius: 8px; }
   .shadow { width: 90px; height: 50px; background: #1E293B; border-radius: 8px;
@@ -82,7 +84,7 @@ local page = [[
 
   <h2>image, button, script</h2>
   <div class="row">
-    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png">
+    <img src="https://raw.githubusercontent.com/Gruffuss/scripted-screens-vector/main/ScriptedScreensVector/About/thumb.png">
     <div>
       <div class="row"><button id="bump">click me</button><span id="count">0 clicks</span></div>
       <div id="made" class="row"></div>
@@ -116,12 +118,23 @@ ui:element({
     style = { bg = "#FF00FF" },
     -- A <button> is a click region in the vector scene: its id arrives here as the value.
     on_click = function(nodeId, player)
+        print("page click: " .. tostring(nodeId))
         if nodeId == "bump" then
             clicks = clicks + 1
             data:set_props({ data = { count = clicks .. " clicks" } })
             ui:commit()
         end
     end,
+})
+
+-- A native ScriptedScreens button as a control: if this one logs and the page's does
+-- not, the pointer never reaches the vector layer's hit region.
+ui:element({
+    id = "native", type = "button",
+    rect = { unit = "px", x = W - 110, y = H - 40, w = 100, h = 30 },
+    props = { text = "native" },
+    style = { bg = "#2E8B6E", text = "#FFFFFF", font_size = 14 },
+    on_click = function(v, player) print("native click") end,
 })
 
 data = ui:element({

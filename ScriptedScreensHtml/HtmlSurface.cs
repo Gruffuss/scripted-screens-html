@@ -29,8 +29,6 @@ internal sealed class HtmlSurface : MonoBehaviour
     private const int MaxTextureSize = 4096;
     private const int DataAwakeFrames = 60;
 
-    /// <summary>Live surfaces, so a capture clone can find the instance it was cloned from.</summary>
-    private static readonly List<HtmlSurface> Live = new();
 
     /// <summary>Scale per page key, so a host rebuilt by ScriptedScreens comes back at the same sharpness.</summary>
     internal string PageKey = string.Empty;
@@ -50,10 +48,6 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal object? State;
     internal string Surface = string.Empty;
 
-    private Texture2D? _snapshot;
-
-    /// <summary>UIElementsRuntimeUtility.RepaintOffscreenPanels: internal, so reflected once.</summary>
-    private static readonly MethodInfo? RepaintOffscreenPanels = RuntimeUtilityMethod("RepaintOffscreenPanels");
 
     /// <summary>UIElementsRuntimeUtility.UpdateRuntimePanels: sizes a panel from its settings. Per-frame normally.</summary>
     private static readonly MethodInfo? UpdateRuntimePanels = RuntimeUtilityMethod("UpdateRuntimePanels");
@@ -88,93 +82,10 @@ internal sealed class HtmlSurface : MonoBehaviour
         Build();
     }
 
-    private void OnEnable()
-    {
-        // ScriptedScreens' screen capture clones the surface tree with Instantiate and
-        // renders the clone. Private fields do not survive Instantiate, and neither does
-        // the RawImage's reference to a runtime RenderTexture (it drew as a white quad),
-        // so a clone is the instance with no panel. Find the live twin -- same board,
-        // surface and host name, captured right now -- and show a snapshot of its texture.
-        if (_panel != null || State != null)
-            return;
-
-        var image = GetComponent<RawImage>();
-        if (image == null)
-            return;
-
-        var hostName = transform.parent != null ? transform.parent.name : string.Empty;
-        HtmlSurface? twin = null;
-
-        // Instantiate keeps the RawImage's reference to the live RenderTexture, and that
-        // identifies the source exactly. The name match is only a fallback: the capturer
-        // rebuilds the surface first and destroys the old host with a deferred Destroy, so
-        // the old surface is still registered and would match by name first.
-        foreach (var s in Live)
-        {
-            if (s != null && s._texture != null && ReferenceEquals(s._texture, image.texture))
-            {
-                twin = s;
-                break;
-            }
-        }
-        if (twin == null)
-        {
-            foreach (var s in Live)
-            {
-                if (s != null && s._texture != null
-                    && ReferenceEquals(s.State, HtmlElementPatch.CapturingState)
-                    && s.Surface == HtmlElementPatch.CapturingSurface
-                    && s.transform.parent != null && s.transform.parent.name == hostName)
-                {
-                    twin = s;
-                    break;
-                }
-            }
-        }
-
-        ScriptedScreensHtmlPlugin.Log?.LogInfo(
-            $"html: capture clone of \"{hostName}\": texture on clone = {(image.texture == null ? "null" : image.texture.name)}, twin {(twin == null ? "NOT found" : "found")} among {Live.Count}");
-
-        if (twin == null)
-            return;
-
-        // The capturer rebuilds the surface before cloning it, so the twin is usually a
-        // panel created this very frame whose texture has never been painted: offscreen
-        // panels paint at end of frame, and the capture reads back synchronously before
-        // that. Paint now. Wake() makes sure the document is attached and the content is
-        // on the root; the repaint runs layout and render for every offscreen panel.
-        // Repaint alone is not enough: a panel created this frame has a zero-sized root
-        // until UpdateRuntimePanels runs PanelSettings.ApplyPanelSettings on it.
-        twin.Wake();
-        if (UpdateRuntimePanels == null || RepaintOffscreenPanels == null)
-            ScriptedScreensHtmlPlugin.Log?.LogWarning("html: UIElementsRuntimeUtility methods not found; capture will be blank");
-        UpdateRuntimePanels?.Invoke(null, null);
-        // Layout is done now, so the page script sees real sizes; run it and draw its canvases.
-        twin.RunScriptNow();
-        UpdateRuntimePanels?.Invoke(null, null);
-        RepaintOffscreenPanels?.Invoke(null, null);
-
-        // After a resize the panel paints into the pending texture while _texture is the
-        // old one; snapshot whichever the panel is actually painting into.
-        var live = twin._pending ?? twin._texture!;
-        _snapshot = new Texture2D(live.width, live.height, TextureFormat.RGBA32, mipChain: false);
-        var previous = RenderTexture.active;
-        RenderTexture.active = live;
-        _snapshot.ReadPixels(new Rect(0, 0, live.width, live.height), 0, 0);
-        _snapshot.Apply(updateMipmaps: false, makeNoLongerReadable: false);
-        RenderTexture.active = previous;
-        image.texture = _snapshot;
-
-        var centre = _snapshot.GetPixel(live.width / 2, live.height / 2);
-        var corner = _snapshot.GetPixel(3, 3);
-        var root = twin._document != null ? twin._document.rootVisualElement : null;
-        var rootLayout = root != null ? root.layout : Rect.zero;
-        var contentLayout = twin._content != null ? twin._content.layout : Rect.zero;
-        ScriptedScreensHtmlPlugin.Log?.LogInfo(
-            $"html: capture snapshot {live.width}x{live.height}, centre {centre}, corner {corner}; "
-            + $"twin scale {twin._scale}, doc active {(twin._document != null && twin._document.gameObject.activeSelf)}, "
-            + $"root {rootLayout.width}x{rootLayout.height} children {(root != null ? root.childCount : -1)}, content {contentLayout.width}x{contentLayout.height}");
-    }
+    // No capture path of its own any more. The page is drawn by the vector mod, whose
+    // clone carries its mesh through Instantiate and builds inline when it has none, and
+    // the first structure is emitted synchronously at build (below), so a capture that
+    // rebuilds the surface sees the scene inside the same call.
 
     private void Update()
     {
@@ -287,7 +198,6 @@ internal sealed class HtmlSurface : MonoBehaviour
         // No RawImage: the panel exists for LAYOUT only. What is drawn is the vector scene
         // the emitter derives from that layout; the vector mod renders it as geometry.
 
-        Live.Add(this);
         ReportShaders();
         ScriptedScreensHtmlPlugin.Log?.LogInfo(
             $"html surface created: {w}x{h} at scale {_scale}, layout {LayoutSize()} for rect {((RectTransform)transform).rect.size}, theme={(_panel.themeStyleSheet == null ? "none" : _panel.themeStyleSheet.name)}");
@@ -520,22 +430,15 @@ internal sealed class HtmlSurface : MonoBehaviour
         // script that reads clientWidth before layout sees 0 and tries again next frame.
         _scriptPending = false;
         _script?.Run(built.Script);
+
+        // The first structure goes out now rather than next Update: a screen capture
+        // rebuilds the surface and clones it inside one call, and the vector mod can only
+        // draw a scene it has been given by then.
+        _dirty = false;
+        EmitToVector();
     }
 
     private bool _scriptPending;
-
-    /// <summary>Run the page script if it has not run, then one frame, and wait (capture path).</summary>
-    internal void RunScriptNow()
-    {
-        if (_script == null)
-            return;
-        if (_scriptPending)
-        {
-            _scriptPending = false;
-            _script.Run(_built?.Script ?? string.Empty);
-        }
-        _script.RunSynchronously(Time.time, _byId, 1500);
-    }
 
     /// <summary>
     /// Lay the page out now, translate it to scene text, and hand it to the vector mod.
@@ -544,6 +447,8 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// </summary>
     /// <summary>Ids of the ScriptedScreens elements created for img/video/audio, to update and remove.</summary>
     private readonly HashSet<string> _externals = new(StringComparer.Ordinal);
+    /// <summary>What each external element was last applied with, so an unchanged one is not re-sent (a re-send re-downloads an image).</summary>
+    private readonly Dictionary<string, string> _externalState = new(StringComparer.Ordinal);
 
     /// <summary>
     /// img, video and audio: a ScriptedScreens image / media / sound element for each,
@@ -592,6 +497,12 @@ internal sealed class HtmlSurface : MonoBehaviour
                 Rect = new SS.UiRect { Unit = SS.UiRectUnit.Pixels, X = ext.X * sx, Y = ext.Y * sy, W = ext.W * sx, H = ext.H * sy },
                 Props = props.ToArray(),
             };
+            var stateKey = new System.Text.StringBuilder(type).Append('|').Append(element.Rect.X).Append(',').Append(element.Rect.Y).Append(',').Append(element.Rect.W).Append(',').Append(element.Rect.H);
+            foreach (var pr in props) stateKey.Append('|').Append(pr.Key).Append('=').Append(pr.Value.String ?? pr.Value.Number.ToString(CultureInfo.InvariantCulture));
+            var stateText = stateKey.ToString();
+            if (_externalState.TryGetValue(id, out var last) && last == stateText)
+                continue;
+            _externalState[id] = stateText;
             try
             {
                 SS.ApplyElementInternal(Board as Motherboard, Cartridge as CartridgeIntegratedCircuitLua, Visor as ProgrammableVisorGlasses, state, Surface, element);
@@ -607,6 +518,28 @@ internal sealed class HtmlSurface : MonoBehaviour
             if (seen.Contains(id)) continue;
             SS.RemoveElement(state, Surface, id);
             _externals.Remove(id);
+            _externalState.Remove(id);
+        }
+    }
+
+    /// <summary>
+    /// The last emitted scene, as a file beside the DLL (`scenes/&lt;page&gt;.txt`): the one
+    /// artefact that answers "what did the emitter actually produce" without a debugger.
+    /// </summary>
+    private void DumpScene(string scene)
+    {
+        try
+        {
+            var here = System.IO.Path.GetDirectoryName(typeof(HtmlSurface).Assembly.Location) ?? string.Empty;
+            var dir = System.IO.Path.Combine(here, "scenes");
+            System.IO.Directory.CreateDirectory(dir);
+            var name = string.IsNullOrEmpty(ElementId) ? "page" : ElementId;
+            foreach (var bad in System.IO.Path.GetInvalidFileNameChars()) name = name.Replace(bad, '_');
+            System.IO.File.WriteAllText(System.IO.Path.Combine(dir, name + ".txt"), scene);
+        }
+        catch (Exception ex)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning("html: scene dump failed: " + ex.Message);
         }
     }
 
@@ -636,6 +569,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId, output.Scene);
             ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: emitted {output.Nodes} vector nodes, {output.Scene.Length} chars");
+            DumpScene(output.Scene);
             if (!_sceneLive)
             {
                 // The first structure: data that arrived before it was dropped by the vector
@@ -920,9 +854,6 @@ internal sealed class HtmlSurface : MonoBehaviour
     private void OnDestroy()
     {
         _script?.Dispose();
-        Live.Remove(this);
-        if (_snapshot != null)
-            Destroy(_snapshot);
         if (_document != null)
             Destroy(_document.gameObject);
         if (_panel != null)
