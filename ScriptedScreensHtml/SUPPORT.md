@@ -1,6 +1,6 @@
 # What works from HTML5, CSS and JS, and what does not — and why
 
-State as of 2026-09-14, vector back-end, vector mod 0.11.12.0. The pipeline decides everything below:
+State as of 2026-09-15, vector back-end, vector mod 0.11.12.0, everything below confirmed on a console. The pipeline decides everything below:
 
 ```
 HTML + CSS  →  parse, cascade  →  UI Toolkit lays the boxes out (layout ONLY; grid is ours)
@@ -36,9 +36,9 @@ keyframe, which compiles to the same thing.
 | `id`, `class`, inline `style` | |
 | Comments, entities (`&amp; &lt; &nbsp; &#x25BC;`) | |
 | `<hr>` | a 1px rule |
-| `<img src>` | a ScriptedScreens `image` element placed over the box (URLs load through ScriptedScreens); `width`/`height` attributes or CSS size the box |
-| `<video src autoplay loop muted>`, `<audio src autoplay loop>` | ScriptedScreens `media` and `sound` elements; ScriptedScreens' own multiplayer and video gating applies |
-| `<button id>` (also any element with `onclick` or `data-click`) | a click region in the vector scene. The click arrives at the page element's Lua `on_click(nodeId, player)` with the button's id. Page JS does not see clicks; bounce them through `data` if the page needs them |
+| `<img src>` | a ScriptedScreens `image` element placed over the box (URLs load through ScriptedScreens; raw GitHub works, Wikimedia refuses Unity's request); `width`/`height` attributes or CSS size the box. Confirmed 2026-09-15: stays through clicks and surface rebuilds. Host and single player only: the element is written to the local surface model, not sent to remote clients |
+| `<video src autoplay loop muted>`, `<audio src autoplay loop>` | ScriptedScreens `media` and `sound` elements, placed the same way as `<img>`; ScriptedScreens' own multiplayer and video gating applies. Not yet seen on a console |
+| `<button id>` (also any element with `onclick` or `data-click`) | a click region in the vector scene. The click arrives at the page element's Lua `on_click(nodeId, player)` with the button's id, and a `data` write from there updates the page. Page JS does not see clicks; bounce them through `data` if the page needs them. Confirmed 2026-09-15 with no noticeable delay on the first click |
 | `<svg>` with `line polyline polygon rect circle ellipse path g defs linearGradient radialGradient` | translated one-to-one to vector nodes; `viewBox`, `preserveAspectRatio="none"` (strokes keep one width: the scale is baked into coordinates), `fill stroke stroke-width opacity fill-opacity stroke-opacity stroke-linecap stroke-linejoin`, `fill="url(#id)"` |
 | SVG extensions | any attribute may be `="expression"`; `n="36"` on `polygon`/`polyline` makes a sampled band/line (`x y y2` per sample `i`); `n="42"` on `circle`/`rect`/`ellipse`/`path` repeats it (`hash(i)` for per-instance randoms); `fo2 fea fea_edge lod dash dofs` pass through to the vector layer |
 | Data binding by id | `data = { id = value }` from Lua: string/number → text, table → CSS, bool → display; an svg shape id takes `points`, an attribute table, or a **number array**, which binds the shape to `$id[i]` so the vector mod scrolls it between ticks. Ids always bind, and a page script's `data` handler gets the same payload afterwards; the whole payload is also forwarded flattened to the scene as `$a_b` |
@@ -53,6 +53,7 @@ keyframe, which compiles to the same thing.
 | `<iframe> <object>` | no meaning here |
 | List markers on `<ul>/<ol>` | no marker generation; write the bullet |
 | Text clipped to a rounded shape | a label under a rounded `overflow: hidden` box is clipped to the box's rectangle, not its rounded outline (the vector text layer masks with a rectangle). Standing limit; invisible at the radii dashboards use |
+| `<img>` etc. for remote players | the image, media and sound elements are written into the host's local surface model, not sent as Lua ops, so a remote client never receives them. Single player and the host see them. The route, if needed: issue them as upsert ops |
 
 ---
 
@@ -178,6 +179,16 @@ rates (0.5 s), wrong at frame rates. JS decides *what* is shown; expressions mov
 Everything above runs on the vector mod as it is, plus these additions it gained for this
 front-end (all additive): `wrap=1`, `lh`, string escapes (0.10.1.0); `sh` on closed shapes
 and on `T` (0.10.2.0).
+
+Reported to the vector side, open there (2026-09-14, `FOR-VECTOR-SESSION.md`):
+
+- **Radial fill vertex count.** One 90x50 rounded box with a radial gradient costs ~49,000
+  of the 60,000-vertex mesh cap at a 2x2's on-screen size; past the cap the last shapes in
+  the scene are dropped silently, and on the test page that was the click button. Until a
+  ring cap lands, a page with a radial gradient should keep its buttons early in document
+  order or use a linear gradient.
+- **Error spam on capture.** 66 Unity errors about `VectorSlice` per screen capture of a
+  page whose text forces mesh cuts. Cosmetic: the capture and the console are fine.
 
 Still open, only if a page needs it: non-convex clips by convex decomposition of the clip
 polygon on the existing geometric path. A stencil pass does not fit a one-mesh, one-material

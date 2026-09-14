@@ -2235,8 +2235,12 @@ tiles stay in one mesh and the naive "cut at every label" version turns them int
 case it cannot serve: a label declared before any shape, since the surface's own renderer always
 draws before its children; it stays on top rather than vanishing.
 
-**Open, reported 2026-09-14 (not yet investigated):** on `HtmlTest2.lua` the **first click on
-the counter takes a long time to register; later clicks are fast.** Candidates, in the
+**Closed 2026-09-15 without a diagnosis:** on `HtmlTest2.lua` the **first click on the
+counter took a long time to register; later clicks were fast.** After the image-element fix
+(the element in the surface model) the user reports no slow first click. The most likely
+link is that the earlier page re-applied the image element on every emit, so the first
+click's emit also queued a download; not measured, so if it comes back, measure it. The
+original notes follow.**Reported 2026-09-14:** Candidates, in the
 order to test: the panel wake after sleep (the document is disabled after three idle frames
 and the first write re-enables, re-attaches and lays out from cold); the first JS `data`
 event on the worker (engine warm-up); ScriptedScreens' own 0.25 s click debounce would not
