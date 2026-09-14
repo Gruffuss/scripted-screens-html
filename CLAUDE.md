@@ -2141,9 +2141,17 @@ it), `radial-gradient` backgrounds (`GR units=bbox`, size keywords approximated 
 `T` (0.10.2.0, TextMeshPro underlay: one per label).
 
 **Elements.** `<img>`, `<video>`, `<audio>` are ScriptedScreens' own `image`/`media`/`sound`
-elements, applied through the real `ApplyElementInternal` with a **hierarchical id**
-(`page/imgN`), which parents them under the page's host so their px rect is simply the
-design box scaled to the host. Removed with `RemoveElement` when the box is gone.
+elements, applied through the real `ApplyElementInternal` with the id `page/imgN` and the
+design box scaled to the host's px. **Correction (2026-09-15):** a hierarchical id does
+*not* parent an element under the page host; ScriptedScreens only does that for scrollview
+parents (or `parent_id`), so the host sits under the surface root beside the page. And
+after every batch and rebuild it re-sorts hosts by `z_index`, moving each **model** element
+to the last sibling, so an element that is merely applied sinks under the page and is never
+seen (the "image loaded for a second" report). The element is therefore written into the
+surface model (`SurfaceState.Elements`) with `z_index` one above the page's, and removed
+from it with `RemoveElement` when the box is gone. Local model only: a remote client is not
+sent it. The ScriptedScreens guide (MCP `search_docs` scope `ss`) documents `parent_id`
+and `z_index`; read it before the decompile.
 `<button>` (or `onclick`/`data-click`) is a vector click region: the background `R`
 carries `id` + `click=1` and the click arrives at the page element's Lua `on_click` with
 the button id. Page JS does not see clicks by design; Lua bounces what it wants via `data`.

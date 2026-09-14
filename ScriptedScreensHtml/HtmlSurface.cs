@@ -517,8 +517,32 @@ internal sealed class HtmlSurface : MonoBehaviour
             _externalState[id] = stateText;
             try
             {
+                // The element must be in the surface model, not just applied: after every
+                // batch and rebuild ScriptedScreens re-sorts the hosts by z_index, and only
+                // model elements take part, each moved to the last sibling. An applied-only
+                // host sinks under the page and the image is never seen. In the model it is
+                // ordered (one above the page), re-applied on a rebuild and cleared with the
+                // surface. ponytail: local model only; a remote client is not sent it.
+                var pageZ = 0;
+                if (state.Surfaces.TryGetValue(Surface, out var model) && model != null)
+                {
+                    lock (model.PendingOpsLock)
+                    {
+                        if (model.Elements.TryGetValue(ElementId, out var pageElement) && pageElement != null)
+                            foreach (var pr in pageElement.Props)
+                                if (string.Equals(pr.Key, "z_index", StringComparison.OrdinalIgnoreCase) || string.Equals(pr.Key, "zIndex", StringComparison.OrdinalIgnoreCase))
+                                    pageZ = (int)pr.Value.Number;
+                    }
+                }
+                props.Add(new SS.UiProp { Key = "z_index", Value = SS.UiValue.FromNumber(pageZ + 1) });
+                element.Props = props.ToArray();
+                if (model != null)
+                    lock (model.PendingOpsLock)
+                        model.Elements[id] = element;
                 SS.ApplyElementInternal(Board as Motherboard, Cartridge as CartridgeIntegratedCircuitLua, Visor as ProgrammableVisorGlasses, state, Surface, element);
                 _externals.Add(id);
+                if (state.SurfaceElementRoots.TryGetValue(Surface, out var roots) && roots.TryGetValue(id, out var host) && host != null)
+                    host.transform.SetAsLastSibling();
             }
             catch (Exception ex)
             {
@@ -528,6 +552,9 @@ internal sealed class HtmlSurface : MonoBehaviour
         foreach (var id in new List<string>(_externals))
         {
             if (seen.Contains(id)) continue;
+            if (state.Surfaces.TryGetValue(Surface, out var model) && model != null)
+                lock (model.PendingOpsLock)
+                    model.Elements.Remove(id);
             SS.RemoveElement(state, Surface, id);
             _externals.Remove(id);
             _externalState.Remove(id);

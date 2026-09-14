@@ -140,6 +140,14 @@ ui:element({
     on_click = function(v, player) print("native click") end,
 })
 
+-- A native ScriptedScreens image as a control: if this one shows and the page's <img> does
+-- not, the download works and the fault is in how the page places its image element.
+ui:element({
+    id = "native_img", type = "image",
+    rect = { unit = "px", x = W - 130, y = H - 130, w = 120, h = 72 },
+    props = { url = "https://raw.githubusercontent.com/Gruffuss/scripted-screens-vector/main/ScriptedScreensVector/About/thumb.png" },
+})
+
 data = ui:element({
     id = "page_data",
     type = "html",
