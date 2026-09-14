@@ -59,14 +59,16 @@ internal sealed class ScriptHost : IDisposable
     private readonly Action<string, string> _appendHtml;
     private readonly Action<string> _remove;
     private readonly Action<string, string> _setValue;
+    private readonly Action<string> _wantClicks;
 
     public ScriptHost(Func<string, VisualElement?> find, Func<string, SvgShape?> findShape, Func<string, HtmlNode?> findNode,
         Func<string, List<string>> query, Action<VisualElement, string> setClass, List<CssRule> rules, Action<string> warn,
-        Action<string, string> appendHtml, Action<string> remove, Action<string, string> setValue)
+        Action<string, string> appendHtml, Action<string> remove, Action<string, string> setValue, Action<string> wantClicks)
     {
         _appendHtml = appendHtml;
         _remove = remove;
         _setValue = setValue;
+        _wantClicks = wantClicks;
         _find = find;
         _findShape = findShape;
         _findNode = findNode;
@@ -98,6 +100,17 @@ internal sealed class ScriptHost : IDisposable
     /// Deliver a chip payload. If the page has a data handler it gets a `data` event;
     /// otherwise the fallback runs on the main thread. Ordered after Run by the queue.
     /// </summary>
+    /// <summary>A click on a page element: listeners, `onclick`, and an inline onclick attribute run.</summary>
+    public void EmitClick(string id)
+    {
+        _toEngine.Enqueue(() =>
+        {
+            _engine!.Invoke("__click", id);
+            AfterRun();
+        });
+        _wake.Set();
+    }
+
     /// <summary>A control changed (user or ScriptedScreens): the element gets `input` and `change` events and its value.</summary>
     public void EmitInput(string id, string value)
     {
@@ -211,6 +224,7 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__appendHtml", new Action<string, string>((parent, html) => _toMain.Enqueue(() => _appendHtml(parent, html))));
             _engine.SetValue("__remove", new Action<string>(id => _toMain.Enqueue(() => _remove(id))));
             _engine.SetValue("__setValue", new Action<string, string>((id, v) => _toMain.Enqueue(() => _setValue(id, v))));
+            _engine.SetValue("__wantClicks", new Action<string>(id => _toMain.Enqueue(() => _wantClicks(id))));
             _engine.SetValue("__size", new Func<string, double[]>(Size));
             _engine.SetValue("__canvasFrame", new Action<string, double[], string[], int>(CanvasFrame));
             _engine.SetValue("__now", new Func<double>(() => _frameNow * 1000.0));
@@ -485,21 +499,29 @@ function __ctx(id){
 }
 function __flushCanvases(){ for (var k in __canvases) { var c = __canvases[k]; if (c.__cmds.length) c.__flush(); } }
 
-// ---- controls: values and per-element listeners ----
+// ---- controls: values, per-element listeners, events ----
 var __values = {}, __elListeners = {}, __elHandlers = {};
+function __fire(id, type, detail){
+  var el = __el(id);
+  var ev = { type: type, target: el, currentTarget: el, detail: detail, defaultPrevented: false,
+             preventDefault: function(){ this.defaultPrevented = true; }, stopPropagation: function(){}, stopImmediatePropagation: function(){} };
+  var fns = (__elListeners[id] || {})[type] || [];
+  for (var i = 0; i < fns.length; i++) { try { fns[i].call(el, ev); } catch (e) { console.error(String(e && e.stack || e)); } }
+  var h = (__elHandlers[id] || {})['on' + type];
+  if (typeof h === 'function') { try { h.call(el, ev); } catch (e) { console.error(String(e && e.stack || e)); } }
+  // An inline handler attribute, as a browser runs it: the code with `event` and `this`.
+  var code = __getAttr(id, 'on' + type);
+  if (code) { try { (new Function('event', code)).call(el, ev); } catch (e) { console.error('on' + type + ' of #' + id + ': ' + String(e && e.stack || e)); } }
+  return ev;
+}
 function __input(id, value){
   __values[id] = value;
-  var el = __el(id);
-  var ls = __elListeners[id] || {};
-  var hs = __elHandlers[id] || {};
-  var types = ['input', 'change'];
-  for (var t = 0; t < types.length; t++) {
-    var ev = { type: types[t], target: el, currentTarget: el, detail: value, preventDefault: function(){}, stopPropagation: function(){} };
-    var fns = ls[types[t]] || [];
-    for (var i = 0; i < fns.length; i++) { try { fns[i](ev); } catch (e) { console.error(String(e && e.stack || e)); } }
-    var h = hs['on' + types[t]];
-    if (typeof h === 'function') { try { h(ev); } catch (e) { console.error(String(e && e.stack || e)); } }
-  }
+  __fire(id, 'input', value);
+  __fire(id, 'change', value);
+  __flushCanvases();
+}
+function __click(id){
+  __fire(id, 'click', null);
   __flushCanvases();
 }
 
@@ -512,6 +534,7 @@ function __el(id){
     get checked(){ var v = __values[id]; return v !== undefined ? v === 'true' : __getAttr(id, 'checked') !== null; },
     set checked(v){ __values[id] = v ? 'true' : 'false'; __setValue(id, v ? 'true' : 'false'); },
     get onchange(){ return (__elHandlers[id] || {}).onchange; }, set onchange(f){ (__elHandlers[id] = __elHandlers[id] || {}).onchange = f; },
+    get onclick(){ return (__elHandlers[id] || {}).onclick; }, set onclick(f){ (__elHandlers[id] = __elHandlers[id] || {}).onclick = f; __wantClicks(id); },
     get oninput(){ return (__elHandlers[id] || {}).oninput; }, set oninput(f){ (__elHandlers[id] = __elHandlers[id] || {}).oninput = f; },
     focus: function(){}, blur: function(){}, select: function(){},
     get style(){ return new Proxy({}, { set: function(o, p, v){ __setStyle(id, String(p), String(v)); return true; }, get: function(){ return ''; } }); },
@@ -528,7 +551,7 @@ function __el(id){
     getAttribute: function(n){ return __getAttr(id, n); },
     setAttribute: function(n, v){ __setAttr(id, n, String(v)); },
     getContext: function(){ return __ctx(id); },
-    addEventListener: function(type, fn){ var l = __elListeners[id] = __elListeners[id] || {}; (l[type] = l[type] || []).push(fn); },
+    addEventListener: function(type, fn){ var l = __elListeners[id] = __elListeners[id] || {}; (l[type] = l[type] || []).push(fn); if (type === 'click') __wantClicks(id); },
     removeEventListener: function(type, fn){ var l = __elListeners[id]; if (l && l[type]) l[type] = l[type].filter(function(f){ return f !== fn; }); },
     get tagName(){ return String(__getAttr(id, '__tag') || 'DIV').toUpperCase(); },
     appendChild: function(c){ __appendHtml(id, __serialize(c)); if (c.__adopt) c.__adopt(); return c; },

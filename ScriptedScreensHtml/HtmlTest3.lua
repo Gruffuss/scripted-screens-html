@@ -49,6 +49,8 @@ local page = [[
   input[type=checkbox], input[type=radio] { width: 16px; height: 16px; accent-color: #2E8B6E; }
   select { width: 110px; height: 26px; background: #172033; color: var(--ink); }
   #echo { margin-top: 6px; color: var(--accent); font-size: 13px; }
+  button { font-size: 13px; padding: 4px 10px; background: #2E8B6E; color: white; border-radius: 4px; }
+  #anyel { color: var(--dim); font-size: 12px; }
   /* the browser way to restyle a checkbox: appearance none, then your own box and a :checked rule */
   .pill-check { appearance: none; width: 34px; height: 18px; border-radius: 9px; background: #24314A; border: 1px solid var(--dim); }
   .pill-check:checked { background: #2E8B6E; border-color: #2E8B6E; }
@@ -85,10 +87,15 @@ local page = [[
     <label>mode</label><select id="mode" name="mode"><option value="auto">Auto</option><option value="manual" selected>Manual</option><option value="off">Off</option></select>
     <label>unit</label><input type="radio" id="kpa" name="unit" value="kPa" checked><label>kPa</label><input type="radio" id="mpa" name="unit" value="MPa"><label>MPa</label>
     <label>custom</label><input type="checkbox" id="custom" name="custom" class="pill-check">
+    <button id="ping">listener</button>
+    <button onclick="document.getElementById('echo').textContent = 'js: inline onclick ran on ' + this.id" id="inline">inline</button>
+    <span id="anyel">a span with a click listener</span>
   </form>
   <div id="echo">js: nothing changed yet</div>
   <script>
     var echo = document.getElementById('echo');
+    document.getElementById('ping').addEventListener('click', function(e){ echo.textContent = 'js: click listener on ' + e.target.id; });
+    document.getElementById('anyel').addEventListener('click', function(){ echo.textContent = 'js: the span was clicked'; });
     ['room', 'alarm', 'target', 'mode', 'kpa', 'mpa', 'custom'].forEach(function(id){
       document.getElementById(id).addEventListener('change', function(e){
         echo.textContent = 'js: ' + id + ' = ' + e.target.value + (id === 'alarm' ? ' (checked ' + e.target.checked + ')' : '');

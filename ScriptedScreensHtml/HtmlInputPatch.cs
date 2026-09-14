@@ -34,8 +34,15 @@ internal static class HtmlInputPatch
                 if (!string.Equals(input.Event, "click", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(input.Value))
                     return true;
                 var owner = HtmlSurface.Find(board, cartridge, visor, surface, id);
-                if (owner == null || !owner.OnControlClick(input.Value, out var cname, out var cvalue))
+                if (owner == null)
                     return true;
+                if (!owner.OnControlClick(input.Value, out var cname, out var cvalue))
+                {
+                    // An ordinary click region: the page script gets a click event on the
+                    // element, and Lua's on_click still gets the node id.
+                    owner.OnPageClick(input.Value);
+                    return true;
+                }
                 SS.DispatchUiInput(board, cartridge, visor, SS.SerializeUiInput(new SS.UiInput { Surface = surface, Id = id, Event = "change", Value = cname + "=" + cvalue }));
                 return false;
             }

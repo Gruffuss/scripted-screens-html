@@ -415,7 +415,8 @@ internal sealed class HtmlSurface : MonoBehaviour
                         Wake();
                     }
                 },
-                SetInputValue);
+                SetInputValue,
+                WantClicks);
         }
         _svgs.Clear();
         foreach (var shape in _shapes.Values)
@@ -873,6 +874,27 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (_built != null)
             foreach (var kv in _built.NodeOf)
                 if (kv.Value == node) { _built.Reclass(kv.Key, node.Attr("class") ?? string.Empty); break; }
+    }
+
+    /// <summary>A click on a page click region: the script gets a `click` event on the element.</summary>
+    internal void OnPageClick(string key)
+    {
+        _script?.EmitClick(key);
+    }
+
+    /// <summary>
+    /// The script added a click listener (or set onclick) on an element: it becomes a click
+    /// region on the next emit, as a button is. Marked on the node so the emitter sees it.
+    /// </summary>
+    private void WantClicks(string key)
+    {
+        if (_built == null || !_byId.TryGetValue(key, out var ve) || !_built.NodeOf.TryGetValue(ve, out var node))
+            return;
+        if (node.Attr("data-click") != null || node.Tag == "button" || node.Attr("onclick") != null)
+            return;
+        node.Attributes["data-click"] = "1";
+        _dirty = true;
+        Wake();
     }
 
     /// <summary>The page script set a control's value or checked state.</summary>
