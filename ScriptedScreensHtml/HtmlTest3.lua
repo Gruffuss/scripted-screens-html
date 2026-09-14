@@ -9,6 +9,7 @@
 --   ~         a general-sibling rule
 --   form      text input, checkbox, range, select: ScriptedScreens controls placed over the
 --             page; the page script gets change events, Lua's on_change gets "name=value"
+--   scroll    a box with overflow: auto, longer than it is tall; wheel over it
 
 local ui = ss.ui.surface("main")
 ss.ui.activate("main")
@@ -51,6 +52,9 @@ local page = [[
   #echo { margin-top: 6px; color: var(--accent); font-size: 13px; }
   button { font-size: 13px; padding: 4px 10px; background: #2E8B6E; color: white; border-radius: 4px; }
   #anyel { color: var(--dim); font-size: 12px; }
+  .log { height: 64px; overflow: auto; background: #172033; border-radius: 6px; padding: 4px 8px; margin-top: 8px; width: 300px; }
+  .log div { font-size: 12px; color: var(--dim); padding: 2px 0; }
+  .log div:nth-child(odd) { color: var(--ink); }
   /* the browser way to restyle a checkbox: appearance none, then your own box and a :checked rule */
   .pill-check { appearance: none; width: 34px; height: 18px; border-radius: 9px; background: #24314A; border: 1px solid var(--dim); }
   .pill-check:checked { background: #2E8B6E; border-color: #2E8B6E; }
@@ -92,6 +96,11 @@ local page = [[
     <span id="anyel">a span with a click listener</span>
   </form>
   <div id="echo">js: nothing changed yet</div>
+  <div class="log">
+    <div>01 overflow: auto scrolls with the wheel</div><div>02 the box clips to itself</div><div>03 and slides its children</div>
+    <div>04 a scroll costs one rebuild</div><div>05 no tick, no network</div><div>06 vertical only</div>
+    <div>07 nth-child striping still applies</div><div>08 seven</div><div>09 eight</div><div>10 nine</div><div>11 ten</div><div>12 the end</div>
+  </div>
   <script>
     var echo = document.getElementById('echo');
     document.getElementById('ping').addEventListener('click', function(e){ echo.textContent = 'js: click listener on ' + e.target.id; });

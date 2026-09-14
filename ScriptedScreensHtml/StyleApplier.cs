@@ -91,7 +91,9 @@ internal static class StyleApplier
             case "align-items": s.alignItems = AlignOf(v); break;
             case "align-self": s.alignSelf = AlignOf(v); break;
             case "align-content": s.alignContent = AlignOf(v); break;
-            case "overflow": s.overflow = v == "hidden" || v == "clip" || v == "scroll" || v == "auto" ? Overflow.Hidden : Overflow.Visible; break;
+            case "overflow":
+            case "overflow-y": s.overflow = v == "hidden" || v == "clip" || v == "scroll" || v == "auto" ? Overflow.Hidden : Overflow.Visible; break;
+            case "overflow-x": break;
             case "visibility": s.visibility = v == "hidden" ? UnityEngine.UIElements.Visibility.Hidden : UnityEngine.UIElements.Visibility.Visible; break;
             case "opacity": s.opacity = Num(v); break;
 

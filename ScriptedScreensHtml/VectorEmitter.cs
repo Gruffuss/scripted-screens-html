@@ -109,11 +109,34 @@ internal static class VectorEmitter
         }
         if (ve.style.overflow.value == Overflow.Hidden && w > 0f && h > 0f)
         {
-            var id = "clip" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-            ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x)).Append(" y=").Append(F(y))
-                .Append(" w=").Append(F(w)).Append(" h=").Append(F(h)).Append(Radius(rs, w, h)).Append(" }\n");
-            ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
-            groups++;
+            if (Scrolls(css))
+            {
+                // overflow: auto / scroll: the vector mod's scroll container. It clips to the
+                // box and slides its children by a client-side offset (wheel or drag), so a
+                // scroll costs one rebuild and no tick. Children stay in page coordinates.
+                var ch = 0f;
+                foreach (var child in ve.Children())
+                {
+                    if (child.resolvedStyle.display == DisplayStyle.None) continue;
+                    var cl = child.layout;
+                    if (float.IsNaN(cl.yMax)) continue;
+                    ch = Mathf.Max(ch, cl.yMax + child.resolvedStyle.marginBottom);
+                }
+                ch += rs.paddingBottom;
+                ctx.Body.Append(indent).Append("SC id=").Append(string.IsNullOrEmpty(ve.name) ? "scroll" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture) : ve.name)
+                    .Append(" x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h))
+                    .Append(" ch=").Append(F(Mathf.Max(ch, h))).Append(Radius(rs, w, h)).Append(" {\n");
+                ctx.Out.Nodes++;
+                groups++;
+            }
+            else
+            {
+                var id = "clip" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x)).Append(" y=").Append(F(y))
+                    .Append(" w=").Append(F(w)).Append(" h=").Append(F(h)).Append(Radius(rs, w, h)).Append(" }\n");
+                ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
+                groups++;
+            }
         }
 
         // Background and border of the box itself.
@@ -633,7 +656,9 @@ internal static class VectorEmitter
         var align = rs.unityTextAlign;
         var centre = align == TextAnchor.MiddleCenter || align == TextAnchor.UpperCenter || align == TextAnchor.LowerCenter;
         var right = align == TextAnchor.MiddleRight || align == TextAnchor.UpperRight || align == TextAnchor.LowerRight;
-        var clipped = label.style.overflow.value == Overflow.Hidden || (label.parent != null && label.parent.style.overflow.value == Overflow.Hidden);
+        // A label in a scrolling box is not clipped to a line: the container slides it.
+        var clipped = (label.style.overflow.value == Overflow.Hidden && !Scrolls(css))
+                      || (label.parent != null && label.parent.style.overflow.value == Overflow.Hidden && !Scrolls(ctx.Built.CssOf(label.parent)));
         var wraps = rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && text.IndexOf(' ') >= 0;
         if (!clipped && !wraps)
         {
@@ -1088,6 +1113,11 @@ internal static class VectorEmitter
             ctx.Body.Append(indent).Append("R x=").Append(F(left + sw * 0.5f)).Append(" y=").Append(F(top + sw * 0.5f)).Append(" w=").Append(F(size - sw)).Append(" h=").Append(F(size - sw)).Append(" rx=").Append(F(Mathf.Max(0f, rx - sw * 0.5f))).Append(" f=none s=").Append(Hex(ink)).Append(" sw=").Append(F(sw)).Append('\n');
             ctx.Out.Nodes++;
         }
+    }
+
+    private static bool Scrolls(Dictionary<string, string> css)
+    {
+        return (css.TryGetValue("overflow", out var o) || css.TryGetValue("overflow-y", out o)) && o.Trim() is "auto" or "scroll";
     }
 
     /// <summary>A list marker in the text colour: a filled disc, a hollow circle or a filled square.</summary>
