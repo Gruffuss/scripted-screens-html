@@ -332,7 +332,7 @@ internal static class HtmlRenderer
             foreach (var child in node.Children)
             {
                 if (list && child.Tag == "li")
-                    AddMarker(child, node, result.CssOf(ve), ++ordinal);
+                    AddMarker(child, node, result.CssOf(ve), ++ordinal, rules);
                 Append(ve, child, rules, result);
             }
             ApplyGap(ve, result.CssOf(ve));
@@ -683,15 +683,37 @@ internal static class HtmlRenderer
     /// drawn as shapes by the emitter (a span carrying data-marker), because no text face
     /// here is guaranteed the geometric glyphs and a bullet is a shape anyway.
     /// </summary>
-    private static void AddMarker(HtmlNode li, HtmlNode list, Dictionary<string, string> css, int ordinal)
+    private static void AddMarker(HtmlNode li, HtmlNode list, Dictionary<string, string> css, int ordinal, List<CssRule> rules)
     {
         if (li.Attr("data-listed") != null) return;
         li.Attributes["data-listed"] = "1";
         var type = list.Tag == "ol" ? "decimal" : "disc";
-        if (css.TryGetValue("list-style-type", out var lst)) type = lst.Trim();
-        else if (css.TryGetValue("list-style", out var ls))
-            foreach (var part in ls.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        void TakeType(string name, string value)
+        {
+            if (name == "list-style-type") { type = value.Trim(); return; }
+            if (name != "list-style") return;
+            foreach (var part in value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 if (part is "none" or "disc" or "circle" or "square" or "decimal" or "lower-alpha" or "upper-alpha" or "lower-roman" or "upper-roman") type = part;
+        }
+        // The list's own value, then rules on the item, then the item's inline style: the
+        // item has not been through the cascade yet, so its declarations are read here.
+        if (css.TryGetValue("list-style", out var ls)) TakeType("list-style", ls);
+        if (css.TryGetValue("list-style-type", out var lst)) TakeType("list-style-type", lst);
+        var matched = new List<(int spec, int order, CssRule rule)>();
+        foreach (var rule in rules)
+        {
+            var best = -1;
+            foreach (var sel in rule.Selectors)
+                if (sel.Matches(li)) best = Math.Max(best, sel.Specificity);
+            if (best >= 0) matched.Add((best, rule.Order, rule));
+        }
+        matched.Sort((x, y) => x.spec != y.spec ? x.spec.CompareTo(y.spec) : x.order.CompareTo(y.order));
+        foreach (var m in matched)
+            foreach (var d in m.rule.Declarations)
+                TakeType(d.Name, d.Value);
+        if (li.Attr("style") is { } inline)
+            foreach (var d in CssParser.ParseDeclarations(inline))
+                TakeType(d.Name, d.Value);
         if (type == "none") return;
         string? text = type switch
         {
