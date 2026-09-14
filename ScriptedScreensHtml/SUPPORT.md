@@ -39,6 +39,12 @@ keyframe, which compiles to the same thing.
 | `<table>` with `thead/tbody/tfoot/tr/td/th/caption`, `colspan` | laid out as a grid, one column per cell of the widest row, columns of equal width (size them with CSS on the cells); `tr` is transparent, so a rule on `tr` styles nothing |
 | `<ul>/<ol>/<li>` | markers at the front of each item, as a browser draws them: disc, circle and square are shapes in the text colour (no font involved), decimal/alpha/roman are text; `list-style-type` on the list or the item, `none` for no marker |
 | `<a href>` | underlined link-coloured text; there is nowhere to navigate, so `href` is inert |
+| `<input type=text/password/number/search/…>`, `<textarea>` | a ScriptedScreens `textinput` over the box (`value`, `placeholder`, `title`); the page's `background`, `color` and `font-size` style it. Editing it fires `input` and `change` on the element in page script (`e.target.value`), and the page element's Lua `on_change(v)` gets `"name=value"` (the input's `name`, else its id) |
+| `<input type=checkbox>`, `<input type=radio name=g>` | ScriptedScreens `checkbox`/`radio`; `checked` state kept by the page, radios exclusive per `name`; `accent-color` colours the mark. Script sees `e.target.checked`; Lua gets `"name=true"`/`"name=false"` |
+| `<input type=range min max value>` | a ScriptedScreens `slider`; `accent-color` is the fill; Lua gets the number |
+| `<select><option value>` | a ScriptedScreens `select`; `selected` on an option picks the initial one; script and Lua get the option's `value` (else its text) |
+| `<input type=button/submit/reset value>` | a click region like `<button>` |
+| Script writes to a control | `el.value = …` and `el.checked = …` update the control; `focus()`/`blur()` are no-ops |
 | `<img src>` | a ScriptedScreens `image` element placed over the box (URLs load through ScriptedScreens; raw GitHub works, Wikimedia refuses Unity's request); `width`/`height` attributes or CSS size the box. Confirmed 2026-09-15: stays through clicks and surface rebuilds. Host and single player only: the element is written to the local surface model, not sent to remote clients |
 | `<video src autoplay loop muted>`, `<audio src autoplay loop>` | ScriptedScreens `media` and `sound` elements, placed the same way as `<img>`; ScriptedScreens' own multiplayer and video gating applies. Not yet seen on a console |
 | `<button id>` (also any element with `onclick` or `data-click`) | a click region in the vector scene. The click arrives at the page element's Lua `on_click(nodeId, player)` with the button's id, and a `data` write from there updates the page. Page JS does not see clicks; bounce them through `data` if the page needs them. Confirmed 2026-09-15 with no noticeable delay on the first click |
@@ -51,7 +57,7 @@ keyframe, which compiles to the same thing.
 | Feature | Why |
 |---|---|
 | `<canvas>` | its whole model is "script repaints pixels every frame". The vector layer draws geometry once and animates it with expressions. A canvas is laid out but draws nothing. Use `<svg>` with expressions |
-| `<input> <select> <textarea> <form>` | no text or pointer input path into the page beyond button clicks. ScriptedScreens has its own `textinput`, `checkbox`, `slider` and `select`; mapping the tags onto them the way `<img>` is mapped is the next batch |
+| `<form>` submission, `<input type=file/date/color>`, `<datalist>` | a form is just a box (no submit, no navigation); those input types have no ScriptedScreens control. `<input type=date>` and friends fall back to a text field |
 | `<iframe> <object>` | no meaning here |
 | Text clipped to a rounded shape | a label under a rounded `overflow: hidden` box is clipped to the box's rectangle, not its rounded outline (the vector text layer masks with a rectangle). Standing limit; invisible at the radii dashboards use |
 | `<img>` etc. for remote players | the image, media and sound elements are written into the host's local surface model, not sent as Lua ops, so a remote client never receives them. Single player and the host see them. The route, if needed: issue them as upsert ops |

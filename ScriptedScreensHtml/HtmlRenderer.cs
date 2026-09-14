@@ -261,16 +261,42 @@ internal static class HtmlRenderer
             return;
         }
 
-        if (node.Tag == "img" || node.Tag == "video" || node.Tag == "audio")
+        if (node.Tag == "input")
         {
-            // A box in the layout; the picture or sound itself is a ScriptedScreens element
-            // positioned over it by the surface (see HtmlSurface.ApplyExternals).
+            var kind = (node.Attr("type") ?? "text").ToLowerInvariant();
+            if (kind is "button" or "submit" or "reset")
+            {
+                // A push button is the same click region as <button>.
+                node.Tag = "button";
+                node.Children.Add(new HtmlNode { Text = node.Attr("value") ?? "Submit", Parent = node });
+            }
+            else if (kind == "hidden")
+                return;
+        }
+
+        if (node.Tag == "img" || node.Tag == "video" || node.Tag == "audio" || node.Tag == "input" || node.Tag == "select" || node.Tag == "textarea")
+        {
+            // A box in the layout; the picture, sound or control itself is a ScriptedScreens
+            // element positioned over it by the surface (see HtmlSurface.ApplyExternals).
             var box = new VisualElement();
             var bw = node.Attr("width");
             var bh = node.Attr("height");
             if (bw != null) box.style.width = StyleApplier.Len(bw);
             if (bh != null) box.style.height = StyleApplier.Len(bh);
             if (node.Tag == "audio") { box.style.width = 0; box.style.height = 0; }
+            switch (node.Tag)
+            {
+                case "input":
+                {
+                    var kind = (node.Attr("type") ?? "text").ToLowerInvariant();
+                    if (kind is "checkbox" or "radio") { box.style.width = 18; box.style.height = 18; }
+                    else if (kind == "range") { box.style.width = 140; box.style.height = 20; }
+                    else { box.style.width = 160; box.style.height = 26; }
+                    break;
+                }
+                case "select": box.style.width = 160; box.style.height = 26; break;
+                case "textarea": box.style.width = 160; box.style.height = 60; break;
+            }
             box.style.flexShrink = 0;
             Register(box, node, result);
             ApplyStyles(box, node, rules, result);

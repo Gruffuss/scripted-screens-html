@@ -414,7 +414,8 @@ internal sealed class HtmlSurface : MonoBehaviour
                         _dirty = true;
                         Wake();
                     }
-                });
+                },
+                SetInputValue);
         }
         _svgs.Clear();
         foreach (var shape in _shapes.Values)
@@ -459,6 +460,10 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// </summary>
     /// <summary>Ids of the ScriptedScreens elements created for img/video/audio, to update and remove.</summary>
     private readonly HashSet<string> _externals = new(StringComparer.Ordinal);
+    /// <summary>The page node behind each external, by key, for routing a control's events.</summary>
+    private readonly Dictionary<string, HtmlNode> _externalNodes = new(StringComparer.Ordinal);
+    /// <summary>Current value of each control the user or the script changed: text, "true"/"false", a slider number, a select index.</summary>
+    private readonly Dictionary<string, string> _inputValues = new(StringComparer.Ordinal);
     /// <summary>What each external element was last applied with, so an unchanged one is not re-sent (a re-send re-downloads an image).</summary>
     private readonly Dictionary<string, string> _externalState = new(StringComparer.Ordinal);
 
@@ -482,11 +487,20 @@ internal sealed class HtmlSurface : MonoBehaviour
             var id = ElementId + "/" + ext.Key;
             seen.Add(id);
             var node = ext.Node;
+            _externalNodes[ext.Key] = node;
             var url = node.Attr("src") ?? string.Empty;
-            var props = new List<SS.UiProp> { new() { Key = "url", Value = SS.UiValue.FromString(url) } };
+            var props = new List<SS.UiProp>();
+            if (node.Tag is "img" or "video" or "audio")
+                props.Add(new SS.UiProp { Key = "url", Value = SS.UiValue.FromString(url) });
+            var styleProps = new List<SS.UiProp>();
             string type;
             switch (node.Tag)
             {
+                case "input":
+                case "textarea":
+                case "select":
+                    type = ControlProps(node, ext, sx, props, styleProps);
+                    break;
                 case "video":
                     type = "media";
                     props.Add(new SS.UiProp { Key = "playing", Value = SS.UiValue.FromString(node.Attr("autoplay") != null ? "true" : "false") });
@@ -508,9 +522,11 @@ internal sealed class HtmlSurface : MonoBehaviour
                 Type = type,
                 Rect = new SS.UiRect { Unit = SS.UiRectUnit.Pixels, X = ext.X * sx, Y = ext.Y * sy, W = ext.W * sx, H = ext.H * sy },
                 Props = props.ToArray(),
+                Style = styleProps.ToArray(),
             };
             var stateKey = new System.Text.StringBuilder(type).Append('|').Append(element.Rect.X).Append(',').Append(element.Rect.Y).Append(',').Append(element.Rect.W).Append(',').Append(element.Rect.H);
-            foreach (var pr in props) stateKey.Append('|').Append(pr.Key).Append('=').Append(pr.Value.String ?? pr.Value.Number.ToString(CultureInfo.InvariantCulture));
+            foreach (var pr in props) stateKey.Append('|').Append(pr.Key).Append('=').Append(PropText(pr.Value));
+            foreach (var pr in styleProps) stateKey.Append('|').Append(pr.Key).Append('=').Append(PropText(pr.Value));
             var stateText = stateKey.ToString();
             if (_externalState.TryGetValue(id, out var last) && last == stateText)
                 continue;
@@ -552,6 +568,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         foreach (var id in new List<string>(_externals))
         {
             if (seen.Contains(id)) continue;
+            _externalNodes.Remove(id.Substring(ElementId.Length + 1));
             if (state.Surfaces.TryGetValue(Surface, out var model) && model != null)
                 lock (model.PendingOpsLock)
                     model.Elements.Remove(id);
@@ -665,6 +682,209 @@ internal sealed class HtmlSurface : MonoBehaviour
                 }
             }
         }
+    }
+
+    private static string PropText(SS.UiValue v)
+    {
+        if (v.Type == SS.UiValueType.Array && v.Array != null)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var item in v.Array) sb.Append(PropText(item)).Append('|');
+            return sb.ToString();
+        }
+        return v.String ?? v.Number.ToString(CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// The ScriptedScreens element behind an input, select or textarea, with its props and
+    /// style from the page: text inputs and textareas are `textinput`, checkbox and radio
+    /// their own types, range a `slider`, select a `select`. The current value comes from
+    /// what the user or the script set, else from the markup.
+    /// </summary>
+    private string ControlProps(HtmlNode node, VectorEmitter.External ext, float sx, List<SS.UiProp> props, List<SS.UiProp> style)
+    {
+        var rs = ext.Ve.resolvedStyle;
+        var css = _built?.CssOf(ext.Ve);
+        var kind = node.Tag == "input" ? (node.Attr("type") ?? "text").ToLowerInvariant() : node.Tag;
+        _inputValues.TryGetValue(ext.Key, out var current);
+        string type;
+        switch (kind)
+        {
+            case "checkbox":
+            case "radio":
+            {
+                type = kind;
+                var on = current != null ? current == "true" : node.Attr("checked") != null;
+                props.Add(new SS.UiProp { Key = kind == "radio" ? "selected" : "checked", Value = SS.UiValue.FromString(on ? "true" : "false") });
+                props.Add(new SS.UiProp { Key = "text", Value = SS.UiValue.FromString(string.Empty) });
+                if (Accent(css, out var check)) style.Add(new SS.UiProp { Key = kind == "radio" ? "radio_color" : "check_color", Value = SS.UiValue.FromString(VectorEmitter.Hex(check)) });
+                break;
+            }
+            case "range":
+            {
+                type = "slider";
+                var min = Num(node.Attr("min"), 0f);
+                var max = Num(node.Attr("max"), 100f);
+                var value = Num(current ?? node.Attr("value"), (min + max) * 0.5f);
+                props.Add(new SS.UiProp { Key = "value", Value = SS.UiValue.FromNumber(value) });
+                props.Add(new SS.UiProp { Key = "min", Value = SS.UiValue.FromNumber(min) });
+                props.Add(new SS.UiProp { Key = "max", Value = SS.UiValue.FromNumber(max) });
+                if (Accent(css, out var fill)) style.Add(new SS.UiProp { Key = "fill", Value = SS.UiValue.FromString(VectorEmitter.Hex(fill)) });
+                break;
+            }
+            case "select":
+            {
+                type = "select";
+                var options = new List<SS.UiValue>();
+                var selected = 0;
+                var i = 0;
+                foreach (var opt in node.Children)
+                {
+                    if (opt.Tag != "option") continue;
+                    options.Add(SS.UiValue.FromString(OptionText(opt)));
+                    if (opt.Attr("selected") != null) selected = i;
+                    i++;
+                }
+                if (current != null && int.TryParse(current, NumberStyles.Integer, CultureInfo.InvariantCulture, out var idx)) selected = idx;
+                props.Add(new SS.UiProp { Key = "options", Value = SS.UiValue.FromArray(options.ToArray()) });
+                props.Add(new SS.UiProp { Key = "selected", Value = SS.UiValue.FromNumber(selected) });
+                break;
+            }
+            default:
+            {
+                type = "textinput";
+                var value = current ?? (node.Tag == "textarea" ? TextOf(node) : node.Attr("value") ?? string.Empty);
+                props.Add(new SS.UiProp { Key = "value", Value = SS.UiValue.FromString(value) });
+                props.Add(new SS.UiProp { Key = "placeholder", Value = SS.UiValue.FromString(node.Attr("placeholder") ?? string.Empty) });
+                props.Add(new SS.UiProp { Key = "title", Value = SS.UiValue.FromString(node.Attr("title") ?? node.Attr("placeholder") ?? "Enter text") });
+                break;
+            }
+        }
+        // The page's own look for the control: background, text colour, font size.
+        if (rs.backgroundColor.a > 0.002f) style.Add(new SS.UiProp { Key = "bg", Value = SS.UiValue.FromString(VectorEmitter.Hex(rs.backgroundColor)) });
+        if (type is "textinput" or "select")
+        {
+            style.Add(new SS.UiProp { Key = "text", Value = SS.UiValue.FromString(VectorEmitter.Hex(rs.color)) });
+            style.Add(new SS.UiProp { Key = "font_size", Value = SS.UiValue.FromNumber(Mathf.Max(8f, rs.fontSize * sx)) });
+        }
+        return type;
+    }
+
+    private static bool Accent(Dictionary<string, string>? css, out Color colour)
+    {
+        colour = default;
+        return css != null && css.TryGetValue("accent-color", out var v) && StyleApplier.TryColor(v.Trim(), out colour);
+    }
+
+    private static float Num(string? text, float fallback)
+    {
+        return text != null && float.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var n) ? n : fallback;
+    }
+
+    private static string TextOf(HtmlNode node)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var c in node.Children)
+            if (c.IsText) sb.Append(c.Text); else sb.Append(TextOf(c));
+        return sb.ToString().Trim();
+    }
+
+    private static string OptionText(HtmlNode opt) => TextOf(opt);
+
+    /// <summary>What a select option reports: its value attribute, else its text.</summary>
+    private static string OptionValue(HtmlNode select, int index)
+    {
+        var i = 0;
+        foreach (var opt in select.Children)
+        {
+            if (opt.Tag != "option") continue;
+            if (i == index) return opt.Attr("value") ?? OptionText(opt);
+            i++;
+        }
+        return string.Empty;
+    }
+
+    /// <summary>
+    /// A control's event from ScriptedScreens (a text field's edit, a click on a checkbox, a
+    /// slider or select change). Updates the stored value, re-applies the control, and hands
+    /// the page script an `input`/`change` event on the element. Returns the name and value
+    /// for the page's Lua on_change ("name=value").
+    /// </summary>
+    internal bool OnExternalInput(string key, string evt, string value, out string name, out string delivered)
+    {
+        name = key;
+        delivered = string.Empty;
+        if (!_externalNodes.TryGetValue(key, out var node))
+            return false;
+        name = node.Attr("name") ?? key;
+        var kind = node.Tag == "input" ? (node.Attr("type") ?? "text").ToLowerInvariant() : node.Tag;
+        string stored;
+        switch (kind)
+        {
+            case "checkbox":
+            case "radio":
+            {
+                if (!string.Equals(evt, "click", StringComparison.OrdinalIgnoreCase)) return false;
+                var on = _inputValues.TryGetValue(key, out var cur) ? cur == "true" : node.Attr("checked") != null;
+                on = kind == "radio" || !on;
+                stored = on ? "true" : "false";
+                if (kind == "radio" && node.Attr("name") is { } group)
+                {
+                    // One radio on per group; the group is the page's business, so it is kept here.
+                    foreach (var kv in _externalNodes)
+                    {
+                        if (kv.Key == key || kv.Value.Tag != "input" || kv.Value.Attr("name") != group) continue;
+                        _inputValues[kv.Key] = "false";
+                        _externalState.Remove(ElementId + "/" + kv.Key);
+                    }
+                }
+                delivered = stored;
+                break;
+            }
+            case "select":
+            {
+                if (!string.Equals(evt, "change", StringComparison.OrdinalIgnoreCase)) return false;
+                stored = value.Trim();
+                delivered = int.TryParse(stored, NumberStyles.Integer, CultureInfo.InvariantCulture, out var idx) ? OptionValue(node, idx) : stored;
+                break;
+            }
+            default:
+            {
+                if (!string.Equals(evt, "change", StringComparison.OrdinalIgnoreCase)) return false;
+                stored = value ?? string.Empty;
+                delivered = stored;
+                break;
+            }
+        }
+        _inputValues[key] = stored;
+        _externalState.Remove(ElementId + "/" + key);
+        _dirty = true;
+        Wake();
+        _script?.EmitInput(key, delivered);
+        return true;
+    }
+
+    /// <summary>The page script set a control's value or checked state.</summary>
+    private void SetInputValue(string key, string value)
+    {
+        if (!_externalNodes.ContainsKey(key))
+            return;
+        _inputValues[key] = value;
+        _externalState.Remove(ElementId + "/" + key);
+        _dirty = true;
+        Wake();
+    }
+
+    /// <summary>The live page for a host and page element id, for routing control events.</summary>
+    internal static HtmlSurface? Find(object? board, object? cartridge, object? visor, string surface, string pageId)
+    {
+        foreach (var s in Surfaces)
+        {
+            if (s == null || s.State == null) continue;
+            if (!ReferenceEquals(s.Board, board) || !ReferenceEquals(s.Cartridge, cartridge) || !ReferenceEquals(s.Visor, visor)) continue;
+            if (s.Surface == surface && s.ElementId == pageId) return s;
+        }
+        return null;
     }
 
     /// <summary>

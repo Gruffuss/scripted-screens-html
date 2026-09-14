@@ -7,6 +7,8 @@
 --   outline   outline + outline-offset around a box
 --   @media    one rule that applies at the 640 design width and one that does not
 --   ~         a general-sibling rule
+--   form      text input, checkbox, range, select: ScriptedScreens controls placed over the
+--             page; the page script gets change events, Lua's on_change gets "name=value"
 
 local ui = ss.ui.surface("main")
 ss.ui.activate("main")
@@ -39,6 +41,14 @@ local page = [[
 
   .focus { padding: 4px 8px; border-radius: 4px; background: #24314A; outline: 2px solid var(--accent); outline-offset: 3px; margin: 8px 0 0 4px; }
   .media { color: #B5352C; margin-top: 10px; }
+
+  form { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+  label { color: var(--dim); font-size: 12px; }
+  input[type=text] { width: 150px; height: 26px; background: #172033; color: var(--ink); font-size: 14px; }
+  input[type=range] { width: 120px; accent-color: var(--accent); }
+  input[type=checkbox] { accent-color: #2E8B6E; }
+  select { width: 110px; height: 26px; background: #172033; color: var(--ink); }
+  #echo { margin-top: 6px; color: var(--accent); font-size: 13px; }
   @media (min-width: 600px) { .media { color: #2E8B6E; } }
   @media (max-width: 300px) { .media { color: #B5352C; } }
 </style>
@@ -63,6 +73,23 @@ local page = [[
   </div>
   <div class="focus">outline, offset 3</div>
   <div class="media">@media: green at width 600 and up</div>
+
+  <h2>form</h2>
+  <form>
+    <label>name</label><input type="text" id="room" name="room" placeholder="room name" value="Airlock 2">
+    <label>alarm</label><input type="checkbox" id="alarm" name="alarm" checked>
+    <label>target</label><input type="range" id="target" name="target" min="0" max="200" value="120">
+    <label>mode</label><select id="mode" name="mode"><option value="auto">Auto</option><option value="manual" selected>Manual</option><option value="off">Off</option></select>
+  </form>
+  <div id="echo">js: nothing changed yet</div>
+  <script>
+    var echo = document.getElementById('echo');
+    ['room', 'alarm', 'target', 'mode'].forEach(function(id){
+      document.getElementById(id).addEventListener('change', function(e){
+        echo.textContent = 'js: ' + id + ' = ' + e.target.value + (id === 'alarm' ? ' (checked ' + e.target.checked + ')' : '');
+      });
+    });
+  </script>
 </body>
 </html>
 ]]
@@ -73,6 +100,13 @@ ui:element({
     rect = { unit = "px", x = 0, y = 0, w = W, h = H },
     props = { src = page },
     style = { bg = "#FF00FF" },
+    -- A control on the page reports here as "name=value": the input's name (or id) and
+    -- its text, "true"/"false" for a checkbox, the number for a range, the option value
+    -- for a select. Split at the first "=".
+    on_change = function(v, player)
+        local name, value = tostring(v):match("^([^=]*)=(.*)$")
+        print("page change: " .. tostring(name) .. " -> " .. tostring(value))
+    end,
 })
 
 ui:commit()

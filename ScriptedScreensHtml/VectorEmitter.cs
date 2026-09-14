@@ -30,6 +30,7 @@ internal static class VectorEmitter
     {
         public string Key = string.Empty;
         public HtmlNode Node = null!;
+        public VisualElement Ve = null!;
         public float X, Y, W, H;
     }
 
@@ -80,7 +81,7 @@ internal static class VectorEmitter
 
         if (ctx.Built.Externals.TryGetValue(ve, out var external))
         {
-            ctx.Out.Externals.Add(new External { Key = ve.name, Node = external, X = x, Y = y, W = w, H = h });
+            ctx.Out.Externals.Add(new External { Key = ve.name, Node = external, Ve = ve, X = x, Y = y, W = w, H = h });
             return;
         }
 
