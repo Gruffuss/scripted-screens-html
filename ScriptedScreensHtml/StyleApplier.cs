@@ -53,6 +53,8 @@ internal static class StyleApplier
 
             // Flex
             case "display":
+                // inline / inline-block: the layout has no inline flow, and an element that
+                // reached here is already its own box, so the value is accepted as-is.
                 s.display = v == "none" ? DisplayStyle.None : DisplayStyle.Flex;
                 // CSS: a flex container lays out in a row unless told otherwise; a block (or
                 // grid, whose children are placed absolutely) stacks. Later declarations win.

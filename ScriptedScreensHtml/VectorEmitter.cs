@@ -196,6 +196,9 @@ internal static class VectorEmitter
 
         switch (ve)
         {
+            case Label when ctx.Built.NodeOf.TryGetValue(ve, out var mnode) && mnode.Attr("data-marker") is { } markerShape:
+                EmitMarker(ctx, markerShape, rs.color, x, y, w, h, indent);
+                break;
             case Label label:
                 EmitText(ctx, label, css, x, y, w, h, indent);
                 break;
@@ -1029,6 +1032,27 @@ internal static class VectorEmitter
         if (Mathf.Approximately(tl, tr) && Mathf.Approximately(tl, br) && Mathf.Approximately(tl, bl))
             return " rx=" + F(tl);
         return " rx=[" + F(tl) + "," + F(tr) + "," + F(br) + "," + F(bl) + "]";
+    }
+
+    /// <summary>A list marker in the text colour: a filled disc, a hollow circle or a filled square.</summary>
+    private static void EmitMarker(Ctx ctx, string shape, Color colour, float x, float y, float w, float h, string indent)
+    {
+        var r = Mathf.Max(1f, Mathf.Min(w, h) * 0.5f);
+        var cx = x + w * 0.5f;
+        var cy = y + h * 0.5f;
+        switch (shape)
+        {
+            case "square":
+                ctx.Body.Append(indent).Append("R x=").Append(F(cx - r)).Append(" y=").Append(F(cy - r)).Append(" w=").Append(F(2f * r)).Append(" h=").Append(F(2f * r)).Append(" f=").Append(Hex(colour)).Append('\n');
+                break;
+            case "circle":
+                ctx.Body.Append(indent).Append("C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(r - 0.5f)).Append(" ry=").Append(F(r - 0.5f)).Append(" f=none s=").Append(Hex(colour)).Append(" sw=1\n");
+                break;
+            default:
+                ctx.Body.Append(indent).Append("C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(r)).Append(" ry=").Append(F(r)).Append(" f=").Append(Hex(colour)).Append('\n');
+                break;
+        }
+        ctx.Out.Nodes++;
     }
 
     /// <summary>

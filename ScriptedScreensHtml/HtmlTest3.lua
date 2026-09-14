@@ -3,7 +3,7 @@
 --
 --   table     thead/tbody, th, colspan, cells coloured by an attribute selector
 --   list      ul with square markers, ol numbered, a link inside an item
---   ::before  a generated dot in the game's punctuation face
+--   ::before  a generated dot drawn as a box (content: "" with width/height/background)
 --   outline   outline + outline-offset around a box
 --   @media    one rule that applies at the 640 design width and one that does not
 --   ~         a general-sibling rule
@@ -31,7 +31,7 @@ local page = [[
   th { color: var(--dim); text-transform: uppercase; font-size: 11px; }
   td[data-state="ok"] { color: #2E8B6E; }
   td[data-state="warn"] { color: #E2A94E; }
-  .live::before { content: "\25CF "; color: #2E8B6E; font-family: noto-punc; }
+  .live::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #2E8B6E; margin-right: 6px; align-self: center; }
 
   .cols { display: flex; gap: 16px; align-items: flex-start; }
   ul { list-style: square; }
@@ -58,6 +58,7 @@ local page = [[
   <h2>lists, link, outline, media</h2>
   <div class="cols">
     <ul><li>square marker</li><li>with <a href="#">a link</a></li></ul>
+    <ul style="list-style: disc"><li>disc</li><li style="list-style-type: circle">circle</li></ul>
     <ol><li>first</li><li>second</li></ol>
   </div>
   <div class="focus">outline, offset 3</div>
@@ -67,7 +68,7 @@ local page = [[
 ]]
 
 ui:element({
-    id = "page",
+    id = "web",
     type = "html",
     rect = { unit = "px", x = 0, y = 0, w = W, h = H },
     props = { src = page },
