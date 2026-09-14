@@ -436,9 +436,16 @@ internal sealed class HtmlSurface : MonoBehaviour
         _scriptPending = false;
         _script?.Run(built.Script);
 
-        // The first structure goes out now rather than next Update: a screen capture
-        // rebuilds the surface and clones it inside one call, and the vector mod can only
-        // draw a scene it has been given by then.
+    }
+
+    /// <summary>
+    /// Emit the structure now rather than next Update. A screen capture rebuilds the surface
+    /// and clones it inside one call, and the vector mod can only draw a scene it has been
+    /// given by then. Called by the patch after the remembered data is applied, so the
+    /// capture shows the page with its values, not the markup's placeholders.
+    /// </summary>
+    internal void EmitNow()
+    {
         _dirty = false;
         EmitToVector();
     }

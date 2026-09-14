@@ -91,6 +91,7 @@ internal static class HtmlElementPatch
             Pages[key] = surfaceComponent;
             if (Remembered.TryGetValue(key, out var all) && all.Count > 0)
                 surfaceComponent.ApplyData(all);
+            surfaceComponent.EmitNow();
         }
         catch (Exception ex)
         {

@@ -413,6 +413,7 @@ internal static class StyleApplier
         "grid-template-columns", "grid-template-rows", "grid-auto-rows", "grid-auto-columns", "grid-auto-flow",
         "grid-column", "grid-row", "grid-column-start", "grid-column-end", "grid-row-start", "grid-row-end",
         "line-height", "text-transform", "z-index", "box-sizing",
+        "box-shadow", "text-shadow", "border-style", "text-decoration",
     };
 
     private static void Unknown(CssDeclaration d, Action<string>? warn)

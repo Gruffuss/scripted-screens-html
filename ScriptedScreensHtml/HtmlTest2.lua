@@ -24,7 +24,9 @@ local page = [[
 <style>
   :root { --ink: #E4F1F7; --dim: #7A93A6; --accent: #38BDF8; --pad: 10px; }
   body { background: #0B1622; color: var(--ink); font-family: 'Barlow'; padding: var(--pad); }
-  h2 { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin: 8px 0 4px 0; }
+  h2 { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin: 8px 0 4px 0;
+       text-shadow: 2px 2px 3px #000000; }
+  .deco { text-shadow: 0px 0px 6px #38BDF8; }
 
   .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
   .cell { background: #1E293B; border-radius: 6px; padding: 8px; font-size: 14px; min-height: 30px; }
