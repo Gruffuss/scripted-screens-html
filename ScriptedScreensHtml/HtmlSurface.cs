@@ -516,11 +516,19 @@ internal sealed class HtmlSurface : MonoBehaviour
                     type = "image";
                     break;
             }
+            var rect = new SS.UiRect { Unit = SS.UiRectUnit.Pixels, X = ext.X * sx, Y = ext.Y * sy, W = ext.W * sx, H = ext.H * sy };
+            if (type is "checkbox" or "radio")
+            {
+                // The control's box is a fixed 18 units centred 5 in from the element's left
+                // edge and on its vertical middle, whatever the rect says: place the element so
+                // that box sits on the page's box.
+                rect = new SS.UiRect { Unit = SS.UiRectUnit.Pixels, X = ext.X * sx + 4f, Y = (ext.Y + ext.H * 0.5f) * sy - 9f, W = 20f, H = 18f };
+            }
             var element = new SS.UiElement
             {
                 Id = id,
                 Type = type,
-                Rect = new SS.UiRect { Unit = SS.UiRectUnit.Pixels, X = ext.X * sx, Y = ext.Y * sy, W = ext.W * sx, H = ext.H * sy },
+                Rect = rect,
                 Props = props.ToArray(),
                 Style = styleProps.ToArray(),
             };
@@ -717,7 +725,11 @@ internal sealed class HtmlSurface : MonoBehaviour
                 var on = current != null ? current == "true" : node.Attr("checked") != null;
                 props.Add(new SS.UiProp { Key = kind == "radio" ? "selected" : "checked", Value = SS.UiValue.FromString(on ? "true" : "false") });
                 props.Add(new SS.UiProp { Key = "text", Value = SS.UiValue.FromString(string.Empty) });
-                if (Accent(css, out var check)) style.Add(new SS.UiProp { Key = kind == "radio" ? "radio_color" : "check_color", Value = SS.UiValue.FromString(VectorEmitter.Hex(check)) });
+                // ScriptedScreens paints the box, its outline and the mark in one check_color,
+                // so an accent there turns the control into a solid square. Its defaults (a
+                // coloured box with a white mark) read as a checkbox; only the element's own
+                // background is ours, and that is transparent unless the page set one.
+                if (rs.backgroundColor.a <= 0.002f) style.Add(new SS.UiProp { Key = "bg", Value = SS.UiValue.FromString("#00000000") });
                 break;
             }
             case "range":
