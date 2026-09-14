@@ -43,6 +43,8 @@ internal static class HtmlRenderer
         public HtmlNode Document = new();
         /// <summary>display: grid containers, laid out by GridLayout once attached.</summary>
         public readonly List<VisualElement> Grids = new();
+        /// <summary>img / video / audio boxes: drawn by ScriptedScreens' own image, media and sound elements.</summary>
+        public readonly Dictionary<VisualElement, HtmlNode> Externals = new();
         /// <summary>Computed font size per node, for em units on its children.</summary>
         public readonly Dictionary<HtmlNode, float> FontSizes = new();
 
@@ -121,6 +123,8 @@ internal static class HtmlRenderer
             root.style.unityFont = font;
         result.Root = root;
 
+        result.NodeOf[root] = body;
+        result.ById["body"] = root;
         ApplyStyles(root, body, rules, result);
         foreach (var child in body.Children)
             Append(root, child, rules, result);
@@ -191,6 +195,39 @@ internal static class HtmlRenderer
         return null;
     }
 
+    /// <summary>Script-created elements: parse the HTML and append it under a live element, cascaded like the page.</summary>
+    internal static void AppendFragment(VisualElement parent, HtmlNode parentNode, string html, Result result)
+    {
+        var frag = HtmlParser.Parse(html, m => result.Warnings.Add(m));
+        foreach (var child in frag.Children)
+        {
+            child.Parent = parentNode;
+            parentNode.Children.Add(child);
+            Append(parent, child, result.Rules, result);
+        }
+    }
+
+    /// <summary>Script removal: the element, its node, and every id under it.</summary>
+    internal static void Remove(VisualElement ve, Result result)
+    {
+        if (result.NodeOf.TryGetValue(ve, out var node))
+        {
+            node.Parent?.Children.Remove(node);
+            result.NodeOf.Remove(ve);
+        }
+        Forget(ve, result);
+        ve.RemoveFromHierarchy();
+    }
+
+    private static void Forget(VisualElement ve, Result result)
+    {
+        if (!string.IsNullOrEmpty(ve.name))
+            result.ById.Remove(ve.name);
+        result.Externals.Remove(ve);
+        foreach (var child in ve.Children())
+            Forget(child, result);
+    }
+
     private static void Append(VisualElement parent, HtmlNode node, List<CssRule> rules, Result result)
     {
         if (node.IsText)
@@ -211,6 +248,24 @@ internal static class HtmlRenderer
             Register(svg, node, result);
             ApplyStyles(svg, node, rules, result);
             parent.Add(svg);
+            return;
+        }
+
+        if (node.Tag == "img" || node.Tag == "video" || node.Tag == "audio")
+        {
+            // A box in the layout; the picture or sound itself is a ScriptedScreens element
+            // positioned over it by the surface (see HtmlSurface.ApplyExternals).
+            var box = new VisualElement();
+            var bw = node.Attr("width");
+            var bh = node.Attr("height");
+            if (bw != null) box.style.width = StyleApplier.Len(bw);
+            if (bh != null) box.style.height = StyleApplier.Len(bh);
+            if (node.Tag == "audio") { box.style.width = 0; box.style.height = 0; }
+            box.style.flexShrink = 0;
+            Register(box, node, result);
+            ApplyStyles(box, node, rules, result);
+            result.Externals[box] = node;
+            parent.Add(box);
             return;
         }
 

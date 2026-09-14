@@ -56,9 +56,15 @@ internal sealed class ScriptHost : IDisposable
     /// <summary>Script time of the last completed frame, milliseconds, for diagnostics.</summary>
     public volatile float LastFrameMs;
 
+    private readonly Action<string, string> _appendHtml;
+    private readonly Action<string> _remove;
+
     public ScriptHost(Func<string, VisualElement?> find, Func<string, SvgShape?> findShape, Func<string, HtmlNode?> findNode,
-        Func<string, List<string>> query, Action<VisualElement, string> setClass, List<CssRule> rules, Action<string> warn)
+        Func<string, List<string>> query, Action<VisualElement, string> setClass, List<CssRule> rules, Action<string> warn,
+        Action<string, string> appendHtml, Action<string> remove)
     {
+        _appendHtml = appendHtml;
+        _remove = remove;
         _find = find;
         _findShape = findShape;
         _findNode = findNode;
@@ -193,6 +199,8 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__setClass", new Action<string, string>(SetClass));
             _engine.SetValue("__getAttr", new Func<string, string, string?>(GetAttr));
             _engine.SetValue("__setAttr", new Action<string, string, string>(SetAttr));
+            _engine.SetValue("__appendHtml", new Action<string, string>((parent, html) => _toMain.Enqueue(() => _appendHtml(parent, html))));
+            _engine.SetValue("__remove", new Action<string>(id => _toMain.Enqueue(() => _remove(id))));
             _engine.SetValue("__size", new Func<string, double[]>(Size));
             _engine.SetValue("__canvasFrame", new Action<string, double[], string[], int>(CanvasFrame));
             _engine.SetValue("__now", new Func<double>(() => _frameNow * 1000.0));
@@ -464,16 +472,64 @@ function __el(id){
     getAttribute: function(n){ return __getAttr(id, n); },
     setAttribute: function(n, v){ __setAttr(id, n, String(v)); },
     getContext: function(){ return __ctx(id); },
-    addEventListener: function(){ }
+    addEventListener: function(){ },
+    get tagName(){ return String(__getAttr(id, '__tag') || 'DIV').toUpperCase(); },
+    appendChild: function(c){ __appendHtml(id, __serialize(c)); if (c.__adopt) c.__adopt(); return c; },
+    append: function(){ for (var i = 0; i < arguments.length; i++) { var c = arguments[i]; if (typeof c === 'string') __appendHtml(id, __escape(c)); else el.appendChild(c); } },
+    removeChild: function(c){ __remove(c.id); return c; },
+    remove: function(){ __remove(id); }
+  };
+  el.classList = {
+    __list: function(){ return String(__getAttr(id, 'class') || '').split(/\s+/).filter(Boolean); },
+    add: function(){ var l = el.classList.__list(); for (var i = 0; i < arguments.length; i++) if (l.indexOf(arguments[i]) < 0) l.push(arguments[i]); __setClass(id, l.join(' ')); },
+    remove: function(){ var l = el.classList.__list(); for (var i = 0; i < arguments.length; i++) l = l.filter(function(x){ return x !== arguments[i]; }.bind(null)); var drop = Array.prototype.slice.call(arguments); __setClass(id, el.classList.__list().filter(function(x){ return drop.indexOf(x) < 0; }).join(' ')); },
+    toggle: function(c, force){ var l = el.classList.__list(); var has = l.indexOf(c) >= 0; var want = force === undefined ? !has : !!force; if (want && !has) l.push(c); if (!want && has) l = l.filter(function(x){ return x !== c; }); __setClass(id, l.join(' ')); return want; },
+    contains: function(c){ return el.classList.__list().indexOf(c) >= 0; }
   };
   return el;
+}
+// ---- DOM creation: an element is built detached, serialised to HTML when it is appended
+// to a live one, and forwards its writes by id from then on ----
+var __jsSeq = 0;
+function __escape(s){ return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/""/g, '&quot;'); }
+function __kebab(p){ return String(p).replace(/[A-Z]/g, function(m){ return '-' + m.toLowerCase(); }); }
+function __serialize(c){
+  if (!c.__tag) return __escape(String(c.textContent || ''));
+  if (!c.id) c.id = '__js' + (++__jsSeq);
+  var a = ' id=""' + c.id + '""';
+  if (c.className) a += ' class=""' + __escape(c.className) + '""';
+  for (var k in c.__attrs) a += ' ' + k + '=""' + __escape(c.__attrs[k]) + '""';
+  var st = '';
+  for (var p in c.__style) st += __kebab(p) + ':' + c.__style[p] + ';';
+  if (st) a += ' style=""' + __escape(st) + '""';
+  var inner = c.__text !== null ? __escape(c.__text) : (c.__html !== null ? c.__html : c.__children.map(__serialize).join(''));
+  return '<' + c.__tag + a + '>' + inner + '</' + c.__tag + '>';
+}
+function __detached(tag){
+  var o = { __tag: String(tag).toLowerCase(), __attrs: {}, __style: {}, __children: [], __html: null, __text: null, __live: false, id: '', className: '' };
+  o.tagName = o.__tag.toUpperCase();
+  o.setAttribute = function(n, v){ if (o.__live) __setAttr(o.id, n, String(v)); else o.__attrs[n] = String(v); };
+  o.getAttribute = function(n){ return o.__live ? __getAttr(o.id, n) : (o.__attrs[n] === undefined ? null : o.__attrs[n]); };
+  o.appendChild = function(c){ if (o.__live) { __appendHtml(o.id, __serialize(c)); if (c.__adopt) c.__adopt(); } else o.__children.push(c); return c; };
+  o.append = function(){ for (var i = 0; i < arguments.length; i++) { var c = arguments[i]; o.appendChild(typeof c === 'string' ? { textContent: c } : c); } };
+  o.removeChild = function(c){ if (o.__live) __remove(c.id); else o.__children = o.__children.filter(function(x){ return x !== c; }); return c; };
+  o.remove = function(){ if (o.__live) __remove(o.id); };
+  o.addEventListener = function(){ };
+  o.style = new Proxy({}, { set: function(t, p, v){ if (o.__live) __setStyle(o.id, String(p), String(v)); else o.__style[p] = String(v); return true; }, get: function(t, p){ return o.__style[p] || ''; } });
+  Object.defineProperty(o, 'innerHTML', { set: function(v){ if (o.__live) __setHtml(o.id, String(v)); else { o.__html = String(v); o.__text = null; } }, get: function(){ return o.__html || ''; } });
+  Object.defineProperty(o, 'textContent', { set: function(v){ if (o.__live) __setText(o.id, String(v)); else { o.__text = String(v); o.__html = null; } }, get: function(){ return o.__text || ''; } });
+  Object.defineProperty(o, 'innerText', { set: function(v){ o.textContent = v; }, get: function(){ return o.__text || ''; } });
+  o.__adopt = function(){ o.__live = true; o.__children.forEach(function(c){ if (c.__adopt) c.__adopt(); }); };
+  return o;
 }
 var document = {
   getElementById: function(id){ return __has(id) ? __el(id) : null; },
   querySelectorAll: function(sel){ return __query(sel).map(__el); },
   querySelector: function(sel){ var r = __query(sel); return r.length ? __el(r[0]) : null; },
+  createElement: __detached,
+  createTextNode: function(t){ return { textContent: String(t) }; },
   addEventListener: addEventListener,
-  body: null
+  body: __el('body')
 };
 ";
 }

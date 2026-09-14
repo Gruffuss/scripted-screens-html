@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
@@ -5,6 +6,9 @@ using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.UIElements;
 using SS = ScriptedScreens.ScriptableUi.ScriptedScreensScriptableUiSystem;
+using Motherboard = Assets.Scripts.Objects.Items.Motherboard;
+using CartridgeIntegratedCircuitLua = ScriptedScreens.CartridgeIntegratedCircuitLua;
+using ProgrammableVisorGlasses = ScriptedScreens.ProgrammableVisorGlasses;
 
 namespace ScriptedScreensHtml;
 
@@ -476,7 +480,26 @@ internal sealed class HtmlSurface : MonoBehaviour
                 built.Query,
                 built.Reclass,
                 built.Rules,
-                m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m));
+                m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m),
+                (parentId, html) =>
+                {
+                    if (_byId.TryGetValue(parentId, out var p) && built.NodeOf.TryGetValue(p, out var pn))
+                    {
+                        HtmlRenderer.AppendFragment(p, pn, html, built);
+                        _dirty = true;
+                        Wake();
+                    }
+                    else ScriptedScreensHtmlPlugin.Log?.LogWarning($"js: appendChild: no element \"{parentId}\"");
+                },
+                id =>
+                {
+                    if (_byId.TryGetValue(id, out var r))
+                    {
+                        HtmlRenderer.Remove(r, built);
+                        _dirty = true;
+                        Wake();
+                    }
+                });
         }
         _svgs.Clear();
         foreach (var shape in _shapes.Values)
@@ -519,6 +542,74 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// The scene is resent only when its text changed; the vector mod caches parsed scenes
     /// by source text, so an unchanged resend costs nothing.
     /// </summary>
+    /// <summary>Ids of the ScriptedScreens elements created for img/video/audio, to update and remove.</summary>
+    private readonly HashSet<string> _externals = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// img, video and audio: a ScriptedScreens image / media / sound element for each,
+    /// applied through the real ApplyElementInternal. The id is hierarchical
+    /// ("page/imgN"), which parents it under this page's host, so its rect is in this
+    /// host's pixels: the design box scaled to the host. Removed when the box is gone.
+    /// </summary>
+    private void ApplyExternals(List<VectorEmitter.External> externals)
+    {
+        if (State is not SS.BoardState state)
+            return;
+        var rt = (RectTransform)transform;
+        var layout = LayoutSize();
+        var sx = layout.x > 0f ? rt.rect.width / layout.x : 1f;
+        var sy = layout.y > 0f ? rt.rect.height / layout.y : 1f;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var ext in externals)
+        {
+            var id = ElementId + "/" + ext.Key;
+            seen.Add(id);
+            var node = ext.Node;
+            var url = node.Attr("src") ?? string.Empty;
+            var props = new List<SS.UiProp> { new() { Key = "url", Value = SS.UiValue.FromString(url) } };
+            string type;
+            switch (node.Tag)
+            {
+                case "video":
+                    type = "media";
+                    props.Add(new SS.UiProp { Key = "playing", Value = SS.UiValue.FromString(node.Attr("autoplay") != null ? "true" : "false") });
+                    props.Add(new SS.UiProp { Key = "loop", Value = SS.UiValue.FromString(node.Attr("loop") != null ? "true" : "false") });
+                    props.Add(new SS.UiProp { Key = "volume", Value = SS.UiValue.FromNumber(node.Attr("muted") != null ? 0f : 1f) });
+                    break;
+                case "audio":
+                    type = "sound";
+                    props.Add(new SS.UiProp { Key = "playing", Value = SS.UiValue.FromString(node.Attr("autoplay") != null ? "true" : "false") });
+                    props.Add(new SS.UiProp { Key = "loop", Value = SS.UiValue.FromString(node.Attr("loop") != null ? "true" : "false") });
+                    break;
+                default:
+                    type = "image";
+                    break;
+            }
+            var element = new SS.UiElement
+            {
+                Id = id,
+                Type = type,
+                Rect = new SS.UiRect { Unit = SS.UiRectUnit.Pixels, X = ext.X * sx, Y = ext.Y * sy, W = ext.W * sx, H = ext.H * sy },
+                Props = props.ToArray(),
+            };
+            try
+            {
+                SS.ApplyElementInternal(Board as Motherboard, Cartridge as CartridgeIntegratedCircuitLua, Visor as ProgrammableVisorGlasses, state, Surface, element);
+                _externals.Add(id);
+            }
+            catch (Exception ex)
+            {
+                ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: <{node.Tag}> as {type} failed: {ex.Message}");
+            }
+        }
+        foreach (var id in new List<string>(_externals))
+        {
+            if (seen.Contains(id)) continue;
+            SS.RemoveElement(state, Surface, id);
+            _externals.Remove(id);
+        }
+    }
+
     private void EmitToVector()
     {
         if (_content == null || _document == null || _built == null)
@@ -536,6 +627,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogWarning(w);
         // An identical scene is normally not resent. While tweens are live it must be: the
         // vector clock restarts on every apply and the expressions are written against it.
+        ApplyExternals(output.Externals);
         if (output.Scene == _lastScene && !_tweens.Any)
             return;
         _lastScene = output.Scene;

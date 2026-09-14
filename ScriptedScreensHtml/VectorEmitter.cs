@@ -22,6 +22,15 @@ internal static class VectorEmitter
         public string Scene = string.Empty;
         public int Nodes;
         public readonly List<string> Warnings = new();
+        /// <summary>Boxes the vector layer does not draw: the surface places ScriptedScreens elements over them.</summary>
+        public readonly List<External> Externals = new();
+    }
+
+    internal sealed class External
+    {
+        public string Key = string.Empty;
+        public HtmlNode Node = null!;
+        public float X, Y, W, H;
     }
 
     private sealed class Ctx
@@ -69,6 +78,12 @@ internal static class VectorEmitter
         var css = ctx.Built.CssOf(ve);
         var indent = new string(' ', depth * 2);
 
+        if (ctx.Built.Externals.TryGetValue(ve, out var external))
+        {
+            ctx.Out.Externals.Add(new External { Key = ve.name, Node = external, X = x, Y = y, W = w, H = h });
+            return;
+        }
+
         // A transition in flight: numbers below become expressions over t (Tweens.cs).
         var tw = ctx.Tw?.Of(ve, ctx.Now);
         var ws = tw != null ? tw.Lerp(tw.From.Rect.width, w) : F(w);
@@ -106,14 +121,34 @@ internal static class VectorEmitter
             var bg = rs.backgroundColor;
             css.TryGetValue("background", out var bgCss);
             if (bgCss == null) css.TryGetValue("background-image", out bgCss);
+            var shadow = css.TryGetValue("box-shadow", out var shCss) ? Shadows(shCss) : string.Empty;
             if (bgCss != null && bgCss.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase))
             {
-                GradientBox(ctx, bgCss, x, y, w, h, ws, hs, rs, indent, ve, xform);
+                GradientBox(ctx, bgCss, x, y, w, h, ws, hs, rs, indent, ve, xform, shadow);
+            }
+            else if (bgCss != null && bgCss.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) && RadialDef(ctx, bgCss) is { } rid)
+            {
+                ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                    .Append(Radius(rs, w, h)).Append(" f=@").Append(rid).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Out.Nodes++;
             }
             else if (bg.a > 0.002f)
             {
                 ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                    .Append(Radius(rs, w, h)).Append(" f=").Append(Hex(bg)).Append(NodeId(ctx, ve)).Append('\n');
+                    .Append(Radius(rs, w, h)).Append(" f=").Append(Hex(bg)).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Out.Nodes++;
+            }
+            else if (IsButton(ctx, ve))
+            {
+                ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                    .Append(Radius(rs, w, h)).Append(" f=#00000001").Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Out.Nodes++;
+            }
+            else if (shadow.Length > 0)
+            {
+                // A shadow under a transparent box still casts: an invisible fill carries it.
+                ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                    .Append(Radius(rs, w, h)).Append(" f=#00000001").Append(shadow).Append('\n');
                 ctx.Out.Nodes++;
             }
 
@@ -135,7 +170,7 @@ internal static class VectorEmitter
                 ctx.Body.Append(indent).Append("R x=").Append(F(x + half)).Append(" y=").Append(F(y + half))
                     .Append(" w=").Append(tw != null ? tw.Lerp(tw.From.Rect.width - bw, w - bw) : F(w - bw))
                     .Append(" h=").Append(tw != null ? tw.Lerp(tw.From.Rect.height - bw, h - bw) : F(h - bw))
-                    .Append(Radius(rs, w, h, -half)).Append(" f=none s=").Append(Hex(rs.borderTopColor)).Append(" sw=").Append(F(bw)).Append('\n');
+                    .Append(Radius(rs, w, h, -half)).Append(" f=none s=").Append(Hex(rs.borderTopColor)).Append(" sw=").Append(F(bw)).Append(Dash(css, bw)).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (bw > 0.01f || rs.borderRightWidth > 0.01f || rs.borderBottomWidth > 0.01f || rs.borderLeftWidth > 0.01f)
@@ -292,7 +327,103 @@ internal static class VectorEmitter
     /// the shape. The box is split instead: one rect per segment, each clipped to its band
     /// of the gradient line, each a solid colour or its own ramp. Exact, and static.
     /// </summary>
-    private static void GradientBox(Ctx ctx, string css, float x, float y, float w, float h, string ws, string hs, IResolvedStyle rs, string indent, VisualElement ve, Xform? xf)
+    /// <summary>CSS box-shadow list to the vector `sh` list: [[dx,dy,blur,spread,#colour],...]. Inset shadows are skipped.</summary>
+    private static string Shadows(string css, int max = int.MaxValue)
+    {
+        var sb = new StringBuilder();
+        var count = 0;
+        foreach (var item in SplitTopLevelCommas(css))
+        {
+            if (count >= max) break;
+            var parts = item.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2) continue;
+            var nums = new List<float>();
+            var colour = new Color(0f, 0f, 0f, 1f);
+            var inset = false;
+            var hasColour = false;
+            foreach (var p in parts)
+            {
+                if (p == "inset") { inset = true; continue; }
+                if (StyleApplier.IsNumber(p.TrimEnd('x').TrimEnd('p')) || char.IsDigit(p[0]) || p[0] == '-' || p[0] == '.') { nums.Add(StyleApplier.Num(p)); continue; }
+                if (StyleApplier.TryColor(p, out var c)) { colour = c; hasColour = true; }
+            }
+            if (inset || nums.Count < 2) continue;
+            if (!hasColour) colour.a = 1f;
+            while (nums.Count < 4) nums.Add(0f);
+            if (sb.Length > 0) sb.Append(',');
+            sb.Append('[').Append(F(nums[0])).Append(',').Append(F(nums[1])).Append(',').Append(F(nums[2])).Append(',').Append(F(nums[3])).Append(',').Append(Hex(colour)).Append(']');
+            count++;
+        }
+        return sb.Length > 0 ? " sh=[" + sb + "]" : string.Empty;
+    }
+
+    /// <summary>border-style dashed/dotted (from the shorthand or the property) as a dash pattern in border widths.</summary>
+    private static string Dash(Dictionary<string, string> css, float bw)
+    {
+        string? style = null;
+        if (css.TryGetValue("border-style", out var bs)) style = bs;
+        else if (css.TryGetValue("border", out var b))
+        {
+            foreach (var p in b.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                if (p == "dashed" || p == "dotted" || p == "solid") style = p;
+        }
+        return style switch
+        {
+            "dashed" => " dash=[" + F(bw * 3f) + "," + F(bw * 2f) + "]",
+            "dotted" => " dash=[" + F(bw) + "," + F(bw) + "] cap=round",
+            _ => string.Empty,
+        };
+    }
+
+    /// <summary>
+    /// radial-gradient([circle|ellipse] [size] [at x y,] stops): a GR def in bounding-box
+    /// units. The size keywords are approximated by a radius: farthest-corner (the CSS
+    /// default) reaches the box corner, closest-side stops at the nearer edge.
+    /// </summary>
+    private static string? RadialDef(Ctx ctx, string css)
+    {
+        var open = css.IndexOf('(');
+        var close = css.LastIndexOf(')');
+        if (open < 0 || close < open) return null;
+        var args = SplitTopLevelCommas(css.Substring(open + 1, close - open - 1));
+        var cx = 0.5f; var cy = 0.5f; var r = 0.7071f;
+        var first = args.Count > 0 ? args[0].Trim() : string.Empty;
+        if (!StyleApplier.TryColor(first.Split(' ')[0], out _))
+        {
+            var at = first.IndexOf(" at ", StringComparison.OrdinalIgnoreCase);
+            var shape = at >= 0 ? first.Substring(0, at) : first;
+            if (shape.Contains("closest-side")) r = 0.5f;
+            else if (shape.Contains("closest-corner")) r = 0.7071f;
+            else if (shape.Contains("farthest-side")) r = 0.5f;
+            if (at >= 0)
+            {
+                var pos = first.Substring(at + 4).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (pos.Length > 0) cx = Fraction(pos[0] switch { "left" => "0", "center" => "50%", "right" => "100%", _ => pos[0] });
+                if (pos.Length > 1) cy = Fraction(pos[1] switch { "top" => "0", "center" => "50%", "bottom" => "100%", _ => pos[1] });
+            }
+            args.RemoveAt(0);
+        }
+        var stops = new List<(float at, Color c)>();
+        for (var i = 0; i < args.Count; i++)
+        {
+            var parts = args[i].Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0 || !StyleApplier.TryColor(parts[0], out var c)) continue;
+            var pos = parts.Length > 1 && parts[1].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[1]) / 100f : (args.Count == 1 ? 0f : (float)i / (args.Count - 1));
+            stops.Add((pos, c));
+        }
+        if (stops.Count < 2) return null;
+        var id = "rad" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+        ctx.Defs.Append("  GR id=").Append(id).Append(" units=bbox cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" r=").Append(F(r)).Append(" stops=[");
+        for (var i = 0; i < stops.Count; i++)
+        {
+            if (i > 0) ctx.Defs.Append(',');
+            ctx.Defs.Append('[').Append(F(stops[i].at)).Append(',').Append(Hex(stops[i].c)).Append(']');
+        }
+        ctx.Defs.Append("]\n");
+        return id;
+    }
+
+    private static void GradientBox(Ctx ctx, string css, float x, float y, float w, float h, string ws, string hs, IResolvedStyle rs, string indent, VisualElement ve, Xform? xf, string shadow = "")
     {
         var parsed = ParseGradient(css);
         if (parsed == null) return;
@@ -311,7 +442,7 @@ internal static class VectorEmitter
         var len = w * Mathf.Abs(Mathf.Sin(rad)) + h * Mathf.Abs(Mathf.Cos(rad));
         var dx = Mathf.Sin(rad) * len * 0.5f / w;
         var dy = -Mathf.Cos(rad) * len * 0.5f / h;
-        var rect = " x=" + F(x) + " y=" + F(y) + " w=" + ws + " h=" + hs + Radius(rs, w, h);
+        var rect = " x=" + F(x) + " y=" + F(y) + " w=" + ws + " h=" + hs + Radius(rs, w, h) + shadow;
 
         if (cuts.Count == 0)
         {
@@ -469,6 +600,11 @@ internal static class VectorEmitter
             return;
         if (css.TryGetValue("text-transform", out var tt))
             text = Transform(text, tt.Trim().ToLowerInvariant());
+        if (css.TryGetValue("text-decoration", out var td))
+        {
+            if (td.Contains("underline")) text = "<u>" + text + "</u>";
+            if (td.Contains("line-through")) text = "<s>" + text + "</s>";
+        }
         // Scene text escapes (vector mod 0.10.1.0): backslash first, then the quote; a line
         // break in the text becomes the two characters backslash-n.
         text = text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n");
@@ -521,6 +657,8 @@ internal static class VectorEmitter
             sb.Append(" fit=ellipsis");
         if (wraps)
             sb.Append(" wrap=1");
+        if (css.TryGetValue("text-shadow", out var tsh))
+            sb.Append(Shadows(tsh, 1)); // one shadow per label: the underlay is a single layer
         if (css.TryGetValue("line-height", out var lh) && rs.fontSize > 0f)
         {
             // CSS: a bare number is a multiple of the font size, a length is absolute.
@@ -882,9 +1020,23 @@ internal static class VectorEmitter
         return " rx=[" + F(tl) + "," + F(tr) + "," + F(br) + "," + F(bl) + "]";
     }
 
+    /// <summary>
+    /// The node id, plus `click=1` on a button: the vector mod makes such a node a hit region
+    /// and the click arrives at the page element's own on_click with the node id as value.
+    /// A button without an id gets its synthetic one, so it can still be clicked.
+    /// </summary>
     private static string NodeId(Ctx ctx, VisualElement ve)
     {
-        return string.IsNullOrEmpty(ve.name) || ve.name.StartsWith("__", StringComparison.Ordinal) ? string.Empty : " id=" + ve.name;
+        var button = IsButton(ctx, ve);
+        if (string.IsNullOrEmpty(ve.name) || (ve.name.StartsWith("__", StringComparison.Ordinal) && !button))
+            return string.Empty;
+        return " id=" + ve.name + (button ? " click=1" : string.Empty);
+    }
+
+    private static bool IsButton(Ctx ctx, VisualElement ve)
+    {
+        return ctx.Built.NodeOf.TryGetValue(ve, out var node)
+               && (node.Tag == "button" || node.Attr("onclick") != null || node.Attr("data-click") != null);
     }
 
     private static void Warn(Ctx ctx, string message)

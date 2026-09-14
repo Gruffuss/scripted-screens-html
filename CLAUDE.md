@@ -2105,3 +2105,69 @@ session's finding about that mod (clips are scene-space, `units=bbox`, `fo2`, `P
 accepts expression strings) was recorded here and read before writing. The gauges were
 written by copying the vector GasUI's tuned constants rather than the mockup's JS: here
 the vector version *was* the tuned reference.
+
+
+### Closing the web-platform gaps (2026-09-10 to 2026-09-14) — batches, one restart each
+
+The user's real concern with `SUPPORT.md` was not the list lengths but the promise: "write
+it as a web page" is only kept if a page written from browser habit works. Four batches,
+each one build, each committed to `github.com/Gruffuss/scripted-screens-html` (private;
+the vector mod stays in its own repo and is git-ignored here so two histories never fight).
+
+**Layout.** `display: grid` (`GridLayout.cs`): the container stays a flex box and its
+children are positioned absolutely from the tracks, recomputed on every geometry change of
+container or child. `px`/`%`/`fr`/`auto`/`repeat()`/`minmax()`, `gap`, auto placement,
+explicit lines including negative ones (`1 / -1`), auto rows measured from the children
+(settles in two passes). Flex `gap` as margins. `var()` resolved in the cascade **and** in
+the rich-text path — the second was missed first and every colour set through `innerHTML`
+went white. Custom properties live on the `HtmlNode` so both paths share them. `calc()`,
+`em/rem/vw/vh`. `:root`, `:first/last-child`, `:nth-child()`, `:not()`; state pseudo-classes
+never match instead of dropping the rule (three parser tests updated). `z-index` as sibling
+paint order. `display: flex` is a row, as in CSS — the flex port had added
+`flex-direction: row` by hand everywhere. **Proof:** `GasUI-html3.lua`, the mockup's CSS
+verbatim (grid, gap, `:root`, `var()`, `text-transform`), only fonts swapped and canvas
+replaced by svg.
+
+**Two data bugs the grid page exposed, both timing.** (1) The first full payload reached the
+vector scene before the scene existed and was dropped, so every tank but O2 was empty; the
+surface now keeps the merged payload and resends it after the first structure. (2) Same
+shape for colours, see `var()` above.
+
+**Paint.** `box-shadow` (the vector mod has a real geometric Gaussian shadow, `sh`, blur
+included; `inset` skipped; a transparent box with a shadow gets an invisible fill to carry
+it), `radial-gradient` backgrounds (`GR units=bbox`, size keywords approximated by radius),
+`border-style: dashed/dotted` (`dash`, round caps for dots), `text-decoration` as rich-text
+`<u>`/`<s>`, `text-transform` outside tags, `text-shadow` once the vector mod grew `sh` on
+`T` (0.10.2.0, TextMeshPro underlay: one per label).
+
+**Elements.** `<img>`, `<video>`, `<audio>` are ScriptedScreens' own `image`/`media`/`sound`
+elements, applied through the real `ApplyElementInternal` with a **hierarchical id**
+(`page/imgN`), which parents them under the page's host so their px rect is simply the
+design box scaled to the host. Removed with `RemoveElement` when the box is gone.
+`<button>` (or `onclick`/`data-click`) is a vector click region: the background `R`
+carries `id` + `click=1` and the click arrives at the page element's Lua `on_click` with
+the button id. Page JS does not see clicks by design; Lua bounces what it wants via `data`.
+
+**DOM creation.** `document.createElement` builds a detached shim on the worker; on
+`appendChild` to a live element it is serialised to HTML, parsed and cascaded on the main
+thread like page markup (`HtmlRenderer.AppendFragment`), gets an id if it had none, and
+forwards its writes by id from then on. `remove()`/`removeChild` drop the element, its node
+and every id under it. `classList` is real now. Trap worth keeping: **the JS prelude is a C#
+verbatim string, so every `"` inside it must be `""`** — a tool that unescapes `\"` on the
+way into a shell heredoc turned that into a two-round build failure; the fix was a script
+file, not a heredoc.
+
+**Non-uniform svg fits.** `preserveAspectRatio="none"` on a 100x60 viewBox in a wide box
+stretched the graph's stroke with the box (thin on the flat, thick on the steep, as a
+browser would). When the two scales differ the emitter now bakes the scale into every
+coordinate and keeps the stroke width in scene units; `path` keeps a scaled group of its
+own since `d` cannot be rewritten.
+
+**Small things that each cost a restart:** the scene reader types a quoted `"3"` as a
+number, so a purely numeric label vanished (`<noparse>` guard); a spinner's differently
+coloured top side needs per-side arcs (the width check alone drew one blue ring); the
+vector `t` restarts on every scene apply, so tween start times must be relative to the
+emission and a scene with live tweens must be resent even when its text is unchanged.
+
+**Test pages:** `HtmlTest.lua` (563, motion), `HtmlTest2.lua` (561: grid, paint, units,
+`<img>`, a counting `<button>`, script-made pills), `GasUI-html3.lua` (586, the mockup).
