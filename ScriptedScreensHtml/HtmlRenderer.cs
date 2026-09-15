@@ -554,12 +554,34 @@ internal static class HtmlRenderer
             var ordinal = 0;
             if (node.Tag == "details")
                 AddDisclosure(node);
+            // Inline content between blocks (text, <b>, a ::before, a span) flows as one line
+            // box, the way a browser wraps it in an anonymous block: consecutive inline
+            // children are gathered into a synthetic span and built as one row. The children
+            // keep their real parent so selectors still match.
+            HtmlNode? lineRun = null;
+            void CloseRun()
+            {
+                if (lineRun == null) return;
+                Append(ve, lineRun, rules, result);
+                lineRun = null;
+            }
             foreach (var child in node.Children)
             {
                 if (list && child.Tag == "li")
                     AddMarker(child, node, result.CssOf(ve), ++ordinal, rules);
+                var inline = child.IsText ? child.Text.Trim().Length > 0 : (Inline.Contains(child.Tag!) && IsInlineOnly(child)) || child.Attr("data-pseudo") != null || child.Attr("data-marker") != null;
+                if (inline && node.Tag is not ("table" or "tr" or "ul" or "ol" or "select" or "svg"))
+                {
+                    lineRun ??= new HtmlNode { Tag = "span", Parent = node };
+                    lineRun.Attributes["data-run"] = "1";
+                    lineRun.Children.Add(child);
+                    continue;
+                }
+                if (child.IsText) continue;
+                CloseRun();
                 Append(ve, child, rules, result);
             }
+            CloseRun();
             if (node.Tag == "details")
                 ShowDetails(ve, node, result);
             ApplyGap(ve, result.CssOf(ve));
