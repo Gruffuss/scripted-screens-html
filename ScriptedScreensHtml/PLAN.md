@@ -125,12 +125,21 @@ when convex. A canvas painted once (a chart drawn at load, redrawn on data) is t
 canvas repainted every frame costs a scene emit per frame and the docs say so, the same as
 rAF DOM writes. `getImageData`/`putImageData` stay out.
 
-## Batch F — verification and docs
+## Batch F — measured gaps (2026-09-15 inventory: 78 pages, MDN standard list)
 
-- One test page per batch, pushed to the 3x3, captured before and after the restart, kept in
-  the repo. A feature is not done until the capture shows it.
-- SUPPORT.md rewritten from this file once a batch lands: the "does not work" tables should
-  end with the three structural items, the vector-side waits, and the honest cost notes.
+Built from `ScriptedScreensHtml.Tests/inventory.py`, most used first, then the spec list.
+
+| Part | Items |
+|---|---|
+| F1 SVG and numbers | `font-variant-numeric: tabular-nums` (TMP monospacing on digit runs); SVG `<text>`/`<tspan>`; SVG styled by CSS (`fill`, `stroke`, `stroke-width`, `opacity`, `font-*` as properties and inline `style`); the `transform` attribute on shapes and groups; `stroke-dasharray`/`dashoffset`; `text-anchor`; `<use>`/`<symbol>`; `<clipPath>` and the `clip-path` attribute; `fill-rule`; `<image>` as `IMG`; `<title>`/`<desc>` skipped |
+| F2 cascade | the 52 logical properties as a mapping table; per-side `border-*-style`; `text-decoration-line/color/style/thickness`, `text-underline-offset` (offset: TMP draws at one position, colour and line map); `color-mix()`; `@layer` (contents in order), `@property` (ignored), `@import` (fetched), `@scope` (prefix), `@container` size queries on layout; `::placeholder` to the field's placeholder colour, `::marker` to the marker; `:required/:optional/:valid/:invalid/:in-range/:out-of-range/:placeholder-shown/:default/:indeterminate/:read-only/:read-write/:disabled` from attributes and values; `:open`/`:modal`; `:any-link`; `:lang()`; `:dir()` |
+| F3 text, lists, tables, layout, script | `text-indent`; `word-break`/`overflow-wrap`/`hyphens` to TMP wrap modes; `line-clamp`; `text-align-last`; `counter-reset`/`counter-increment` and `counter()` in `content`; `list-style-image`; `caption-side`, `table-layout`, `empty-cells`; flex `order`, `flex-flow`, `place-*`, `justify-items`/`justify-self`; `grid-area`, `grid-template`, `grid-template-areas`; `DocumentFragment`; a module loader for `import` from a URL |
+| F4 rescued from the old exclusion list | `::first-letter` (a generated child); `::first-line` (estimated now, exact through vector 15); `::-webkit-scrollbar`, `scrollbar-width`, `scrollbar-color` as a drawn track and thumb over `sy`; `@counter-style`; `corner-shape` as a `P` outline; `border-image` with a gradient as a gradient stroke, nine-slice through vector 16; `ruby`; `background-attachment` no-op; scroll-driven animations (`animation-timeline: scroll()`/`view()`) as expressions over `sy`; `backface-visibility`/`perspective` card flip as `scaleX(cos θ)` with a hidden back; `background-clip: text` through vector 14 |
+| F5 accepted silently, listed | scroll snap and scroll margins, `will-change`, `contain`, `isolation`, `touch-action`, `-webkit-font-smoothing`, `color-scheme`, `zoom`, `all`, `overscroll-behavior`, `text-wrap`, `image-rendering` |
+
+Out, with the reason: `::selection` (no text selection), `@page` (print), `@view-transition`
+(no document navigation), `shape-outside` (no inline formatting context), MathML (no user),
+per-pixel effects, network from a page, animation triggers (draft spec).
 
 ---
 

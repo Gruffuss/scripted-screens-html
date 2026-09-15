@@ -123,10 +123,23 @@ every vertex colour and label colour under the group at emit. Only the ones pres
 `G m=[a,b,c,d,e,f] { ... }`: a 2x3 affine matrix composed after `t r s` (CSS `matrix()`
 order). Makes `skew()` and `matrix()` exact.
 
-## 14. Proposed, not agreed: gradient text (`background-clip: text`)
+## 14. Gradient text (agreed)
 
-A gradient through the glyphs needs the text drawn with a gradient over its quads. TMP allows
-per-vertex colour on each glyph's four corners, so a linear ramp across a label is exact per
-glyph and continuous across the label. Form: `T ... f=@gradient` where the gradient is
-linear with `units=bbox` over the label box. Radial would be the per-glyph approximation.
-Say yes or no.
+`T ... f=@gradient` (and `s=@gradient` for an outline): the gradient sampled at each glyph's
+four vertex corners, `units=bbox` over the label box, so a linear ramp is exact per glyph and
+continuous across the label; radial and conic per-glyph. Same per-vertex recolour path as
+filters and masks. Carries `background-clip: text` with a gradient background.
+
+## 15. First-line information (agreed)
+
+`::first-line` needs to know where TMP broke the first line. Additive form:
+`T ... fl="<attrs>"` where attrs is a subset of `f`, `size`, `weight`, `font` for the first
+line only. The text layer, after the mesh update, reads `textInfo.lineInfo[0]`'s last
+character index and re-sets the text with rich tags around that span (a text re-set, not a
+mesh edit). If the layout moves the break (a later size change), it repeats once.
+
+## 16. Source crop on `IMG` (agreed)
+
+`IMG ... uv=[u0,v0,u1,v1]`, fractions of the texture, the part of the picture the box shows
+(default `[0,0,1,1]`). Carries the nine-slice `border-image` (nine `IMG` nodes) and canvas
+`drawImage` with a source rectangle.
