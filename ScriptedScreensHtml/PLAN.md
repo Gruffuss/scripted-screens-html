@@ -195,7 +195,7 @@ its own layout boxes and the pointer position (Batch A and D).
 | D script DOM | HtmlTest6: all PASS, external script loaded (repo made public) | reads after DOM writes saw the old tree; script-made elements lacked the live API once adopted; `load` fired per script; `innerHTML` on a container did not replace built children |
 | C paint | HtmlTest7: all rows; vector 1, 2, 4, 5, 8, 9, 10, 11, 12, 13 seen | float in a sentence sat left; conic stops all at 0; 3D border keywords warned |
 | E canvas | HtmlTest8: the canvases drew nothing (the vector mod flagged a degenerate clip) | a canvas box was 0x0: it now takes its bitmap size unless CSS sizes it; by eye after that |
-| F1 SVG and numbers | HtmlTest9: all rows except the `evenodd` hole (vector 17) | svg text/image lost their own x/y/size; clipPath defs were viewBox-space |
+| F1 SVG and numbers | HtmlTest9: all rows (the `evenodd` hole since vector 0.11.23) | svg text/image lost their own x/y/size; clipPath defs were viewBox-space |
 | F2 cascade | HtmlTest10: all rows | controls had no border and clipped their text |
 | F3 text, lists, tables, layout, script | HtmlTest11: text, counters, tables, flex, grid rows; script rows need eyes | a ::before stacked above its text (inline runs between blocks now flow as one line); list-style-image read from the list; caption-side inherited; img/controls inline; width-less table cells sized to content; break-all wraps in the layout |
 | F4 rescued items | HtmlTest12: all rows; vector 7, 14, 15, 16 seen | ::first-letter only ran with an ::after; the border-image gradient came out flat (def now in scene space) |

@@ -1,6 +1,6 @@
 # Writing a page for a console: what works from HTML, CSS and JS
 
-State as of 2026-09-15 (branch `untested`, vector mod 0.11.21.0). Everything in the
+State as of 2026-09-15 (vector mod 0.11.23.0). Everything in the
 "works" tables below was seen on a console that day (`HtmlTest4` to `HtmlTest12`, on the
 2x2 and 3x3 test consoles). The contract is simple: **a page is written exactly as for a
 browser.** Anything a browser page does that fails here is a defect, not a convention, and
@@ -173,10 +173,8 @@ stack. Unsupported CSS is logged once per property as `css: ... not supported`.
 
 ## Being finished
 
-Pending on the vector side (`FOR-VECTOR-SESSION.md`):
-
-- **17. Holes under a clip.** Every inline svg is clipped to its box, and the vector mod
-  drops holes in a clipped fill, so a path with a hole inside an svg draws solid.
+Nothing is pending on the vector side: items 1 to 17 are in vector mod 0.11.23 and seen
+working from a page.
 
 Approximations in this layer, listed to be replaced, not kept:
 
