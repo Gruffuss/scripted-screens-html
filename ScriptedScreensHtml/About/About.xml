@@ -3,7 +3,64 @@
 	<Name>ScriptedScreens Html [StationeersLaunchPad]</Name>
 	<Author>Gruffuss</Author>
 	<Version>0.1.0.0</Version>
-	<Description>Write a console screen as a web page. Adds an "html" element to ScriptedScreens: give it an HTML document with CSS and, if you like, JavaScript, and the page is drawn on the console by ScriptedScreens Vector as crisp geometry at any distance, in the Fonts mod's typefaces. Flexbox and grid, gradients, shadows, transitions and keyframes, scrolling boxes, inline SVG with client-side animation, canvas, forms and buttons that report to Lua, live values bound by element id. A page that does not change costs nothing per frame. Requires ScriptedScreens, ScriptedScreens Vector and ScriptedScreens Fonts. Client-side. README and examples in the mod folder.</Description>
+	<Description>
+[h1]ScriptedScreens Html[/h1]
+[i]Client-side only. Nothing on disk is modified.[/i]
+
+Write a console screen as a web page. Adds an [b]html[/b] element type to ScriptedScreens surfaces: give it an HTML document with CSS and, if you like, JavaScript, and the page is drawn on the console by ScriptedScreens Vector as crisp geometry at any distance, in real typefaces. A page that does not change costs the game nothing per frame.
+
+[code]ui:element({ id = "screen", type = "html", rect = { unit = "px", x = 0, y = 0, w = 460, h = 460 },
+  props = { src = [[&lt;html&gt;&lt;head&gt;&lt;style&gt;body { background: #0B1622; color: #E4F1F7; font-family: Barlow; padding: 16px }
+  h1 { color: #38BDF8 }&lt;/style&gt;&lt;/head&gt;&lt;body&gt;&lt;h1&gt;Hello, base&lt;/h1&gt;&lt;p&gt;A web page on a console.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;]] } })[/code]
+
+[h2]Why you want it[/h2]
+Far more people can write HTML and CSS than a drawing API, and a page written from browser habit works: flexbox and grid, gradients of every kind, shadows, borders, transforms, transitions and keyframes, scrolling boxes with the wheel, inline SVG, forms, tables, lists, counters, custom properties, media queries against the design width. Lay the page out for one design width and it scales to any console.
+
+[h2]The page changes on data, motion is free[/h2]
+Keep the page static and send values from Lua through a second, tiny element that names the page. Values bind by element id: a string becomes text, a table becomes CSS, a boolean shows or hides, a number array becomes a live graph. Elements persist, so a CSS [b]transition[/b] animates the change and nothing in Lua runs per frame.
+
+[code]data:set_props({ data = { temp = "293 K", bar = { width = "62%" }, alarm = pressure > 500, hist = history } })[/code]
+
+Transitions, keyframes and scroll-driven animations are compiled to expressions the Vector mod evaluates on a worker thread. Inline SVG goes further: any attribute may be an expression over time, instance and your data, so a tank surface ripples on the client with one number sent a second.
+
+[h2]Controls and scripts[/h2]
+[list]
+[*] Buttons and anything with onclick report to Lua's on_click with the element id; hover, active and focus styles work
+[*] Inputs, ranges, selects, checkboxes and radios report to on_change as "name=value"
+[*] Images, video and audio are ScriptedScreens' own elements, so URLs the game can fetch work
+[*] A page script runs on a worker thread with the DOM you expect: querySelector, createElement, innerHTML, classList, events, timers, localStorage, a full 2D canvas drawn as vector paths, modules imported from a URL
+[*] Fonts are the ones the Fonts mod ships, by family and weight: Barlow, Barlow SemiBold, Barlow Condensed, the game's own faces, monospace
+[/list]
+
+[h2]Getting started[/h2]
+The mod folder holds a README guide, SUPPORT.md (everything seen working on a console, and the short list still being finished), and six numbered examples that each run on paste: a styled page, live data, controls, an SVG tank, a script-built table with a canvas chart, and a complete four-tank gas monitor.
+
+[h2]Notes[/h2]
+[list]
+[*] Per-pixel effects (blur, backdrop-filter, blend modes) are accepted and do nothing: the page is geometry, not pixels
+[*] A page has no network of its own; stylesheets, scripts and modules are fetched from http(s) URLs when the page loads, data comes from Lua
+[*] A magenta frame means the Vector mod refused part of the scene; the reason is in the log. Turn on Diagnostics in the settings for per-page cost lines and the exact scene text
+[/list]
+
+[h2]Changelog[/h2]
+[b]0.1.0[/b]
+[list]
+[*] First release: HTML, CSS and JavaScript pages on ScriptedScreens consoles, drawn through ScriptedScreens Vector.
+[/list]
+
+[h2]Source[/h2]
+[url=https://github.com/Gruffuss/scripted-screens-html]github.com/Gruffuss/scripted-screens-html[/url] — MIT licensed. Issues and pull requests welcome.
+
+[h2]Requirements[/h2]
+[list]
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3666779631]ScriptedScreens[/url] — [b]required[/b]; load before this mod
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3787517570]ScriptedScreens Vector[/url] — [b]required[/b]; draws the page
+[*] ScriptedScreens Fonts — [b]required[/b]; the typefaces (in the same repository)
+[*] [url=https://github.com/StationeersLaunchPad/StationeersLaunchPad]StationeersLaunchPad[/url]
+[*] [url=https://github.com/BepInEx/BepInEx]BepInEx 5.x[/url]
+[/list]
+	</Description>
+	<WorkshopHandle>0</WorkshopHandle>
 	<Tags>
 		<Tag>Mod</Tag>
 		<Tag>BepInEx</Tag>
@@ -13,6 +70,9 @@
 	<Dependencies>
 		<Mod>
 			<Id>3666779631</Id>
+		</Mod>
+		<Mod>
+			<Id>3787517570</Id>
 		</Mod>
 	</Dependencies>
 </ModMetadata>
