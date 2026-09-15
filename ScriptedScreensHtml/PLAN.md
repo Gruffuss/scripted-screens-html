@@ -184,7 +184,7 @@ its own layout boxes and the pointer position (Batch A and D).
 | A cascade and values | `8df1951` | yes | parser tests | not yet (HtmlTest4) |
 | B HTML coverage | `610bb96` | yes | parser tests | not yet (HtmlTest5) |
 | D script DOM | `38c4c01` | yes | parser tests, prelude smoke test in Node | not yet (HtmlTest6) |
-| C paint | `b72f674` | yes | parser tests | not yet (HtmlTest7); rows marked with a requirement number wait for the vector work |
+| C paint | `b72f674` | yes | parser tests | not yet (HtmlTest7); the vector work it needs is built as 0.11.21.0, unconfirmed |
 | E canvas | see git | yes | prelude smoke test records a frame | not yet (HtmlTest8) |
 
 SUPPORT.md is rewritten from this file once the pages have been seen on a console.

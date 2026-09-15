@@ -429,6 +429,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                 },
                 SetInputValue,
                 WantClicks,
+                SetScroll,
                 (parentId, html, beforeId) =>
                 {
                     if (_byId.TryGetValue(parentId, out var p) && built.NodeOf.TryGetValue(p, out var pn))
@@ -677,7 +678,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         var layout = LayoutSize();
         _tweens.Diff(_content, _built, Time.time);
         var t1 = Clock.Elapsed.TotalMilliseconds;
-        var output = VectorEmitter.Emit(_built, _content, layout.x, layout.y, _tweens, Time.time);
+        var output = VectorEmitter.Emit(_built, _content, layout.x, layout.y, _tweens, Time.time, ScrollSet);
         _lastLayoutMs = t1 - t0;
         _lastTranslateMs = Clock.Elapsed.TotalMilliseconds - t1;
         _lastNodes = output.Nodes;
@@ -1148,6 +1149,17 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (node.Attr("data-click") != null || node.Tag == "button" || node.Attr("onclick") != null)
             return;
         node.Attributes["data-click"] = "1";
+        _dirty = true;
+        Wake();
+    }
+
+    /// <summary>Scroll offsets a script asked for, by scroll box id, with a version the vector mod applies once (so/sov, vector requirement 7).</summary>
+    internal readonly Dictionary<string, (float offset, int version)> ScrollSet = new(StringComparer.Ordinal);
+    private int _scrollVersion;
+
+    private void SetScroll(string key, float offset)
+    {
+        ScrollSet[key] = (Mathf.Max(0f, offset), ++_scrollVersion);
         _dirty = true;
         Wake();
     }

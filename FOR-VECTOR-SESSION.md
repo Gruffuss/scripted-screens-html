@@ -1,9 +1,18 @@
 # Requirements for the vector mod, from the HTML layer (2026-09-15)
 
-All additive: nothing existing changes meaning. The HTML emitter already writes these forms
-in the scene text and treats them as present; a scene using a form that is not implemented
-yet should degrade (attribute ignored) rather than fail to parse. Where a feasibility check
-was done against the vector code and the game's shipped shaders, the findings are inline.
+**Status 2026-09-15: all thirteen implemented on the vector side as 0.11.21.0, tested offline
+(171 unit checks, offline renders, no regressions on five old scenes), not yet seen in game.**
+The build deploys itself, so the next game start loads 0.11.21. The HTML emitter's forms were
+checked against the 0.11.21 reference and parser and match. Pending in-game confirmation, per
+the vector session: inset text shadow (3), stencil masks on labels (6, 8), IMG download and
+rebuild (9), filters and masks on text (10, 12), extra text shadow copies (4), so/sov live (7).
+
+Two behaviours to know: an inset shadow costs about 3x the vertices of an outset one; a
+concave clip draws its contents once per convex piece. Filters do not reach IMG (reported).
+A nested clip with an empty intersection now draws nothing, as CSS does.
+
+All additive: nothing existing changes meaning. Where a feasibility check was done against
+the vector code and the game's shipped shaders, the findings are inline.
 
 Resolved and removed from this file: the radial fill vertex count and the `VectorSlice`
 error spam on capture, both fixed in 0.11.20.0 and confirmed from the HTML side.
@@ -113,3 +122,11 @@ every vertex colour and label colour under the group at emit. Only the ones pres
 
 `G m=[a,b,c,d,e,f] { ... }`: a 2x3 affine matrix composed after `t r s` (CSS `matrix()`
 order). Makes `skew()` and `matrix()` exact.
+
+## 14. Proposed, not agreed: gradient text (`background-clip: text`)
+
+A gradient through the glyphs needs the text drawn with a gradient over its quads. TMP allows
+per-vertex colour on each glyph's four corners, so a linear ramp across a label is exact per
+glyph and continuous across the label. Form: `T ... f=@gradient` where the gradient is
+linear with `units=bbox` over the label box. Radial would be the per-glyph approximation.
+Say yes or no.

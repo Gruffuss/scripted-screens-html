@@ -61,6 +61,7 @@ internal sealed class ScriptHost : IDisposable
     private readonly Action<string, string> _setValue;
     private readonly Action<string> _wantClicks;
     private readonly Action<string, string, string> _insertHtml;
+    private readonly Action<string, float> _setScroll;
     /// <summary>The page's built result and a re-emit hook, for attribute writes that change layout (dialog/details `open`).</summary>
     private HtmlRenderer.Result? _built;
     private Action? _onLayoutAttr;
@@ -113,9 +114,10 @@ internal sealed class ScriptHost : IDisposable
     public ScriptHost(Func<string, VisualElement?> find, Func<string, SvgShape?> findShape, Func<string, HtmlNode?> findNode,
         Func<string, List<string>> query, Action<VisualElement, string> setClass, List<CssRule> rules, Action<string> warn,
         Action<string, string> appendHtml, Action<string> remove, Action<string, string> setValue, Action<string> wantClicks,
-        Action<string, string, string> insertHtml)
+        Action<string, float> setScroll, Action<string, string, string> insertHtml)
     {
         _insertHtml = insertHtml;
+        _setScroll = setScroll;
         _appendHtml = appendHtml;
         _remove = remove;
         _setValue = setValue;
@@ -346,6 +348,17 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__wantClicks", new Action<string>(id => _toMain.Enqueue(() => _wantClicks(id))));
             _engine.SetValue("__wantPointer", new Action<string>(type => _pointerTypes.Add(type)));
             _engine.SetValue("__cssOf", new Func<string, string, string>(CssOf));
+            _engine.SetValue("__setScroll", new Action<string, double>((id, off) => _toMain.Enqueue(() => _setScroll(id, (float)off))));
+            _engine.SetValue("__scrollBox", new Func<string, string?>(id =>
+            {
+                // the nearest ancestor (or the element itself) that scrolls: overflow auto/scroll
+                for (var cur = id; cur != null; cur = ParentOf(cur))
+                {
+                    var o = CssOf(cur, "overflow"); var oy = CssOf(cur, "overflow-y");
+                    if (o.Trim() is "auto" or "scroll" || oy.Trim() is "auto" or "scroll") return cur;
+                }
+                return null;
+            }));
             _engine.SetValue("__viewport", new Func<double[]>(() => new[] { (double)_viewport.x, (double)_viewport.y }));
             _engine.SetValue("__media", new Func<string, bool>(CssParser.MediaMatches));
             _engine.SetValue("__animate", new Func<string, string[], string, int>(Animate));
@@ -892,9 +905,18 @@ function __el(id){
     animate: function(k, o){ return __animate_el(id, k, o); },
     getAnimations: function(){ return []; },
     get scrollWidth(){ return __children_rects(id)[0]; }, get scrollHeight(){ return __children_rects(id)[1]; },
-    get scrollTop(){ return __scrollCache[id] || 0; }, set scrollTop(v){ __scrollCache[id] = Number(v) || 0; },
+    get scrollTop(){ return __scrollCache[id] || 0; }, set scrollTop(v){ __scrollCache[id] = Math.max(0, Number(v) || 0); __setScroll(id, __scrollCache[id]); },
     get scrollLeft(){ return 0; }, set scrollLeft(v){},
-    scrollTo: function(){}, scrollBy: function(){}, scrollIntoView: function(){},
+    scrollTo: function(a, b){ var y = (a && typeof a === 'object') ? (a.top || 0) : (b || 0); el.scrollTop = y; },
+    scrollBy: function(a, b){ var y = (a && typeof a === 'object') ? (a.top || 0) : (b || 0); el.scrollTop = (__scrollCache[id] || 0) + y; },
+    scrollIntoView: function(arg){
+      // the nearest scrolling ancestor jumps so this element's top (or bottom, for block: 'end') meets its edge
+      var box = __scrollBox(__parent(id) || id); if (!box) return;
+      var r = __rect(id), b = __rect(box), cur = __scrollCache[box] || 0;
+      var toEnd = arg && typeof arg === 'object' && (arg.block === 'end' || arg.block === 'nearest' && r[1] > b[1] + b[3] / 2) || arg === false;
+      var y = toEnd ? cur + (r[1] + r[3]) - (b[1] + b[3]) : cur + r[1] - b[1];
+      __el(box).scrollTop = y;
+    },
     get offsetParent(){ return el.parentElement; },
     get value(){ return __values[id] !== undefined ? __values[id] : (__getAttr(id, 'value') || ''); },
     set value(v){ __values[id] = String(v); __setValue(id, String(v)); },

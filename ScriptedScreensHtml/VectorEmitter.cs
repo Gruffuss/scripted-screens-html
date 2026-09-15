@@ -47,14 +47,16 @@ internal static class VectorEmitter
         public float Now;
         /// <summary>Top of the scroll container being emitted, or NaN outside one: what a sticky child pins to.</summary>
         public float ScrollTop = float.NaN;
+        /// <summary>Scroll offsets a script set, by box id (HtmlSurface.ScrollSet).</summary>
+        public Dictionary<string, (float offset, int version)>? ScrollSet;
         /// <summary>Positioned elements with a z-index, emitted after everything else at the root in z order: a stacking context across parents.</summary>
         public List<(VisualElement ve, Vector2 parentPos, int z)> Deferred = new();
         public bool EmittingDeferred;
     }
 
-    public static Output Emit(HtmlRenderer.Result built, VisualElement root, float designW, float designH, Tweens? tweens = null, float now = 0f)
+    public static Output Emit(HtmlRenderer.Result built, VisualElement root, float designW, float designH, Tweens? tweens = null, float now = 0f, Dictionary<string, (float offset, int version)>? scrollSet = null)
     {
-        var ctx = new Ctx { Built = built, RootOrigin = root.worldBound.position, Tw = tweens, Now = now };
+        var ctx = new Ctx { Built = built, RootOrigin = root.worldBound.position, Tw = tweens, Now = now, ScrollSet = scrollSet };
         var inv = CultureInfo.InvariantCulture;
         EmitElement(ctx, root, Vector2.zero, 0);
         if (ctx.Deferred.Count > 0)
@@ -178,7 +180,10 @@ internal static class VectorEmitter
                 ch += rs.paddingBottom;
                 ctx.Body.Append(indent).Append("SC id=").Append(string.IsNullOrEmpty(ve.name) ? "scroll" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture) : ve.name)
                     .Append(" x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h))
-                    .Append(" ch=").Append(F(Mathf.Max(ch, h))).Append(Radius(rs, w, h)).Append(" {\n");
+                    .Append(" ch=").Append(F(Mathf.Max(ch, h))).Append(Radius(rs, w, h));
+                if (ctx.ScrollSet != null && !string.IsNullOrEmpty(ve.name) && ctx.ScrollSet.TryGetValue(ve.name, out var ss))
+                    ctx.Body.Append(" so=").Append(F(ss.offset)).Append(" sov=").Append(ss.version); // applied once per version (vector requirement 7)
+                ctx.Body.Append(" {\n");
                 ctx.Out.Nodes++;
                 groups++;
                 scrollTop = y;
