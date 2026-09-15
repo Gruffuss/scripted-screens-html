@@ -501,6 +501,10 @@ internal static class HtmlRenderer
             if (ch != null && float.TryParse(ch, NumberStyles.Float, CultureInfo.InvariantCulture, out var h)) cv.CanvasHeight = h;
             Register(cv, node, result);
             ApplyStyles(cv, node, rules, result);
+            // a canvas is its bitmap size (300x150 by default) unless CSS sizes the box
+            var ccss = result.CssOf(cv);
+            if (!ccss.ContainsKey("width")) cv.style.width = cv.CanvasWidth;
+            if (!ccss.ContainsKey("height")) cv.style.height = cv.CanvasHeight;
             parent.Add(cv);
             return;
         }
