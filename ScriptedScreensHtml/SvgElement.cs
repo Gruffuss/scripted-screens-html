@@ -13,6 +13,8 @@ internal sealed class SvgShape
     public string Tag = string.Empty;
     public readonly Dictionary<string, string> Attributes = new(StringComparer.OrdinalIgnoreCase);
     public SvgElement? Owner;
+    /// <summary>A clipPath's shapes, which draw nothing themselves and become one CP def.</summary>
+    public List<SvgShape>? Children;
 
     // Point interpolation. A data tick arrives ~2 Hz and a polyline's points are not a
     // style, so nothing eases them: the graph stepped. Successive arrays are the same

@@ -787,6 +787,10 @@ internal static class VectorEmitter
         // has no text: "3" vanished from the footer. TextMeshPro's <noparse> keeps it a string.
         if (float.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out _))
             text = "<noparse>" + text + "</noparse>";
+        // font-variant-numeric: tabular-nums: TextMeshPro has no OpenType features, but it can
+        // monospace a span; digits get an em-fraction cell, the rest stays proportional.
+        if (css.TryGetValue("font-variant-numeric", out var fvn) && fvn.Contains("tabular"))
+            text = System.Text.RegularExpressions.Regex.Replace(text, "[0-9]+", m => "<mspace=0.6em>" + m.Value + "</mspace>");
         var align = rs.unityTextAlign;
         var centre = align == TextAnchor.MiddleCenter || align == TextAnchor.UpperCenter || align == TextAnchor.LowerCenter;
         var right = align == TextAnchor.MiddleRight || align == TextAnchor.UpperRight || align == TextAnchor.LowerRight;
@@ -979,8 +983,73 @@ internal static class VectorEmitter
         // SVG ids are per document, scene def ids are global: sixteen tanks each declare
         // `#fill`, so every reference is prefixed with this svg's id.
         foreach (var shape in svg.Shapes)
+            if (shape.Tag == "clipPath") SvgClipDef(ctx, shape, id + "_", fit);
+        foreach (var shape in svg.Shapes)
             EmitShape(ctx, shape, inner, id + "_", fit);
         ctx.Body.Append(indent).Append("}\n");
+    }
+
+    /// <summary>A clipPath's shapes as one CP def, in scene coordinates (the fit and any transform baked in).</summary>
+    private static void SvgClipDef(Ctx ctx, SvgShape clip, string prefix, Fit fit)
+    {
+        var id = clip.Attr("id");
+        if (id == null || clip.Children == null || clip.Children.Count == 0) return;
+        var sb = new StringBuilder();
+        foreach (var shape in clip.Children)
+        {
+            var g = Geometry(shape, fit, out var isPath);
+            if (g == null) continue;
+            if (sb.Length > 0) sb.Append(' ');
+            if (isPath && fit.Bake) sb.Append('G').Append(fit.PathGroup).Append(" { ").Append(g).Append(" }");
+            else sb.Append(g);
+        }
+        if (sb.Length == 0) return;
+        ctx.Defs.Append("  CP id=").Append(prefix).Append(id).Append(" { ").Append(sb).Append(" }\n");
+    }
+
+    /// <summary>The node text for a shape's geometry alone (no paint), or null for a tag with none.</summary>
+    private static string? Geometry(SvgShape shape, Fit fit, out bool isPath)
+    {
+        isPath = shape.Tag == "path";
+        switch (shape.Tag)
+        {
+            case "rect":
+            {
+                var r = "R x=" + fit.X(shape.Attr("x")) + " y=" + fit.Y(shape.Attr("y")) + " w=" + fit.W(shape.Attr("width")) + " h=" + fit.H(shape.Attr("height"));
+                if (shape.Attr("rx") != null) r += " rx=" + fit.Len(shape.Attr("rx"));
+                return r;
+            }
+            case "circle": return "C cx=" + fit.X(shape.Attr("cx")) + " cy=" + fit.Y(shape.Attr("cy")) + " rx=" + fit.W(shape.Attr("r")) + " ry=" + fit.H(shape.Attr("r"));
+            case "ellipse": return "C cx=" + fit.X(shape.Attr("cx")) + " cy=" + fit.Y(shape.Attr("cy")) + " rx=" + fit.W(shape.Attr("rx")) + " ry=" + fit.H(shape.Attr("ry"));
+            case "polygon":
+            case "polyline":
+            {
+                var pts = (shape.Attr("points") ?? string.Empty).Split(new[] { ' ', ',', '\n', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                var sb = new StringBuilder("Y p=[");
+                for (var i = 0; i + 1 < pts.Length; i += 2) { if (i > 0) sb.Append(','); sb.Append(fit.X(pts[i])).Append(',').Append(fit.Y(pts[i + 1])); }
+                return sb.Append(']').ToString();
+            }
+            case "path": return "P d=\"" + (shape.Attr("d") ?? string.Empty).Replace('"', ' ') + "\"";
+        }
+        return null;
+    }
+
+    /// <summary>A shape's `__m` (viewBox space) as a scene-space matrix: under a scaled group it applies as is; when the fit is baked it is conjugated by the fit.</summary>
+    private static string? ShapeMatrix(SvgShape shape, Fit fit)
+    {
+        var mt = shape.Attr("__m");
+        if (mt == null) return null;
+        var parts = mt.Split(',');
+        if (parts.Length != 6) return null;
+        var m = new float[6];
+        for (var i = 0; i < 6; i++) m[i] = float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : 0f;
+        if (fit.Bake)
+        {
+            var f = new[] { fit.Sx, 0f, 0f, fit.Sy, fit.Ox, fit.Oy };
+            var inv = new[] { 1f / fit.Sx, 0f, 0f, 1f / fit.Sy, -fit.Ox / fit.Sx, -fit.Oy / fit.Sy };
+            m = HtmlRenderer.MulMatrix(HtmlRenderer.MulMatrix(f, m), inv);
+        }
+        return "[" + F(m[0]) + "," + F(m[1]) + "," + F(m[2]) + "," + F(m[3]) + "," + F(m[4]) + "," + F(m[5]) + "]";
     }
 
     /// <summary>viewBox to scene mapping for one svg: identity under a scaled group, or baked.</summary>
@@ -1031,8 +1100,36 @@ internal static class VectorEmitter
             return;
         }
 
+        if (shape.Tag == "clipPath")
+            return;
         var sb = new StringBuilder(indent);
         var opacity = shape.Attr("opacity");
+        // wrappers: a clip-path reference, a transform (vector requirement 13)
+        var wrappers = 0;
+        if (shape.Attr("__clip") is { } clipRef) { sb.Append("G clip=").Append(prefix).Append(clipRef).Append(" { "); wrappers++; }
+        if (ShapeMatrix(shape, fit) is { } mtx) { sb.Append("G m=").Append(mtx).Append(" { "); wrappers++; }
+        if (shape.Tag == "text")
+        {
+            SvgTextNode(ctx, shape, sb, prefix, fit, opacity);
+            for (var i = 0; i < wrappers; i++) sb.Append(" }");
+            ctx.Body.Append(sb).Append('\n');
+            ctx.Out.Nodes++;
+            return;
+        }
+        if (shape.Tag == "image")
+        {
+            var href = shape.Attr("href") ?? string.Empty;
+            if (href.Length == 0) return;
+            var par = (shape.Attr("preserveAspectRatio") ?? "xMidYMid meet").ToLowerInvariant();
+            var ifit = par.Contains("none") ? "fill" : par.Contains("slice") ? "cover" : "contain";
+            sb.Append("IMG x=").Append(fit.X(shape.Attr("x"))).Append(" y=").Append(fit.Y(shape.Attr("y"))).Append(" w=").Append(fit.W(shape.Attr("width"))).Append(" h=").Append(fit.H(shape.Attr("height")))
+              .Append(" src=\"").Append(href.Replace("\"", string.Empty)).Append("\" fit=").Append(ifit);
+            if (opacity != null) sb.Append(" o=").Append(Expr(opacity));
+            for (var i = 0; i < wrappers; i++) sb.Append(" }");
+            ctx.Body.Append(sb).Append('\n');
+            ctx.Out.Nodes++;
+            return;
+        }
 
         // `n` on a discrete shape is the repeat extension: n instances with `i` bound, the
         // vector layer's RP. On polygon/polyline it is the sampled form instead (below).
@@ -1133,12 +1230,65 @@ internal static class VectorEmitter
             var v = shape.Attr(name);
             if (v != null) sb.Append(' ').Append(name).Append('=').Append(Expr(v));
         }
+        // dashes, miter limit and fill rule in their SVG spellings
+        if (shape.Attr("stroke-dasharray") is { } da && shape.Attr("dash") == null && da.Trim() != "none")
+        {
+            var parts = da.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
+            var list = new StringBuilder();
+            foreach (var p in parts) { if (list.Length > 0) list.Append(','); list.Append(pathGroup ? Expr(p) : fit.Len(p)); }
+            if (list.Length > 0) sb.Append(" dash=[").Append(list).Append(']');
+        }
+        if (shape.Attr("stroke-dashoffset") is { } dofs && shape.Attr("dofs") == null) sb.Append(" dofs=").Append(pathGroup ? Expr(dofs) : fit.Len(dofs));
+        if (shape.Attr("stroke-miterlimit") is { } ml && shape.Attr("ml") == null) sb.Append(" ml=").Append(Expr(ml));
+        if (shape.Attr("fill-rule") is { } frule && shape.Attr("fr") == null) sb.Append(" fr=").Append(frule.Trim());
         var sid = shape.Attr("id");
         if (sid != null) sb.Append(" id=").Append(sid);
         if (pathGroup) sb.Append(" }");
         if (repeat != null) sb.Append(" }");
+        for (var i = 0; i < wrappers; i++) sb.Append(" }");
         ctx.Body.Append(sb).Append('\n');
         ctx.Out.Nodes++;
+    }
+
+    /// <summary>
+    /// SVG text as a T: x/y are the baseline start, text-anchor sets the alignment and where
+    /// the box sits, the font size is in viewBox units (scaled with the fit), a tspan with
+    /// its own x/y is a line break.
+    /// </summary>
+    private static void SvgTextNode(Ctx ctx, SvgShape shape, StringBuilder sb, string prefix, Fit fit, string? opacity)
+    {
+        var text = shape.Attr("__text") ?? string.Empty;
+        var size = StyleApplier.Num(shape.Attr("font-size") ?? "16");
+        var ps = fit.Bake ? size * (fit.Sx + fit.Sy) * 0.5f : size;
+        var lines = text.Split('\n');
+        var longest = 0;
+        foreach (var l in lines) longest = Math.Max(longest, l.Length);
+        var width = longest * ps * 0.6f + ps;
+        var height = ps * 1.25f * lines.Length;
+        var anchor = (shape.Attr("text-anchor") ?? "start").Trim().ToLowerInvariant();
+        var bx = fit.Bake ? fit.Px(StyleApplier.Num(shape.Attr("x") ?? "0")) : StyleApplier.Num(shape.Attr("x") ?? "0");
+        var by = fit.Bake ? fit.Py(StyleApplier.Num(shape.Attr("y") ?? "0")) : StyleApplier.Num(shape.Attr("y") ?? "0");
+        var left = anchor == "middle" ? bx - width * 0.5f : anchor == "end" ? bx - width : bx;
+        var baseline = (shape.Attr("dominant-baseline") ?? "auto").Trim().ToLowerInvariant();
+        var top = baseline is "middle" or "central" ? by - ps * 0.6f : baseline is "hanging" or "text-before-edge" ? by : by - ps * 0.95f;
+        var esc = text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", string.Empty).Replace("\n", "\\n");
+        if (float.TryParse(esc.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out _)) esc = "<noparse>" + esc + "</noparse>";
+        sb.Append("T x=").Append(F(left)).Append(" y=").Append(F(top)).Append(" w=").Append(F(width)).Append(" h=").Append(F(height)).Append(" text=\"").Append(esc).Append("\" size=").Append(F(ps));
+        var fill = shape.Attr("fill") ?? "black";
+        sb.Append(" f=").Append(Paint(fill, prefix));
+        var fo = Mul(shape.Attr("fill-opacity"), opacity);
+        if (fo != null) sb.Append(" fo=").Append(fo);
+        if (shape.Attr("font-family") is { } fam)
+        {
+            var first = fam.Split(',')[0].Trim().Trim('"', '\'');
+            if (first.Length > 0) sb.Append(" font=\"").Append(IsGeneric(first) ? StyleApplier.MapGeneric(first) ?? first : FontLibrary.ResolveFace(first)).Append('"');
+        }
+        var weight = (shape.Attr("font-weight") ?? "normal").Trim().ToLowerInvariant();
+        if (weight == "bold" || weight == "bolder" || (StyleApplier.IsNumber(weight) && StyleApplier.Num(weight) >= 600)) sb.Append(" weight=bold");
+        if (anchor == "middle") sb.Append(" align=center"); else if (anchor == "end") sb.Append(" align=right");
+        sb.Append(" valign=top");
+        if (shape.Attr("letter-spacing") is { } ls && ps > 0f) sb.Append(" cspace=").Append(F(StyleApplier.Num(ls) / size * 100f));
+        if (shape.Attr("id") is { } sid) sb.Append(" id=").Append(sid);
     }
 
     /// <summary>

@@ -368,7 +368,7 @@ internal static class HtmlRenderer
 
         if (node.Tag == "svg")
         {
-            var svg = BuildSvg(node, result);
+            var svg = BuildSvg(node, rules, result);
             Register(svg, node, result);
             ApplyStyles(svg, node, rules, result);
             parent.Add(svg);
@@ -560,7 +560,7 @@ internal static class HtmlRenderer
     /// Inline SVG. viewBox, width/height attributes, preserveAspectRatio="none"; shapes are
     /// collected flat (a g's children are hoisted, its own attributes are not inherited).
     /// </summary>
-    private static SvgElement BuildSvg(HtmlNode node, Result result)
+    private static SvgElement BuildSvg(HtmlNode node, List<CssRule> rules, Result result)
     {
         var svg = new SvgElement();
         var vb = node.Attr("viewBox") ?? node.Attr("viewbox");
@@ -584,75 +584,271 @@ internal static class HtmlRenderer
             result.Warnings.Add("html: <svg> without viewBox uses 0 0 100 100");
         svg.Stretch = string.Equals(node.Attr("preserveAspectRatio"), "none", StringComparison.OrdinalIgnoreCase);
 
-        CollectShapes(node, svg, result);
+        CollectShapes(node, svg, result, rules);
         return svg;
     }
 
-    private static void CollectShapes(HtmlNode node, SvgElement svg, Result result)
+    /// <summary>SVG presentation properties that a group hands down to its content.</summary>
+    private static readonly string[] SvgInherited =
     {
+        "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap", "stroke-linejoin", "stroke-dasharray", "stroke-dashoffset", "stroke-miterlimit",
+        "font-family", "font-size", "font-weight", "font-style", "text-anchor", "dominant-baseline", "letter-spacing", "color",
+    };
+
+    /// <summary>
+    /// Walks the svg subtree the way a browser resolves it: presentation attributes, then CSS
+    /// rules matching the node, then inline style; inherited properties flow down through
+    /// groups, `opacity` multiplies, `transform` composes into one matrix per shape (written
+    /// as `__m`). `use` inlines what it references (a `symbol` scales to the use's box),
+    /// `clipPath` becomes a shape holding its children, `text` and `image` become shapes,
+    /// content inside `defs` draws only when referenced.
+    /// </summary>
+    private static void CollectShapes(HtmlNode node, SvgElement svg, Result result, List<CssRule> rules, Dictionary<string, string>? inherited = null, float[]? matrix = null, Dictionary<string, HtmlNode>? byId = null, int depth = 0, bool inDefs = false, SvgShape? clipTarget = null)
+    {
+        if (byId == null)
+        {
+            byId = new Dictionary<string, HtmlNode>(StringComparer.Ordinal);
+            IndexIds(node, byId);
+        }
+        inherited ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (depth > 12) return;
         foreach (var c in node.Children)
         {
             if (c.IsText)
                 continue;
-            switch (c.Tag)
+            var tag = c.Tag!;
+            if (tag is "title" or "desc" or "metadata" or "script" or "style")
+                continue;
+            if (tag is "lineargradient" or "radialgradient")
             {
-                case "g":
-                case "defs":
-                    CollectShapes(c, svg, result);
-                    break;
-                case "lineargradient":
-                case "radialgradient":
+                var shape = new SvgShape { Tag = tag == "lineargradient" ? "linearGradient" : "radialGradient", Owner = svg };
+                foreach (var kv in c.Attributes)
+                    shape.Attributes[kv.Key] = kv.Value;
+                var stops = new StringBuilder();
+                foreach (var st in c.Children)
                 {
-                    // Kept as a shape the painter ignores; the vector emitter turns it into a
-                    // def. Stops travel as one attribute: offset|color|opacity; ...
-                    var shape = new SvgShape { Tag = c.Tag == "lineargradient" ? "linearGradient" : "radialGradient", Owner = svg };
-                    foreach (var kv in c.Attributes)
-                        shape.Attributes[kv.Key] = kv.Value;
-                    var stops = new System.Text.StringBuilder();
-                    foreach (var st in c.Children)
-                    {
-                        if (st.IsText || st.Tag != "stop") continue;
-                        var style = st.Attr("style");
-                        var colour = st.Attr("stop-color");
-                        var opacity = st.Attr("stop-opacity");
-                        if (style != null)
+                    if (st.IsText || st.Tag != "stop") continue;
+                    var style = st.Attr("style");
+                    var colour = st.Attr("stop-color");
+                    var opacity = st.Attr("stop-opacity");
+                    if (style != null)
+                        foreach (var d in CssParser.ParseDeclarations(style))
                         {
-                            foreach (var d in CssParser.ParseDeclarations(style))
-                            {
-                                if (d.Name == "stop-color") colour = d.Value;
-                                else if (d.Name == "stop-opacity") opacity = d.Value;
-                            }
+                            if (d.Name == "stop-color") colour = d.Value;
+                            else if (d.Name == "stop-opacity") opacity = d.Value;
                         }
-                        stops.Append(st.Attr("offset") ?? "0").Append('|').Append(colour ?? "black").Append('|').Append(opacity ?? string.Empty).Append(';');
+                    stops.Append(st.Attr("offset") ?? "0").Append('|').Append(colour ?? "black").Append('|').Append(opacity ?? string.Empty).Append(';');
+                }
+                shape.Attributes["stops"] = stops.ToString();
+                svg.Shapes.Add(shape);
+                continue;
+            }
+
+            // the node's own presentation, in cascade order
+            var own = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in c.Attributes)
+                own[kv.Key] = kv.Value;
+            var matched = new List<(int spec, int order, CssRule rule)>();
+            foreach (var rule in rules)
+            {
+                var best = -1;
+                foreach (var sel in rule.Selectors)
+                    if (sel.Matches(c)) best = Math.Max(best, sel.Specificity);
+                if (best >= 0) matched.Add((best, rule.Order, rule));
+            }
+            matched.Sort((a, b) => a.spec != b.spec ? a.spec.CompareTo(b.spec) : a.order.CompareTo(b.order));
+            foreach (var m in matched)
+                foreach (var d in m.rule.Declarations)
+                    own[d.Name] = d.Value.IndexOf("var(", StringComparison.Ordinal) >= 0 ? ResolveVars(d.Value, c) : d.Value;
+            if (c.Attr("style") is { } inlineStyle)
+                foreach (var d in CssParser.ParseDeclarations(inlineStyle))
+                    own[d.Name] = d.Value;
+            if (own.TryGetValue("display", out var disp) && disp.Trim() == "none") continue;
+            if (own.TryGetValue("visibility", out var vis) && vis.Trim() == "hidden") continue;
+
+            // effective: inherited, then own; opacity multiplies; transform composes
+            var eff = new Dictionary<string, string>(inherited, StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in own)
+                if (Array.IndexOf(SvgInherited, kv.Key.ToLowerInvariant()) >= 0) eff[kv.Key] = kv.Value;
+            // a clip on a group clips everything under it; the nearest wins
+            if (own.TryGetValue("clip-path", out var gcp) && UrlId(gcp) is { } gcid) eff["__clip"] = gcid;
+            if (own.TryGetValue("opacity", out var op))
+            {
+                var o = StyleApplier.Num(op);
+                eff["opacity"] = (inherited.TryGetValue("opacity", out var io) ? StyleApplier.Num(io) * o : o).ToString("0.###", CultureInfo.InvariantCulture);
+            }
+            var m2 = matrix;
+            if (own.TryGetValue("transform", out var tr) && SvgTransform(tr) is { } tm)
+                m2 = matrix == null ? tm : MulMatrix(matrix, tm);
+
+            switch (tag)
+            {
+                case "g": case "a": case "switch":
+                    CollectShapes(c, svg, result, rules, eff, m2, byId, depth + 1, inDefs, clipTarget);
+                    break;
+                case "defs":
+                    CollectShapes(c, svg, result, rules, eff, m2, byId, depth + 1, true, clipTarget);
+                    break;
+                case "symbol":
+                    if (!inDefs && depth > 0) CollectShapes(c, svg, result, rules, eff, m2, byId, depth + 1, inDefs, clipTarget);
+                    break; // a symbol draws only through use
+                case "clippath":
+                {
+                    var cp = new SvgShape { Tag = "clipPath", Owner = svg, Children = new List<SvgShape>() };
+                    if (c.Attr("id") is { } cid) cp.Attributes["id"] = cid;
+                    var before = svg.Shapes.Count;
+                    CollectShapes(c, svg, result, rules, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), m2, byId, depth + 1, false, cp);
+                    svg.Shapes.Insert(before, cp);
+                    break;
+                }
+                case "use":
+                {
+                    var href = (c.Attr("href") ?? c.Attr("xlink:href") ?? string.Empty).Trim();
+                    if (!href.StartsWith("#", StringComparison.Ordinal) || !byId.TryGetValue(href.Substring(1), out var target) || depth > 8)
+                        break;
+                    var ux = StyleApplier.Num(c.Attr("x") ?? "0"); var uy = StyleApplier.Num(c.Attr("y") ?? "0");
+                    var um = MulMatrix(m2 ?? Identity(), new[] { 1f, 0f, 0f, 1f, ux, uy });
+                    if (target.Tag == "symbol" && target.Attr("viewBox") is { } svb)
+                    {
+                        var n = svb.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (n.Length == 4 && c.Attr("width") is { } uw && c.Attr("height") is { } uh)
+                        {
+                            var vbw = StyleApplier.Num(n[2]); var vbh = StyleApplier.Num(n[3]);
+                            var sc = Mathf.Min(StyleApplier.Num(uw) / Mathf.Max(1f, vbw), StyleApplier.Num(uh) / Mathf.Max(1f, vbh));
+                            um = MulMatrix(um, new[] { sc, 0f, 0f, sc, -StyleApplier.Num(n[0]) * sc, -StyleApplier.Num(n[1]) * sc });
+                        }
                     }
-                    shape.Attributes["stops"] = stops.ToString();
+                    // the use's own presentation is what the referenced content inherits
+                    var wrapper = new HtmlNode { Tag = "g", Parent = c };
+                    wrapper.Children.Add(target);
+                    CollectShapes(wrapper, svg, result, rules, eff, um, byId, depth + 1, false, clipTarget);
+                    break;
+                }
+                case "text":
+                {
+                    if (inDefs && clipTarget == null) break;
+                    var text = SvgText(c);
+                    if (text.Length == 0) break;
+                    var shape = new SvgShape { Tag = "text", Owner = svg };
+                    foreach (var kv in eff) shape.Attributes[kv.Key] = kv.Value;
+                    shape.Attributes["__text"] = text;
+                    if (m2 != null) shape.Attributes["__m"] = MatrixText(m2);
+                                        svg.Shapes.Add(shape);
+                    if (c.Attr("id") is { } tid) result.Shapes[tid] = shape;
+                    break;
+                }
+                case "image":
+                {
+                    if (inDefs && clipTarget == null) break;
+                    var shape = new SvgShape { Tag = "image", Owner = svg };
+                    foreach (var kv in eff) shape.Attributes[kv.Key] = kv.Value;
+                    shape.Attributes["href"] = c.Attr("href") ?? c.Attr("xlink:href") ?? string.Empty;
+                    if (m2 != null) shape.Attributes["__m"] = MatrixText(m2);
                     svg.Shapes.Add(shape);
                     break;
                 }
                 case "line": case "polyline": case "polygon": case "rect": case "circle": case "ellipse": case "path":
                 {
-                    var shape = new SvgShape { Tag = c.Tag!, Owner = svg };
-                    foreach (var kv in c.Attributes)
-                        shape.Attributes[kv.Key] = kv.Value;
-                    // style="stroke: red" on a shape: presentation attributes win in SVG,
-                    // but authors write style= expecting it to apply, so it does.
-                    var style = c.Attr("style");
-                    if (style != null)
-                    {
-                        foreach (var d in CssParser.ParseDeclarations(style))
-                            shape.Attributes[d.Name] = d.Value;
-                    }
-                    svg.Shapes.Add(shape);
+                    if (inDefs && clipTarget == null) break;
+                    var shape = new SvgShape { Tag = tag, Owner = svg };
+                    foreach (var kv in eff) shape.Attributes[kv.Key] = kv.Value;
+                    foreach (var kv in c.Attributes) if (!shape.Attributes.ContainsKey(kv.Key)) shape.Attributes[kv.Key] = kv.Value;
+                    if (m2 != null) shape.Attributes["__m"] = MatrixText(m2);
+                                        if (clipTarget != null) clipTarget.Children!.Add(shape);
+                    else svg.Shapes.Add(shape);
                     var id = c.Attr("id");
-                    if (id != null)
+                    if (id != null && clipTarget == null)
                         result.Shapes[id] = shape;
                     break;
                 }
                 default:
-                    result.Warnings.Add($"html: svg <{c.Tag}> not supported");
+                    result.Warnings.Add($"html: svg <{tag}> not supported");
                     break;
             }
         }
+    }
+
+    private static void IndexIds(HtmlNode node, Dictionary<string, HtmlNode> byId)
+    {
+        foreach (var c in node.Children)
+        {
+            if (c.IsText) continue;
+            if (c.Attr("id") is { } id && !byId.ContainsKey(id)) byId[id] = c;
+            IndexIds(c, byId);
+        }
+    }
+
+    /// <summary>The text of a &lt;text&gt; with its tspans, whitespace collapsed; a tspan with its own x/y starts a new line.</summary>
+    private static string SvgText(HtmlNode text)
+    {
+        var sb = new StringBuilder();
+        void Walk(HtmlNode n)
+        {
+            foreach (var c in n.Children)
+            {
+                if (c.IsText) { sb.Append(c.Text); continue; }
+                if (c.Tag == "tspan" && (c.Attr("x") != null || c.Attr("y") != null) && sb.Length > 0) sb.Append('\n');
+                Walk(c);
+            }
+        }
+        Walk(text);
+        return sb.ToString().Trim();
+    }
+
+    private static string? UrlId(string v)
+    {
+        var u = v.IndexOf("url(", StringComparison.OrdinalIgnoreCase);
+        if (u < 0) return null;
+        var close = v.IndexOf(')', u);
+        if (close < 0) return null;
+        var id = v.Substring(u + 4, close - u - 4).Trim().Trim('"', '\'');
+        return id.StartsWith("#", StringComparison.Ordinal) ? id.Substring(1) : id;
+    }
+
+    private static float[] Identity() => new[] { 1f, 0f, 0f, 1f, 0f, 0f };
+
+    internal static float[] MulMatrix(float[] m, float[] n)
+    {
+        // m then n: points go through n first (SVG composes left to right as nested groups)
+        return new[]
+        {
+            m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+            m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+            m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5],
+        };
+    }
+
+    internal static string MatrixText(float[] m) => string.Join(",", Array.ConvertAll(m, v => v.ToString("0.####", CultureInfo.InvariantCulture)));
+
+    /// <summary>The SVG transform attribute: translate, rotate (about a point), scale, skewX/Y, matrix, in order.</summary>
+    internal static float[]? SvgTransform(string v)
+    {
+        var m = Identity();
+        var any = false;
+        foreach (System.Text.RegularExpressions.Match fn in System.Text.RegularExpressions.Regex.Matches(v, @"([a-zA-Z]+)\s*\(([^)]*)\)"))
+        {
+            var a = fn.Groups[2].Value.Split(new[] { ' ', ',', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            float A(int i) => a.Length > i ? StyleApplier.Num(a[i]) : 0f;
+            switch (fn.Groups[1].Value.ToLowerInvariant())
+            {
+                case "translate": m = MulMatrix(m, new[] { 1f, 0f, 0f, 1f, A(0), A(1) }); break;
+                case "scale": m = MulMatrix(m, new[] { A(0), 0f, 0f, a.Length > 1 ? A(1) : A(0), 0f, 0f }); break;
+                case "rotate":
+                {
+                    var r = A(0) * Mathf.Deg2Rad; var cx = A(1); var cy = A(2);
+                    if (a.Length > 2) m = MulMatrix(m, new[] { 1f, 0f, 0f, 1f, cx, cy });
+                    m = MulMatrix(m, new[] { Mathf.Cos(r), Mathf.Sin(r), -Mathf.Sin(r), Mathf.Cos(r), 0f, 0f });
+                    if (a.Length > 2) m = MulMatrix(m, new[] { 1f, 0f, 0f, 1f, -cx, -cy });
+                    break;
+                }
+                case "skewx": m = MulMatrix(m, new[] { 1f, 0f, Mathf.Tan(A(0) * Mathf.Deg2Rad), 1f, 0f, 0f }); break;
+                case "skewy": m = MulMatrix(m, new[] { 1f, Mathf.Tan(A(0) * Mathf.Deg2Rad), 0f, 1f, 0f, 0f }); break;
+                case "matrix": if (a.Length >= 6) m = MulMatrix(m, new[] { A(0), A(1), A(2), A(3), A(4), A(5) }); break;
+                default: continue;
+            }
+            any = true;
+        }
+        return any ? m : null;
     }
 
     /// <summary>Name, classes, id (a synthetic one when the page gave none) and the node map.</summary>
