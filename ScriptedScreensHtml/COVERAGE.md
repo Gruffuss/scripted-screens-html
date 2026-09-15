@@ -59,5 +59,5 @@ Handled sets are read from the code by `ScriptedScreensHtml.Tests/coverage.py`; 
 
 - **document**: 33 of 35. Missing: elementFromPoint write
 - **element**: 96 of 100. Missing: compareDocumentPosition requestFullscreen setPointerCapture releasePointerCapture
-- **window**: 64 of 80. Missing: sessionStorage fetch XMLHttpRequest WebSocket Worker postMessage Blob File FileReader FormData Headers Request Response AbortController DOMParser XMLSerializer
+- **window**: 65 of 80. Missing: fetch XMLHttpRequest WebSocket Worker postMessage Blob File FileReader FormData Headers Request Response AbortController DOMParser XMLSerializer
 - **canvas**: 60 of 60. Missing: none
