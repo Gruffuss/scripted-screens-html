@@ -144,7 +144,7 @@ internal static class StyleApplier
                 {
                     var name = raw.Trim().Trim('"', (char)39);
                     if (name.Length == 0) continue;
-                    sdf = FontLibrary.Get(name);
+                    sdf = FontLibrary.Get(MapGeneric(name) ?? name);
                     if (sdf != null) break;
                 }
                 if (sdf != null) s.unityFontDefinition = FontDefinition.FromSDFFont(sdf);
@@ -450,6 +450,7 @@ internal static class StyleApplier
             Calc(v, out var px, out var pct);
             return Mathf.Abs(px) > 0.0001f || Mathf.Abs(pct) < 0.0001f ? px : pct;
         }
+        if (Func(v) is { } f) return f;
         return Unit(v);
     }
 
@@ -463,8 +464,42 @@ internal static class StyleApplier
         else if (v.EndsWith("vw", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = ViewportW / 100f; }
         else if (v.EndsWith("vh", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = ViewportH / 100f; }
         else if (v.EndsWith("vmin", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = Mathf.Min(ViewportW, ViewportH) / 100f; }
+        else if (v.EndsWith("vmax", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = Mathf.Max(ViewportW, ViewportH) / 100f; }
         else if (v.EndsWith("pt", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 4f / 3f; }
+        else if (v.EndsWith("pc", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 16f; }
+        else if (v.EndsWith("cm", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f / 2.54f; }
+        else if (v.EndsWith("mm", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f / 25.4f; }
+        else if (v.EndsWith("in", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f; }
+        else if (v.EndsWith("ch", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize * 0.5f; }   // the "0" of a text face is about half an em
+        else if (v.EndsWith("ex", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize * 0.5f; }
+        else if (v.EndsWith("q", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 1); scale = 96f / 25.4f / 4f; }
+        else if (v.EndsWith("grad", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = 0.9f; }
+        else if (v.EndsWith("deg", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 3); }
+        else if (v.EndsWith("rad", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 3); scale = 180f / Mathf.PI; }
+        else if (v.EndsWith("turn", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = 360f; }
         return float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f * scale : 0f;
+    }
+
+    /// <summary>min(), max(), clamp() over lengths; each argument may be a calc-style expression. Null when not one of them.</summary>
+    private static float? Func(string v)
+    {
+        var lower = v.ToLowerInvariant();
+        string fn;
+        if (lower.StartsWith("min(", StringComparison.Ordinal)) fn = "min";
+        else if (lower.StartsWith("max(", StringComparison.Ordinal)) fn = "max";
+        else if (lower.StartsWith("clamp(", StringComparison.Ordinal)) fn = "clamp";
+        else return null;
+        var inner = v.Substring(fn.Length + 1, Math.Max(0, v.Length - fn.Length - 2));
+        var args = new List<float>();
+        foreach (var a in CssParser.SplitTopLevel(inner, ','))
+            args.Add(Num("calc(" + a.Trim() + ")"));
+        if (args.Count == 0) return 0f;
+        switch (fn)
+        {
+            case "min": { var m = args[0]; foreach (var a in args) m = Mathf.Min(m, a); return m; }
+            case "max": { var m = args[0]; foreach (var a in args) m = Mathf.Max(m, a); return m; }
+            default: return args.Count >= 3 ? Mathf.Clamp(args[1], args[0], args[2]) : args[0];
+        }
     }
 
     public static StyleLength Len(string v)
@@ -472,6 +507,7 @@ internal static class StyleApplier
         v = v.Trim();
         if (v == "auto") return StyleKeyword.Auto;
         if (v == "initial" || v == "unset") return StyleKeyword.Initial;
+        if (Func(v) is { } fpx) return new Length(fpx, LengthUnit.Pixel);
         if (v.StartsWith("calc(", StringComparison.OrdinalIgnoreCase))
         {
             // px and % cannot be mixed in one length here; whichever part is non-zero wins.
@@ -534,8 +570,18 @@ internal static class StyleApplier
         }
         var start = i;
         if (i < s.Length && (s[i] == '-' || s[i] == '+')) i++;
-        while (i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '.' || s[i] == '%')) i++;
+        while (i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '.' || s[i] == '%' || s[i] == '-')) i++;
         var tok = s.Substring(start, i - start);
+        if (i < s.Length && s[i] == '(')
+        {
+            // a nested function: min(), max(), clamp(), var() already resolved, calc()
+            var depth = 0;
+            var j = i;
+            for (; j < s.Length; j++) { if (s[j] == '(') depth++; else if (s[j] == ')' && --depth == 0) { j++; break; } }
+            var call = s.Substring(start, j - start);
+            i = j;
+            return (Num(call), 0f);
+        }
         if (tok.EndsWith("%", StringComparison.Ordinal)) return (0f, Unit(tok));
         return (Unit(tok), 0f);
     }
@@ -696,15 +742,54 @@ internal static class StyleApplier
 
     // ---- colour ----
 
-    private static readonly Dictionary<string, Color> Named = new(StringComparer.OrdinalIgnoreCase)
+    /// <summary>The 148 CSS named colours (CSS Color Level 4), plus transparent.</summary>
+    private static readonly Dictionary<string, Color> Named = BuildNamed(
+        "aliceblue f0f8ff antiquewhite faebd7 aqua 00ffff aquamarine 7fffd4 azure f0ffff beige f5f5dc bisque ffe4c4 black 000000 " +
+        "blanchedalmond ffebcd blue 0000ff blueviolet 8a2be2 brown a52a2a burlywood deb887 cadetblue 5f9ea0 chartreuse 7fff00 " +
+        "chocolate d2691e coral ff7f50 cornflowerblue 6495ed cornsilk fff8dc crimson dc143c cyan 00ffff darkblue 00008b " +
+        "darkcyan 008b8b darkgoldenrod b8860b darkgray a9a9a9 darkgreen 006400 darkgrey a9a9a9 darkkhaki bdb76b darkmagenta 8b008b " +
+        "darkolivegreen 556b2f darkorange ff8c00 darkorchid 9932cc darkred 8b0000 darksalmon e9967a darkseagreen 8fbc8f " +
+        "darkslateblue 483d8b darkslategray 2f4f4f darkslategrey 2f4f4f darkturquoise 00ced1 darkviolet 9400d3 deeppink ff1493 " +
+        "deepskyblue 00bfff dimgray 696969 dimgrey 696969 dodgerblue 1e90ff firebrick b22222 floralwhite fffaf0 forestgreen 228b22 " +
+        "fuchsia ff00ff gainsboro dcdcdc ghostwhite f8f8ff gold ffd700 goldenrod daa520 gray 808080 green 008000 greenyellow adff2f " +
+        "grey 808080 honeydew f0fff0 hotpink ff69b4 indianred cd5c5c indigo 4b0082 ivory fffff0 khaki f0e68c lavender e6e6fa " +
+        "lavenderblush fff0f5 lawngreen 7cfc00 lemonchiffon fffacd lightblue add8e6 lightcoral f08080 lightcyan e0ffff " +
+        "lightgoldenrodyellow fafad2 lightgray d3d3d3 lightgreen 90ee90 lightgrey d3d3d3 lightpink ffb6c1 lightsalmon ffa07a " +
+        "lightseagreen 20b2aa lightskyblue 87cefa lightslategray 778899 lightslategrey 778899 lightsteelblue b0c4de lightyellow ffffe0 " +
+        "lime 00ff00 limegreen 32cd32 linen faf0e6 magenta ff00ff maroon 800000 mediumaquamarine 66cdaa mediumblue 0000cd " +
+        "mediumorchid ba55d3 mediumpurple 9370db mediumseagreen 3cb371 mediumslateblue 7b68ee mediumspringgreen 00fa9a " +
+        "mediumturquoise 48d1cc mediumvioletred c71585 midnightblue 191970 mintcream f5fffa mistyrose ffe4e1 moccasin ffe4b5 " +
+        "navajowhite ffdead navy 000080 oldlace fdf5e6 olive 808000 olivedrab 6b8e23 orange ffa500 orangered ff4500 orchid da70d6 " +
+        "palegoldenrod eee8aa palegreen 98fb98 paleturquoise afeeee palevioletred db7093 papayawhip ffefd5 peachpuff ffdab9 " +
+        "peru cd853f pink ffc0cb plum dda0dd powderblue b0e0e6 purple 800080 rebeccapurple 663399 red ff0000 rosybrown bc8f8f " +
+        "royalblue 4169e1 saddlebrown 8b4513 salmon fa8072 sandybrown f4a460 seagreen 2e8b57 seashell fff5ee sienna a0522d " +
+        "silver c0c0c0 skyblue 87ceeb slateblue 6a5acd slategray 708090 slategrey 708090 snow fffafa springgreen 00ff7f " +
+        "steelblue 4682b4 tan d2b48c teal 008080 thistle d8bfd8 tomato ff6347 turquoise 40e0d0 violet ee82ee wheat f5deb3 " +
+        "white ffffff whitesmoke f5f5f5 yellow ffff00 yellowgreen 9acd32");
+
+    private static Dictionary<string, Color> BuildNamed(string table)
     {
-        ["black"] = Color.black, ["white"] = Color.white, ["red"] = Color.red, ["green"] = new Color(0, 0.5f, 0),
-        ["lime"] = Color.green, ["blue"] = Color.blue, ["yellow"] = Color.yellow, ["cyan"] = Color.cyan, ["aqua"] = Color.cyan,
-        ["magenta"] = Color.magenta, ["fuchsia"] = Color.magenta, ["gray"] = Color.gray, ["grey"] = Color.gray,
-        ["silver"] = new Color(0.75f, 0.75f, 0.75f), ["orange"] = new Color(1f, 0.647f, 0f), ["navy"] = new Color(0, 0, 0.5f),
-        ["teal"] = new Color(0, 0.5f, 0.5f), ["maroon"] = new Color(0.5f, 0, 0), ["purple"] = new Color(0.5f, 0, 0.5f),
-        ["olive"] = new Color(0.5f, 0.5f, 0), ["transparent"] = Color.clear,
-    };
+        var d = new Dictionary<string, Color>(StringComparer.OrdinalIgnoreCase) { ["transparent"] = Color.clear };
+        var parts = table.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i + 1 < parts.Length; i += 2)
+        {
+            var n = uint.Parse(parts[i + 1], NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+            d[parts[i]] = new Color(((n >> 16) & 0xFF) / 255f, ((n >> 8) & 0xFF) / 255f, (n & 0xFF) / 255f, 1f);
+        }
+        return d;
+    }
+
+    /// <summary>The face a generic family stands for here: the game's mono face for monospace, Barlow for sans, RBBook for serif.</summary>
+    public static string? MapGeneric(string family)
+    {
+        switch (family.Trim().Trim('"', '\'').ToLowerInvariant())
+        {
+            case "monospace": case "ui-monospace": return "code";
+            case "serif": case "ui-serif": return "RBBook SDF";
+            case "sans-serif": case "system-ui": case "ui-sans-serif": case "ui-rounded": case "cursive": case "fantasy": return "Barlow";
+        }
+        return null;
+    }
 
     /// <summary>#rgb #rgba #rrggbb #rrggbbaa rgb() rgba() hsl() and a few names. Managed code only:
     /// ColorUtility.TryParseHtmlString is a native call that fails headless.</summary>
@@ -748,7 +833,7 @@ internal static class StyleApplier
             }
             else
             {
-                var hue = Num(args[0]) / 360f;
+                var hue = Mathf.Repeat(Num(args[0]) / 360f, 1f);
                 var sat = Num(args[1]) / 100f;
                 var light = Num(args[2]) / 100f;
                 // HSL to RGB via HSV: v = l + s*min(l,1-l); s_v = 2*(1 - l/v)

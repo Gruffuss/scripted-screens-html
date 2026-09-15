@@ -108,7 +108,10 @@ internal static class HtmlRenderer
         result.ViewportWidth = ReadViewport(doc);
         CssParser.ViewportWidth = result.ViewportWidth > 0f ? result.ViewportWidth : 460f;
         CssParser.ViewportHeight = CssParser.ViewportWidth * SurfaceAspect;
+        CssParser.FontFaces.Clear();
         Collect(doc, rules, script, result.Keyframes, Warn);
+        foreach (var (family, src, weight, style) in CssParser.FontFaces)
+            FontLibrary.Alias(family, src, weight, style);
         result.Script = script.ToString();
         rules.Sort((a, b) => a.Order.CompareTo(b.Order));
         result.Rules = rules;
@@ -1055,6 +1058,20 @@ internal static class HtmlRenderer
         }
     }
 
+    private static float Px(StyleLength l) => l.keyword == StyleKeyword.Undefined && l.value.unit == LengthUnit.Pixel ? l.value.value : 0f;
+
+    /// <summary>The nearest ancestor's cascaded value for a property, or null.</summary>
+    private static string? InheritedValue(HtmlNode node, string property, Result result)
+    {
+        for (var n = node.Parent; n != null; n = n.Parent)
+        {
+            var id = n.Attr("id");
+            if (id != null && result.ById.TryGetValue(id, out var pve) && result.CssOf(pve).TryGetValue(property, out var v))
+                return v;
+        }
+        return null;
+    }
+
     private static float InheritedFontSize(HtmlNode? node, Result result)
     {
         for (var n = node; n != null; n = n.Parent)
@@ -1186,6 +1203,26 @@ internal static class HtmlRenderer
             var d = raw.Value.IndexOf("var(", StringComparison.Ordinal) >= 0
                 ? new CssDeclaration(raw.Name, ResolveVars(raw.Value, node), raw.Important)
                 : raw;
+            // Keywords: inherit takes the parent's cascaded value (the layout inherits text
+            // properties by itself, but not backgrounds or borders); initial/unset/revert
+            // drop the declaration. currentColor is the element's own colour, else inherited.
+            var kw = d.Value.Trim().ToLowerInvariant();
+            if (kw == "inherit")
+            {
+                var inherited = InheritedValue(node, d.Name, result);
+                if (inherited == null) { record.Remove(d.Name); continue; }
+                d = new CssDeclaration(d.Name, inherited, d.Important);
+            }
+            else if (kw is "initial" or "unset" or "revert" or "revert-layer")
+            {
+                record.Remove(d.Name);
+                continue;
+            }
+            if (d.Value.IndexOf("currentcolor", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                var cc = d.Name == "color" ? InheritedValue(node, "color", result) : (record.TryGetValue("color", out var own) ? own : InheritedValue(node, "color", result));
+                d = new CssDeclaration(d.Name, System.Text.RegularExpressions.Regex.Replace(d.Value, "currentcolor", cc ?? "#FFFFFF", System.Text.RegularExpressions.RegexOptions.IgnoreCase), d.Important);
+            }
             record[d.Name] = d.Value;
             if (d.Name == "font-size")
             {
@@ -1200,6 +1237,17 @@ internal static class HtmlRenderer
                 continue;
             }
             StyleApplier.Apply(ve, d, Warn);
+        }
+        // CSS sizes a box content-box unless told otherwise; the layout engine is border-box.
+        // A width the page set therefore grows by its padding and border, unless the page
+        // opted into border-box (which most stylesheets do with `* { box-sizing: border-box }`).
+        if (!(record.TryGetValue("box-sizing", out var sizing) && sizing.Trim() == "border-box"))
+        {
+            var st = ve.style;
+            if (record.ContainsKey("width") && st.width.keyword == StyleKeyword.Undefined && st.width.value.unit == LengthUnit.Pixel)
+                st.width = st.width.value.value + Px(st.paddingLeft) + Px(st.paddingRight) + st.borderLeftWidth.value + st.borderRightWidth.value;
+            if (record.ContainsKey("height") && st.height.keyword == StyleKeyword.Undefined && st.height.value.unit == LengthUnit.Pixel)
+                st.height = st.height.value.value + Px(st.paddingTop) + Px(st.paddingBottom) + st.borderTopWidth.value + st.borderBottomWidth.value;
         }
         if (record.TryGetValue("display", out var display) && display.Trim() == "grid")
             result.Grids.Add(ve);
@@ -1227,8 +1275,8 @@ internal static class HtmlRenderer
             case "animation":
             {
                 var times = 0;
-                foreach (var token in v.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                    anim.ApplyToken(token, ref times);
+                foreach (var token in CssParser.SplitTopLevel(v, ' '))
+                    if (token.Length > 0) anim.ApplyToken(token, ref times);
                 break;
             }
             case "animation-name": anim.Name = v; break;

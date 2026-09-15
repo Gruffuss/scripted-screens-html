@@ -694,16 +694,41 @@ internal static class VectorEmitter
         sb.Append(" size=").Append(F(rs.fontSize));
         sb.Append(" f=").Append(Hex(rs.color));
         var first = string.Empty;
+        var fs = rs.unityFontStyleAndWeight;
+        var wantBold = fs == FontStyle.Bold || fs == FontStyle.BoldAndItalic;
         if (css.TryGetValue("font-family", out var family))
         {
-            first = family.Split(',')[0].Trim().Trim('"', '\'');
-            if (first.Length > 0 && !IsGeneric(first))
-                sb.Append(" font=\"").Append(first).Append('"');
+            // The first real family, else what the first generic stands for here.
+            string? generic = null;
+            foreach (var raw in family.Split(','))
+            {
+                var name = raw.Trim().Trim('"', '\'');
+                if (name.Length == 0) continue;
+                if (IsGeneric(name)) { generic ??= StyleApplier.MapGeneric(name); continue; }
+                first = name;
+                break;
+            }
+            if (first.Length == 0 && generic != null) first = generic;
+            if (first.Length > 0 && !NamedWeight(first))
+            {
+                // A weight or stretch the family has as a real face beats a synthetic one:
+                // Barlow ships Thin..Black and Condensed, and TextMeshPro's synthetic bold
+                // only widens glyphs.
+                if (css.TryGetValue("font-stretch", out var stretch) && stretch.IndexOf("condensed", StringComparison.OrdinalIgnoreCase) >= 0 && FontLibrary.Get(first + " Condensed") != null)
+                    first += " Condensed";
+                var weight = WeightFace(css, wantBold);
+                if (weight != null && FontLibrary.Get(first + " " + weight) != null)
+                {
+                    first += " " + weight;
+                    wantBold = false;
+                }
+            }
+            if (first.Length > 0)
+                sb.Append(" font=\"").Append(FontLibrary.ResolveFace(first)).Append('"');
         }
-        var fs = rs.unityFontStyleAndWeight;
         // A face that is already a named weight ("Barlow SemiBold") must not be bolded again:
         // TextMeshPro's synthetic bold widens every glyph on top of it.
-        if ((fs == FontStyle.Bold || fs == FontStyle.BoldAndItalic) && !NamedWeight(first))
+        if (wantBold && !NamedWeight(first))
             sb.Append(" weight=bold");
         if (css.TryGetValue("letter-spacing", out var ls) && rs.fontSize > 0f)
         {
@@ -755,6 +780,26 @@ internal static class VectorEmitter
             wordStart = char.IsWhiteSpace(ch);
         }
         return sb.ToString();
+    }
+
+    /// <summary>The face-name suffix for the cascaded font-weight (Thin..Black), null for regular.</summary>
+    private static string? WeightFace(Dictionary<string, string> css, bool bold)
+    {
+        if (!css.TryGetValue("font-weight", out var w)) return bold ? "Bold" : null;
+        var v = w.Trim().ToLowerInvariant();
+        if (v == "bold" || v == "bolder") return "Bold";
+        if (v == "lighter") return "Light";
+        if (!StyleApplier.IsNumber(v)) return bold ? "Bold" : null;
+        var n = StyleApplier.Num(v);
+        if (n < 150) return "Thin";
+        if (n < 250) return "ExtraLight";
+        if (n < 350) return "Light";
+        if (n < 450) return null;
+        if (n < 550) return "Medium";
+        if (n < 650) return "SemiBold";
+        if (n < 750) return "Bold";
+        if (n < 850) return "ExtraBold";
+        return "Black";
     }
 
     private static bool NamedWeight(string family)

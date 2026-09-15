@@ -106,15 +106,29 @@ internal sealed class ScriptHost : IDisposable
     /// otherwise the fallback runs on the main thread. Ordered after Run by the queue.
     /// </summary>
     /// <summary>A click on a page element: listeners, `onclick`, and an inline onclick attribute run.</summary>
-    public void EmitClick(string id)
+    public void EmitClick(string id, float x, float y)
     {
         _toEngine.Enqueue(() =>
         {
-            _engine!.Invoke("__click", id);
+            _engine!.Invoke("__click", id, (double)x, (double)y);
             AfterRun();
         });
         _wake.Set();
     }
+
+    /// <summary>mouseover/mouseout/mousemove/mousedown/mouseup on an element, with page coordinates. Only queued when the script listens for that type.</summary>
+    public void EmitPointer(string id, string type, float x, float y)
+    {
+        if (!_pointerTypes.Contains(type)) return;
+        _toEngine.Enqueue(() =>
+        {
+            _engine!.Invoke("__pointer", id, type, (double)x, (double)y);
+            AfterRun();
+        });
+        _wake.Set();
+    }
+
+    private readonly HashSet<string> _pointerTypes = new(StringComparer.Ordinal);
 
     /// <summary>A control changed (user or ScriptedScreens): the element gets `input` and `change` events and its value.</summary>
     public void EmitInput(string id, string value)
@@ -272,6 +286,7 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__remove", new Action<string>(id => _toMain.Enqueue(() => _remove(id))));
             _engine.SetValue("__setValue", new Action<string, string>((id, v) => _toMain.Enqueue(() => _setValue(id, v))));
             _engine.SetValue("__wantClicks", new Action<string>(id => _toMain.Enqueue(() => _wantClicks(id))));
+            _engine.SetValue("__wantPointer", new Action<string>(type => _pointerTypes.Add(type)));
             _engine.SetValue("__textOf", new Func<string, string>(TextOf));
             _engine.SetValue("__htmlOf", new Func<string, bool, string>(HtmlOf));
             _engine.SetValue("__children", new Func<string, string[]>(ChildrenOf));
@@ -578,9 +593,12 @@ function IntersectionObserver(){ this.observe = function(){}; this.unobserve = f
 
 // ---- controls: values, per-element listeners, events ----
 var __values = {}, __elListeners = {}, __elHandlers = {};
-function __fire(id, type, detail){
+function __fire(id, type, detail, x, y){
   var el = __el(id);
-  var ev = { type: type, target: el, currentTarget: el, detail: detail, defaultPrevented: false,
+  var r = (x !== undefined) ? __rect(id) : [0, 0, 0, 0];
+  var ev = { type: type, target: el, currentTarget: el, detail: detail, defaultPrevented: false, button: 0, buttons: type === 'mousedown' ? 1 : 0,
+             clientX: x || 0, clientY: y || 0, pageX: x || 0, pageY: y || 0, x: x || 0, y: y || 0,
+             offsetX: (x || 0) - r[0], offsetY: (y || 0) - r[1],
              preventDefault: function(){ this.defaultPrevented = true; }, stopPropagation: function(){}, stopImmediatePropagation: function(){} };
   var fns = (__elListeners[id] || {})[type] || [];
   for (var i = 0; i < fns.length; i++) { try { fns[i].call(el, ev); } catch (e) { console.error(String(e && e.stack || e)); } }
@@ -597,8 +615,14 @@ function __input(id, value){
   __fire(id, 'change', value);
   __flushCanvases();
 }
-function __click(id){
-  __fire(id, 'click', null);
+function __click(id, x, y){
+  __fire(id, 'click', null, x, y);
+  __flushCanvases();
+}
+function __pointer(id, type, x, y){
+  __fire(id, type, null, x, y);
+  if (type === 'mouseover') __fire(id, 'mouseenter', null, x, y);
+  if (type === 'mouseout') __fire(id, 'mouseleave', null, x, y);
   __flushCanvases();
 }
 
@@ -651,7 +675,7 @@ function __el(id){
     getAttribute: function(n){ return __getAttr(id, n); },
     setAttribute: function(n, v){ __setAttr(id, n, String(v)); },
     getContext: function(){ return __ctx(id); },
-    addEventListener: function(type, fn){ var l = __elListeners[id] = __elListeners[id] || {}; (l[type] = l[type] || []).push(fn); if (type === 'click') __wantClicks(id); },
+    addEventListener: function(type, fn){ var l = __elListeners[id] = __elListeners[id] || {}; (l[type] = l[type] || []).push(fn); if (type === 'click') __wantClicks(id); if (type.indexOf('mouse') === 0) __wantPointer(type === 'mouseenter' ? 'mouseover' : type === 'mouseleave' ? 'mouseout' : type); },
     removeEventListener: function(type, fn){ var l = __elListeners[id]; if (l && l[type]) l[type] = l[type].filter(function(f){ return f !== fn; }); },
     get tagName(){ return String(__getAttr(id, '__tag') || 'DIV').toUpperCase(); },
     appendChild: function(c){ __appendHtml(id, __serialize(c)); if (c.__adopt) c.__adopt(); return c; },

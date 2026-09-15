@@ -134,6 +134,17 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             a.Update(Time.time);
             if (a.Wrote) { a.Wrote = false; _dirty = true; }
+            if (a.Finished && !a.Restored)
+            {
+                // animation-fill-mode: without forwards (the CSS default), the element
+                // returns to its own style once the last iteration ends.
+                a.Restored = true;
+                if (!a.Spec.FillForwards && _built != null && _built.NodeOf.TryGetValue(a.Element, out var an))
+                {
+                    _built.Reclass(a.Element, an.Attr("class") ?? string.Empty);
+                    _dirty = true;
+                }
+            }
             animating |= !a.Finished;
         }
         // The last tween ending re-emits the scene once with plain numbers: static again.
@@ -885,10 +896,135 @@ internal sealed class HtmlSurface : MonoBehaviour
                 if (kv.Value == node) { _built.Reclass(kv.Key, node.Attr("class") ?? string.Empty); break; }
     }
 
-    /// <summary>A click on a page click region: the script gets a `click` event on the element.</summary>
+    /// <summary>A click on a page click region: the script gets a `click` event on the element, with the pointer's page coordinates.</summary>
     internal void OnPageClick(string key)
     {
-        _script?.EmitClick(key);
+        SetFocus(key);
+        _script?.EmitClick(key, _pointerPage.x, _pointerPage.y);
+    }
+
+    // ---- pointer state: :hover / :active / :focus and mouse events, from the page's own boxes ----
+    private Vector2 _pointerPage;
+    private readonly HashSet<HtmlNode> _hovered = new();
+    private readonly HashSet<HtmlNode> _active = new();
+    private HtmlNode? _focused;
+    private string? _hoverDeepest;
+
+    /// <summary>The pointer at a fraction of the host rect: which page boxes are under it.</summary>
+    internal void PointerMove(Vector2 fraction)
+    {
+        var layout = LayoutSize();
+        _pointerPage = new Vector2(fraction.x * layout.x, fraction.y * layout.y);
+        var deepest = Deepest(_pointerPage);
+        var deepestId = deepest != null && _built != null && _built.NodeOf.TryGetValue(deepest, out var dn) ? dn.Attr("id") : null;
+        if (deepestId != _hoverDeepest)
+        {
+            if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseout", _pointerPage.x, _pointerPage.y);
+            if (deepestId != null) _script?.EmitPointer(deepestId, "mouseover", _pointerPage.x, _pointerPage.y);
+            _hoverDeepest = deepestId;
+        }
+        else if (deepestId != null)
+            _script?.EmitPointer(deepestId, "mousemove", _pointerPage.x, _pointerPage.y);
+        SetState(_hovered, "data-hover", Chain(deepest));
+    }
+
+    internal void PointerLeave()
+    {
+        if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseout", _pointerPage.x, _pointerPage.y);
+        _hoverDeepest = null;
+        SetState(_hovered, "data-hover", null);
+        SetState(_active, "data-active", null);
+    }
+
+    internal void PointerDown(Vector2 fraction)
+    {
+        var layout = LayoutSize();
+        _pointerPage = new Vector2(fraction.x * layout.x, fraction.y * layout.y);
+        var deepest = Deepest(_pointerPage);
+        SetState(_active, "data-active", Chain(deepest));
+        if (deepest != null && _built != null && _built.NodeOf.TryGetValue(deepest, out var dn) && dn.Attr("id") is { } id)
+            _script?.EmitPointer(id, "mousedown", _pointerPage.x, _pointerPage.y);
+    }
+
+    internal void PointerUp()
+    {
+        if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseup", _pointerPage.x, _pointerPage.y);
+        SetState(_active, "data-active", null);
+    }
+
+    /// <summary>The last clicked element or control takes :focus; a click elsewhere moves it.</summary>
+    private void SetFocus(string key)
+    {
+        if (_built == null || !_byId.TryGetValue(key, out var ve) || !_built.NodeOf.TryGetValue(ve, out var node)) return;
+        if (_focused == node) return;
+        var changed = false;
+        if (_focused != null) { _focused.Attributes.Remove("data-focus"); Recascade(_focused); changed = true; }
+        _focused = node;
+        node.Attributes["data-focus"] = string.Empty;
+        Recascade(node);
+        if (changed || CssParser.UsesPointerState) { _dirty = true; Wake(); }
+    }
+
+    /// <summary>The innermost element whose box contains the page point.</summary>
+    private VisualElement? Deepest(Vector2 p)
+    {
+        if (_content == null) return null;
+        var origin = _content.worldBound.position;
+        VisualElement? best = null;
+        var bestDepth = -1;
+        foreach (var ve in _byId.Values)
+        {
+            if (ve.resolvedStyle.display == DisplayStyle.None) continue;
+            var wb = ve.worldBound;
+            if (float.IsNaN(wb.width)) continue;
+            var r = new Rect(wb.x - origin.x, wb.y - origin.y, wb.width, wb.height);
+            if (!r.Contains(p)) continue;
+            var depth = 0;
+            for (var e = ve; e != null && e != _content; e = e.parent) depth++;
+            if (depth > bestDepth) { bestDepth = depth; best = ve; }
+        }
+        return best;
+    }
+
+    /// <summary>The element and its ancestors, as nodes: a pointer over a child is over every ancestor too, as in CSS.</summary>
+    private HashSet<HtmlNode>? Chain(VisualElement? ve)
+    {
+        if (ve == null || _built == null) return null;
+        var set = new HashSet<HtmlNode>();
+        for (var e = ve; e != null; e = e.parent)
+            if (_built.NodeOf.TryGetValue(e, out var n)) set.Add(n);
+        return set;
+    }
+
+    /// <summary>Moves a state attribute from the old set to the new one, re-cascading what changed, and emits if any rule cares.</summary>
+    private void SetState(HashSet<HtmlNode> current, string attr, HashSet<HtmlNode>? next)
+    {
+        if (!CssParser.UsesPointerState) { current.Clear(); return; }
+        var changed = false;
+        foreach (var n in new List<HtmlNode>(current))
+        {
+            if (next != null && next.Contains(n)) continue;
+            n.Attributes.Remove(attr);
+            current.Remove(n);
+            Recascade(n);
+            changed = true;
+        }
+        if (next != null)
+            foreach (var n in next)
+            {
+                if (current.Contains(n)) continue;
+                n.Attributes[attr] = string.Empty;
+                current.Add(n);
+                Recascade(n);
+                changed = true;
+            }
+        if (changed) { _dirty = true; Wake(); }
+    }
+
+    private void Recascade(HtmlNode node)
+    {
+        if (_built == null || node.Attr("id") is not { } id || !_byId.TryGetValue(id, out var ve)) return;
+        _built.Reclass(ve, node.Attr("class") ?? string.Empty);
     }
 
     /// <summary>

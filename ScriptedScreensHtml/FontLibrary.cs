@@ -24,6 +24,57 @@ internal static class FontLibrary
 {
     private static Dictionary<string, string>? _files;   // "family" and "family|style" -> path
     private static readonly Dictionary<string, FontAsset?> Cache = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>@font-face names: the family the page uses -> the TextMeshPro face name the file is registered under.</summary>
+    private static readonly Dictionary<string, string> AliasFace = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// @font-face { font-family: X; src: url(file.ttf) }: X resolves to that file. The url is
+    /// matched by file name against the font folders (a page cannot ship a file, and
+    /// everything the Fonts mod loaded is there). Weight and style pick the styled face.
+    /// </summary>
+    public static void Alias(string family, string src, string weight, string style)
+    {
+        Scan();
+        var wanted = Path.GetFileName(src.Replace('\\', '/'));
+        string? path = null;
+        foreach (var kv in _files!)
+            if (string.Equals(Path.GetFileName(kv.Value), wanted, StringComparison.OrdinalIgnoreCase)) { path = kv.Value; break; }
+        if (path == null)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: @font-face \"{family}\": no font file named \"{wanted}\" in the font folders");
+            return;
+        }
+        var key = Normalise(family);
+        var bold = weight.Trim().ToLowerInvariant() is "bold" or "bolder" || (float.TryParse(weight.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) && n >= 600);
+        var italic = style.Trim().ToLowerInvariant() is "italic" or "oblique";
+        _files[bold && italic ? key + "|bolditalic" : bold ? key + "|bold" : italic ? key + "|italic" : key] = path;
+        if (!_files.ContainsKey(key)) _files[key] = path;
+        AliasFace[family] = FaceNameFromFile(path);
+        Cache.Remove(key);
+    }
+
+    /// <summary>The face name the vector layer (TextMeshPro, registered by the Fonts mod) knows a page's family by: the @font-face alias resolved, else the name itself.</summary>
+    public static string ResolveFace(string family)
+    {
+        return AliasFace.TryGetValue(family, out var face) ? face : family;
+    }
+
+    /// <summary>"BarlowCondensed-SemiBold.ttf" -> "Barlow Condensed SemiBold", the way the Fonts mod names it from the font's own metadata.</summary>
+    private static string FaceNameFromFile(string path)
+    {
+        var stem = Path.GetFileNameWithoutExtension(path);
+        var dash = stem.IndexOf('-');
+        var family = dash > 0 ? stem.Substring(0, dash) : stem;
+        var style = dash > 0 ? stem.Substring(dash + 1) : string.Empty;
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < family.Length; i++)
+        {
+            if (i > 0 && char.IsUpper(family[i]) && !char.IsUpper(family[i - 1])) sb.Append(' ');
+            sb.Append(family[i]);
+        }
+        if (style.Length > 0 && !string.Equals(style, "Regular", StringComparison.OrdinalIgnoreCase)) sb.Append(' ').Append(style);
+        return sb.ToString();
+    }
 
     public static FontAsset? Get(string family)
     {

@@ -12,9 +12,13 @@ internal sealed class AnimationSpec
     public float Duration = 1f;
     public float Delay;
     public float Iterations = 1f;   // float.PositiveInfinity for infinite
-    public EasingMode Easing = EasingMode.Ease;
+    public Tweens.Easing Easing = Tweens.Easing.Default;
     public bool Reverse;
     public bool Alternate;
+    /// <summary>animation-fill-mode: whether the first frame shows during the delay and the last frame stays after the end.</summary>
+    public bool FillBackwards;
+    public bool FillForwards;
+    public bool Paused;
 
     /// <summary>Parse one token of the shorthand into whichever slot it belongs to.</summary>
     public void ApplyToken(string t, ref int timesSeen)
@@ -26,20 +30,20 @@ internal sealed class AnimationSpec
             if (timesSeen++ == 0) Duration = secs; else Delay = secs;
             return;
         }
+        if (Tweens.Easing.TryParse(lower, out var e)) { Easing = e; return; }
         switch (lower)
         {
-            case "ease": Easing = EasingMode.Ease; return;
-            case "linear": Easing = EasingMode.Linear; return;
-            case "ease-in": Easing = EasingMode.EaseIn; return;
-            case "ease-out": Easing = EasingMode.EaseOut; return;
-            case "ease-in-out": Easing = EasingMode.EaseInOut; return;
             case "infinite": Iterations = float.PositiveInfinity; return;
             case "normal": Reverse = false; Alternate = false; return;
             case "reverse": Reverse = true; Alternate = false; return;
             case "alternate": Alternate = true; Reverse = false; return;
             case "alternate-reverse": Alternate = true; Reverse = true; return;
-            case "none": case "forwards": case "backwards": case "both": return; // fill-mode: always forwards here
-            case "running": case "paused": return;
+            case "none": FillForwards = false; FillBackwards = false; return;
+            case "forwards": FillForwards = true; return;
+            case "backwards": FillBackwards = true; return;
+            case "both": FillForwards = true; FillBackwards = true; return;
+            case "running": Paused = false; return;
+            case "paused": Paused = true; return;
         }
         if (float.TryParse(lower, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n))
         {
@@ -84,8 +88,14 @@ internal sealed class KeyframeRunner
     private bool _snapped;              // start frame of the current iteration applied instantly, transition pending
 
     public bool Finished => _finished;
+    public AnimationSpec Spec => _spec;
+    public VisualElement Element => _ve;
     /// <summary>Set when a frame was written; the surface clears it and re-emits.</summary>
     public bool Wrote;
+    /// <summary>Set once the surface has put the element back to its cascade after an animation without forwards fill.</summary>
+    public bool Restored;
+    private float _pausedAt = float.NaN;
+    private float _pauseShift;
 
     public KeyframeRunner(VisualElement ve, CssKeyframes frames, AnimationSpec spec, float now, Action<string>? warn)
     {
@@ -101,18 +111,30 @@ internal sealed class KeyframeRunner
         if (_finished || _frames.Frames.Count == 0)
             return;
 
+        // animation-play-state: paused holds the clock where it is; resuming shifts the start.
+        if (_spec.Paused)
+        {
+            if (float.IsNaN(_pausedAt)) _pausedAt = now;
+            return;
+        }
+        if (!float.IsNaN(_pausedAt)) { _pauseShift += now - _pausedAt; _pausedAt = float.NaN; }
+
         var frames = _frames.Frames;
 
-        // Before the delay elapses, hold the first frame.
+        // Before the delay elapses, hold the first frame (fill-mode backwards/both); with
+        // no backwards fill the element keeps its own style until the delay ends.
         if (_segment == -2)
         {
-            SetTransition(0f);
-            ApplyFrame(_spec.Reverse ? frames[frames.Count - 1] : frames[0]);
+            if (_spec.FillBackwards || _spec.Delay <= 0f)
+            {
+                SetTransition(0f);
+                ApplyFrame(_spec.Reverse ? frames[frames.Count - 1] : frames[0]);
+            }
             _segment = -1;
             return;
         }
 
-        var elapsed = now - _start;
+        var elapsed = now - _start - _pauseShift;
         if (elapsed < 0f)
             return;
 

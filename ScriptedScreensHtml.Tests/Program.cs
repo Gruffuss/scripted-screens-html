@@ -73,6 +73,24 @@ Console.WriteLine("CssParser");
     var before = CssParser.ParseSelector(".tag::before", null)!;
     var gen = new HtmlNode { Tag = "span", Parent = d0 }; gen.Attributes["data-pseudo"] = "before"; d0.Attributes["class"] = "tag";
     Check(before.Chain[0].PseudoElement == "before" && before.Matches(gen) && !before.Matches(d0) && !CssParser.ParseSelector("span", null)!.Matches(gen), "::before matches the generated child only, and plain rules skip it");
+
+    var nested = CssParser.ParseStylesheet(".card { color: red; .title { font-size: 20px } &:hover { color: blue } > b { color: green } @media (min-width: 100px) { padding: 4px } }", warnings.Add);
+    Check(nested.Count == 5, $"nesting expands to five rules (got {nested.Count})");
+    Check(nested[0].Selectors[0].Chain.Count == 1 && nested[0].Declarations[0].Name == "color", "parent rule keeps its own declarations");
+    Check(nested[1].Selectors[0].Chain.Count == 2 && nested[1].Selectors[0].Chain[1].Classes[0] == "title", "nested .title becomes .card .title");
+    Check(nested[2].Selectors[0].Chain.Count == 1 && nested[2].Selectors[0].Chain[0].Pseudos.Count == 1, "&:hover becomes .card:hover");
+    Check(nested[3].Selectors[0].Chain[1].ChildOfPrevious, "> b keeps the child combinator");
+    Check(nested[4].Declarations[0].Name == "padding", "nested @media applies to the parent selector");
+    var typeDoc = HtmlParser.Parse("<div><p>a</p><span>x</span><p>b</p><p>c</p><i></i></div>");
+    var td = typeDoc.Children[0];
+    Check(CssParser.ParseSelector("p:nth-of-type(2)", null)!.Matches(td.Children[2]) && !CssParser.ParseSelector("p:nth-of-type(2)", null)!.Matches(td.Children[0]), ":nth-of-type counts only the tag");
+    Check(CssParser.ParseSelector("span:only-of-type", null)!.Matches(td.Children[1]) && CssParser.ParseSelector("p:last-of-type", null)!.Matches(td.Children[3]), ":only-of-type and :last-of-type");
+    Check(CssParser.ParseSelector(":is(p, span)", null)!.Matches(td.Children[1]) && !CssParser.ParseSelector(":not(p, span)", null)!.Matches(td.Children[1]), ":is() and :not() with lists");
+    Check(CssParser.ParseSelector("div:has(> span)", null)!.Matches(td) && !CssParser.ParseSelector("div:has(> b)", null)!.Matches(td), ":has(> x) tests the children");
+    Check(CssParser.ParseSelector("i:empty", null)!.Matches(td.Children[4]) && !CssParser.ParseSelector("p:empty", null)!.Matches(td.Children[0]), ":empty");
+    CssParser.FontFaces.Clear();
+    CssParser.ParseStylesheet("@font-face { font-family: 'Sig'; src: url(fonts/Barlow-Black.ttf) format('truetype'); font-weight: 900 }", warnings.Add);
+    Check(CssParser.FontFaces.Count == 1 && CssParser.FontFaces[0].family == "Sig" && CssParser.FontFaces[0].src.EndsWith("Barlow-Black.ttf") && CssParser.FontFaces[0].weight == "900", "@font-face collected");
     Check(rules[2].Selectors[0].Chain[0].Pseudos.Count == 1, ":hover parsed as a pseudo-class");
 
     var doc = HtmlParser.Parse("<div id=main><div class='row big'><span class=row>t</span></div></div>");
