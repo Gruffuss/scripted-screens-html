@@ -32,6 +32,8 @@ internal static class HtmlElementPatch
     /// changed since the rebuild showed "--" for good. Also covers data before structure.
     /// </summary>
     private static readonly Dictionary<string, Dictionary<string, SS.UiValue>> Remembered = new(StringComparer.Ordinal);
+    /// <summary>Pointer state per page key, so a surface rebuilt by ScriptedScreens (a click does that) keeps :hover, :active and :focus.</summary>
+    internal static readonly Dictionary<string, (bool inside, bool down, UnityEngine.Vector2 fraction, string? focus)> PointerStates = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, string> DataIds = new(StringComparer.Ordinal);
 
     private static void Postfix(Motherboard? board, CartridgeIntegratedCircuitLua? cartridge,
@@ -88,6 +90,7 @@ internal static class HtmlElementPatch
             if (DataIds.TryGetValue(key, out var dataId))
                 surfaceComponent.DataElementId = dataId;
             surfaceComponent.SetSource(src);
+            if (PointerStates.TryGetValue(key, out var pointer)) surfaceComponent.RestorePointer(pointer);
             Pages[key] = surfaceComponent;
             if (Remembered.TryGetValue(key, out var all) && all.Count > 0)
                 surfaceComponent.ApplyData(all);

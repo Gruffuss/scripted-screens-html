@@ -128,7 +128,9 @@ Write it as you would for a browser. Flexbox and grid, `position: sticky` inside
 scrolling box, `overflow: auto` (real scrolling with the wheel), gradients of every kind,
 box and text shadows, filters, clip paths, masks, borders of every style, `border-image`,
 transforms, transitions, `@keyframes`, scroll-driven animations, `@media` against the design
-width, custom properties, `calc()`, `@font-face`, counters, logical properties, and so on.
+width, custom properties, `calc()` with the trigonometric functions, `@font-face`, counters,
+logical properties, `@starting-style` for a fade-in on insert, `::backdrop` behind a modal
+dialog, `column-rule`, `offset-path`, and so on.
 `SUPPORT.md` lists everything that has been seen working on a console and the few things
 still being finished.
 
@@ -173,7 +175,7 @@ the data table.
 A `<script>` in the page runs on a worker thread, with the DOM you expect: `document`,
 `querySelector`, `createElement`, `appendChild`, `innerHTML`, `classList`, `style`,
 `addEventListener`, `dispatchEvent`, timers, `requestAnimationFrame`, `localStorage`, `URL`,
-`fetch`-less networking (see above), `Element.animate()`, `<canvas>` with a full 2D context
+`fetch`-less networking (see above), `Element.animate()`, `elementFromPoint`, `<canvas>` with a full 2D context
 (drawn as vector paths), `import` from a URL in a module script. Reads after writes see the
 writes. `console.log` goes to the BepInEx log.
 

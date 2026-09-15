@@ -62,7 +62,7 @@ mdn_sel = {k for k, v in mdn("selectors").items() if v.get("status") == "standar
 
 fn_names = set()
 for m in re.findall(r'"([a-z-]+)\(', code): fn_names.add(m)
-for m in re.findall(r'case "([a-z-]+)":', emitter + style): fn_names.add(m)
+for m in re.findall(r'case "([a-z0-9-]+)":', emitter + style): fn_names.add(m)
 for m in re.findall(r'StartsWith\("([a-z-]+)\(', code): fn_names.add(m)
 for m in re.findall(r'"([a-z-]+)"', code): fn_names.add(m)  # keyword spellings (min, max, clamp as words)
 mdn_fn = {k.rstrip("()") for k, v in mdn("functions").items() if v.get("status") == "standard"}
@@ -198,4 +198,4 @@ table(["What", "Why"], OUT)
 out = os.path.join(MOD, "COVERAGE.md")
 open(out, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 unreasoned = [l for l in lines if "no reason recorded" in l]
-print("written", out, "-", len(unreasoned), "rows without a reason")
+print("written", out, "-", len(unreasoned), "rows without a reason", unreasoned)

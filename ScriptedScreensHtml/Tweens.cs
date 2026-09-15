@@ -221,9 +221,13 @@ internal sealed class Tweens
     private void Walk(VisualElement ve, HtmlRenderer.Result built, float now)
     {
         var cur = Snap.Of(ve);
-        if (_shown.TryGetValue(ve, out var prev) && prev.Differs(cur))
+        var isNew = !_shown.TryGetValue(ve, out var prev);
+        if (isNew && built.StartingRules.Count > 0 && StartingSnap(ve, built, cur) is { } starting) { prev = starting; isNew = false; }
+        if (!isNew && prev.Differs(cur))
         {
             var timing = Timing(ve, built, prev, cur);
+            if (HtmlConfig.Diagnostics && !_shown.ContainsKey(ve))
+                ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: starting-style on {ve.name}: opacity {prev.Opacity}->{cur.Opacity}, transition {timing.dur}s");
             if (timing.dur > 0.001f)
             {
                 var from = _live.TryGetValue(ve, out var running) && running.Active(now) ? running.At(now) : prev;
@@ -263,6 +267,60 @@ internal sealed class Tweens
         foreach (var ve in _scratch)
             _live.Remove(ve);
         return _scratch.Count > 0;
+    }
+
+    /// <summary>
+    /// @starting-style for an element shown for the first time: its snapshot with the
+    /// starting declarations applied (opacity, colours, px width/height, transform),
+    /// so the usual transition runs from there. Null when no starting rule matches.
+    /// </summary>
+    private static Snap? StartingSnap(VisualElement ve, HtmlRenderer.Result built, in Snap cur)
+    {
+        if (!built.NodeOf.TryGetValue(ve, out var node)) return null;
+        var s = cur;
+        var any = false;
+        foreach (var d in HtmlRenderer.Cascaded(node, built.StartingRules))
+        {
+            var v = d.Value.Trim();
+            switch (d.Name)
+            {
+                case "opacity": s.Opacity = StyleApplier.Num(v); any = true; break;
+                case "background-color": case "background": if (StyleApplier.TryColor(v, out var bg)) { s.Bg = bg; any = true; } break;
+                case "color": if (StyleApplier.TryColor(v, out var fg)) { s.Fg = fg; any = true; } break;
+                case "width": if (!v.EndsWith("%", StringComparison.Ordinal)) { s.Rect.width = StyleApplier.Num(v); any = true; } break;
+                case "height": if (!v.EndsWith("%", StringComparison.Ordinal)) { s.Rect.height = StyleApplier.Num(v); any = true; } break;
+                case "translate": { var p = v.Split(' ', StringSplitOptions.RemoveEmptyEntries); s.Translate = new Vector2(StyleApplier.Num(p[0]), p.Length > 1 ? StyleApplier.Num(p[1]) : 0f); any = true; break; }
+                case "scale": { var p = v.Split(' ', StringSplitOptions.RemoveEmptyEntries); s.Scale = new Vector2(StyleApplier.Num(p[0]), StyleApplier.Num(p.Length > 1 ? p[1] : p[0])); any = true; break; }
+                case "rotate": s.Rotate = Degrees(v); any = true; break;
+                case "transform":
+                    if (v == "none") { s.Translate = Vector2.zero; s.Scale = Vector2.one; s.Rotate = 0f; any = true; break; }
+                    foreach (var (name, a) in StyleApplier.Functions(v))
+                    {
+                        switch (name)
+                        {
+                            case "translate": s.Translate = new Vector2(StyleApplier.Num(a[0]), a.Length > 1 ? StyleApplier.Num(a[1]) : 0f); break;
+                            case "translatex": s.Translate.x = StyleApplier.Num(a[0]); break;
+                            case "translatey": s.Translate.y = StyleApplier.Num(a[0]); break;
+                            case "scale": s.Scale = new Vector2(StyleApplier.Num(a[0]), StyleApplier.Num(a.Length > 1 ? a[1] : a[0])); break;
+                            case "scalex": s.Scale.x = StyleApplier.Num(a[0]); break;
+                            case "scaley": s.Scale.y = StyleApplier.Num(a[0]); break;
+                            case "rotate": case "rotatez": s.Rotate = Degrees(a[0]); break;
+                        }
+                        any = true;
+                    }
+                    break;
+            }
+        }
+        return any ? s : null;
+    }
+
+    private static float Degrees(string v)
+    {
+        v = v.Trim().ToLowerInvariant();
+        if (v.EndsWith("turn", StringComparison.Ordinal)) return StyleApplier.Num(v.Substring(0, v.Length - 4)) * 360f;
+        if (v.EndsWith("rad", StringComparison.Ordinal)) return StyleApplier.Num(v.Substring(0, v.Length - 3)) * Mathf.Rad2Deg;
+        if (v.EndsWith("grad", StringComparison.Ordinal)) return StyleApplier.Num(v.Substring(0, v.Length - 4)) * 0.9f;
+        return StyleApplier.Num(v.EndsWith("deg", StringComparison.Ordinal) ? v.Substring(0, v.Length - 3) : v);
     }
 
     private static readonly string[] LayoutProps = { "width", "height", "top", "left", "right", "bottom", "margin", "padding", "flex", "min-width", "min-height", "max-width", "max-height", "inset" };

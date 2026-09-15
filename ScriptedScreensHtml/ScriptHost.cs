@@ -332,6 +332,21 @@ internal sealed class ScriptHost : IDisposable
             if (n.Attr("id") == ancestorId) return true;
         return false;
     }
+    /// <summary>The innermost element (smallest box) whose layout rect contains the page point.</summary>
+    private string? ElementAt(double x, double y)
+    {
+        string? best = null;
+        var bestArea = float.MaxValue;
+        foreach (var kv in _rects)
+        {
+            var r = kv.Value;
+            if (x < r.x || y < r.y || x > r.x + r.w || y > r.y + r.h) continue;
+            var area = r.w * r.h;
+            if (area < bestArea) { bestArea = area; best = kv.Key; }
+        }
+        return best;
+    }
+
     private double[] RectOf(string id)
     {
         return _rects.TryGetValue(id, out var r) ? new[] { (double)r.x, (double)r.y, (double)r.w, (double)r.h } : new[] { 0.0, 0.0, 0.0, 0.0 };
@@ -394,6 +409,7 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__attrs", new Func<string, string[]>(id => { Sync(); return AttrsOf(id); }));
             _engine.SetValue("__contains", new Func<string, string, bool>((a, b) => { Sync(); return Contains(a, b); }));
             _engine.SetValue("__rect", new Func<string, double[]>(RectOf));
+            _engine.SetValue("__elementAt", new Func<double, double, string?>(ElementAt));
             _engine.SetValue("__insertHtml", new Action<string, string, string>((parent, html, before) => Write(() => _insertHtml(parent, html, before))));
             _engine.SetValue("__removeAttr", new Action<string, string>((id, name) => { _attrCache.TryRemove(id + "\n" + name, out _); Write(() => { var n = _findNode(id); if (n != null && n.Attributes.Remove(name)) AfterAttribute(id, n, name); }); }));
             _engine.SetValue("__size", new Func<string, double[]>(Size));
@@ -1016,7 +1032,7 @@ function __el(id){
     cloneNode: function(deep){ var c = __detached(el.tagName); var a = __attrs(id); for (var i = 0; i < a.length; i += 2) { if (a[i] === 'class') c.className = a[i + 1]; else c.__attrs[a[i]] = a[i + 1]; } if (deep) c.__html = __htmlOf(id, false); return c; },
     focus: function(){}, blur: function(){},
     get open(){ return __getAttr(id, 'open') !== null; }, set open(v){ if (v) __setAttr(id, 'open', ''); else __removeAttr(id, 'open'); },
-    show: function(){ __setAttr(id, 'open', ''); }, showModal: function(){ __setAttr(id, 'open', ''); }, close: function(){ __removeAttr(id, 'open'); },
+    show: function(){ __setAttr(id, 'open', ''); }, showModal: function(){ __setAttr(id, 'open', ''); __setAttr(id, 'data-modal', ''); }, close: function(){ __removeAttr(id, 'open'); __removeAttr(id, 'data-modal'); },
     submit: function(){ __fire(id, 'submit', null); }, reset: function(){},
     get disabled(){ return __getAttr(id, 'disabled') !== null; }, set disabled(v){ if (v) __setAttr(id, 'disabled', ''); else __removeAttr(id, 'disabled'); },
     get hidden(){ return __getAttr(id, 'hidden') !== null; }, set hidden(v){ if (v) { __setAttr(id, 'hidden', ''); __setStyle(id, 'display', 'none'); } else { __removeAttr(id, 'hidden'); __setStyle(id, 'display', ''); } },
@@ -1102,6 +1118,8 @@ function __detached(tag){
 }
 var document = {
   getElementById: function(id){ return __has(id) ? __el(id) : null; },
+  elementFromPoint: function(x, y){ var id = __elementAt(Number(x) || 0, Number(y) || 0); return id ? __el(id) : null; },
+  elementsFromPoint: function(x, y){ var e = document.elementFromPoint(x, y); var out = []; while (e) { out.push(e); e = e.parentElement; } return out; },
   querySelectorAll: function(sel){ return __query(sel).map(__el); },
   querySelector: function(sel){ var r = __query(sel); return r.length ? __el(r[0]) : null; },
   createElement: __detached,

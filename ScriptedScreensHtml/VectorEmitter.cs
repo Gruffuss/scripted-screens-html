@@ -49,6 +49,8 @@ internal static class VectorEmitter
         public float ScrollTop = float.NaN;
         /// <summary>Viewport height and scrollable range (content minus viewport) of that container.</summary>
         public float ScrollH, ScrollRange;
+        /// <summary>The page's design size, for full-page overlays (::backdrop).</summary>
+        public float PageW, PageH;
         /// <summary>Scroll offsets a script set, by box id (HtmlSurface.ScrollSet).</summary>
         public Dictionary<string, (float offset, int version)>? ScrollSet;
         /// <summary>Positioned elements with a z-index, emitted after everything else at the root in z order: a stacking context across parents.</summary>
@@ -58,7 +60,7 @@ internal static class VectorEmitter
 
     public static Output Emit(HtmlRenderer.Result built, VisualElement root, float designW, float designH, Tweens? tweens = null, float now = 0f, Dictionary<string, (float offset, int version)>? scrollSet = null)
     {
-        var ctx = new Ctx { Built = built, RootOrigin = root.worldBound.position, Tw = tweens, Now = now, ScrollSet = scrollSet };
+        var ctx = new Ctx { Built = built, RootOrigin = root.worldBound.position, Tw = tweens, Now = now, ScrollSet = scrollSet, PageW = designW, PageH = designH };
         var inv = CultureInfo.InvariantCulture;
         EmitElement(ctx, root, Vector2.zero, 0);
         if (ctx.Deferred.Count > 0)
@@ -94,6 +96,23 @@ internal static class VectorEmitter
         var h = layout.height;
         var css = ctx.Built.CssOf(ve);
         var indent = new string(' ', depth * 2);
+        var modal = ctx.Built.NodeOf.TryGetValue(ve, out var dialogNode) && dialogNode.Tag == "dialog" && dialogNode.Attr("data-modal") != null;
+        if (modal && !ctx.EmittingDeferred)
+        {
+            // the top layer: a modal dialog paints over everything, whatever its place in the document
+            ctx.Deferred.Add((ve, parentPos, int.MaxValue));
+            return;
+        }
+        // a modal dialog dims the page behind it: the ::backdrop pseudo-element, a full-page box under the dialog
+        if (modal)
+        {
+            var bd = PseudoCss(ctx, ve, "backdrop");
+            var backdrop = new Color(0f, 0f, 0f, 0.1f);
+            if ((bd.TryGetValue("background", out var bdc) || bd.TryGetValue("background-color", out bdc)) && StyleApplier.TryColor(bdc, out var bcol)) backdrop = bcol;
+            if (bd.TryGetValue("opacity", out var bdo)) backdrop.a *= StyleApplier.Num(bdo);
+            ctx.Body.Append(indent).Append("R x=0 y=0 w=").Append(F(ctx.PageW)).Append(" h=").Append(F(ctx.PageH)).Append(" f=").Append(Hex(backdrop)).Append('\n');
+            ctx.Out.Nodes++;
+        }
 
         // A ScriptedScreens control (input, select, video...) fills the element's content box:
         // the page still paints the element's background and border around it, as a browser does.
@@ -139,7 +158,9 @@ internal static class VectorEmitter
                 .Append(tw.Remaining(tw.From.Rect.y, tw.To.Rect.y)).Append("\"] {\n");
             groups++;
         }
-        var xform = Xform.From(ve, tw, x, y, w, h);
+        // offset-path + offset-distance + offset-rotate: the box moved to its point on the path and turned along it
+        var offset = css.TryGetValue("offset-path", out var opath) ? Offset(css, opath, ve, x, y, w, h) : null;
+        var xform = Xform.From(ve, tw, x, y, w, h, offset);
         if (xform != null) { ctx.Body.Append(indent).Append(xform.Group()).Append(" {\n"); groups++; }
         if (css.TryGetValue("transform", out var tcss) && StyleApplier.NeedsMatrix(tcss) && Matrix(tcss, css, x, y, w, h) is { } m)
         {
@@ -153,7 +174,7 @@ internal static class VectorEmitter
             groups++;
         }
         else filterShadow = css.TryGetValue("filter", out var fcss2) && Filters(ctx, fcss2, out _, out var fs2) ? fs2 : string.Empty;
-        if ((css.TryGetValue("clip-path", out var cpath) || css.TryGetValue("-webkit-clip-path", out cpath)) && ClipPath(ctx, cpath, x, y, w, h) is { } clipId)
+        if ((css.TryGetValue("clip-path", out var cpath) || css.TryGetValue("-webkit-clip-path", out cpath)) && ClipPath(ctx, cpath, x, y, w, h, xform) is { } clipId)
         {
             ctx.Body.Append(indent).Append("G clip=").Append(clipId).Append(" {\n");
             groups++;
@@ -487,23 +508,157 @@ internal static class VectorEmitter
         ctx.Out.Nodes++;
     }
 
+    /// <summary>
+    /// The G that places an element on its offset-path: path("...") in the containing
+    /// block's coordinates, sampled at offset-distance (px or % of the length), turned by
+    /// offset-rotate (auto = along the tangent, an angle, or auto plus an angle).
+    /// ponytail: ray()/shapes as offset-path and offset-anchor are not read; arcs flatten to a chord.
+    /// </summary>
+    private static (float dx, float dy, float rot)? Offset(Dictionary<string, string> css, string pathCss, VisualElement ve, float x, float y, float w, float h)
+    {
+        var open = pathCss.IndexOf("path(", StringComparison.OrdinalIgnoreCase);
+        if (open < 0) return null;
+        var close = pathCss.LastIndexOf(')');
+        if (close <= open) return null;
+        var d = pathCss.Substring(open + 5, close - open - 5).Trim().Trim('"', '\'');
+        var pts = FlattenPath(d);
+        if (pts.Count < 2) return null;
+        var total = 0f;
+        for (var i = 1; i < pts.Count; i++) total += Vector2.Distance(pts[i - 1], pts[i]);
+        var dist = 0f;
+        if (css.TryGetValue("offset-distance", out var od))
+            dist = od.Trim().EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(od) / 100f * total : StyleApplier.Num(od);
+        dist = Mathf.Clamp(dist, 0f, total);
+        var p = pts[0];
+        var tangent = pts[1] - pts[0];
+        var run = 0f;
+        for (var i = 1; i < pts.Count; i++)
+        {
+            var seg = Vector2.Distance(pts[i - 1], pts[i]);
+            if (seg <= 0f) continue;
+            if (run + seg >= dist || i == pts.Count - 1)
+            {
+                var f = Mathf.Clamp01((dist - run) / seg);
+                p = Vector2.Lerp(pts[i - 1], pts[i], f);
+                tangent = pts[i] - pts[i - 1];
+                break;
+            }
+            run += seg;
+        }
+        var along = Mathf.Atan2(tangent.y, tangent.x) * Mathf.Rad2Deg;
+        var rot = along;
+        if (css.TryGetValue("offset-rotate", out var orr))
+        {
+            var parts = orr.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            rot = 0f;
+            foreach (var part in parts)
+            {
+                if (part == "auto") rot += along;
+                else if (part == "reverse") rot += along + 180f;
+                else rot += Degrees(part);
+            }
+        }
+        // the path is in the containing block's space: the parent's origin in page coordinates
+        var ox = x - ve.layout.x;
+        var oy = y - ve.layout.y;
+        var cx = x + w * 0.5f;
+        var cy = y + h * 0.5f;
+        return (ox + p.x - cx, oy + p.y - cy, rot);
+    }
+
+    private static float Degrees(string v)
+    {
+        if (v.EndsWith("turn", StringComparison.Ordinal)) return StyleApplier.Num(v.Substring(0, v.Length - 4)) * 360f;
+        if (v.EndsWith("rad", StringComparison.Ordinal)) return StyleApplier.Num(v.Substring(0, v.Length - 3)) * Mathf.Rad2Deg;
+        if (v.EndsWith("grad", StringComparison.Ordinal)) return StyleApplier.Num(v.Substring(0, v.Length - 4)) * 0.9f;
+        return StyleApplier.Num(v.EndsWith("deg", StringComparison.Ordinal) ? v.Substring(0, v.Length - 3) : v);
+    }
+
+    /// <summary>SVG path data as a polyline: M L H V C S Q T Z (absolute and relative); A as its chord.</summary>
+    internal static List<Vector2> FlattenPath(string d)
+    {
+        var pts = new List<Vector2>();
+        var nums = new List<float>();
+        var cmd = ' ';
+        var cur = Vector2.zero; var start = Vector2.zero; var lastCtrl = Vector2.zero;
+        var i = 0;
+        void Cubic(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3)
+        {
+            for (var k = 1; k <= 12; k++)
+            {
+                var u = k / 12f; var m = 1f - u;
+                pts.Add(m * m * m * p0 + 3f * m * m * u * p1 + 3f * m * u * u * p2 + u * u * u * p3);
+            }
+        }
+        void Run()
+        {
+            if (cmd == ' ') return;
+            var rel = char.IsLower(cmd);
+            var c = char.ToUpperInvariant(cmd);
+            var n = 0;
+            Vector2 R(int k) => rel ? cur + new Vector2(nums[k], nums[k + 1]) : new Vector2(nums[k], nums[k + 1]);
+            if (c == 'Z') { if (pts.Count > 0) pts.Add(start); cur = start; return; }
+            while (true)
+            {
+                switch (c)
+                {
+                    case 'M': if (n + 2 > nums.Count) return; cur = R(n); start = cur; pts.Add(cur); n += 2; c = 'L'; break;
+                    case 'L': if (n + 2 > nums.Count) return; cur = R(n); pts.Add(cur); n += 2; break;
+                    case 'H': if (n + 1 > nums.Count) return; cur = new Vector2(rel ? cur.x + nums[n] : nums[n], cur.y); pts.Add(cur); n += 1; break;
+                    case 'V': if (n + 1 > nums.Count) return; cur = new Vector2(cur.x, rel ? cur.y + nums[n] : nums[n]); pts.Add(cur); n += 1; break;
+                    case 'C': { if (n + 6 > nums.Count) return; var p1 = R(n); var p2 = R(n + 2); var p3 = R(n + 4); Cubic(cur, p1, p2, p3); lastCtrl = p2; cur = p3; n += 6; break; }
+                    case 'S': { if (n + 4 > nums.Count) return; var p1 = cur + (cur - lastCtrl); var p2 = R(n); var p3 = R(n + 2); Cubic(cur, p1, p2, p3); lastCtrl = p2; cur = p3; n += 4; break; }
+                    case 'Q': { if (n + 4 > nums.Count) return; var q = R(n); var p3 = R(n + 2); Cubic(cur, cur + 2f / 3f * (q - cur), p3 + 2f / 3f * (q - p3), p3); lastCtrl = q; cur = p3; n += 4; break; }
+                    case 'T': { if (n + 2 > nums.Count) return; var q = cur + (cur - lastCtrl); var p3 = R(n); Cubic(cur, cur + 2f / 3f * (q - cur), p3 + 2f / 3f * (q - p3), p3); lastCtrl = q; cur = p3; n += 2; break; }
+                    case 'A': if (n + 7 > nums.Count) return; cur = R(n + 5); pts.Add(cur); n += 7; break;
+                    default: return;
+                }
+                if (c is not ('C' or 'S' or 'Q' or 'T')) lastCtrl = cur;
+                if (n >= nums.Count) return;
+            }
+        }
+        while (i < d.Length)
+        {
+            var ch = d[i];
+            if (char.IsLetter(ch) && ch != 'e' && ch != 'E')
+            {
+                Run(); nums.Clear(); cmd = ch; i++;
+                continue;
+            }
+            if (char.IsDigit(ch) || ch == '-' || ch == '+' || ch == '.')
+            {
+                var j = i + 1;
+                while (j < d.Length && (char.IsDigit(d[j]) || d[j] == '.' || d[j] == 'e' || d[j] == 'E' || ((d[j] == '-' || d[j] == '+') && (d[j - 1] == 'e' || d[j - 1] == 'E')))) j++;
+                if (float.TryParse(d.Substring(i, j - i), NumberStyles.Float, CultureInfo.InvariantCulture, out var f)) nums.Add(f);
+                i = j;
+                continue;
+            }
+            i++;
+        }
+        Run();
+        return pts;
+    }
+
     /// <summary>A CSS transform as the vector G attributes, kept numeric so clip
     /// polygons declared in scene space can be put through the same transform.</summary>
     private sealed class Xform
     {
         public float Ax, Ay, Tx, Ty, R, Sx = 1f, Sy = 1f;
+        /// <summary>offset-path: a translation and turn applied under the transform, both ends of a tween alike.</summary>
+        private float _ox, _oy, _or;
         private Tweens.Tween? _tw;
 
         /// <summary>The element's resolved transform (UI Toolkit has already applied the CSS), tweened if one is running.</summary>
-        public static Xform? From(VisualElement ve, Tweens.Tween? tw, float x, float y, float w, float h)
+        public static Xform? From(VisualElement ve, Tweens.Tween? tw, float x, float y, float w, float h, (float dx, float dy, float rot)? offset = null)
         {
             var rs = ve.resolvedStyle;
             var xf = new Xform
             {
                 Ax = x + w * 0.5f, Ay = y + h * 0.5f,
-                Tx = rs.translate.x, Ty = rs.translate.y,
-                R = rs.rotate.angle.ToDegrees(),
+                Tx = rs.translate.x + (offset?.dx ?? 0f), Ty = rs.translate.y + (offset?.dy ?? 0f),
+                R = rs.rotate.angle.ToDegrees() + (offset?.rot ?? 0f),
                 Sx = rs.scale.value.x, Sy = rs.scale.value.y,
+                _ox = offset?.dx ?? 0f, _oy = offset?.dy ?? 0f, _or = offset?.rot ?? 0f,
                 _tw = tw != null && tw.From.TransformDiffers(tw.To) ? tw : null,
             };
             var identity = Mathf.Abs(xf.Tx) < 0.01f && Mathf.Abs(xf.Ty) < 0.01f && Mathf.Abs(xf.R) < 0.01f
@@ -517,8 +672,8 @@ internal static class VectorEmitter
             if (_tw != null)
             {
                 var f = _tw.From;
-                sb.Append(" t=[\"").Append(_tw.Lerp(f.Translate.x, Tx)).Append("\",\"").Append(_tw.Lerp(f.Translate.y, Ty)).Append("\"]");
-                sb.Append(" r=").Append(_tw.Lerp(f.Rotate, R));
+                sb.Append(" t=[\"").Append(_tw.Lerp(f.Translate.x + _ox, Tx)).Append("\",\"").Append(_tw.Lerp(f.Translate.y + _oy, Ty)).Append("\"]");
+                sb.Append(" r=").Append(_tw.Lerp(f.Rotate + _or, R));
                 sb.Append(" s=[\"").Append(_tw.Lerp(f.Scale.x, Sx)).Append("\",\"").Append(_tw.Lerp(f.Scale.y, Sy)).Append("\"]");
                 return sb.ToString();
             }
@@ -2592,7 +2747,7 @@ internal static class VectorEmitter
     }
 
     /// <summary>clip-path basic shapes to a CP def in page coordinates: inset(), circle(), ellipse(), polygon(). A concave polygon is passed as is (vector requirement 8).</summary>
-    private static string? ClipPath(Ctx ctx, string css, float x, float y, float w, float h)
+    private static string? ClipPath(Ctx ctx, string css, float x, float y, float w, float h, Xform? xform = null)
     {
         var v = css.Trim();
         var open = v.IndexOf('(');
@@ -2601,6 +2756,21 @@ internal static class VectorEmitter
         var inner = v.Substring(open + 1, v.Length - open - 2).Trim();
         var id = "cpath" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
         float Along(string s, float size) => s.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(s) / 100f * size : StyleApplier.Num(s);
+        // Under a transform the def (scene space, like every CP) is the shape put through it, as a
+        // polygon. ponytail: a tweened transform clips at its end position; inset radii are dropped.
+        string? Through(List<Vector2> pts)
+        {
+            if (xform == null) return null;
+            var sb = new StringBuilder();
+            foreach (var p in pts)
+            {
+                var q = xform.Apply(p);
+                if (sb.Length > 0) sb.Append(',');
+                sb.Append(F(q.x)).Append(',').Append(F(q.y));
+            }
+            ctx.Defs.Append("  CP id=").Append(id).Append(" { Y p=[").Append(sb).Append("] }\n");
+            return id;
+        }
         switch (name)
         {
             case "inset":
@@ -2612,6 +2782,7 @@ internal static class VectorEmitter
                 var r = sides.Length > 1 ? Along(sides[1], w) : t;
                 var b = sides.Length > 2 ? Along(sides[2], h) : t;
                 var l = sides.Length > 3 ? Along(sides[3], w) : r;
+                if (xform != null) return Through(new List<Vector2> { new(x + l, y + t), new(x + w - r, y + t), new(x + w - r, y + h - b), new(x + l, y + h - b) });
                 ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x + l)).Append(" y=").Append(F(y + t)).Append(" w=").Append(F(Mathf.Max(0f, w - l - r))).Append(" h=").Append(F(Mathf.Max(0f, h - t - b)));
                 if (radius > 0f) ctx.Defs.Append(" rx=").Append(F(radius));
                 ctx.Defs.Append(" }\n");
@@ -2636,20 +2807,29 @@ internal static class VectorEmitter
                     rx = size.Length > 0 ? Along(size[0], w) : w * 0.5f;
                     ry = size.Length > 1 ? Along(size[1], h) : h * 0.5f;
                 }
+                if (xform != null)
+                {
+                    var ring = new List<Vector2>();
+                    for (var k = 0; k < 32; k++) { var a = k / 32f * 2f * Mathf.PI; ring.Add(new Vector2(cx + rx * Mathf.Cos(a), cy + ry * Mathf.Sin(a))); }
+                    return Through(ring);
+                }
                 ctx.Defs.Append("  CP id=").Append(id).Append(" { C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(rx)).Append(" ry=").Append(F(ry)).Append(" }\n");
                 return id;
             }
             case "polygon":
             {
                 var pts = new StringBuilder();
+                var poly = new List<Vector2>();
                 foreach (var pair in SplitTopLevelCommas(inner))
                 {
                     var xy = pair.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
                     if (xy.Length < 2) continue;
                     if (pts.Length > 0) pts.Append(',');
+                    poly.Add(new Vector2(x + Along(xy[0], w), y + Along(xy[1], h)));
                     pts.Append(F(x + Along(xy[0], w))).Append(',').Append(F(y + Along(xy[1], h)));
                 }
                 if (pts.Length == 0) return null;
+                if (xform != null) return Through(poly);
                 ctx.Defs.Append("  CP id=").Append(id).Append(" { Y p=[").Append(pts).Append("] }\n");
                 return id;
             }

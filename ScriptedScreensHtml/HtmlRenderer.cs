@@ -50,6 +50,8 @@ internal static class HtmlRenderer
         public float ViewportWidth;
         /// <summary>Stylesheet rules and the node each element came from, for className changes at runtime.</summary>
         public List<CssRule> Rules = new();
+        /// <summary>@starting-style rules: the state a newly shown element transitions from.</summary>
+        public readonly List<CssRule> StartingRules = new();
         public readonly Dictionary<VisualElement, HtmlNode> NodeOf = new();
         public HtmlNode Document = new();
         /// <summary>display: grid containers, laid out by GridLayout once attached.</summary>
@@ -120,11 +122,21 @@ internal static class HtmlRenderer
         CssParser.ViewportWidth = result.ViewportWidth > 0f ? result.ViewportWidth : 460f;
         CssParser.ViewportHeight = CssParser.ViewportWidth * SurfaceAspect;
         Counters.Clear();
+        AfterDecls.Clear();
         CssParser.CounterStyles.Clear();
         CssParser.FontFaces.Clear();
         CssParser.Imports.Clear();
         CssParser.PropertyInitials.Clear();
+        CssParser.StartingRules.Clear();
+        _building = true;
+        try { return BuildInner(source, font, result, doc, rules, script, Warn); }
+        finally { _building = false; }
+    }
+
+    private static Result BuildInner(string source, Font? font, Result result, HtmlNode doc, List<CssRule> rules, StringBuilder script, Action<string> Warn)
+    {
         Collect(doc, rules, script, result.Keyframes, Warn, result);
+        result.StartingRules.AddRange(CssParser.StartingRules);
         result.ExternalImports.AddRange(CssParser.Imports);
         foreach (var (family, src, weight, style) in CssParser.FontFaces)
             FontLibrary.Alias(family, src, weight, style);
@@ -381,6 +393,17 @@ internal static class HtmlRenderer
         if (Skipped.Contains(node.Tag!))
             return;
 
+        if (node.Attr("data-pseudo") == "after" && node.Attr("data-content") is { } afterContent && node.Children.Count == 0)
+        {
+            // an ::after is built last among its siblings: its counters and text are resolved now
+            var owner = node.Parent ?? node;
+            if (AfterDecls.TryGetValue(node, out var afterDecls)) ApplyCounters(node, owner, afterDecls);
+            var afterText = GeneratedText(afterContent, owner);
+            node.Attributes.Remove("data-content");
+            if (afterText == null) return;
+            node.Children.Add(new HtmlNode { Text = afterText, Parent = node });
+        }
+
         AddGenerated(node, rules);
 
         if (node.Tag == "tr")
@@ -451,6 +474,23 @@ internal static class HtmlRenderer
             }
         }
 
+        if (node.Tag == "picture")
+        {
+            // the first <source> whose media query matches the design width supplies the img's src
+            HtmlNode? img = null; string? chosen = null;
+            foreach (var c in node.Children)
+            {
+                if (c.Tag == "img") img = c;
+                else if (c.Tag == "source" && chosen == null && (c.Attr("media") == null || CssParser.MediaMatches(c.Attr("media")!)) && (c.Attr("srcset") ?? c.Attr("src")) is { } set)
+                    chosen = set.Split(',')[0].Trim().Split(' ')[0];
+            }
+            if (img != null)
+            {
+                if (chosen != null) img.Attributes["src"] = chosen;
+                Append(parent, img, rules, result);
+            }
+            return;
+        }
         if (node.Tag == "img")
         {
             // Drawn by the scene as an IMG node (vector requirement 9): a box here, the
@@ -520,6 +560,20 @@ internal static class HtmlRenderer
 
         VisualElement ve;
         var mixed = false;
+        if (IsTextLike(node) && node.Children.TrueForAll(c => c.IsText) && CascadedValue(node, rules, "column-count") is { } ccv && int.TryParse(ccv, out var textColumns) && textColumns > 1)
+        {
+            // column-count on plain text: the words shared out over the columns as block children.
+            // ponytail: an equal word count per column, not balanced by height; inline tags inside keep one column
+            var words = string.Join(" ", node.Children.ConvertAll(c => c.Text)).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            node.Children.Clear();
+            var perColumn = (words.Length + textColumns - 1) / textColumns;
+            for (var c = 0; c < textColumns; c++)
+            {
+                var col = new HtmlNode { Tag = "div", Parent = node };
+                col.Children.Add(new HtmlNode { Text = string.Join(" ", words, Math.Min(words.Length, c * perColumn), Math.Max(0, Math.Min(perColumn, words.Length - c * perColumn))), Parent = col });
+                node.Children.Add(col);
+            }
+        }
         if (IsTextLike(node))
         {
             ve = new Label(RichText(node, rules));
@@ -554,6 +608,14 @@ internal static class HtmlRenderer
             if (mono != null) ve.style.unityFontDefinition = FontDefinition.FromSDFFont(mono);
         }
         ApplyStyles(ve, node, rules, result);
+        if (node.Tag == "dialog")
+        {
+            // the tag default centres it (left/top 50% + translate -50%); a page that places it keeps its own numbers
+            var dcss = result.CssOf(ve);
+            if ((dcss.ContainsKey("left") || dcss.ContainsKey("top") || dcss.ContainsKey("right") || dcss.ContainsKey("bottom") || dcss.ContainsKey("inset") || dcss.ContainsKey("margin"))
+                && !dcss.ContainsKey("translate") && !dcss.ContainsKey("transform"))
+                ve.style.translate = new Translate(0, 0);
+        }
         if (mixed && result.CssOf(ve).TryGetValue("display", out var dsp) && dsp.Trim().ToLowerInvariant() is "flex" or "inline-flex" or "grid" or "inline-grid")
         {
             // a flex or grid container whose children happen to be inline: they are items, not a line box
@@ -1061,6 +1123,10 @@ internal static class HtmlRenderer
     /// element that reset it (valid for its subtree and following siblings), innermost last.
     /// </summary>
     private static readonly List<(string name, HtmlNode scope, int value)> Counters = new();
+    /// <summary>True while Build runs: counters advance only then, not when a script rewrites a label later.</summary>
+    private static bool _building;
+    /// <summary>Counter declarations of ::after pseudo-elements, applied when the pseudo is built (after its siblings).</summary>
+    private static readonly Dictionary<HtmlNode, List<CssDeclaration>> AfterDecls = new();
 
     private static bool AncestorOrSelf(HtmlNode? a, HtmlNode n)
     {
@@ -1093,7 +1159,7 @@ internal static class HtmlRenderer
     }
 
     /// <summary>The element's own cascaded declarations (rules by specificity, then inline), for reads before the element is built.</summary>
-    private static List<CssDeclaration> Cascaded(HtmlNode node, List<CssRule> rules)
+    internal static List<CssDeclaration> Cascaded(HtmlNode node, List<CssRule> rules)
     {
         var matched = new List<(int spec, int order, CssRule rule)>();
         foreach (var rule in rules)
@@ -1169,11 +1235,19 @@ internal static class HtmlRenderer
                 }
             }
             if (content == null) continue;
+            if (which == "after")
+            {
+                // filled when it is built, after the children, so counters they incremented are seen
+                probe.Attributes["data-content"] = content;
+                AfterDecls[probe] = pseudoDecls;
+                node.Children.Add(probe);
+                continue;
+            }
             ApplyCounters(probe, node, pseudoDecls);
             var text = GeneratedText(content, node);
             if (text == null) continue;
             probe.Children.Add(new HtmlNode { Text = text, Parent = probe });
-            if (which == "before") node.Children.Insert(0, probe); else node.Children.Add(probe);
+            node.Children.Insert(0, probe);
         }
     }
 
@@ -1302,6 +1376,23 @@ internal static class HtmlRenderer
         ApplyStyles(ve, node, rules, result);
         parent.Add(ve);
         HtmlNode? bottomCaption = null;
+        // <colgroup>/<col>: widths by column (the width attribute or a style width), span repeats
+        var colWidths = new List<string?>();
+        void TakeCol(HtmlNode col)
+        {
+            string? w = col.Attr("width");
+            if (w != null && !w.EndsWith("%", StringComparison.Ordinal) && !w.EndsWith("px", StringComparison.OrdinalIgnoreCase)) w += "px";
+            if (col.Attr("style") is { } cs)
+                foreach (var d in CssParser.ParseDeclarations(cs)) if (d.Name == "width") w = d.Value.Trim();
+            var span = int.TryParse(col.Attr("span"), out var sp) && sp > 0 ? sp : 1;
+            for (var i = 0; i < span; i++) colWidths.Add(w);
+        }
+        foreach (var child in node.Children)
+        {
+            if (child.Tag == "col") TakeCol(child);
+            else if (child.Tag == "colgroup") { var any = false; foreach (var c in child.Children) if (c.Tag == "col") { TakeCol(c); any = true; } if (!any) TakeCol(child); }
+        }
+        if (colWidths.TrueForAll(w => w == null)) colWidths.Clear();
         var hideEmpty = CascadedValue(node, rules, "empty-cells") == "hide";
         if (hideEmpty) node.Attributes["data-empty-cells"] = "hide";
         foreach (var child in node.Children)
@@ -1320,11 +1411,11 @@ internal static class HtmlRenderer
                     ApplyStyles(section, child, rules, result);
                     ve.Add(section);
                     foreach (var tr in child.Children)
-                        if (tr.Tag == "tr") AppendRow(section, tr, columns, rules, result);
+                        if (tr.Tag == "tr") AppendRow(section, tr, columns, rules, result, colWidths);
                     break;
                 }
                 case "tr":
-                    AppendRow(ve, child, columns, rules, result);
+                    AppendRow(ve, child, columns, rules, result, colWidths);
                     break;
             }
         }
@@ -1352,8 +1443,9 @@ internal static class HtmlRenderer
         return null;
     }
 
-    private static void AppendRow(VisualElement table, HtmlNode tr, int columns, List<CssRule> rules, Result result)
+    private static void AppendRow(VisualElement table, HtmlNode tr, int columns, List<CssRule> rules, Result result, List<string?>? colWidths = null)
     {
+        var colIndex = 0;
         var row = new VisualElement();
         row.style.flexDirection = FlexDirection.Row;
         row.style.alignItems = Align.Stretch;
@@ -1367,8 +1459,10 @@ internal static class HtmlRenderer
             if (IsEmptyCell(cell) && TableOf(tr)?.Attr("data-empty-cells") == "hide")
                 cell.Attributes["style"] = "visibility: hidden;" + (cell.Attr("style") ?? string.Empty);
             var w = cell.Attr("width");
+            if (w == null && colWidths != null && colIndex < colWidths.Count) w = colWidths[colIndex];
+            colIndex += Span(cell);
             if (w != null && cell.Attr("style")?.Contains("width") != true)
-                cell.Attributes["style"] = "width:" + (w.EndsWith("%", StringComparison.Ordinal) ? w : w + "px") + ";" + (cell.Attr("style") ?? string.Empty);
+                cell.Attributes["style"] = "width:" + (w.EndsWith("%", StringComparison.Ordinal) || w.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? w : w + "px") + ";" + (cell.Attr("style") ?? string.Empty);
             Append(row, cell, rules, result);
             var id = cell.Attr("id");
             if (id == null || !result.ById.TryGetValue(id, out var cve)) continue;
@@ -1435,11 +1529,34 @@ internal static class HtmlRenderer
             ve.style.flexDirection = FlexDirection.Row;
             ve.style.alignItems = Align.FlexStart;
             var per = (kids.Count + columns - 1) / columns;
+            // column-rule: a line in the middle of each gap, drawn as the left border of every column but the first
+            var ruleW = 0f; var ruleStyle = "solid"; var ruleColor = Color.clear;
+            if (css.TryGetValue("column-rule", out var cr))
+                foreach (var part in CssParser.SplitTopLevel(cr.Trim(), ' '))
+                {
+                    if (part is "solid" or "dashed" or "dotted" or "double" or "none" or "hidden") ruleStyle = part;
+                    else if (StyleApplier.TryColor(part, out var rc)) ruleColor = rc;
+                    else if (part.Length > 0 && (char.IsDigit(part[0]) || part[0] == '.')) ruleW = StyleApplier.Num(part);
+                    else if (part is "thin") ruleW = 1f; else if (part is "medium") ruleW = 3f; else if (part is "thick") ruleW = 5f;
+                }
+            if (css.TryGetValue("column-rule-width", out var crw)) ruleW = crw.Trim() is "thin" ? 1f : crw.Trim() is "medium" ? 3f : crw.Trim() is "thick" ? 5f : StyleApplier.Num(crw);
+            if (css.TryGetValue("column-rule-style", out var crs)) ruleStyle = crs.Trim();
+            if (css.TryGetValue("column-rule-color", out var crc) && StyleApplier.TryColor(crc, out var crcol)) ruleColor = crcol;
+            if (ruleW > 0f && ruleColor.a <= 0.002f) ruleColor = ve.resolvedStyle.color;
+            var hasRule = ruleW > 0f && ruleStyle is not ("none" or "hidden");
             for (var c = 0; c < columns; c++)
             {
                 var col = new VisualElement { name = ve.name + "__col" + c };
                 col.style.flexGrow = 1; col.style.flexBasis = 0; col.style.flexShrink = 1;
-                if (c > 0) col.style.marginLeft = gap;
+                if (c > 0 && hasRule)
+                {
+                    col.style.marginLeft = gap * 0.5f - ruleW * 0.5f;
+                    col.style.paddingLeft = gap * 0.5f - ruleW * 0.5f;
+                    col.style.borderLeftWidth = ruleW;
+                    col.style.borderLeftColor = ruleColor;
+                    result.CssOf(col)["border-left-style"] = ruleStyle;
+                }
+                else if (c > 0) col.style.marginLeft = gap;
                 for (var i = c * per; i < Math.Min(kids.Count, (c + 1) * per); i++) col.Add(kids[i]);
                 ve.Add(col);
             }
@@ -1680,6 +1797,20 @@ internal static class HtmlRenderer
         {
             sb.Append(node.Text.Replace("<", "<noparse><</noparse>"));
             return;
+        }
+        if (_building && rules != null)
+        {
+            // an inline element flattened into its parent's label still counts (counter-increment)
+            // and an ::after probe left for last is filled here, after its siblings
+            if (node.Attr("data-pseudo") == null && node.Attr("data-marker") == null)
+                ApplyCounters(node, node, Cascaded(node, rules));
+            else if (node.Attr("data-pseudo") == "after" && node.Attr("data-content") is { } afterContent && node.Children.Count == 0)
+            {
+                var owner = node.Parent ?? node;
+                if (AfterDecls.TryGetValue(node, out var afterDecls)) ApplyCounters(node, owner, afterDecls);
+                node.Attributes.Remove("data-content");
+                if (GeneratedText(afterContent, owner) is { } afterText) node.Children.Add(new HtmlNode { Text = afterText, Parent = node });
+            }
         }
 
         if (node.Tag == "br")

@@ -25,3 +25,4 @@ Thumbs.db
 desktop.ini
 .DS_Store
 ScriptedScreensHtml.Tests/prelude_extracted.js
+__pycache__/

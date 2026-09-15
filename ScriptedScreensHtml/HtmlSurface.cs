@@ -494,6 +494,12 @@ internal sealed class HtmlSurface : MonoBehaviour
                 _script.RunSynchronously(Time.time + k * 0.1f, _byId, 300);
         _dirty = false;
         EmitToVector();
+        if (_restore != null)
+        {
+            // the layout exists now: put the old surface's hover, press and focus back and emit once more
+            ApplyRestoredPointer();
+            if (_dirty) { _dirty = false; EmitToVector(); }
+        }
     }
 
     private bool _scriptPending;
@@ -902,7 +908,9 @@ internal sealed class HtmlSurface : MonoBehaviour
             }
         }
         _inputValues[key] = stored;
-        if (node.Tag is "input" or "textarea") { node.Attributes["value"] = stored; Recascade(node); }
+        node.Attributes["data-touched"] = string.Empty; // :user-invalid / :user-valid: the user has interacted
+        if (node.Tag is "input" or "textarea") node.Attributes["value"] = stored;
+        Recascade(node);
         _externalState.Remove(ElementId + "/" + key);
         _dirty = true;
         Wake();
@@ -1054,9 +1062,33 @@ internal sealed class HtmlSurface : MonoBehaviour
     private HtmlNode? _focused;
     private string? _hoverDeepest;
 
+    private (bool inside, bool down, Vector2 fraction, string? focus)? _restore;
+
+    /// <summary>A rebuilt surface takes the pointer state the old one had, applied once the page is laid out.</summary>
+    internal void RestorePointer((bool inside, bool down, Vector2 fraction, string? focus) state) => _restore = state;
+
+    private void ApplyRestoredPointer()
+    {
+        if (_restore is not { } r) return;
+        _restore = null;
+        if (r.focus != null) SetFocus(r.focus);
+        if (r.inside) PointerMove(r.fraction);
+        if (r.down) PointerDown(r.fraction);
+    }
+
+    private void SavePointer(bool inside, bool down, Vector2 fraction)
+    {
+        if (PageKey == null) return;
+        HtmlElementPatch.PointerStates[PageKey] = (inside, down, fraction, _focused?.Attr("id"));
+    }
+
+    private Vector2 _lastFraction;
+
     /// <summary>The pointer at a fraction of the host rect: which page boxes are under it.</summary>
     internal void PointerMove(Vector2 fraction)
     {
+        _lastFraction = fraction;
+        SavePointer(true, _active.Count > 0, fraction);
         var layout = LayoutSize();
         _pointerPage = new Vector2(fraction.x * layout.x, fraction.y * layout.y);
         var deepest = Deepest(_pointerPage);
@@ -1074,6 +1106,7 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     internal void PointerLeave()
     {
+        SavePointer(false, false, _lastFraction);
         if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseout", _pointerPage.x, _pointerPage.y);
         _hoverDeepest = null;
         SetState(_hovered, "data-hover", null);
@@ -1082,6 +1115,8 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     internal void PointerDown(Vector2 fraction)
     {
+        _lastFraction = fraction;
+        SavePointer(true, true, fraction);
         var layout = LayoutSize();
         _pointerPage = new Vector2(fraction.x * layout.x, fraction.y * layout.y);
         var deepest = Deepest(_pointerPage);
@@ -1092,6 +1127,7 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     internal void PointerUp()
     {
+        SavePointer(true, false, _lastFraction);
         if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseup", _pointerPage.x, _pointerPage.y);
         SetState(_active, "data-active", null);
     }
@@ -1453,7 +1489,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             if (string.IsNullOrEmpty(entry.Key) || !_byId.TryGetValue(entry.Key, out var ve))
             {
                 // a key the scene reads as $name (an svg expression) is a legitimate target too
-                if (!string.IsNullOrEmpty(entry.Key) && !quiet && _lastScene.IndexOf("$" + entry.Key, StringComparison.Ordinal) < 0)
+                if (!string.IsNullOrEmpty(entry.Key) && !quiet && _lastScene.Length > 0 && _lastScene.IndexOf("$" + entry.Key, StringComparison.Ordinal) < 0)  // before the first scene nothing is known yet
                     ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: data key \"{entry.Key}\" matches no element id and no $ expression");
                 continue;
             }

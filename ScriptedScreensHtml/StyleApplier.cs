@@ -508,6 +508,7 @@ internal static class StyleApplier
         "font-variant-numeric", "fill", "stroke", "stroke-width", "stroke-opacity", "fill-opacity", "fill-rule", "stroke-dasharray", "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "text-anchor", "dominant-baseline", "stroke-miterlimit",
         "background-size", "background-position", "background-repeat", "float", "clear", "column-count", "columns", "column-gap", "aspect-ratio", "mix-blend-mode", "backdrop-filter",
         "list-style", "list-style-type", "list-style-position", "border-collapse", "border-spacing",
+        "column-rule", "column-rule-width", "column-rule-style", "column-rule-color", "offset-path", "offset-distance", "offset-rotate",
     };
 
     private static void Unknown(CssDeclaration d, Action<string>? warn)
@@ -567,25 +568,69 @@ internal static class StyleApplier
         return float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f * scale : 0f;
     }
 
-    /// <summary>min(), max(), clamp() over lengths; each argument may be a calc-style expression. Null when not one of them.</summary>
+    /// <summary>
+    /// The CSS math functions over lengths and numbers: min/max/clamp, the trigonometric ones
+    /// (angles in deg/rad/grad/turn, a bare number is radians), pow/sqrt/hypot/log/exp,
+    /// abs/sign/mod/rem/round. Each argument may be a calc-style expression. Null when not one.
+    /// </summary>
     private static float? Func(string v)
     {
         var lower = v.ToLowerInvariant();
-        string fn;
-        if (lower.StartsWith("min(", StringComparison.Ordinal)) fn = "min";
-        else if (lower.StartsWith("max(", StringComparison.Ordinal)) fn = "max";
-        else if (lower.StartsWith("clamp(", StringComparison.Ordinal)) fn = "clamp";
-        else return null;
-        var inner = v.Substring(fn.Length + 1, Math.Max(0, v.Length - fn.Length - 2));
+        var paren = lower.IndexOf('(');
+        if (paren <= 0 || !lower.EndsWith(")", StringComparison.Ordinal)) return null;
+        var fn = lower.Substring(0, paren).Trim();
+        if (fn is not ("min" or "max" or "clamp" or "sin" or "cos" or "tan" or "asin" or "acos" or "atan" or "atan2" or "pow" or "sqrt" or "hypot" or "log" or "exp" or "abs" or "sign" or "mod" or "rem" or "round"))
+            return null;
+        var inner = v.Substring(paren + 1, Math.Max(0, v.Length - paren - 2));
+        var raw = CssParser.SplitTopLevel(inner, ',');
+        static float Angle(string a)
+        {
+            a = a.Trim().ToLowerInvariant();
+            static float N(string t) => float.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f : 0f;
+            if (a.EndsWith("deg", StringComparison.Ordinal)) return N(a.Substring(0, a.Length - 3)) * Mathf.Deg2Rad;
+            if (a.EndsWith("grad", StringComparison.Ordinal)) return N(a.Substring(0, a.Length - 4)) * Mathf.PI / 200f;
+            if (a.EndsWith("turn", StringComparison.Ordinal)) return N(a.Substring(0, a.Length - 4)) * 2f * Mathf.PI;
+            if (a.EndsWith("rad", StringComparison.Ordinal)) return N(a.Substring(0, a.Length - 3));
+            return Num("calc(" + a + ")");
+        }
         var args = new List<float>();
-        foreach (var a in CssParser.SplitTopLevel(inner, ','))
-            args.Add(Num("calc(" + a.Trim() + ")"));
+        var isTrig = fn is "sin" or "cos" or "tan";
+        for (var i = 0; i < raw.Count; i++)
+        {
+            var a = raw[i].Trim();
+            if (fn == "round" && i == 0 && a is "nearest" or "up" or "down" or "to-zero") { continue; }
+            args.Add(isTrig ? Angle(a) : Num("calc(" + a + ")"));
+        }
         if (args.Count == 0) return 0f;
         switch (fn)
         {
             case "min": { var m = args[0]; foreach (var a in args) m = Mathf.Min(m, a); return m; }
             case "max": { var m = args[0]; foreach (var a in args) m = Mathf.Max(m, a); return m; }
-            default: return args.Count >= 3 ? Mathf.Clamp(args[1], args[0], args[2]) : args[0];
+            case "clamp": return args.Count >= 3 ? Mathf.Clamp(args[1], args[0], args[2]) : args[0];
+            case "sin": return Mathf.Sin(args[0]);
+            case "cos": return Mathf.Cos(args[0]);
+            case "tan": return Mathf.Tan(args[0]);
+            case "asin": return Mathf.Asin(Mathf.Clamp(args[0], -1f, 1f)) * Mathf.Rad2Deg; // angles come back in degrees, as CSS returns <angle>
+            case "acos": return Mathf.Acos(Mathf.Clamp(args[0], -1f, 1f)) * Mathf.Rad2Deg;
+            case "atan": return Mathf.Atan(args[0]) * Mathf.Rad2Deg;
+            case "atan2": return args.Count >= 2 ? Mathf.Atan2(args[0], args[1]) * Mathf.Rad2Deg : 0f;
+            case "pow": return args.Count >= 2 ? Mathf.Pow(args[0], args[1]) : args[0];
+            case "sqrt": return Mathf.Sqrt(Mathf.Max(0f, args[0]));
+            case "hypot": { var s2 = 0f; foreach (var a in args) s2 += a * a; return Mathf.Sqrt(s2); }
+            case "log": return args.Count >= 2 ? Mathf.Log(args[0]) / Mathf.Log(args[1]) : Mathf.Log(args[0]);
+            case "exp": return Mathf.Exp(args[0]);
+            case "abs": return Mathf.Abs(args[0]);
+            case "sign": return Mathf.Sign(args[0]) * (args[0] == 0f ? 0f : 1f);
+            case "mod": return args.Count >= 2 && args[1] != 0f ? args[0] - args[1] * Mathf.Floor(args[0] / args[1]) : 0f;
+            case "rem": return args.Count >= 2 && args[1] != 0f ? args[0] % args[1] : 0f;
+            default: // round(<strategy>, value, interval)
+            {
+                var value = args[0]; var step = args.Count >= 2 && args[1] != 0f ? args[1] : 1f;
+                var strategy = raw.Count > args.Count ? raw[0].Trim().ToLowerInvariant() : "nearest";
+                var q = value / step;
+                var r = strategy switch { "up" => Mathf.Ceil(q), "down" => Mathf.Floor(q), "to-zero" => (float)Math.Truncate(q), _ => Mathf.Round(q) };
+                return r * step;
+            }
         }
     }
 

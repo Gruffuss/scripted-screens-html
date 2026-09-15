@@ -200,6 +200,7 @@ its own layout boxes and the pointer position (Batch A and D).
 | F3 text, lists, tables, layout, script | HtmlTest11: text, counters, tables, flex, grid rows; script rows need eyes | a ::before stacked above its text (inline runs between blocks now flow as one line); list-style-image read from the list; caption-side inherited; img/controls inline; width-less table cells sized to content; break-all wraps in the layout |
 | F4 rescued items | HtmlTest12: all rows; vector 7, 14, 15, 16 seen | ::first-letter only ran with an ::after; the border-image gradient came out flat (def now in scene space) |
 | F5 silent list | n/a | |
+| G after COVERAGE.md (2026-09-16) | HtmlTest13 on 586: backdrop, trig widths, column-rule, offset-path (dots and the clipped arrow), col widths, picture/source, ::after counters seen by capture; @starting-style seen in the log (the capture is taken at t=0 of the fade, so the card is still invisible there); :user-invalid, elementFromPoint, add-pill insert, dialog close and the held button need eyes | the modal dialog drew in document order (top layer now); counters never advanced inside a label; column-count on plain text did nothing; a clip-path stayed where the untransformed box was under a transform or offset-path; a dialog the page positions kept the default centring translate; the unmatched-data-key warning fired before the first scene |
 
 Captures now run the page script for a few frames before grabbing the page, so script-drawn
 content shows; animation and network fetches still need eyes.
@@ -215,8 +216,6 @@ firing for `$name` expression keys.
 
 - `@container` size queries are decided against the design size like `@media`; a real one
   needs the container's laid-out size and a re-cascade after layout.
-- `::after` content is generated before the element's children, so a `counter()` in it does
-  not include increments by descendants.
 - `::first-letter`: the rest of the paragraph wraps below the letter as one label, not
   around it (no inline flow around a float in the layout engine).
 - `ruby`: the annotation is small and raised after its base, in the sentence; a browser

@@ -22,8 +22,6 @@ put("build", "`column-width` (column count from a width) is arithmetic on top of
 put("build", "`white-space-collapse` and `text-wrap-mode` are the new longhands of `white-space`: map them. `hyphens: auto` needs a dictionary: out. `text-justify` variants: the text engine has one justification. `text-wrap-style: balance/pretty`: no control over the line breaker.", "group:CSS Text")
 put("build", "`initial-letter` is the drop cap with a line count: the `::first-letter` machinery exists, the size is lines times line-height. `baseline-shift` and `alignment-baseline` are `vertical-align` spellings. `text-box-*` (leading trim) needs font metrics the text engine does not expose.", "group:CSS Inline")
 put("out", "no caret (typing happens in ScriptedScreens' own control); `interactivity` and `interest-delay-*` are 2025 drafts.", "group:CSS Basic User Interface")
-put("build", "`column-rule` is a vertical line between the columns `column-count` makes: a left border on each column but the first. `column-span: all` breaks an element out of the columns: rebuild the columns around it. `column-fill: balance` is what exists; `auto` fills the first column first.", "group:CSS Multi-column Layout")
-put("build", "position an element along a path (`offset-path`, `offset-distance`, `offset-rotate`): sample the path at a distance; with an expression over `t` it animates on the client. The only way to animate along a curve, worth doing.", "group:Motion Path")
 put("build", "`text-emphasis-*` are small marks above each character: a second label of dots; low value. `text-decoration-inset` is new and rarely used.", "group:CSS Text Decoration")
 put("out", "SVG filter primitives (`<filter>`, feGaussianBlur, flood, lighting) are per-pixel; out with `filter: blur()`: the page is geometry, not pixels.", "group:Filter Effects")
 put("build", "`overflow-clip-margin` is a larger clip rect: small. Scroll markers and `scroll-axis-lock` are 2025 drafts (carousel dots).", "group:CSS Overflow")
@@ -46,7 +44,6 @@ put("build", "`transform-box: fill-box` changes the transform origin box for svg
 put("build", "`transition-behavior: allow-discrete` lets `display` transition; the tween system could hold `display` until the tween ends.", "group:CSS Transitions")
 
 # ---------------------------------------------------------------- at-rules
-put("build", "the style an element has when it first appears, so a transition can run from it (fade-in on insert). The tween system snapshots what the scene showed; a new element has no snapshot and snaps. Closes by cascading the block as the new element's first snapshot.", "at:@starting-style")
 put("out", "OpenType features and palettes: see fonts.", "at:@font-feature-values", "at:@font-palette-values")
 put("out", "XML namespaces in selectors; nobody writes them for HTML.", "at:@namespace")
 put("out", "print.", "at:@page")
@@ -54,19 +51,16 @@ put("out", "no document navigation.", "at:@view-transition")
 
 # ---------------------------------------------------------------- selectors
 put("out", "no text selection, so nothing to style.", "sel:::selection", "sel:::highlight", "sel:::spelling-error", "sel:::grammar-error", "sel:::target-text")
-put("build", "the dim layer behind a modal dialog: one full-page box under the dialog when `showModal()` opened it. Cheap, worth it.", "sel:::backdrop")
 put("build", "`::details-content` styles the body of a details element, which is an element already: match it.", "sel:::details-content")
 put("out", "parts of browser-native widgets. The select's arrow and the checkbox's mark are drawn here and could take colours from these rules later.", "sel:::file-selector-button", "sel:::picker", "sel:::picker-icon", "sel:::checkmark")
 put("out", "web components and shadow DOM: the renderer has one tree, no custom elements.", "sel:::part", "sel:::slotted", "sel::host", "sel::host-context", "sel::has-slotted", "sel::defined", "sel::state")
 put("out", "media state of ScriptedScreens' media element is not readable from the page.", "sel:::cue", "sel::playing", "sel::paused", "sel::muted", "sel::buffering", "sel::seeking", "sel::stalled", "sel::volume-locked", "sel::picture-in-picture")
 put("out", "no fullscreen, no autofill, no paged media, no time-based media cues, no view transitions.", "sel::fullscreen", "sel::autofill", "sel::first", "sel::left", "sel::right", "sel::past", "sel::future", "sel::active-view-transition", "sel::active-view-transition-type")
 put("build", "`popover` attribute support would make `:popover-open` the same as `:open`.", "sel::popover-open")
-put("build", "like `:invalid`/`:valid` but only after the user has interacted: a flag set on the node at its first change.", "sel::user-invalid", "sel::user-valid")
 put("build", "inside `querySelector` and `@scope` it is the root (done there); as a bare selector it is `:root`. One case.", "sel::scope")
 put("out", "view transitions.", "sel:::view-transition", "sel:::view-transition-group", "sel:::view-transition-image-pair", "sel:::view-transition-new", "sel:::view-transition-old")
 
 # ---------------------------------------------------------------- functions
-put("build", "trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it.", "fn:sin", "fn:cos", "fn:tan", "fn:asin", "fn:acos", "fn:atan", "fn:atan2", "fn:pow", "fn:sqrt", "fn:hypot", "fn:log", "fn:exp", "fn:abs", "fn:sign", "fn:mod")
 put("build", "safe-area insets: return 0.", "fn:env")
 put("build", "pick the light value, or by `color-scheme`.", "fn:light-dark")
 put("build", "colour spaces: the conversion maths into sRGB; `color-mix(in oklch)` then becomes exact instead of sRGB.", "fn:hwb", "fn:lab", "fn:lch", "fn:oklab", "fn:oklch")
@@ -81,9 +75,7 @@ put("out", "resolution and frequency units only appear in media queries this lay
 # ---------------------------------------------------------------- HTML
 put("out", "no second document, no plugins; a console page is one document.", "html:iframe", "html:embed", "html:object")
 put("build", "image maps: a click on an `img` inside a `map` must hit-test the `area` shapes and fire the area's id. The click plumbing exists, the shape test does not.", "html:area", "html:map")
-put("build", "column widths and styles by column: the parser keeps `col`; the row builder ignores it. Read `col` widths before sizing cells, apply `col` background per column.", "html:col", "html:colgroup")
 put("build", "suggestions for an input: the control is ScriptedScreens', with no suggestion UI; could be drawn by the page as a list under the field on focus.", "html:datalist")
-put("approximation", "the `img` inside renders; the `source` candidates are ignored, which is what a browser does when none matches, but a matching one is never chosen. Choose the first `source` whose `media` matches the design width and use its `srcset`.", "html:picture", "html:source")
 put("out", "subtitles on a video: the ScriptedScreens media element has no text track.", "html:track")
 put("build", "base URL for relative `href`/`src`; relative URLs are not resolved at all today.", "html:base")
 put("out", "bidirectional override; the text engine is left-to-right only.", "html:bdo")
@@ -94,12 +86,17 @@ put("out", "a page has no network of its own by decision: data comes from Lua, s
 put("out", "one script thread per page is the design; a worker would be a second engine per page.", "js:Worker", "js:postMessage")
 put("out", "no file system, no uploads. `FormData` over a form's fields could be built from the DOM if asked.", "js:Blob", "js:File", "js:FileReader", "js:FormData")
 put("build", "parse a string into a detached tree: the detached shim holds `innerHTML`; `querySelector` over a detached tree is the missing half.", "js:DOMParser", "js:XMLSerializer")
-put("build", "hit-test the layout rects the surface keeps for `getBoundingClientRect`.", "js:elementFromPoint")
 put("out", "replaced by `innerHTML` decades ago; ignored.", "js:write")
 put("out", "no use in a console page.", "js:compareDocumentPosition", "js:requestFullscreen", "js:setPointerCapture", "js:releasePointerCapture")
 
+put("build", "`offset-path` places the box at `offset-distance` along a `path()`, turned by `offset-rotate`. `offset` is their shorthand: split it. `offset-anchor` moves which point of the box sits on the path (the centre today); `offset-position` is the start for `ray()`, not read.", "group:Motion Path")
+put("build", "`column-rule` is a left border on every column but the first. `column-span: all` breaks an element out of the columns: rebuild the columns around it. `column-fill: balance` is what exists; `auto` fills the first column first.", "group:CSS Multi-column Layout")
+
 # ---------------------------------------------------------------- approximations (drawn, but not as a browser draws it)
 APPROX = [
+    ("`offset-path` is a static position on the path; `offset-distance` does not animate", "the tween system interpolates snapshots of box, opacity and transform, not a path distance", "a tween on the distance written as an expression that samples the flattened path"),
+    ("`offset-path` reads `path()` only; `ray()`, `circle()` and `url()` are ignored, arcs flatten to their chord", "one flattener for M L H V C S Q T Z", "the arc flattening the vector mod already has, exposed or copied"),
+    ("`column-rule` is `solid` or dashed/dotted only; `column-span` and `column-fill` are ignored", "the rule is a column's left border", "column-span needs the columns rebuilt around the spanning element"),
     ("Inline flow: text wraps beside a float, a drop cap or a list marker only as one shrinkable label; it does not flow around a shape or continue under the letter at the left margin",
      "the layout engine (UI Toolkit) has no inline formatting context: text lives in labels, labels are flex boxes",
      "a real line breaker: measure text, break into line boxes, place runs around floats. Large; would also give `shape-outside`, `::first-line` without the vector, `initial-letter`, mixed inline sizes on one line"),
@@ -107,14 +104,12 @@ APPROX = [
     ("`ruby`: the reading is small and raised after its base, not stacked above it", "stacking needs a two-line inline box", "same"),
     ("`::first-letter` drop cap: the rest of the paragraph is one label beside the letter, every line indented past it", "same", "same"),
     ("`@container` size queries are decided against the design width, not the container's", "a real container query needs the container's laid-out size and a re-cascade after layout, which today runs once before layout", "cascade twice: layout, re-cascade the elements whose rules have container conditions, layout again"),
-    ("`::after` content sees counters before the element's children incremented them", "generated content is created when the element is built, before its children", "fill the `::after` text when it is built, after the children"),
     ("`border-image` with `px`/number slices reads them as thirds", "the image's pixel size is unknown to the emitter (the vector mod downloads it)", "vector: expose an image's natural size, or interpret `uv` slices in pixels"),
     ("`text-decoration` colour, thickness, offset and style are drawn only under single-line labels", "for a wrapped label the emitter does not know where the text engine broke the lines", "the first-line machinery (vector item 15) generalised to every line, or per-line underlines from the vector side"),
     ("`rotateX/Y` are the flat foreshortening, `perspective` ignored", "no depth in the vector layer", "a 3D matrix group with a depth-sorted mesh: vector work, not asked for"),
     ("`animation-timeline` covers opacity and 2D transforms; `animation-range` ignored", "the piecewise expression builder handles those properties", "extend it to width/height/background-color (colour through a gradient ramp) and read `animation-range` as an offset"),
     ("`word-break: break-all` estimates its wrapped height from an average glyph width", "the layout engine breaks only at spaces; the vector mod breaks at the zero-width spaces the emitter inserts, but the box height must be known first", "measure the text with the layout font at the box width, per character"),
     ("`:hover` uses the page rect, not a raycast; something standing between the player and the console does not block it", "the game's input module delivers presses only, so the cursor is polled", "a raycast from the camera through the cursor against the console before accepting the hover"),
-    ("`:active` and `:hover` are lost when ScriptedScreens rebuilds the surface on a click, until the next pointer event", "the surface component is recreated", "keep pointer state in the page registry keyed by page id, like remembered data"),
     ("Controls: text capped at about two thirds of the field height; the select's arrow, the checkbox mark and the range thumb are ScriptedScreens' look, not the page's", "the controls are ScriptedScreens elements", "page-drawn select and range when a page styles them; text input stays native (it needs the keyboard)"),
     ("`@import` and `<link>` sheets are fetched once at load, `<script src>` runs after the inline script rather than before it", "fetches are asynchronous; a browser blocks parsing on them", "hold the page's first script until its external scripts arrive (the module path does this); the same for sheets"),
     ("`color-mix()` mixes in sRGB whatever colour space is named", "no oklab/oklch conversion yet", "the colour-space maths (see functions)"),

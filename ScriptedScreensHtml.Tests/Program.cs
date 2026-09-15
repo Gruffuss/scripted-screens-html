@@ -194,6 +194,27 @@ Console.WriteLine("Keyframes, child combinator, !important");
     Check(CssParser.ParseSelector("p::first-letter", null)!.Matches(fl) && !CssParser.ParseSelector("p::first-line", null)!.Matches(fl), "::first-letter and ::first-line are distinct pseudo-elements");
     Check(CssParser.ParseSelector("div::-webkit-scrollbar", null)!.Matches(sb), "::-webkit-scrollbar parses and matches");
     Check(warnings.Count == 0, $"no warnings for the F4 sheet (got {string.Join("; ", warnings)})");
+    TestBatchG();
+}
+
+void TestBatchG()
+{
+    var warnings = new List<string>();
+    CssParser.StartingRules.Clear();
+    var rules = CssParser.ParseStylesheet(
+        "@starting-style { .card { opacity: 0 } } .pill { opacity: 1; @starting-style { transform: scale(.5) } } " +
+        "input:user-invalid { a: 1 } dialog::backdrop { background: #0008 } .x { width: calc(sin(30deg) * 100px) }",
+        m => warnings.Add(m), new Dictionary<string, CssKeyframes>());
+    Check(rules.Count == 4, $"starting-style blocks are not ordinary rules ({rules.Count})");
+    Check(CssParser.StartingRules.Count == 2 && CssParser.StartingRules[1].Declarations[0].Name == "transform", "@starting-style: top-level and nested blocks collected");
+    var inp = HtmlParser.Parse("<input required>").Children[0];
+    var ui = CssParser.ParseSelector("input:user-invalid", null)!;
+    Check(!ui.Matches(inp), ":user-invalid: untouched field never matches");
+    inp.Attributes["data-touched"] = "";
+    Check(ui.Matches(inp), ":user-invalid: touched empty required field matches");
+    var bd = new HtmlNode { Tag = "span", Parent = HtmlParser.Parse("<dialog></dialog>").Children[0] }; bd.Attributes["data-pseudo"] = "backdrop";
+    Check(CssParser.ParseSelector("dialog::backdrop", null)!.Matches(bd), "::backdrop is a pseudo-element");
+    Check(warnings.Count == 0, $"no warnings for the G sheet (got {string.Join("; ", warnings)})");
 }
 
 if (args.Length > 0 && args[0] == "--probe2") { Probe2.Run(); return 0; }

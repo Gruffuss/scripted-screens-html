@@ -335,6 +335,12 @@ internal static class CssParser
                         }
                     }
                 }
+                else if (header.StartsWith("starting-style", StringComparison.OrdinalIgnoreCase))
+                {
+                    // @starting-style { rules }: what an element looks like the moment it appears; Tweens starts from it
+                    var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
+                    StartingRules.AddRange(ParseStylesheet(inner, warn, keyframes));
+                }
                 else if (header.StartsWith("counter-style", StringComparison.OrdinalIgnoreCase))
                 {
                     // @counter-style name { system; symbols; suffix; prefix }: used by list-style-type and counter()
@@ -471,7 +477,9 @@ internal static class CssParser
                     var paren = header.IndexOf('(');
                     if (paren < 0 || !MediaMatches(header.Substring(paren))) continue;
                 }
-                if (kind is "media" or "supports" or "layer" or "container")
+                if (kind == "starting-style")
+                    ParseRule("&", nbody, selectors, StartingRules, ref order, warn, keyframes);
+                else if (kind is "media" or "supports" or "layer" or "container")
                     ParseRule("&", nbody, selectors, rules, ref order, warn, keyframes);
                 else
                     warn?.Invoke($"css: nested @{header.Split(' ')[0]} skipped");
@@ -494,6 +502,9 @@ internal static class CssParser
 
     /// <summary>@import urls collected while parsing; the surface fetches and inlines them.</summary>
     public static readonly List<string> Imports = new();
+
+    /// <summary>@starting-style rules collected while parsing: the "from" state of an element that has just appeared.</summary>
+    public static readonly List<CssRule> StartingRules = new();
 
     /// <summary>@property initial values, what an undefined var() of that name resolves to.</summary>
     public static readonly Dictionary<string, string> PropertyInitials = new(StringComparer.Ordinal);
@@ -910,7 +921,7 @@ internal static class CssParser
                 // marker span), ::placeholder (the field's placeholder, colour only); other
                 // pseudo-elements skip the rule.
                 if (name is "-webkit-input-placeholder" or "-moz-placeholder" or "-ms-input-placeholder") name = "placeholder";
-                if (name is not ("before" or "after" or "marker" or "placeholder" or "first-letter" or "first-line" or "-webkit-scrollbar" or "-webkit-scrollbar-thumb" or "-webkit-scrollbar-track")) return false;
+                if (name is not ("before" or "after" or "marker" or "placeholder" or "first-letter" or "first-line" or "backdrop" or "-webkit-scrollbar" or "-webkit-scrollbar-thumb" or "-webkit-scrollbar-track")) return false;
                 compound.PseudoElement = name;
                 continue;
             }
@@ -1056,6 +1067,8 @@ internal static class CssParser
                 case "indeterminate": compound.Pseudos.Add(n => n.Attr("indeterminate") != null || (n.Tag == "progress" && n.Attr("value") == null)); break;
                 case "valid": compound.Pseudos.Add(n => IsField(n) && Valid(n)); break;
                 case "invalid": compound.Pseudos.Add(n => IsField(n) && !Valid(n)); break;
+                case "user-invalid": compound.Pseudos.Add(n => IsField(n) && n.Attr("data-touched") != null && !Valid(n)); break;
+                case "user-valid": compound.Pseudos.Add(n => IsField(n) && n.Attr("data-touched") != null && Valid(n)); break;
                 case "in-range": compound.Pseudos.Add(n => InRange(n) == true); break;
                 case "out-of-range": compound.Pseudos.Add(n => InRange(n) == false); break;
                 case "open": compound.Pseudos.Add(n => n.Attr("open") != null); break;

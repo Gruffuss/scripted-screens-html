@@ -1,4 +1,4 @@
-# What works, what does not, and why (2026-09-15)
+# What works, what does not, and why (2026-09-16)
 
 One file. The counts and the item names are read from the code by `ScriptedScreensHtml.Tests/coverage.py` (run it after a change), against MDN's CSS data, the HTML living standard's element list and a list of the DOM and Web APIs a page script commonly uses; the reasons come from `ScriptedScreensHtml.Tests/reasons.py`, written by hand. "Handled" means the code names it; whether it behaves as a browser is what the console pages and examples check (`SUPPORT.md`).
 
@@ -9,13 +9,13 @@ Kinds: **build** = not done yet, nothing in the way. **approximation** = drawn, 
 
 | Area | Handled | Of | Share |
 |---|---|---|---|
-| CSS properties (standard) | 336 | 491 | 68% |
-| CSS at-rules | 12 | 18 | 66% |
-| CSS pseudo-classes and pseudo-elements | 53 | 98 | 54% |
-| CSS functions | 59 | 95 | 62% |
+| CSS properties (standard) | 343 | 491 | 69% |
+| CSS at-rules | 13 | 18 | 72% |
+| CSS pseudo-classes and pseudo-elements | 56 | 98 | 57% |
+| CSS functions | 78 | 95 | 82% |
 | CSS units | 24 | 32 | 75% |
-| HTML elements | 93 | 112 | 83% |
-| JavaScript: document | 33 | 35 | 94% |
+| HTML elements | 97 | 112 | 86% |
+| JavaScript: document | 34 | 35 | 97% |
 | JavaScript: element | 96 | 100 | 96% |
 | JavaScript: window | 65 | 80 | 81% |
 | JavaScript: canvas | 60 | 60 | 100% |
@@ -33,14 +33,14 @@ Kinds: **build** = not done yet, nothing in the way. **approximation** = drawn, 
 | CSS Text | 14 of 23 | `hyphenate-character`, `hyphenate-limit-chars`, `line-break`, `text-autospace`, `text-fit`, `text-justify`, `text-wrap-mode`, `text-wrap-style`, `white-space-collapse` | build | `white-space-collapse` and `text-wrap-mode` are the new longhands of `white-space`: map them. `hyphens: auto` needs a dictionary: out. `text-justify` variants: the text engine has one justification. `text-wrap-style: balance/pretty`: no control over the line breaker. |
 | CSS Basic User Interface | 12 of 19 | `caret`, `caret-animation`, `caret-shape`, `interactivity`, `interest-delay`, `interest-delay-end`, `interest-delay-start` | out | no caret (typing happens in ScriptedScreens' own control); `interactivity` and `interest-delay-*` are 2025 drafts. |
 | CSS Inline | 3 of 10 | `alignment-baseline`, `baseline-shift`, `baseline-source`, `initial-letter`, `text-box`, `text-box-edge`, `text-box-trim` | build | `initial-letter` is the drop cap with a line count: the `::first-letter` machinery exists, the size is lines times line-height. `baseline-shift` and `alignment-baseline` are `vertical-align` spellings. `text-box-*` (leading trim) needs font metrics the text engine does not expose. |
-| CSS Multi-column Layout | 2 of 8 | `column-fill`, `column-rule`, `column-rule-color`, `column-rule-style`, `column-rule-width`, `column-span` | build | `column-rule` is a vertical line between the columns `column-count` makes: a left border on each column but the first. `column-span: all` breaks an element out of the columns: rebuild the columns around it. `column-fill: balance` is what exists; `auto` fills the first column first. |
-| Motion Path | 0 of 6 | `offset`, `offset-anchor`, `offset-distance`, `offset-path`, `offset-position`, `offset-rotate` | build | position an element along a path (`offset-path`, `offset-distance`, `offset-rotate`): sample the path at a distance; with an expression over `t` it animates on the client. The only way to animate along a curve, worth doing. |
 | CSS Text Decoration | 9 of 14 | `text-decoration-inset`, `text-emphasis`, `text-emphasis-color`, `text-emphasis-position`, `text-emphasis-style` | build | `text-emphasis-*` are small marks above each character: a second label of dots; low value. `text-decoration-inset` is new and rarely used. |
 | CSS Overflow | 9 of 13 | `overflow-clip-margin`, `scroll-axis-lock`, `scroll-marker-group`, `scroll-target-group` | build | `overflow-clip-margin` is a larger clip rect: small. Scroll markers and `scroll-axis-lock` are 2025 drafts (carousel dots). |
 | Filter Effects | 2 of 6 | `color-interpolation-filters`, `flood-color`, `flood-opacity`, `lighting-color` | out | SVG filter primitives (`<filter>`, feGaussianBlur, flood, lighting) are per-pixel; out with `filter: blur()`: the page is geometry, not pixels. |
 | CSS Shapes | 0 of 3 | `shape-image-threshold`, `shape-margin`, `shape-outside` | out | text flowing around a float's outline needs an inline formatting context that breaks lines around shapes. The layout engine has none: text lives in labels, labels are boxes. This is the structural limit behind every inline approximation in this file. |
 | CSS View Transitions | 0 of 3 | `view-transition-class`, `view-transition-name`, `view-transition-scope` | out | no document navigation, so no view transitions. |
+| Motion Path | 3 of 6 | `offset`, `offset-anchor`, `offset-position` | build | `offset-path` places the box at `offset-distance` along a `path()`, turned by `offset-rotate`. `offset` is their shorthand: split it. `offset-anchor` moves which point of the box sits on the path (the centre today); `offset-position` is the start for `ray()`, not read. |
 | CSS Display | 3 of 5 | `reading-flow`, `reading-order` | out | `reading-flow`/`reading-order` set keyboard focus order; a page has no keyboard. |
+| CSS Multi-column Layout | 6 of 8 | `column-fill`, `column-span` | build | `column-rule` is a left border on every column but the first. `column-span: all` breaks an element out of the columns: rebuild the columns around it. `column-fill: balance` is what exists; `auto` fills the first column first. |
 | CSS Overscroll Behavior | 3 of 5 | `overscroll-behavior-block`, `overscroll-behavior-inline` | fine | logical spellings of `overscroll-behavior`, which is a no-op here (no overscroll physics). |
 | MathML | 0 of 2 | `math-depth`, `math-style` | out | no user for MathML. |
 | CSS Color | 5 of 6 | `dynamic-range-limit` | out | `dynamic-range-limit` is an HDR display hint. |
@@ -60,7 +60,7 @@ Complete groups: CSS Anchor Positioning, CSS Box Alignment, CSS Box Model, CSS C
 
 ## CSS at-rules
 
-Handled: `@-webkit-keyframes`, `@charset`, `@container`, `@counter-style`, `@font-face`, `@import`, `@keyframes`, `@layer`, `@media`, `@property`, `@scope`, `@supports`
+Handled: `@-webkit-keyframes`, `@charset`, `@container`, `@counter-style`, `@font-face`, `@import`, `@keyframes`, `@layer`, `@media`, `@property`, `@scope`, `@starting-style`, `@supports`
 
 | Not handled | Kind | Why |
 |---|---|---|
@@ -68,18 +68,16 @@ Handled: `@-webkit-keyframes`, `@charset`, `@container`, `@counter-style`, `@fon
 | `@font-palette-values` | out | OpenType features and palettes: see fonts. |
 | `@namespace` | out | XML namespaces in selectors; nobody writes them for HTML. |
 | `@page` | out | print. |
-| `@starting-style` | build | the style an element has when it first appears, so a transition can run from it (fade-in on insert). The tween system snapshots what the scene showed; a new element has no snapshot and snaps. Closes by cascading the block as the new element's first snapshot. |
 | `@view-transition` | out | no document navigation. |
 
 ## CSS selectors
 
-Handled pseudo-classes: `:active`, `:any-link`, `:checked`, `:default`, `:dir`, `:disabled`, `:empty`, `:enabled`, `:first-child`, `:first-of-type`, `:focus`, `:focus-visible`, `:focus-within`, `:has`, `:hover`, `:in-range`, `:indeterminate`, `:invalid`, `:is`, `:lang`, `:last-child`, `:last-of-type`, `:link`, `:matches`, `:modal`, `:not`, `:nth-child`, `:nth-last-child`, `:nth-last-of-type`, `:nth-of-type`, `:only-child`, `:only-of-type`, `:open`, `:optional`, `:out-of-range`, `:placeholder-shown`, `:read-only`, `:read-write`, `:required`, `:root`, `:target`, `:valid`, `:visited`, `:where`
+Handled pseudo-classes: `:active`, `:any-link`, `:checked`, `:default`, `:dir`, `:disabled`, `:empty`, `:enabled`, `:first-child`, `:first-of-type`, `:focus`, `:focus-visible`, `:focus-within`, `:has`, `:hover`, `:in-range`, `:indeterminate`, `:invalid`, `:is`, `:lang`, `:last-child`, `:last-of-type`, `:link`, `:matches`, `:modal`, `:not`, `:nth-child`, `:nth-last-child`, `:nth-last-of-type`, `:nth-of-type`, `:only-child`, `:only-of-type`, `:open`, `:optional`, `:out-of-range`, `:placeholder-shown`, `:read-only`, `:read-write`, `:required`, `:root`, `:target`, `:user-invalid`, `:user-valid`, `:valid`, `:visited`, `:where`
 
-Handled pseudo-elements: `::-webkit-scrollbar`, `::-webkit-scrollbar-thumb`, `::-webkit-scrollbar-track`, `::after`, `::before`, `::first-letter`, `::first-line`, `::marker`, `::placeholder`
+Handled pseudo-elements: `::-webkit-scrollbar`, `::-webkit-scrollbar-thumb`, `::-webkit-scrollbar-track`, `::after`, `::backdrop`, `::before`, `::first-letter`, `::first-line`, `::marker`, `::placeholder`
 
 | Not handled | Kind | Why |
 |---|---|---|
-| `::backdrop` | build | the dim layer behind a modal dialog: one full-page box under the dialog when `showModal()` opened it. Cheap, worth it. |
 | `::checkmark` | out | parts of browser-native widgets. The select's arrow and the checkbox's mark are drawn here and could take colours from these rules later. |
 | `::cue` | out | media state of ScriptedScreens' media element is not readable from the page. |
 | `::details-content` | build | `::details-content` styles the body of a details element, which is an element already: match it. |
@@ -121,50 +119,29 @@ Handled pseudo-elements: `::-webkit-scrollbar`, `::-webkit-scrollbar-thumb`, `::
 | `:seeking` | out | media state of ScriptedScreens' media element is not readable from the page. |
 | `:stalled` | out | media state of ScriptedScreens' media element is not readable from the page. |
 | `:state` | out | web components and shadow DOM: the renderer has one tree, no custom elements. |
-| `:user-invalid` | build | like `:invalid`/`:valid` but only after the user has interacted: a flag set on the node at its first change. |
-| `:user-valid` | build | like `:invalid`/`:valid` but only after the user has interacted: a flag set on the node at its first change. |
 | `:volume-locked` | out | media state of ScriptedScreens' media element is not readable from the page. |
 
 ## CSS functions
 
-Handled: `attr`, `blur`, `brightness`, `calc`, `circle`, `clamp`, `color`, `color-mix`, `conic-gradient`, `contrast`, `counter`, `counters`, `cubic-bezier`, `drop-shadow`, `ellipse`, `fit-content`, `grayscale`, `hsl`, `hue-rotate`, `image`, `inset`, `invert`, `layer`, `linear`, `linear-gradient`, `matrix`, `max`, `min`, `minmax`, `opacity`, `path`, `perspective`, `polygon`, `radial-gradient`, `rect`, `rem`, `repeating-conic-gradient`, `repeating-linear-gradient`, `repeating-radial-gradient`, `rgb`, `rotate`, `rotateX`, `rotateY`, `rotateZ`, `round`, `saturate`, `scale`, `scaleX`, `scaleY`, `sepia`, `skew`, `skewX`, `skewY`, `steps`, `symbols`, `translate`, `translateX`, `translateY`, `var`
+Handled: `abs`, `acos`, `asin`, `atan`, `atan2`, `attr`, `blur`, `brightness`, `calc`, `circle`, `clamp`, `color`, `color-mix`, `conic-gradient`, `contrast`, `cos`, `counter`, `counters`, `cubic-bezier`, `drop-shadow`, `ellipse`, `exp`, `fit-content`, `grayscale`, `hsl`, `hue-rotate`, `hypot`, `image`, `inset`, `invert`, `layer`, `linear`, `linear-gradient`, `log`, `matrix`, `matrix3d`, `max`, `min`, `minmax`, `mod`, `opacity`, `path`, `perspective`, `polygon`, `pow`, `radial-gradient`, `rect`, `rem`, `repeating-conic-gradient`, `repeating-linear-gradient`, `repeating-radial-gradient`, `rgb`, `rotate`, `rotate3d`, `rotateX`, `rotateY`, `rotateZ`, `round`, `saturate`, `scale`, `scale3d`, `scaleX`, `scaleY`, `sepia`, `sign`, `sin`, `skew`, `skewX`, `skewY`, `sqrt`, `steps`, `symbols`, `tan`, `translate`, `translate3d`, `translateX`, `translateY`, `var`
 
 | Not handled | Kind | Why |
 |---|---|---|
-| `abs()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
-| `acos()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
 | `alpha()` | build | `image-set` picks a URL by resolution: take the first. `xywh()` is a `clip-path` rect form. `ray()` belongs to motion paths. `alpha` is the relative-colour syntax (`rgb(from ...)`). |
-| `asin()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
-| `atan()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
-| `atan2()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
-| `cos()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
 | `cross-fade()` | out | `paint()` is the Houdini paint API; `cross-fade()` blends two images per pixel; `palette-mix()` is a font palette; `param()` is a draft. |
 | `env()` | build | safe-area insets: return 0. |
-| `exp()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
 | `hwb()` | build | colour spaces: the conversion maths into sRGB; `color-mix(in oklch)` then becomes exact instead of sRGB. |
-| `hypot()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
 | `image-set()` | build | `image-set` picks a URL by resolution: take the first. `xywh()` is a `clip-path` rect form. `ray()` belongs to motion paths. `alpha` is the relative-colour syntax (`rgb(from ...)`). |
 | `lab()` | build | colour spaces: the conversion maths into sRGB; `color-mix(in oklch)` then becomes exact instead of sRGB. |
 | `lch()` | build | colour spaces: the conversion maths into sRGB; `color-mix(in oklch)` then becomes exact instead of sRGB. |
 | `light-dark()` | build | pick the light value, or by `color-scheme`. |
-| `log()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
-| `matrix3d()` | approximation | 3D spellings take their flat projection: `rotateX/Y` as foreshortening, Z ignored. A true perspective projection needs depth the vector layer does not have. |
-| `mod()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
 | `oklab()` | build | colour spaces: the conversion maths into sRGB; `color-mix(in oklch)` then becomes exact instead of sRGB. |
 | `oklch()` | build | colour spaces: the conversion maths into sRGB; `color-mix(in oklch)` then becomes exact instead of sRGB. |
 | `paint()` | out | `paint()` is the Houdini paint API; `cross-fade()` blends two images per pixel; `palette-mix()` is a font palette; `param()` is a draft. |
 | `palette-mix()` | out | `paint()` is the Houdini paint API; `cross-fade()` blends two images per pixel; `palette-mix()` is a font palette; `param()` is a draft. |
 | `param()` | out | `paint()` is the Houdini paint API; `cross-fade()` blends two images per pixel; `palette-mix()` is a font palette; `param()` is a draft. |
-| `pow()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
 | `ray()` | build | `image-set` picks a URL by resolution: take the first. `xywh()` is a `clip-path` rect form. `ray()` belongs to motion paths. `alpha` is the relative-colour syntax (`rgb(from ...)`). |
-| `rotate3d()` | approximation | 3D spellings take their flat projection: `rotateX/Y` as foreshortening, Z ignored. A true perspective projection needs depth the vector layer does not have. |
-| `scale3d()` | approximation | 3D spellings take their flat projection: `rotateX/Y` as foreshortening, Z ignored. A true perspective projection needs depth the vector layer does not have. |
 | `scaleZ()` | approximation | 3D spellings take their flat projection: `rotateX/Y` as foreshortening, Z ignored. A true perspective projection needs depth the vector layer does not have. |
-| `sign()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
-| `sin()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
-| `sqrt()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
-| `tan()` | build | trigonometric and exponential functions inside `calc()`: the evaluator has min/max/clamp; extend it. |
-| `translate3d()` | approximation | 3D spellings take their flat projection: `rotateX/Y` as foreshortening, Z ignored. A true perspective projection needs depth the vector layer does not have. |
 | `translateZ()` | approximation | 3D spellings take their flat projection: `rotateX/Y` as foreshortening, Z ignored. A true perspective projection needs depth the vector layer does not have. |
 | `xywh()` | build | `image-set` picks a URL by resolution: take the first. `xywh()` is a `clip-path` rect form. `ray()` belongs to motion paths. `alpha` is the relative-colour syntax (`rgb(from ...)`). |
 
@@ -185,15 +162,13 @@ Handled: `%`, `ch`, `cm`, `deg`, `em`, `ex`, `fr`, `grad`, `in`, `mm`, `ms`, `pc
 
 ## HTML elements
 
-Handled: `a`, `abbr`, `address`, `article`, `aside`, `audio`, `b`, `bdi`, `blockquote`, `body`, `br`, `button`, `canvas`, `caption`, `cite`, `code`, `data`, `dd`, `del`, `details`, `dfn`, `dialog`, `div`, `dt`, `em`, `fieldset`, `figcaption`, `figure`, `footer`, `form`, `h1`, `h2`, `h3`, `h4`, `h5`, `h6`, `head`, `header`, `hr`, `html`, `i`, `img`, `input`, `ins`, `kbd`, `label`, `legend`, `li`, `link`, `main`, `mark`, `meta`, `meter`, `nav`, `noscript`, `ol`, `optgroup`, `option`, `p`, `pre`, `progress`, `q`, `rp`, `rt`, `ruby`, `s`, `samp`, `script`, `section`, `select`, `small`, `span`, `strong`, `style`, `sub`, `summary`, `sup`, `table`, `tbody`, `td`, `template`, `textarea`, `tfoot`, `th`, `thead`, `time`, `title`, `tr`, `u`, `ul`, `var`, `video`, `wbr`
+Handled: `a`, `abbr`, `address`, `article`, `aside`, `audio`, `b`, `bdi`, `blockquote`, `body`, `br`, `button`, `canvas`, `caption`, `cite`, `code`, `col`, `colgroup`, `data`, `dd`, `del`, `details`, `dfn`, `dialog`, `div`, `dt`, `em`, `fieldset`, `figcaption`, `figure`, `footer`, `form`, `h1`, `h2`, `h3`, `h4`, `h5`, `h6`, `head`, `header`, `hr`, `html`, `i`, `img`, `input`, `ins`, `kbd`, `label`, `legend`, `li`, `link`, `main`, `mark`, `meta`, `meter`, `nav`, `noscript`, `ol`, `optgroup`, `option`, `p`, `picture`, `pre`, `progress`, `q`, `rp`, `rt`, `ruby`, `s`, `samp`, `script`, `section`, `select`, `small`, `source`, `span`, `strong`, `style`, `sub`, `summary`, `sup`, `table`, `tbody`, `td`, `template`, `textarea`, `tfoot`, `th`, `thead`, `time`, `title`, `tr`, `u`, `ul`, `var`, `video`, `wbr`
 
 | Not handled | Kind | Why |
 |---|---|---|
 | `<area>` | build | image maps: a click on an `img` inside a `map` must hit-test the `area` shapes and fire the area's id. The click plumbing exists, the shape test does not. |
 | `<base>` | build | base URL for relative `href`/`src`; relative URLs are not resolved at all today. |
 | `<bdo>` | out | bidirectional override; the text engine is left-to-right only. |
-| `<col>` | build | column widths and styles by column: the parser keeps `col`; the row builder ignores it. Read `col` widths before sizing cells, apply `col` background per column. |
-| `<colgroup>` | build | column widths and styles by column: the parser keeps `col`; the row builder ignores it. Read `col` widths before sizing cells, apply `col` background per column. |
 | `<datalist>` | build | suggestions for an input: the control is ScriptedScreens', with no suggestion UI; could be drawn by the page as a list under the field on focus. |
 | `<dl>` | fine | renders as a plain block, as a browser's default; nothing names it in the code, which is why the tool counts it. |
 | `<embed>` | out | no second document, no plugins; a console page is one document. |
@@ -203,19 +178,16 @@ Handled: `a`, `abbr`, `address`, `article`, `aside`, `audio`, `b`, `bdi`, `block
 | `<menu>` | fine | renders as a plain block, as a browser's default; nothing names it in the code, which is why the tool counts it. |
 | `<object>` | out | no second document, no plugins; a console page is one document. |
 | `<output>` | fine | renders as a plain block, as a browser's default; nothing names it in the code, which is why the tool counts it. |
-| `<picture>` | approximation | the `img` inside renders; the `source` candidates are ignored, which is what a browser does when none matches, but a matching one is never chosen. Choose the first `source` whose `media` matches the design width and use its `srcset`. |
 | `<search>` | fine | renders as a plain block, as a browser's default; nothing names it in the code, which is why the tool counts it. |
 | `<slot>` | fine | renders as a plain block, as a browser's default; nothing names it in the code, which is why the tool counts it. |
-| `<source>` | approximation | the `img` inside renders; the `source` candidates are ignored, which is what a browser does when none matches, but a matching one is never chosen. Choose the first `source` whose `media` matches the design width and use its `srcset`. |
 | `<track>` | out | subtitles on a video: the ScriptedScreens media element has no text track. |
 
 ## JavaScript: DOM and Web APIs
 
-Handled: document 33 of 35, element 96 of 100, window 65 of 80, canvas 60 of 60.
+Handled: document 34 of 35, element 96 of 100, window 65 of 80, canvas 60 of 60.
 
 | Object | Not handled | Kind | Why |
 |---|---|---|---|
-| document | `elementFromPoint` | build | hit-test the layout rects the surface keeps for `getBoundingClientRect`. |
 | document | `write` | out | replaced by `innerHTML` decades ago; ignored. |
 | element | `compareDocumentPosition` | out | no use in a console page. |
 | element | `requestFullscreen` | out | no use in a console page. |
@@ -241,19 +213,20 @@ Handled: document 33 of 35, element 96 of 100, window 65 of 80, canvas 60 of 60.
 
 | What | Why | What closes it |
 |---|---|---|
+| `offset-path` is a static position on the path; `offset-distance` does not animate | the tween system interpolates snapshots of box, opacity and transform, not a path distance | a tween on the distance written as an expression that samples the flattened path |
+| `offset-path` reads `path()` only; `ray()`, `circle()` and `url()` are ignored, arcs flatten to their chord | one flattener for M L H V C S Q T Z | the arc flattening the vector mod already has, exposed or copied |
+| `column-rule` is `solid` or dashed/dotted only; `column-span` and `column-fill` are ignored | the rule is a column's left border | column-span needs the columns rebuilt around the spanning element |
 | Inline flow: text wraps beside a float, a drop cap or a list marker only as one shrinkable label; it does not flow around a shape or continue under the letter at the left margin | the layout engine (UI Toolkit) has no inline formatting context: text lives in labels, labels are flex boxes | a real line breaker: measure text, break into line boxes, place runs around floats. Large; would also give `shape-outside`, `::first-line` without the vector, `initial-letter`, mixed inline sizes on one line |
 | An inline-block beside text (a small LED span) sits at the line bottom, not on the baseline; `vertical-align` on it is ignored | same: a row of boxes aligned flex-end | same, or a per-item top margin from the font metrics as a stopgap |
 | `ruby`: the reading is small and raised after its base, not stacked above it | stacking needs a two-line inline box | same |
 | `::first-letter` drop cap: the rest of the paragraph is one label beside the letter, every line indented past it | same | same |
 | `@container` size queries are decided against the design width, not the container's | a real container query needs the container's laid-out size and a re-cascade after layout, which today runs once before layout | cascade twice: layout, re-cascade the elements whose rules have container conditions, layout again |
-| `::after` content sees counters before the element's children incremented them | generated content is created when the element is built, before its children | fill the `::after` text when it is built, after the children |
 | `border-image` with `px`/number slices reads them as thirds | the image's pixel size is unknown to the emitter (the vector mod downloads it) | vector: expose an image's natural size, or interpret `uv` slices in pixels |
 | `text-decoration` colour, thickness, offset and style are drawn only under single-line labels | for a wrapped label the emitter does not know where the text engine broke the lines | the first-line machinery (vector item 15) generalised to every line, or per-line underlines from the vector side |
 | `rotateX/Y` are the flat foreshortening, `perspective` ignored | no depth in the vector layer | a 3D matrix group with a depth-sorted mesh: vector work, not asked for |
 | `animation-timeline` covers opacity and 2D transforms; `animation-range` ignored | the piecewise expression builder handles those properties | extend it to width/height/background-color (colour through a gradient ramp) and read `animation-range` as an offset |
 | `word-break: break-all` estimates its wrapped height from an average glyph width | the layout engine breaks only at spaces; the vector mod breaks at the zero-width spaces the emitter inserts, but the box height must be known first | measure the text with the layout font at the box width, per character |
 | `:hover` uses the page rect, not a raycast; something standing between the player and the console does not block it | the game's input module delivers presses only, so the cursor is polled | a raycast from the camera through the cursor against the console before accepting the hover |
-| `:active` and `:hover` are lost when ScriptedScreens rebuilds the surface on a click, until the next pointer event | the surface component is recreated | keep pointer state in the page registry keyed by page id, like remembered data |
 | Controls: text capped at about two thirds of the field height; the select's arrow, the checkbox mark and the range thumb are ScriptedScreens' look, not the page's | the controls are ScriptedScreens elements | page-drawn select and range when a page styles them; text input stays native (it needs the keyboard) |
 | `@import` and `<link>` sheets are fetched once at load, `<script src>` runs after the inline script rather than before it | fetches are asynchronous; a browser blocks parsing on them | hold the page's first script until its external scripts arrive (the module path does this); the same for sheets |
 | `color-mix()` mixes in sRGB whatever colour space is named | no oklab/oklch conversion yet | the colour-space maths (see functions) |
