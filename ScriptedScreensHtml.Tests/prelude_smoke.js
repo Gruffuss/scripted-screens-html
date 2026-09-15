@@ -77,5 +77,4 @@ localStorage.setItem('k', '1'); if (localStorage.getItem('k') !== '1') throw new
 document.getElementsByClassName('x').length === 1 || (() => { throw new Error('byClass'); })();
 if (document.getElementsByName('q').length !== 0) throw new Error('byName');
 new Audio('u.ogg').play(); new Image().src = 'i.png';
-process.stdout.write('prelude smoke ok; ' + calls.length + ' binding calls
-');
+process.stdout.write('prelude smoke ok; ' + calls.length + ' binding calls' + String.fromCharCode(10));
