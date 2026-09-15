@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
 using UnityEngine;
+using UnityEngine.Networking;
 using UnityEngine.UI;
 using UnityEngine.UIElements;
 using SS = ScriptedScreens.ScriptableUi.ScriptedScreensScriptableUiSystem;
@@ -134,6 +135,17 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             a.Update(Time.time);
             if (a.Wrote) { a.Wrote = false; _dirty = true; }
+            if (a.Finished && !a.Restored)
+            {
+                // animation-fill-mode: without forwards (the CSS default), the element
+                // returns to its own style once the last iteration ends.
+                a.Restored = true;
+                if (!a.Spec.FillForwards && _built != null && _built.NodeOf.TryGetValue(a.Element, out var an))
+                {
+                    _built.Reclass(a.Element, an.Attr("class") ?? string.Empty);
+                    _dirty = true;
+                }
+            }
             animating |= !a.Finished;
         }
         // The last tween ending re-emits the scene once with plain numbers: static again.
@@ -417,6 +429,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                 },
                 SetInputValue,
                 WantClicks,
+                SetScroll,
                 (parentId, html, beforeId) =>
                 {
                     if (_byId.TryGetValue(parentId, out var p) && built.NodeOf.TryGetValue(p, out var pn))
@@ -427,6 +440,18 @@ internal sealed class HtmlSurface : MonoBehaviour
                     }
                 });
         }
+        _script?.Attach(built, () => { _dirty = true; Wake(); }, LayoutSize(), StartAnimation, CancelAnimation);
+        // <link rel=stylesheet href> and <script src>: fetched the way ScriptedScreens fetches
+        // an image, then the sheet is inlined and the page rebuilt, or the script run after
+        // the inline ones. ponytail: http(s) only, no caching, 15 s timeout.
+        foreach (var href in built.ExternalStyles)
+            if (_fetched.Add("css:" + href)) StartCoroutine(Fetch(href, css => { _source = InlineStylesheet(_source, href, css); Build(); }));
+        foreach (var href in built.ExternalImports)
+            if (_fetched.Add("css:" + href)) StartCoroutine(Fetch(href, css => { _source = InlineImport(_source, href, css); Build(); }));
+        foreach (var (urls, code) in built.Modules)
+            StartCoroutine(RunModule(urls, code));
+        foreach (var src in built.ExternalScripts)
+            if (_fetched.Add("js:" + src)) StartCoroutine(Fetch(src, js => _script?.Run(src.EndsWith(".mjs", StringComparison.OrdinalIgnoreCase) ? HtmlRenderer.StripModuleSyntax(js) : js)));
         _svgs.Clear();
         foreach (var shape in _shapes.Values)
         {
@@ -436,7 +461,11 @@ internal sealed class HtmlSurface : MonoBehaviour
 
         _animations.Clear();
         foreach (var (element, spec) in built.Animations)
+        {
+            // animation-timeline: scroll()/view(): the emitter writes the frames as expressions over the scroll offset; no clock runs it
+            if (built.CssOf(element).TryGetValue("animation-timeline", out var timeline) && timeline.Trim() != "auto") continue;
             _animations.Add(new KeyframeRunner(element, built.Keyframes[spec.Name], spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m)));
+        }
 
         _dirty = true;
         Wake();
@@ -457,6 +486,12 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// </summary>
     internal void EmitNow()
     {
+        // A capture builds and copies the page in one call. The script gets a few frames
+        // first (its load work, a short timer, an animation frame), each waited for, so the
+        // capture shows what the script drew rather than the bare markup.
+        if (_script != null)
+            for (var k = 0; k < 4; k++)
+                _script.RunSynchronously(Time.time + k * 0.1f, _byId, 300);
         _dirty = false;
         EmitToVector();
     }
@@ -498,9 +533,9 @@ internal sealed class HtmlSurface : MonoBehaviour
             seen.Add(id);
             var node = ext.Node;
             _externalNodes[ext.Key] = node;
-            var url = node.Attr("src") ?? string.Empty;
+            var url = node.Attr("src") ?? FirstOfSrcset(node.Attr("srcset")) ?? string.Empty;
             var props = new List<SS.UiProp>();
-            if (node.Tag is "img" or "video" or "audio")
+            if (node.Tag is "video" or "audio")
                 props.Add(new SS.UiProp { Key = "url", Value = SS.UiValue.FromString(url) });
             var styleProps = new List<SS.UiProp>();
             string type;
@@ -657,7 +692,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         var layout = LayoutSize();
         _tweens.Diff(_content, _built, Time.time);
         var t1 = Clock.Elapsed.TotalMilliseconds;
-        var output = VectorEmitter.Emit(_built, _content, layout.x, layout.y, _tweens, Time.time);
+        var output = VectorEmitter.Emit(_built, _content, layout.x, layout.y, _tweens, Time.time, ScrollSet);
         _lastLayoutMs = t1 - t0;
         _lastTranslateMs = Clock.Elapsed.TotalMilliseconds - t1;
         _lastNodes = output.Nodes;
@@ -739,9 +774,8 @@ internal sealed class HtmlSurface : MonoBehaviour
                 var options = new List<SS.UiValue>();
                 var selected = 0;
                 var i = 0;
-                foreach (var opt in node.Children)
+                foreach (var opt in Options(node))
                 {
-                    if (opt.Tag != "option") continue;
                     options.Add(SS.UiValue.FromString(OptionText(opt)));
                     if (opt.Attr("selected") != null) selected = i;
                     i++;
@@ -758,6 +792,8 @@ internal sealed class HtmlSurface : MonoBehaviour
                 props.Add(new SS.UiProp { Key = "value", Value = SS.UiValue.FromString(value) });
                 props.Add(new SS.UiProp { Key = "placeholder", Value = SS.UiValue.FromString(node.Attr("placeholder") ?? string.Empty) });
                 props.Add(new SS.UiProp { Key = "title", Value = SS.UiValue.FromString(node.Attr("title") ?? node.Attr("placeholder") ?? "Enter text") });
+                if (node.Attr("data-placeholder-color") is { } pc && StyleApplier.TryColor(pc, out var pcol))
+                    style.Add(new SS.UiProp { Key = "placeholder_color", Value = SS.UiValue.FromString(VectorEmitter.Hex(pcol)) });
                 break;
             }
         }
@@ -766,7 +802,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (type is "textinput" or "select")
         {
             style.Add(new SS.UiProp { Key = "text", Value = SS.UiValue.FromString(VectorEmitter.Hex(rs.color)) });
-            style.Add(new SS.UiProp { Key = "font_size", Value = SS.UiValue.FromNumber(Mathf.Max(8f, rs.fontSize * sx)) });
+            // the control pads its text; a font taller than about two thirds of the field is clipped
+            style.Add(new SS.UiProp { Key = "font_size", Value = SS.UiValue.FromNumber(Mathf.Max(8f, Mathf.Min(rs.fontSize, ext.H * 0.62f) * sx)) });
         }
         return type;
     }
@@ -792,17 +829,34 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     private static string OptionText(HtmlNode opt) => TextOf(opt);
 
+    /// <summary>The selectable options, through optgroups, skipping disabled ones.</summary>
+    private static IEnumerable<HtmlNode> Options(HtmlNode select)
+    {
+        foreach (var c in select.Children)
+        {
+            if (c.Tag == "option" && c.Attr("disabled") == null) yield return c;
+            else if (c.Tag == "optgroup" && c.Attr("disabled") == null)
+                foreach (var o in c.Children) if (o.Tag == "option" && o.Attr("disabled") == null) yield return o;
+        }
+    }
+
     /// <summary>What a select option reports: its value attribute, else its text.</summary>
     private static string OptionValue(HtmlNode select, int index)
     {
         var i = 0;
-        foreach (var opt in select.Children)
+        foreach (var opt in Options(select))
         {
-            if (opt.Tag != "option") continue;
             if (i == index) return opt.Attr("value") ?? OptionText(opt);
             i++;
         }
         return string.Empty;
+    }
+
+    private static string? FirstOfSrcset(string? srcset)
+    {
+        if (string.IsNullOrEmpty(srcset)) return null;
+        var first = srcset!.Split(',')[0].Trim().Split(' ')[0];
+        return first.Length > 0 ? first : null;
     }
 
     /// <summary>
@@ -833,11 +887,22 @@ internal sealed class HtmlSurface : MonoBehaviour
             {
                 if (!string.Equals(evt, "change", StringComparison.OrdinalIgnoreCase)) return false;
                 stored = value ?? string.Empty;
+                if (kind == "number" && float.TryParse(stored.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var num))
+                {
+                    // min/max/step as a browser applies them on change
+                    var min = Num(node.Attr("min"), float.NegativeInfinity);
+                    var max = Num(node.Attr("max"), float.PositiveInfinity);
+                    var step = Num(node.Attr("step"), 0f);
+                    if (step > 0f) num = (float.IsInfinity(min) ? 0f : min) + Mathf.Round((num - (float.IsInfinity(min) ? 0f : min)) / step) * step;
+                    num = Mathf.Clamp(num, min, max);
+                    stored = num.ToString(CultureInfo.InvariantCulture);
+                }
                 delivered = stored;
                 break;
             }
         }
         _inputValues[key] = stored;
+        if (node.Tag is "input" or "textarea") { node.Attributes["value"] = stored; Recascade(node); }
         _externalState.Remove(ElementId + "/" + key);
         _dirty = true;
         Wake();
@@ -856,8 +921,26 @@ internal sealed class HtmlSurface : MonoBehaviour
         delivered = string.Empty;
         if (_built == null || !_byId.TryGetValue(key, out var ve) || !_built.NodeOf.TryGetValue(ve, out var node))
             return false;
+        // <label for=x>: the click goes to the control it names.
+        if (node.Tag == "label" && node.Attr("for") is { } target && target != key)
+        {
+            if (OnControlClick(target, out name, out delivered)) return true;
+            SetFocus(target);
+            return false;
+        }
+        // <summary>: toggles its details.
+        if (node.Tag == "summary" && node.Parent is { Tag: "details" } details && details.Attr("id") is { } detailsId && _byId.TryGetValue(detailsId, out var dve))
+        {
+            if (details.Attr("open") != null) details.Attributes.Remove("open"); else details.Attributes["open"] = string.Empty;
+            HtmlRenderer.ShowDetails(dve, details, _built);
+            Recascade(details);
+            _dirty = true;
+            Wake();
+            _script?.EmitEvent(detailsId, "toggle");
+            return false;
+        }
         var control = node.Attr("data-control");
-        if (control == null)
+        if (control == null || control is "progress" or "meter")
             return false;
         name = node.Attr("name") ?? key;
         var on = control == "radio" || node.Attr("checked") == null;
@@ -885,10 +968,207 @@ internal sealed class HtmlSurface : MonoBehaviour
                 if (kv.Value == node) { _built.Reclass(kv.Key, node.Attr("class") ?? string.Empty); break; }
     }
 
-    /// <summary>A click on a page click region: the script gets a `click` event on the element.</summary>
+    private readonly HashSet<string> _fetched = new(StringComparer.Ordinal);
+
+    private static System.Collections.IEnumerator Fetch(string url, Action<string> done)
+    {
+        if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: external \"{url}\": only http(s) urls are fetched");
+            yield break;
+        }
+        using var req = UnityWebRequest.Get(new Uri(url));
+        req.timeout = 15;
+        yield return req.SendWebRequest();
+        if (req.result != UnityWebRequest.Result.Success)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: external \"{url}\" failed: {req.error}");
+            yield break;
+        }
+        done(req.downloadHandler.text ?? string.Empty);
+    }
+
+    /// <summary>The &lt;link&gt; for this href becomes a &lt;style&gt; with the fetched text, so a rebuild sees it as page CSS.</summary>
+    /// <summary>The @import statement naming <paramref name="href"/> replaced by the fetched sheet, in place, so its rules keep their position.</summary>
+    private static string InlineImport(string source, string href, string css)
+    {
+        var rx = new System.Text.RegularExpressions.Regex(@"@import\s+(?:url\()?[""']?" + System.Text.RegularExpressions.Regex.Escape(href) + @"[""']?\)?[^;]*;", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return rx.Replace(source, css.Replace("</style>", string.Empty), 1);
+    }
+
+    /// <summary>A module script: its URL imports fetched and run in order (exports become globals), then its body.</summary>
+    private System.Collections.IEnumerator RunModule(List<string> urls, string code)
+    {
+        foreach (var url in urls)
+            yield return Fetch(url, js => _script?.Run(HtmlRenderer.StripModuleSyntax(js)));
+        _script?.Run(code);
+    }
+
+    private static string InlineStylesheet(string source, string href, string css)
+    {
+        var rx = new System.Text.RegularExpressions.Regex("<link[^>]*href=[\"']?" + System.Text.RegularExpressions.Regex.Escape(href) + "[\"']?[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return rx.Replace(source, "<style>" + css.Replace("</style>", string.Empty) + "</style>", 1);
+    }
+
+    /// <summary>Element.animate(): a keyframe runner made by the script; the handle cancels it.</summary>
+    private int StartAnimation(VisualElement ve, CssKeyframes frames, AnimationSpec spec)
+    {
+        var runner = new KeyframeRunner(ve, frames, spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m));
+        _animations.Add(runner);
+        _scriptAnimations[++_animationSeq] = runner;
+        _awakeFrames = Mathf.Max(_awakeFrames, 2);
+        return _animationSeq;
+    }
+
+    private void CancelAnimation(int handle)
+    {
+        if (!_scriptAnimations.TryGetValue(handle, out var runner)) return;
+        _scriptAnimations.Remove(handle);
+        _animations.Remove(runner);
+        if (_built != null && _built.NodeOf.TryGetValue(runner.Element, out var n))
+            _built.Reclass(runner.Element, n.Attr("class") ?? string.Empty);
+        _dirty = true;
+        Wake();
+    }
+
+    private readonly Dictionary<int, KeyframeRunner> _scriptAnimations = new();
+    private int _animationSeq;
+
+    /// <summary>A click on a page click region: the script gets a `click` event on the element, with the pointer's page coordinates. A submit button also fires `submit` on its form.</summary>
     internal void OnPageClick(string key)
     {
-        _script?.EmitClick(key);
+        SetFocus(key);
+        _script?.EmitClick(key, _pointerPage.x, _pointerPage.y);
+        if (_built != null && _byId.TryGetValue(key, out var ve) && _built.NodeOf.TryGetValue(ve, out var node)
+            && node.Tag == "button" && string.Equals(node.Attr("type") ?? "submit", "submit", StringComparison.OrdinalIgnoreCase))
+        {
+            for (var f = node.Parent; f != null; f = f.Parent)
+                if (f.Tag == "form" && f.Attr("id") is { } formId) { _script?.EmitEvent(formId, "submit"); break; }
+        }
+    }
+
+    // ---- pointer state: :hover / :active / :focus and mouse events, from the page's own boxes ----
+    private Vector2 _pointerPage;
+    private readonly HashSet<HtmlNode> _hovered = new();
+    private readonly HashSet<HtmlNode> _active = new();
+    private HtmlNode? _focused;
+    private string? _hoverDeepest;
+
+    /// <summary>The pointer at a fraction of the host rect: which page boxes are under it.</summary>
+    internal void PointerMove(Vector2 fraction)
+    {
+        var layout = LayoutSize();
+        _pointerPage = new Vector2(fraction.x * layout.x, fraction.y * layout.y);
+        var deepest = Deepest(_pointerPage);
+        var deepestId = deepest != null && _built != null && _built.NodeOf.TryGetValue(deepest, out var dn) ? dn.Attr("id") : null;
+        if (deepestId != _hoverDeepest)
+        {
+            if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseout", _pointerPage.x, _pointerPage.y);
+            if (deepestId != null) _script?.EmitPointer(deepestId, "mouseover", _pointerPage.x, _pointerPage.y);
+            _hoverDeepest = deepestId;
+        }
+        else if (deepestId != null)
+            _script?.EmitPointer(deepestId, "mousemove", _pointerPage.x, _pointerPage.y);
+        SetState(_hovered, "data-hover", Chain(deepest));
+    }
+
+    internal void PointerLeave()
+    {
+        if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseout", _pointerPage.x, _pointerPage.y);
+        _hoverDeepest = null;
+        SetState(_hovered, "data-hover", null);
+        SetState(_active, "data-active", null);
+    }
+
+    internal void PointerDown(Vector2 fraction)
+    {
+        var layout = LayoutSize();
+        _pointerPage = new Vector2(fraction.x * layout.x, fraction.y * layout.y);
+        var deepest = Deepest(_pointerPage);
+        SetState(_active, "data-active", Chain(deepest));
+        if (deepest != null && _built != null && _built.NodeOf.TryGetValue(deepest, out var dn) && dn.Attr("id") is { } id)
+            _script?.EmitPointer(id, "mousedown", _pointerPage.x, _pointerPage.y);
+    }
+
+    internal void PointerUp()
+    {
+        if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseup", _pointerPage.x, _pointerPage.y);
+        SetState(_active, "data-active", null);
+    }
+
+    /// <summary>The last clicked element or control takes :focus; a click elsewhere moves it.</summary>
+    private void SetFocus(string key)
+    {
+        if (_built == null || !_byId.TryGetValue(key, out var ve) || !_built.NodeOf.TryGetValue(ve, out var node)) return;
+        if (_focused == node) return;
+        var changed = false;
+        if (_focused != null) { _focused.Attributes.Remove("data-focus"); Recascade(_focused); changed = true; }
+        _focused = node;
+        node.Attributes["data-focus"] = string.Empty;
+        Recascade(node);
+        if (changed || CssParser.UsesPointerState) { _dirty = true; Wake(); }
+    }
+
+    /// <summary>The innermost element whose box contains the page point.</summary>
+    private VisualElement? Deepest(Vector2 p)
+    {
+        if (_content == null) return null;
+        var origin = _content.worldBound.position;
+        VisualElement? best = null;
+        var bestDepth = -1;
+        foreach (var ve in _byId.Values)
+        {
+            if (ve.resolvedStyle.display == DisplayStyle.None) continue;
+            var wb = ve.worldBound;
+            if (float.IsNaN(wb.width)) continue;
+            var r = new Rect(wb.x - origin.x, wb.y - origin.y, wb.width, wb.height);
+            if (!r.Contains(p)) continue;
+            var depth = 0;
+            for (var e = ve; e != null && e != _content; e = e.parent) depth++;
+            if (depth > bestDepth) { bestDepth = depth; best = ve; }
+        }
+        return best;
+    }
+
+    /// <summary>The element and its ancestors, as nodes: a pointer over a child is over every ancestor too, as in CSS.</summary>
+    private HashSet<HtmlNode>? Chain(VisualElement? ve)
+    {
+        if (ve == null || _built == null) return null;
+        var set = new HashSet<HtmlNode>();
+        for (var e = ve; e != null; e = e.parent)
+            if (_built.NodeOf.TryGetValue(e, out var n)) set.Add(n);
+        return set;
+    }
+
+    /// <summary>Moves a state attribute from the old set to the new one, re-cascading what changed, and emits if any rule cares.</summary>
+    private void SetState(HashSet<HtmlNode> current, string attr, HashSet<HtmlNode>? next)
+    {
+        if (!CssParser.UsesPointerState) { current.Clear(); return; }
+        var changed = false;
+        foreach (var n in new List<HtmlNode>(current))
+        {
+            if (next != null && next.Contains(n)) continue;
+            n.Attributes.Remove(attr);
+            current.Remove(n);
+            Recascade(n);
+            changed = true;
+        }
+        if (next != null)
+            foreach (var n in next)
+            {
+                if (current.Contains(n)) continue;
+                n.Attributes[attr] = string.Empty;
+                current.Add(n);
+                Recascade(n);
+                changed = true;
+            }
+        if (changed) { _dirty = true; Wake(); }
+    }
+
+    private void Recascade(HtmlNode node)
+    {
+        if (_built == null || node.Attr("id") is not { } id || !_byId.TryGetValue(id, out var ve)) return;
+        _built.Reclass(ve, node.Attr("class") ?? string.Empty);
     }
 
     /// <summary>
@@ -906,19 +1186,32 @@ internal sealed class HtmlSurface : MonoBehaviour
         Wake();
     }
 
+    /// <summary>Scroll offsets a script asked for, by scroll box id, with a version the vector mod applies once (so/sov, vector requirement 7).</summary>
+    internal readonly Dictionary<string, (float offset, int version)> ScrollSet = new(StringComparer.Ordinal);
+    private int _scrollVersion;
+
+    private void SetScroll(string key, float offset)
+    {
+        ScrollSet[key] = (Mathf.Max(0f, offset), ++_scrollVersion);
+        _dirty = true;
+        Wake();
+    }
+
     /// <summary>The page script set a control's value or checked state.</summary>
     private void SetInputValue(string key, string value)
     {
-        if (_built != null && _byId.TryGetValue(key, out var ve) && _built.NodeOf.TryGetValue(ve, out var node) && node.Attr("data-control") != null)
+        if (_built != null && _byId.TryGetValue(key, out var ve) && _built.NodeOf.TryGetValue(ve, out var node) && node.Attr("data-control") is { } control)
         {
-            SetChecked(node, value == "true");
+            if (control is "progress" or "meter") node.Attributes["value"] = value;
+            else SetChecked(node, value == "true");
             _dirty = true;
             Wake();
             return;
         }
-        if (!_externalNodes.ContainsKey(key))
+        if (!_externalNodes.TryGetValue(key, out var field))
             return;
         _inputValues[key] = value;
+        if (field.Tag is "input" or "textarea") { field.Attributes["value"] = value; Recascade(field); }
         _externalState.Remove(ElementId + "/" + key);
         _dirty = true;
         Wake();
@@ -1159,8 +1452,9 @@ internal sealed class HtmlSurface : MonoBehaviour
 
             if (string.IsNullOrEmpty(entry.Key) || !_byId.TryGetValue(entry.Key, out var ve))
             {
-                if (!string.IsNullOrEmpty(entry.Key) && !quiet)
-                    ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: data key \"{entry.Key}\" matches no element id");
+                // a key the scene reads as $name (an svg expression) is a legitimate target too
+                if (!string.IsNullOrEmpty(entry.Key) && !quiet && _lastScene.IndexOf("$" + entry.Key, StringComparison.Ordinal) < 0)
+                    ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: data key \"{entry.Key}\" matches no element id and no $ expression");
                 continue;
             }
 

@@ -87,7 +87,7 @@ internal sealed class CssSelector
         // ::before/::after: the subject is a generated child carrying data-pseudo; the
         // selector proper is matched against its parent. Generated children match nothing else.
         var pseudoElement = Chain[idx].PseudoElement;
-        var generated = node.Attr("data-pseudo");
+        var generated = node.Attr("data-pseudo") ?? (node.Attr("data-marker") != null ? "marker" : null);
         if (pseudoElement != null)
         {
             if (node.Parent == null || !string.Equals(generated, pseudoElement, StringComparison.Ordinal))
@@ -133,6 +133,44 @@ internal sealed class CssSelector
             ancestor = ancestor.Parent;
         }
         return true;
+    }
+}
+
+/// <summary>An @counter-style: how a counter value becomes text.</summary>
+internal sealed class CounterStyle
+{
+    public string System = "symbolic";
+    public List<string> Symbols = new();
+    public string Suffix = ". ";
+    public string Prefix = string.Empty;
+
+    /// <summary>The text for value n, without prefix/suffix; null when the system cannot represent it (falls back to decimal).</summary>
+    public string? Text(int n)
+    {
+        var k = Symbols.Count;
+        if (k == 0) return null;
+        switch (System)
+        {
+            case "cyclic": return Symbols[((n - 1) % k + k) % k];
+            case "fixed": return n >= 1 && n <= k ? Symbols[n - 1] : null;
+            case "symbolic": { if (n < 1) return null; var reps = (n - 1) / k + 1; var sym = Symbols[(n - 1) % k]; var sb = new StringBuilder(); for (var i = 0; i < reps; i++) sb.Append(sym); return sb.ToString(); }
+            case "alphabetic":
+            {
+                if (n < 1 || k < 2) return null;
+                var sb = new StringBuilder();
+                while (n > 0) { n--; sb.Insert(0, Symbols[n % k]); n /= k; }
+                return sb.ToString();
+            }
+            case "numeric":
+            {
+                if (n < 0 || k < 2) return null;
+                if (n == 0) return Symbols[0];
+                var sb = new StringBuilder();
+                while (n > 0) { sb.Insert(0, Symbols[n % k]); n /= k; }
+                return sb.ToString();
+            }
+            default: return null;
+        }
     }
 }
 
@@ -200,6 +238,10 @@ internal static class CssParser
                 var brace = css.IndexOf('{', i);
                 if (brace < 0 || (semi >= 0 && semi < brace))
                 {
+                    // statement at-rules: @import is fetched by the surface; @layer lists and @charset are nothing to do
+                    var stmt = css.Substring(i + 1, (semi < 0 ? css.Length : semi) - i - 1).Trim();
+                    if (stmt.StartsWith("import", StringComparison.OrdinalIgnoreCase) && ImportUrl(stmt.Substring(6)) is { } importUrl)
+                        Imports.Add(importUrl);
                     i = semi < 0 ? css.Length : semi + 1;
                     continue;
                 }
@@ -219,6 +261,38 @@ internal static class CssParser
                     if (keyframes != null)
                         keyframes[name] = kf;
                 }
+                else if (header.StartsWith("font-face", StringComparison.OrdinalIgnoreCase))
+                {
+                    var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
+                    string? fam = null, src = null, weight = "normal", style = "normal";
+                    foreach (var d in ParseDeclarations(inner))
+                    {
+                        switch (d.Name)
+                        {
+                            case "font-family": fam = d.Value.Trim().Trim('"', '\''); break;
+                            case "src":
+                            {
+                                // src: url(file.ttf) format("truetype"), url(...) ...: the first url with a font extension
+                                foreach (var cand in SplitTopLevel(d.Value, ','))
+                                {
+                                    var u = cand.IndexOf("url(", StringComparison.OrdinalIgnoreCase);
+                                    if (u < 0) continue;
+                                    var closeParen = cand.IndexOf(')', u);
+                                    if (closeParen < 0) continue;
+                                    var path = cand.Substring(u + 4, closeParen - u - 4).Trim().Trim('"', '\'');
+                                    var lower = path.ToLowerInvariant();
+                                    if (lower.EndsWith(".ttf") || lower.EndsWith(".otf")) { src = path; break; }
+                                    src ??= path;
+                                }
+                                break;
+                            }
+                            case "font-weight": weight = d.Value.Trim(); break;
+                            case "font-style": style = d.Value.Trim(); break;
+                        }
+                    }
+                    if (fam != null && src != null) FontFaces.Add((fam, src, weight, style));
+                    else warn?.Invoke("css: @font-face needs font-family and src");
+                }
                 else if (header.StartsWith("media", StringComparison.OrdinalIgnoreCase) || header.StartsWith("supports", StringComparison.OrdinalIgnoreCase))
                 {
                     // One screen, one design width: a media query is decided once, here.
@@ -232,6 +306,61 @@ internal static class CssParser
                         }
                     }
                 }
+                else if (header.StartsWith("layer", StringComparison.OrdinalIgnoreCase) || header.StartsWith("container", StringComparison.OrdinalIgnoreCase) || header.StartsWith("scope", StringComparison.OrdinalIgnoreCase))
+                {
+                    // @layer: its rules in source order (layer precedence is source order here);
+                    // @container: decided against the design size like @media (ponytail: a real
+                    // container query needs the container's laid-out size and a re-cascade);
+                    // @scope (root): the block becomes a nested rule under the root selector.
+                    var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
+                    var take = true;
+                    if (header.StartsWith("container", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var paren = header.IndexOf('(');
+                        take = paren >= 0 && MediaMatches(header.Substring(paren));
+                    }
+                    else if (header.StartsWith("scope", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var paren = header.IndexOf('(');
+                        var closeParen = paren >= 0 ? header.IndexOf(')', paren) : -1;
+                        var root = closeParen > paren ? header.Substring(paren + 1, closeParen - paren - 1).Trim() : ":root";
+                        inner = root + " { " + inner.Replace(":scope", "&") + " }";
+                    }
+                    if (take)
+                    {
+                        foreach (var r in ParseStylesheet(inner, warn, keyframes))
+                        {
+                            r.Order = order++;
+                            rules.Add(r);
+                        }
+                    }
+                }
+                else if (header.StartsWith("counter-style", StringComparison.OrdinalIgnoreCase))
+                {
+                    // @counter-style name { system; symbols; suffix; prefix }: used by list-style-type and counter()
+                    var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
+                    var cname = header.Substring(13).Trim();
+                    var style = new CounterStyle();
+                    foreach (var d in ParseDeclarations(inner))
+                    {
+                        switch (d.Name)
+                        {
+                            case "system": style.System = d.Value.Trim().Split(' ')[0].ToLowerInvariant(); break;
+                            case "symbols": style.Symbols = Symbols(d.Value); break;
+                            case "suffix": style.Suffix = Unquote(d.Value); break;
+                            case "prefix": style.Prefix = Unquote(d.Value); break;
+                        }
+                    }
+                    if (cname.Length > 0 && style.Symbols.Count > 0) CounterStyles[cname] = style;
+                }
+                else if (header.StartsWith("property", StringComparison.OrdinalIgnoreCase))
+                {
+                    // @property --name { initial-value }: the value a var() falls back to
+                    var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
+                    var pname = header.Substring(8).Trim();
+                    foreach (var d in ParseDeclarations(inner))
+                        if (d.Name == "initial-value") PropertyInitials[pname] = d.Value.Trim();
+                }
                 else
                 {
                     warn?.Invoke($"css: @{header.Split(' ')[0]} skipped");
@@ -243,31 +372,233 @@ internal static class CssParser
             var open = css.IndexOf('{', i);
             if (open < 0)
                 break;
-            var close = css.IndexOf('}', open);
-            if (close < 0)
-                close = css.Length;
+            var close = MatchBrace(css, open);
 
             var selectorText = css.Substring(i, open - i).Trim();
-            var body = css.Substring(open + 1, close - open - 1);
+            var body = css.Substring(open + 1, Math.Max(0, close - open - 1));
             i = Math.Min(css.Length, close + 1);
-
-            var rule = new CssRule { Order = order++ };
-            foreach (var sel in selectorText.Split(','))
-            {
-                var parsed = ParseSelector(sel.Trim(), warn);
-                if (parsed != null)
-                    rule.Selectors.Add(parsed);
-            }
-            if (rule.Selectors.Count == 0)
-                continue;
-            rule.Declarations.AddRange(ParseDeclarations(body));
-            rules.Add(rule);
+            ParseRule(selectorText, body, null, rules, ref order, warn, keyframes);
         }
         return rules;
     }
 
+    /// <summary>Index of the '}' matching the '{' at <paramref name="open"/>, or the end of the text.</summary>
+    private static int MatchBrace(string s, int open)
+    {
+        var depth = 0;
+        for (var j = open; j < s.Length; j++)
+        {
+            if (s[j] == '{') depth++;
+            else if (s[j] == '}' && --depth == 0) return j;
+        }
+        return s.Length;
+    }
+
+    /// <summary>Split on a separator outside parentheses and brackets.</summary>
+    internal static List<string> SplitTopLevel(string text, char sep)
+    {
+        var parts = new List<string>();
+        var depth = 0;
+        var start = 0;
+        for (var i = 0; i <= text.Length; i++)
+        {
+            if (i < text.Length)
+            {
+                var c = text[i];
+                if (c == '(' || c == '[') depth++;
+                else if (c == ')' || c == ']') depth--;
+                if (c != sep || depth > 0) continue;
+            }
+            parts.Add(text.Substring(start, i - start));
+            start = i + 1;
+        }
+        return parts;
+    }
+
+    /// <summary>
+    /// One rule body, which under CSS nesting may hold declarations and nested rules in any
+    /// order. A nested selector is expanded against every parent selector: `&amp;` is replaced
+    /// by the parent, otherwise the parent is prefixed as an ancestor (a leading combinator
+    /// keeps it). A nested `@media`/`@supports` applies its block to the parent selectors.
+    /// </summary>
+    private static void ParseRule(string selectorText, string body, List<string>? parents, List<CssRule> rules, ref int order, Action<string>? warn, Dictionary<string, CssKeyframes>? keyframes)
+    {
+        var selectors = new List<string>();
+        foreach (var raw in SplitTopLevel(selectorText, ','))
+        {
+            var t = raw.Trim();
+            if (t.Length == 0) continue;
+            if (parents == null) { selectors.Add(t); continue; }
+            foreach (var p in parents)
+                selectors.Add(t.IndexOf('&') >= 0 ? t.Replace("&", p) : p + " " + t);
+        }
+
+        var decls = new StringBuilder();
+        var nested = new List<(string sel, string body)>();
+        var segStart = 0;
+        for (var k = 0; k < body.Length; k++)
+        {
+            if (body[k] != '{') continue;
+            var selStart = body.LastIndexOf(';', k);
+            selStart = selStart < segStart ? segStart : selStart + 1;
+            decls.Append(body, segStart, selStart - segStart);
+            var end = MatchBrace(body, k);
+            nested.Add((body.Substring(selStart, k - selStart).Trim(), body.Substring(k + 1, Math.Max(0, end - k - 1))));
+            k = end;
+            segStart = k + 1;
+        }
+        if (segStart < body.Length) decls.Append(body, segStart, body.Length - segStart);
+
+        var rule = new CssRule { Order = order++ };
+        foreach (var sel in selectors)
+        {
+            var parsed = ParseSelector(sel, warn);
+            if (parsed != null) rule.Selectors.Add(parsed);
+        }
+        rule.Declarations.AddRange(ParseDeclarations(decls.ToString()));
+        if (rule.Selectors.Count > 0 && rule.Declarations.Count > 0)
+            rules.Add(rule);
+
+        foreach (var (sel, nbody) in nested)
+        {
+            if (sel.StartsWith("@", StringComparison.Ordinal))
+            {
+                var header = sel.Substring(1).Trim();
+                var kind = header.Split(' ', '(')[0].ToLowerInvariant();
+                if (kind == "media" && !MediaMatches(header.Substring(5))) continue;
+                if (kind == "container")
+                {
+                    var paren = header.IndexOf('(');
+                    if (paren < 0 || !MediaMatches(header.Substring(paren))) continue;
+                }
+                if (kind is "media" or "supports" or "layer" or "container")
+                    ParseRule("&", nbody, selectors, rules, ref order, warn, keyframes);
+                else
+                    warn?.Invoke($"css: nested @{header.Split(' ')[0]} skipped");
+                continue;
+            }
+            ParseRule(sel, nbody, selectors, rules, ref order, warn, keyframes);
+        }
+    }
+
     /// <summary>The page's design size, for @media; set by the renderer before parsing.</summary>
     public static float ViewportWidth = 460f, ViewportHeight = 460f;
+
+    /// <summary>True once any stylesheet used :hover/:active/:focus, so the surface tracks the pointer.</summary>
+    public static bool UsesPointerState;
+
+    private static readonly CssSelector FocusSel = ParseSelector("[data-focus]", null)!;
+
+    /// <summary>@font-face declarations collected while parsing; the renderer clears and registers them.</summary>
+    public static readonly List<(string family, string src, string weight, string style)> FontFaces = new();
+
+    /// <summary>@import urls collected while parsing; the surface fetches and inlines them.</summary>
+    public static readonly List<string> Imports = new();
+
+    /// <summary>@property initial values, what an undefined var() of that name resolves to.</summary>
+    public static readonly Dictionary<string, string> PropertyInitials = new(StringComparer.Ordinal);
+
+    /// <summary>@counter-style rules by name.</summary>
+    public static readonly Dictionary<string, CounterStyle> CounterStyles = new(StringComparer.Ordinal);
+
+    private static string Unquote(string v)
+    {
+        v = v.Trim();
+        return v.Length >= 2 && (v[0] == '"' || v[0] == '\'') && v[v.Length - 1] == v[0] ? v.Substring(1, v.Length - 2) : v;
+    }
+
+    /// <summary>The symbols list of @counter-style: quoted strings or bare tokens.</summary>
+    private static List<string> Symbols(string v)
+    {
+        var list = new List<string>();
+        var i = 0;
+        while (i < v.Length)
+        {
+            var ch = v[i];
+            if (char.IsWhiteSpace(ch)) { i++; continue; }
+            if (ch == '"' || ch == '\'')
+            {
+                var end = v.IndexOf(ch, i + 1);
+                if (end < 0) end = v.Length;
+                list.Add(v.Substring(i + 1, end - i - 1));
+                i = end + 1;
+                continue;
+            }
+            var j = i;
+            while (j < v.Length && !char.IsWhiteSpace(v[j])) j++;
+            list.Add(v.Substring(i, j - i));
+            i = j;
+        }
+        return list;
+    }
+
+    /// <summary>The url of an @import prelude: url(...) or a quoted string; the media/layer conditions after it are ignored.</summary>
+    private static string? ImportUrl(string prelude)
+    {
+        var p = prelude.Trim();
+        if (p.StartsWith("url(", StringComparison.OrdinalIgnoreCase))
+        {
+            var closeParen = p.IndexOf(')');
+            if (closeParen < 0) return null;
+            p = p.Substring(4, closeParen - 4);
+        }
+        else
+        {
+            var end = p.Length > 1 ? p.IndexOf(p[0], 1) : -1;
+            if (end > 0 && (p[0] == '"' || p[0] == '\'')) p = p.Substring(0, end + 1);
+        }
+        p = p.Trim().Trim('"', '\'');
+        return p.Length > 0 ? p : null;
+    }
+
+    private static bool IsField(HtmlNode n) => n.Tag is "input" or "textarea" or "select";
+
+    private static string? FieldValue(HtmlNode n)
+    {
+        if (n.Attr("value") is { } v) return v;
+        if (n.Tag != "textarea") return null;
+        var sb = new StringBuilder();
+        foreach (var c in n.Children) if (c.IsText) sb.Append(c.Text);
+        return sb.ToString();
+    }
+
+    /// <summary>Constraint validation as a browser runs it: required, pattern, minlength/maxlength, type email/url/number, min/max.</summary>
+    private static bool Valid(HtmlNode n)
+    {
+        var v = FieldValue(n) ?? string.Empty;
+        var type = (n.Attr("type") ?? "text").ToLowerInvariant();
+        if (n.Attr("required") != null)
+        {
+            if (type is "checkbox" or "radio") { if (n.Attr("checked") == null) return false; }
+            else if (v.Trim().Length == 0) return false;
+        }
+        if (v.Length == 0) return true;
+        if (n.Attr("pattern") is { } pat)
+        {
+            try { if (!System.Text.RegularExpressions.Regex.IsMatch(v, "^(?:" + pat + ")$")) return false; }
+            catch (ArgumentException) { }
+        }
+        if (n.Attr("minlength") is { } mn && int.TryParse(mn, out var minLen) && v.Length < minLen) return false;
+        if (n.Attr("maxlength") is { } mx && int.TryParse(mx, out var maxLen) && v.Length > maxLen) return false;
+        if (type == "email" && !System.Text.RegularExpressions.Regex.IsMatch(v.Trim(), @"^[^@\s]+@[^@\s]+\.[^@\s]+$")) return false;
+        if (type == "url" && !Uri.TryCreate(v.Trim(), UriKind.Absolute, out _)) return false;
+        if (type is "number" or "range")
+        {
+            if (!float.TryParse(v.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _)) return false;
+            if (InRange(n) == false) return false;
+        }
+        return true;
+    }
+
+    /// <summary>For a number/range input with a value: inside min/max or not; null when the question does not apply.</summary>
+    private static bool? InRange(HtmlNode n)
+    {
+        if (n.Tag != "input" || (n.Attr("type") ?? "text").ToLowerInvariant() is not ("number" or "range")) return null;
+        if (!float.TryParse((FieldValue(n) ?? string.Empty).Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x)) return null;
+        if (n.Attr("min") is { } mn && float.TryParse(mn, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var min) && x < min) return false;
+        if (n.Attr("max") is { } mx && float.TryParse(mx, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var max) && x > max) return false;
+        return true;
+    }
 
     /// <summary>
     /// A media query list against the design size: min/max-width/height, orientation,
@@ -575,8 +906,11 @@ internal static class CssParser
             }
             if (element || name == "before" || name == "after")
             {
-                // ::before / ::after (and the legacy one-colon spelling); other pseudo-elements skip the rule.
-                if (name != "before" && name != "after") return false;
+                // ::before / ::after (and the legacy one-colon spelling), ::marker (the list
+                // marker span), ::placeholder (the field's placeholder, colour only); other
+                // pseudo-elements skip the rule.
+                if (name is "-webkit-input-placeholder" or "-moz-placeholder" or "-ms-input-placeholder") name = "placeholder";
+                if (name is not ("before" or "after" or "marker" or "placeholder" or "first-letter" or "first-line" or "-webkit-scrollbar" or "-webkit-scrollbar-thumb" or "-webkit-scrollbar-track")) return false;
                 compound.PseudoElement = name;
                 continue;
             }
@@ -591,6 +925,79 @@ internal static class CssParser
                 case "last-child":
                     compound.Pseudos.Add(n => ElementIndex(n) == ElementCount(n) - 1);
                     break;
+                case "only-child":
+                    compound.Pseudos.Add(n => ElementCount(n) == 1);
+                    break;
+                case "first-of-type":
+                    compound.Pseudos.Add(n => TypeIndex(n) == 0);
+                    break;
+                case "last-of-type":
+                    compound.Pseudos.Add(n => TypeIndex(n) == TypeCount(n) - 1);
+                    break;
+                case "only-of-type":
+                    compound.Pseudos.Add(n => TypeCount(n) == 1);
+                    break;
+                case "nth-of-type":
+                case "nth-last-of-type":
+                case "nth-last-child":
+                {
+                    var (a, b) = ParseNth(arg);
+                    var ofType = name.EndsWith("of-type", StringComparison.Ordinal);
+                    var fromEnd = name.StartsWith("nth-last", StringComparison.Ordinal);
+                    compound.Pseudos.Add(n =>
+                    {
+                        var idx = ofType ? TypeIndex(n) : ElementIndex(n);
+                        var cnt = ofType ? TypeCount(n) : ElementCount(n);
+                        var k = (fromEnd ? cnt - 1 - idx : idx) + 1;
+                        if (a == 0) return k == b;
+                        var m = k - b;
+                        return m % a == 0 && m / a >= 0;
+                    });
+                    break;
+                }
+                case "empty":
+                    compound.Pseudos.Add(n =>
+                    {
+                        foreach (var c in n.Children)
+                            if (!c.IsText || c.Text.Trim().Length > 0) return false;
+                        return true;
+                    });
+                    break;
+                case "is":
+                case "where":
+                case "matches":
+                {
+                    var any = new List<CssSelector>();
+                    foreach (var part in SplitTopLevel(arg, ','))
+                    {
+                        var inner = ParseSelector(part.Trim(), warn);
+                        if (inner != null) any.Add(inner);
+                    }
+                    if (any.Count == 0) return false;
+                    compound.Pseudos.Add(n => { foreach (var s in any) if (s.Matches(n)) return true; return false; });
+                    break;
+                }
+                case "has":
+                {
+                    // :has(> x) tests the children, :has(x) every descendant.
+                    var wants = new List<(bool childOnly, CssSelector sel)>();
+                    foreach (var part in SplitTopLevel(arg, ','))
+                    {
+                        var t = part.Trim();
+                        var childOnly = t.StartsWith(">", StringComparison.Ordinal);
+                        if (childOnly) t = t.Substring(1).Trim();
+                        var inner = ParseSelector(t, warn);
+                        if (inner != null) wants.Add((childOnly, inner));
+                    }
+                    if (wants.Count == 0) return false;
+                    compound.Pseudos.Add(n =>
+                    {
+                        foreach (var (childOnly, sel) in wants)
+                            if (AnyDescendant(n, sel, childOnly)) return true;
+                        return false;
+                    });
+                    break;
+                }
                 case "nth-child":
                 {
                     var (a, b) = ParseNth(arg);
@@ -605,10 +1012,14 @@ internal static class CssParser
                 }
                 case "not":
                 {
-                    var inner = ParseSelector(arg, warn);
-                    if (inner == null || inner.Chain.Count != 1) return false;
-                    var c = inner.Chain[0];
-                    compound.Pseudos.Add(n => !c.Matches(n));
+                    var none = new List<CssSelector>();
+                    foreach (var part in SplitTopLevel(arg, ','))
+                    {
+                        var inner = ParseSelector(part.Trim(), warn);
+                        if (inner != null) none.Add(inner);
+                    }
+                    if (none.Count == 0) return false;
+                    compound.Pseudos.Add(n => { foreach (var s in none) if (s.Matches(n)) return false; return true; });
                     break;
                 }
                 case "checked":
@@ -620,8 +1031,59 @@ internal static class CssParser
                 case "enabled":
                     compound.Pseudos.Add(n => n.Attr("disabled") == null);
                     break;
-                case "hover": case "active": case "focus": case "focus-visible": case "focus-within":
-                case "visited": case "link":
+                case "hover":
+                    UsesPointerState = true;
+                    compound.Pseudos.Add(n => n.Attr("data-hover") != null);
+                    break;
+                case "active":
+                    UsesPointerState = true;
+                    compound.Pseudos.Add(n => n.Attr("data-active") != null);
+                    break;
+                case "focus": case "focus-visible":
+                    UsesPointerState = true;
+                    compound.Pseudos.Add(n => n.Attr("data-focus") != null);
+                    break;
+                case "focus-within":
+                    UsesPointerState = true;
+                    compound.Pseudos.Add(n => n.Attr("data-focus") != null || AnyDescendant(n, FocusSel, false));
+                    break;
+                case "required": compound.Pseudos.Add(n => n.Attr("required") != null); break;
+                case "optional": compound.Pseudos.Add(n => IsField(n) && n.Attr("required") == null); break;
+                case "read-only": compound.Pseudos.Add(n => !IsField(n) || n.Attr("readonly") != null || n.Attr("disabled") != null); break;
+                case "read-write": compound.Pseudos.Add(n => IsField(n) && n.Attr("readonly") == null && n.Attr("disabled") == null); break;
+                case "placeholder-shown": compound.Pseudos.Add(n => n.Attr("placeholder") != null && string.IsNullOrEmpty(FieldValue(n))); break;
+                case "default": compound.Pseudos.Add(n => n.Attr("checked") != null || n.Attr("selected") != null || n.Attr("default") != null); break;
+                case "indeterminate": compound.Pseudos.Add(n => n.Attr("indeterminate") != null || (n.Tag == "progress" && n.Attr("value") == null)); break;
+                case "valid": compound.Pseudos.Add(n => IsField(n) && Valid(n)); break;
+                case "invalid": compound.Pseudos.Add(n => IsField(n) && !Valid(n)); break;
+                case "in-range": compound.Pseudos.Add(n => InRange(n) == true); break;
+                case "out-of-range": compound.Pseudos.Add(n => InRange(n) == false); break;
+                case "open": compound.Pseudos.Add(n => n.Attr("open") != null); break;
+                case "modal": compound.Pseudos.Add(n => n.Tag == "dialog" && n.Attr("data-modal") != null); break;
+                case "link": case "any-link": compound.Pseudos.Add(n => n.Tag is "a" or "area" && n.Attr("href") != null); break;
+                case "lang":
+                {
+                    var want = arg.Trim().Trim('"', '\'').ToLowerInvariant();
+                    compound.Pseudos.Add(n =>
+                    {
+                        for (var p = n; p != null; p = p.Parent)
+                            if (p.Attr("lang") is { } l) { l = l.ToLowerInvariant(); return l == want || l.StartsWith(want + "-", StringComparison.Ordinal); }
+                        return false;
+                    });
+                    break;
+                }
+                case "dir":
+                {
+                    var want = arg.Trim().ToLowerInvariant();
+                    compound.Pseudos.Add(n =>
+                    {
+                        for (var p = n; p != null; p = p.Parent)
+                            if (p.Attr("dir") is { } d) return string.Equals(d, want, StringComparison.OrdinalIgnoreCase);
+                        return want == "ltr";
+                    });
+                    break;
+                }
+                case "visited": case "target":
                     compound.Pseudos.Add(_ => false);
                     break;
                 default:
@@ -629,6 +1091,38 @@ internal static class CssParser
             }
         }
         return true;
+    }
+
+    private static int TypeIndex(HtmlNode n)
+    {
+        if (n.Parent == null) return 0;
+        var i = 0;
+        foreach (var c in n.Parent.Children)
+        {
+            if (c == n) return i;
+            if (!c.IsText && string.Equals(c.Tag, n.Tag, StringComparison.OrdinalIgnoreCase)) i++;
+        }
+        return i;
+    }
+
+    private static int TypeCount(HtmlNode n)
+    {
+        if (n.Parent == null) return 1;
+        var i = 0;
+        foreach (var c in n.Parent.Children)
+            if (!c.IsText && string.Equals(c.Tag, n.Tag, StringComparison.OrdinalIgnoreCase)) i++;
+        return i;
+    }
+
+    private static bool AnyDescendant(HtmlNode n, CssSelector sel, bool childOnly)
+    {
+        foreach (var c in n.Children)
+        {
+            if (c.IsText) continue;
+            if (sel.Matches(c)) return true;
+            if (!childOnly && AnyDescendant(c, sel, false)) return true;
+        }
+        return false;
     }
 
     private static (int a, int b) ParseNth(string arg)

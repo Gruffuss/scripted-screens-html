@@ -151,7 +151,11 @@ internal static class HtmlElementPatch
         }
 
         var surface = child.GetComponent<HtmlSurface>();
-        return surface != null ? surface : child.AddComponent<HtmlSurface>();
+        if (surface == null) surface = child.AddComponent<HtmlSurface>();
+        var pointer = host.GetComponent<HtmlPointer>();
+        if (pointer == null) pointer = host.AddComponent<HtmlPointer>();
+        pointer.Surface = surface;
+        return surface;
     }
 
     private static SS.UiValue? Find(SS.UiProp[] props, string key)

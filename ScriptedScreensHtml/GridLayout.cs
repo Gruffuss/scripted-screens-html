@@ -82,9 +82,27 @@ internal sealed class GridLayout
         var definiteHeight = HasDefiniteHeight(css) && !float.IsNaN(h) && h > 0f;
 
         Gaps(css, out var rowGap, out var colGap);
-        var cols = ParseTracks(Get(css, "grid-template-columns") ?? "auto");
+        // grid-template: [areas + row sizes] / columns; grid-template-areas names cells by row strings
+        var colsText = Get(css, "grid-template-columns");
+        var rowsText = Get(css, "grid-template-rows");
+        var areasText = Get(css, "grid-template-areas");
+        if (Get(css, "grid-template") is { } template && template.Trim() != "none")
+        {
+            var slash = template.LastIndexOf('/');
+            var rowsPart = slash >= 0 ? template.Substring(0, slash) : template;
+            if (slash >= 0) colsText ??= template.Substring(slash + 1);
+            var strings = System.Text.RegularExpressions.Regex.Matches(rowsPart, "\"[^\"]*\"|'[^']*'");
+            if (strings.Count > 0)
+            {
+                areasText ??= rowsPart;
+                rowsText ??= System.Text.RegularExpressions.Regex.Replace(rowsPart, "\"[^\"]*\"|'[^']*'|\\[[^\\]]*\\]", " ");
+            }
+            else rowsText ??= rowsPart;
+        }
+        var areas = ParseAreas(areasText);
+        var cols = ParseTracks(colsText ?? "auto");
         if (cols.Count == 0) cols.Add(new Track { Auto = true });
-        var rowsSpec = ParseTracks(Get(css, "grid-template-rows") ?? string.Empty);
+        var rowsSpec = ParseTracks(rowsText ?? string.Empty);
         var autoRow = ParseTracks(Get(css, "grid-auto-rows") ?? "auto");
         var autoRowTrack = autoRow.Count > 0 ? autoRow[0] : new Track { Auto = true };
 
@@ -96,6 +114,21 @@ internal sealed class GridLayout
             var ccss = _built.CssOf(child);
             var (c0, cs, ce) = Line(Get(ccss, "grid-column"), Get(ccss, "grid-column-start"), Get(ccss, "grid-column-end"));
             var (r0, rsp, re) = Line(Get(ccss, "grid-row"), Get(ccss, "grid-row-start"), Get(ccss, "grid-row-end"));
+            if (Get(ccss, "grid-area") is { } ga)
+            {
+                var name = ga.Trim();
+                if (areas.TryGetValue(name, out var area))
+                {
+                    r0 = area.row; rsp = area.rows; c0 = area.col; cs = area.cols; re = 0; ce = 0;
+                }
+                else
+                {
+                    // grid-area: row-start / column-start / row-end / column-end
+                    var p = name.Split('/');
+                    (r0, rsp, re) = Line(null, p.Length > 0 ? p[0] : null, p.Length > 2 ? p[2] : null);
+                    (c0, cs, ce) = Line(null, p.Length > 1 ? p[1] : null, p.Length > 3 ? p[3] : null);
+                }
+            }
             items.Add(new Item { Ve = child, Col = c0, ColSpan = Mathf.Max(1, cs), Row = r0, RowSpan = Mathf.Max(1, rsp), ColEnd = ce, RowEnd = re });
         }
         var ncols = cols.Count;
@@ -359,6 +392,29 @@ internal sealed class GridLayout
     }
 
     /// <summary>grid-column / grid-row to (start index or -1 for auto, span, explicit end line or 0).</summary>
+    /// <summary>grid-template-areas: each quoted string is a row of cell names; a name's rectangle is its area (0-based row/col, spans).</summary>
+    private static Dictionary<string, (int row, int col, int rows, int cols)> ParseAreas(string? text)
+    {
+        var areas = new Dictionary<string, (int row, int col, int rows, int cols)>(StringComparer.Ordinal);
+        if (text == null) return areas;
+        var r = 0;
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, "\"([^\"]*)\"|'([^']*)'"))
+        {
+            var cells = (m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            for (var c = 0; c < cells.Length; c++)
+            {
+                var name = cells[c];
+                if (name == "." || name.Length == 0) continue;
+                if (areas.TryGetValue(name, out var a))
+                    areas[name] = (a.row, Mathf.Min(a.col, c), Mathf.Max(a.rows, r - a.row + 1), Mathf.Max(a.cols, c - a.col + 1));
+                else
+                    areas[name] = (r, c, 1, 1);
+            }
+            r++;
+        }
+        return areas;
+    }
+
     private static (int start, int span, int end) Line(string? shorthand, string? startProp, string? endProp)
     {
         var start = -1;

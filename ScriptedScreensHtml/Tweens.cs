@@ -29,6 +29,8 @@ internal sealed class Tweens
         public float Rotate;
         public Vector2 Translate;
         public Vector2 Scale;
+        public Color Bg;
+        public Color Fg;
 
         public static Snap Of(VisualElement ve)
         {
@@ -40,15 +42,107 @@ internal sealed class Tweens
                 Rotate = rs.rotate.angle.ToDegrees(),
                 Translate = new Vector2(rs.translate.x, rs.translate.y),
                 Scale = new Vector2(rs.scale.value.x, rs.scale.value.y),
+                Bg = rs.backgroundColor,
+                Fg = rs.color,
             };
         }
+
+        public bool ColourDiffers(in Snap o) => !NearColour(Bg, o.Bg) || !NearColour(Fg, o.Fg);
+        internal static bool NearColour(Color a, Color b) => Mathf.Abs(a.r - b.r) < 0.004f && Mathf.Abs(a.g - b.g) < 0.004f && Mathf.Abs(a.b - b.b) < 0.004f && Mathf.Abs(a.a - b.a) < 0.004f;
 
         public bool LayoutDiffers(in Snap o) => !Near(Rect.x, o.Rect.x) || !Near(Rect.y, o.Rect.y) || !Near(Rect.width, o.Rect.width) || !Near(Rect.height, o.Rect.height);
         public bool OpacityDiffers(in Snap o) => !Near(Opacity, o.Opacity);
         public bool TransformDiffers(in Snap o) => !Near(Rotate, o.Rotate) || !Near(Translate.x, o.Translate.x) || !Near(Translate.y, o.Translate.y) || !Near(Scale.x, o.Scale.x) || !Near(Scale.y, o.Scale.y);
-        public bool Differs(in Snap o) => LayoutDiffers(o) || OpacityDiffers(o) || TransformDiffers(o);
+        public bool Differs(in Snap o) => LayoutDiffers(o) || OpacityDiffers(o) || TransformDiffers(o) || ColourDiffers(o);
 
         private static bool Near(float a, float b) => Mathf.Abs(a - b) < 0.01f;
+    }
+
+    /// <summary>
+    /// A CSS timing function: the keywords, steps(n[, start|end]) and cubic-bezier(). Emitted
+    /// as an expression over the tween's progress and evaluated in C# for snapshots. A bezier
+    /// is approximated by evaluating y at t = progress (exact when x(t) = t, close for the
+    /// eases pages use).
+    /// </summary>
+    internal readonly struct Easing
+    {
+        public readonly EasingMode Mode;
+        public readonly int Steps;
+        public readonly bool JumpStart;
+        public readonly float Y1, Y2;
+        public readonly bool Bezier;
+
+        private Easing(EasingMode mode, int steps, bool jumpStart, bool bezier, float y1, float y2)
+        {
+            Mode = mode; Steps = steps; JumpStart = jumpStart; Bezier = bezier; Y1 = y1; Y2 = y2;
+        }
+
+        public static readonly Easing Default = new(EasingMode.Ease, 0, false, false, 0f, 0f);
+
+        public static bool TryParse(string v, out Easing e)
+        {
+            var t = v.Trim().ToLowerInvariant();
+            e = Default;
+            switch (t)
+            {
+                case "ease": return true;
+                case "linear": e = new Easing(EasingMode.Linear, 0, false, false, 0f, 0f); return true;
+                case "ease-in": e = new Easing(EasingMode.EaseIn, 0, false, false, 0f, 0f); return true;
+                case "ease-out": e = new Easing(EasingMode.EaseOut, 0, false, false, 0f, 0f); return true;
+                case "ease-in-out": e = new Easing(EasingMode.EaseInOut, 0, false, false, 0f, 0f); return true;
+                case "step-start": e = new Easing(EasingMode.Linear, 1, true, false, 0f, 0f); return true;
+                case "step-end": e = new Easing(EasingMode.Linear, 1, false, false, 0f, 0f); return true;
+            }
+            if (t.StartsWith("steps(", StringComparison.Ordinal) && t.EndsWith(")", StringComparison.Ordinal))
+            {
+                var args = t.Substring(6, t.Length - 7).Split(',');
+                var n = int.TryParse(args[0].Trim(), out var k) ? Math.Max(1, k) : 1;
+                var start = args.Length > 1 && args[1].Trim() is "start" or "jump-start" or "jump-both";
+                e = new Easing(EasingMode.Linear, n, start, false, 0f, 0f);
+                return true;
+            }
+            if (t.StartsWith("cubic-bezier(", StringComparison.Ordinal) && t.EndsWith(")", StringComparison.Ordinal))
+            {
+                var args = t.Substring(13, t.Length - 14).Split(',');
+                if (args.Length == 4
+                    && float.TryParse(args[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y1)
+                    && float.TryParse(args[3].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y2))
+                {
+                    e = new Easing(EasingMode.Linear, 0, false, true, y1, y2);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>The eased value for a linear progress 0..1.</summary>
+        public float Progress(float p)
+        {
+            p = Mathf.Clamp01(p);
+            if (Steps > 0) return Mathf.Min(1f, Mathf.Floor(p * Steps + (JumpStart ? 1f : 0f)) / Steps);
+            if (Bezier) { var q = 1f - p; return 3f * q * q * p * Y1 + 3f * q * p * p * Y2 + p * p * p; }
+            return Mode switch
+            {
+                EasingMode.Linear => p,
+                EasingMode.EaseIn => p * p,
+                EasingMode.EaseOut => 1f - (1f - p) * (1f - p),
+                _ => p * p * (3f - 2f * p),
+            };
+        }
+
+        /// <summary>The same as an expression over a progress fragment <paramref name="p"/> (0..1).</summary>
+        public string Expr(string p)
+        {
+            if (Steps > 0) return "min(1,floor(" + p + "*" + Steps + (JumpStart ? "+1" : string.Empty) + ")/" + Steps + ")";
+            if (Bezier) return "(3*(1-" + p + ")^2*" + p + "*" + Tweens.F(Y1) + "+3*(1-" + p + ")*" + p + "^2*" + Tweens.F(Y2) + "+" + p + "^3)";
+            return Mode switch
+            {
+                EasingMode.Linear => p,
+                EasingMode.EaseIn => "(" + p + ")^2",
+                EasingMode.EaseOut => "(1-(1-" + p + ")^2)",
+                _ => "smoothstep(0,1," + p + ")",
+            };
+        }
     }
 
     internal sealed class Tween
@@ -57,7 +151,7 @@ internal sealed class Tweens
         public Snap To;
         public float Start;
         public float Duration;
-        public EasingMode Ease;
+        public Easing Ease;
         /// <summary>The eased progress as an expression fragment, 0..1.</summary>
         public string P = string.Empty;
 
@@ -65,14 +159,7 @@ internal sealed class Tweens
 
         private float Progress(float now)
         {
-            var p = Mathf.Clamp01((now - Start) / Mathf.Max(0.001f, Duration));
-            return Ease switch
-            {
-                EasingMode.Linear => p,
-                EasingMode.EaseIn => p * p,
-                EasingMode.EaseOut => 1f - (1f - p) * (1f - p),
-                _ => p * p * (3f - 2f * p),
-            };
+            return Ease.Progress((now - Start) / Mathf.Max(0.001f, Duration));
         }
 
         /// <summary>Where the element is right now, for a tween that interrupts this one.</summary>
@@ -105,16 +192,10 @@ internal sealed class Tweens
             return "=(" + F(a - b) + ")*(1-" + P + ")";
         }
 
-        public static string Eased(EasingMode ease, float start, float duration)
+        public static string Eased(Easing ease, float start, float duration)
         {
             var p = "clamp((t-" + F(start) + ")/" + F(Mathf.Max(0.001f, duration)) + ",0,1)";
-            return ease switch
-            {
-                EasingMode.Linear => p,
-                EasingMode.EaseIn => "(" + p + ")^2",
-                EasingMode.EaseOut => "(1-(1-" + p + ")^2)",
-                _ => "smoothstep(0,1," + p + ")",
-            };
+            return ease.Expr(p);
         }
     }
 
@@ -122,7 +203,7 @@ internal sealed class Tweens
     /// Set by a keyframe runner before it writes a frame: the segment's duration and
     /// easing apply to that element's next change instead of its CSS transition.
     /// </summary>
-    internal static readonly Dictionary<VisualElement, (float dur, EasingMode ease)> Override = new();
+    internal static readonly Dictionary<VisualElement, (float dur, Easing ease)> Override = new();
 
     private readonly Dictionary<VisualElement, Snap> _shown = new();
     private readonly Dictionary<VisualElement, Tween> _live = new();
@@ -186,38 +267,40 @@ internal sealed class Tweens
 
     private static readonly string[] LayoutProps = { "width", "height", "top", "left", "right", "bottom", "margin", "padding", "flex", "min-width", "min-height", "max-width", "max-height", "inset" };
 
-    private static (float dur, EasingMode ease, float delay) Timing(VisualElement ve, HtmlRenderer.Result built, in Snap prev, in Snap cur)
+    private static (float dur, Easing ease, float delay) Timing(VisualElement ve, HtmlRenderer.Result built, in Snap prev, in Snap cur)
     {
         if (Override.TryGetValue(ve, out var o))
             return (o.dur, o.ease, 0f);
 
         if (!built.CssOf(ve).TryGetValue("transition", out var css))
-            return (0f, EasingMode.Ease, 0f);
+            return (0f, Easing.Default, 0f);
 
         var layout = prev.LayoutDiffers(cur);
         var opacity = prev.OpacityDiffers(cur);
         var transform = prev.TransformDiffers(cur);
+        var colour = prev.ColourDiffers(cur);
         foreach (var item in css.Split(','))
         {
-            var parts = item.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var parts = CssParser.SplitTopLevel(item.Trim(), ' ').FindAll(p => p.Length > 0).ToArray();
             if (parts.Length < 2) continue;
             var prop = parts[0].ToLowerInvariant();
             var matches = prop == "all"
+                          || (colour && (prop == "color" || prop == "background-color" || prop == "background" || prop == "border-color"))
                           || (opacity && prop == "opacity")
                           || (transform && (prop == "transform" || prop == "rotate" || prop == "translate" || prop == "scale"))
                           || (layout && Array.Exists(LayoutProps, p => prop.StartsWith(p, StringComparison.Ordinal)));
             if (!matches) continue;
             var dur = Seconds(parts[1]);
-            var ease = EasingMode.Ease;
+            var ease = Easing.Default;
             var delay = 0f;
             for (var i = 2; i < parts.Length; i++)
             {
-                if (StyleApplier.TryEasing(parts[i], out var e)) ease = e;
+                if (Easing.TryParse(parts[i], out var e)) ease = e;
                 else delay = Seconds(parts[i]);
             }
             return (dur, ease, delay);
         }
-        return (0f, EasingMode.Ease, 0f);
+        return (0f, Easing.Default, 0f);
     }
 
     private static float Seconds(string v)

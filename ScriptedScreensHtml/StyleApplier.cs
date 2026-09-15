@@ -64,6 +64,28 @@ internal static class StyleApplier
                 s.flexDirection = v switch { "row" => FlexDirection.Row, "row-reverse" => FlexDirection.RowReverse, "column-reverse" => FlexDirection.ColumnReverse, _ => FlexDirection.Column };
                 break;
             case "flex-wrap": s.flexWrap = v == "wrap" ? Wrap.Wrap : v == "wrap-reverse" ? Wrap.WrapReverse : Wrap.NoWrap; break;
+            case "flex-flow":
+                foreach (var part in v.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                    Apply(ve, new CssDeclaration(part.StartsWith("wrap", StringComparison.Ordinal) || part == "nowrap" ? "flex-wrap" : "flex-direction", part), warn);
+                break;
+            case "place-items": case "place-content": case "place-self":
+            {
+                // align-* first, justify-* second (or the same value for both)
+                var parts = v.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 0) break;
+                var suffix = d.Name.Substring(6);
+                Apply(ve, new CssDeclaration("align-" + suffix, parts[0]), warn);
+                if (suffix == "content") Apply(ve, new CssDeclaration("justify-content", parts.Length > 1 ? parts[1] : parts[0]), warn);
+                break;
+            }
+            case "-webkit-line-clamp": case "line-clamp":
+            {
+                // the box ends after n lines and the emitter ellipsises the last: max-height in line heights
+                if (v == "none") break;
+                var n = Num(v);
+                if (n > 0f) { s.maxHeight = n * EmSize * 1.25f; s.overflow = Overflow.Hidden; }
+                break;
+            }
             case "flex-grow": s.flexGrow = Num(v); break;
             case "flex-shrink": s.flexShrink = Num(v); break;
             case "flex-basis": s.flexBasis = Len(v); break;
@@ -105,6 +127,12 @@ internal static class StyleApplier
                 if (v == "none" || v == "transparent") { s.backgroundColor = Color.clear; s.backgroundImage = StyleKeyword.None; }
                 else if (v.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase)) Gradient(s, v, warn);
                 else if (TryColor(v, out var bg)) s.backgroundColor = bg;
+                else if (v.IndexOf("url(", StringComparison.OrdinalIgnoreCase) >= 0 || v.IndexOf("gradient(", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    // the shorthand: a colour token among the image, position, size and repeat parts; the emitter draws the image
+                    foreach (var part in SplitTopLevel(v))
+                        if (!part.Contains('(') && TryColor(part, out var shc)) { s.backgroundColor = shc; break; }
+                }
                 else Unknown(d, warn);
                 break;
 
@@ -119,6 +147,20 @@ internal static class StyleApplier
             case "border-right-width": s.borderRightWidth = Num(v); break;
             case "border-bottom-width": s.borderBottomWidth = Num(v); break;
             case "border-left-width": s.borderLeftWidth = Num(v); break;
+            case "border-top-style": if (v is "none" or "hidden") s.borderTopWidth = 0f; break;
+            case "border-right-style": if (v is "none" or "hidden") s.borderRightWidth = 0f; break;
+            case "border-bottom-style": if (v is "none" or "hidden") s.borderBottomWidth = 0f; break;
+            case "border-left-style": if (v is "none" or "hidden") s.borderLeftWidth = 0f; break;
+            case "border-style":
+            {
+                var parts = v.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 0) break;
+                if (SideOf(parts, 0) is "none" or "hidden") s.borderTopWidth = 0f;
+                if (SideOf(parts, 1) is "none" or "hidden") s.borderRightWidth = 0f;
+                if (SideOf(parts, 2) is "none" or "hidden") s.borderBottomWidth = 0f;
+                if (SideOf(parts, 3) is "none" or "hidden") s.borderLeftWidth = 0f;
+                break;
+            }
             case "border-top-color": if (TryColor(v, out var btc)) s.borderTopColor = btc; else Unknown(d, warn); break;
             case "border-right-color": if (TryColor(v, out var brc)) s.borderRightColor = brc; else Unknown(d, warn); break;
             case "border-bottom-color": if (TryColor(v, out var bbc)) s.borderBottomColor = bbc; else Unknown(d, warn); break;
@@ -144,7 +186,7 @@ internal static class StyleApplier
                 {
                     var name = raw.Trim().Trim('"', (char)39);
                     if (name.Length == 0) continue;
-                    sdf = FontLibrary.Get(name);
+                    sdf = FontLibrary.Get(MapGeneric(name) ?? name);
                     if (sdf != null) break;
                 }
                 if (sdf != null) s.unityFontDefinition = FontDefinition.FromSDFFont(sdf);
@@ -213,6 +255,13 @@ internal static class StyleApplier
             case "transform":
             {
                 if (v == "none") { s.translate = new Translate(0, 0); s.rotate = new Rotate(0); s.scale = new Scale(Vector2.one); break; }
+                if (NeedsMatrix(v))
+                {
+                    // skew(), matrix(), 3D functions: the emitter composes the whole transform
+                    // into a matrix on the group; the layout engine must not apply any of it.
+                    s.translate = new Translate(0, 0); s.rotate = new Rotate(0); s.scale = new Scale(Vector2.one);
+                    break;
+                }
                 foreach (var fn in Functions(v))
                 {
                     var args = fn.args;
@@ -411,8 +460,43 @@ internal static class StyleApplier
     }
 
     /// <summary>Handled outside the style object: by the grid layout, the emitter, or by the box model itself.</summary>
+    private static bool MixPart(string part, out Color c, out float pct)
+    {
+        pct = float.NaN;
+        var tokens = part.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var colourText = part.Trim();
+        if (tokens.Length >= 2 && tokens[tokens.Length - 1].EndsWith("%", StringComparison.Ordinal))
+        {
+            pct = Num(tokens[tokens.Length - 1]);
+            colourText = colourText.Substring(0, colourText.Length - tokens[tokens.Length - 1].Length).Trim();
+        }
+        else if (tokens.Length >= 2 && tokens[0].EndsWith("%", StringComparison.Ordinal))
+        {
+            pct = Num(tokens[0]);
+            colourText = colourText.Substring(tokens[0].Length).Trim();
+        }
+        return TryColor(colourText, out c);
+    }
+
     private static readonly HashSet<string> Elsewhere = new(StringComparer.Ordinal)
     {
+        // Batch F5: accepted silently. Each has no visible effect here (no printing, no pointer
+        // physics, no font hinting, no snap physics) or is a hint the layout does not need.
+        "scroll-snap-type", "scroll-snap-align", "scroll-snap-stop", "scroll-margin", "scroll-margin-top", "scroll-margin-right", "scroll-margin-bottom", "scroll-margin-left",
+        "scroll-padding", "scroll-padding-top", "scroll-padding-right", "scroll-padding-bottom", "scroll-padding-left", "scroll-behavior", "overscroll-behavior", "overscroll-behavior-x", "overscroll-behavior-y",
+        "will-change", "contain", "content-visibility", "isolation", "touch-action", "-webkit-font-smoothing", "-moz-osx-font-smoothing", "font-smooth", "text-rendering", "image-rendering",
+        "color-scheme", "zoom", "all", "text-wrap", "text-size-adjust", "-webkit-text-size-adjust", "-webkit-tap-highlight-color", "-webkit-overflow-scrolling", "print-color-adjust", "-webkit-print-color-adjust", "forced-color-adjust",
+        "resize", "caret-color", "tab-size", "orphans", "widows", "page-break-before", "page-break-after", "page-break-inside", "break-before", "break-after", "break-inside",
+        "unicode-bidi", "direction", "font-kerning", "font-feature-settings", "font-optical-sizing", "font-synthesis", "font-stretch", "font-variant", "font-variant-ligatures", "font-variant-caps", "quotes", "hanging-punctuation",
+        "background-attachment", "animation-timeline", "animation-range", "animation-range-start", "animation-range-end",
+        "scroll-timeline", "scroll-timeline-name", "scroll-timeline-axis", "view-timeline", "view-timeline-name", "view-timeline-axis", "timeline-scope",
+        "corner-shape", "border-image", "border-image-source", "border-image-slice", "border-image-width", "border-image-repeat", "border-image-outset",
+        "backface-visibility", "perspective", "perspective-origin", "transform-style", "scrollbar-width", "scrollbar-color", "scrollbar-gutter",
+        "background-clip", "-webkit-background-clip", "-webkit-text-fill-color", "ruby-position", "ruby-align",
+        "justify-items", "justify-self", "table-layout", "caption-side", "empty-cells", "grid-area", "grid-template", "grid-template-areas",
+        "counter-reset", "counter-increment", "counter-set", "list-style-image", "text-indent", "word-break", "overflow-wrap", "word-wrap", "hyphens", "text-align-last", "order", "-webkit-box-orient",
+        "container", "container-type", "container-name",
+        "text-decoration-line", "text-decoration-color", "text-decoration-style", "text-decoration-thickness", "text-underline-offset", "text-underline-position", "text-decoration-skip-ink",
         "gap", "row-gap", "column-gap", "grid-gap", "grid-row-gap", "grid-column-gap",
         "grid-template-columns", "grid-template-rows", "grid-auto-rows", "grid-auto-columns", "grid-auto-flow",
         "grid-column", "grid-row", "grid-column-start", "grid-column-end", "grid-row-start", "grid-row-end",
@@ -420,6 +504,9 @@ internal static class StyleApplier
         "box-shadow", "text-shadow", "border-style", "text-decoration",
         "outline", "outline-width", "outline-color", "outline-style", "outline-offset",
         "pointer-events", "cursor", "user-select", "content", "appearance", "-webkit-appearance", "-moz-appearance", "accent-color",
+        "filter", "clip-path", "mask-image", "-webkit-mask-image", "mask", "writing-mode", "text-orientation", "vertical-align", "object-fit", "object-position",
+        "font-variant-numeric", "fill", "stroke", "stroke-width", "stroke-opacity", "fill-opacity", "fill-rule", "stroke-dasharray", "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "text-anchor", "dominant-baseline", "stroke-miterlimit",
+        "background-size", "background-position", "background-repeat", "float", "clear", "column-count", "columns", "column-gap", "aspect-ratio", "mix-blend-mode", "backdrop-filter",
         "list-style", "list-style-type", "list-style-position", "border-collapse", "border-spacing",
     };
 
@@ -450,6 +537,7 @@ internal static class StyleApplier
             Calc(v, out var px, out var pct);
             return Mathf.Abs(px) > 0.0001f || Mathf.Abs(pct) < 0.0001f ? px : pct;
         }
+        if (Func(v) is { } f) return f;
         return Unit(v);
     }
 
@@ -463,8 +551,42 @@ internal static class StyleApplier
         else if (v.EndsWith("vw", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = ViewportW / 100f; }
         else if (v.EndsWith("vh", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = ViewportH / 100f; }
         else if (v.EndsWith("vmin", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = Mathf.Min(ViewportW, ViewportH) / 100f; }
+        else if (v.EndsWith("vmax", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = Mathf.Max(ViewportW, ViewportH) / 100f; }
         else if (v.EndsWith("pt", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 4f / 3f; }
+        else if (v.EndsWith("pc", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 16f; }
+        else if (v.EndsWith("cm", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f / 2.54f; }
+        else if (v.EndsWith("mm", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f / 25.4f; }
+        else if (v.EndsWith("in", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f; }
+        else if (v.EndsWith("ch", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize * 0.5f; }   // the "0" of a text face is about half an em
+        else if (v.EndsWith("ex", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize * 0.5f; }
+        else if (v.EndsWith("q", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 1); scale = 96f / 25.4f / 4f; }
+        else if (v.EndsWith("grad", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = 0.9f; }
+        else if (v.EndsWith("deg", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 3); }
+        else if (v.EndsWith("rad", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 3); scale = 180f / Mathf.PI; }
+        else if (v.EndsWith("turn", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = 360f; }
         return float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f * scale : 0f;
+    }
+
+    /// <summary>min(), max(), clamp() over lengths; each argument may be a calc-style expression. Null when not one of them.</summary>
+    private static float? Func(string v)
+    {
+        var lower = v.ToLowerInvariant();
+        string fn;
+        if (lower.StartsWith("min(", StringComparison.Ordinal)) fn = "min";
+        else if (lower.StartsWith("max(", StringComparison.Ordinal)) fn = "max";
+        else if (lower.StartsWith("clamp(", StringComparison.Ordinal)) fn = "clamp";
+        else return null;
+        var inner = v.Substring(fn.Length + 1, Math.Max(0, v.Length - fn.Length - 2));
+        var args = new List<float>();
+        foreach (var a in CssParser.SplitTopLevel(inner, ','))
+            args.Add(Num("calc(" + a.Trim() + ")"));
+        if (args.Count == 0) return 0f;
+        switch (fn)
+        {
+            case "min": { var m = args[0]; foreach (var a in args) m = Mathf.Min(m, a); return m; }
+            case "max": { var m = args[0]; foreach (var a in args) m = Mathf.Max(m, a); return m; }
+            default: return args.Count >= 3 ? Mathf.Clamp(args[1], args[0], args[2]) : args[0];
+        }
     }
 
     public static StyleLength Len(string v)
@@ -472,6 +594,7 @@ internal static class StyleApplier
         v = v.Trim();
         if (v == "auto") return StyleKeyword.Auto;
         if (v == "initial" || v == "unset") return StyleKeyword.Initial;
+        if (Func(v) is { } fpx) return new Length(fpx, LengthUnit.Pixel);
         if (v.StartsWith("calc(", StringComparison.OrdinalIgnoreCase))
         {
             // px and % cannot be mixed in one length here; whichever part is non-zero wins.
@@ -534,8 +657,18 @@ internal static class StyleApplier
         }
         var start = i;
         if (i < s.Length && (s[i] == '-' || s[i] == '+')) i++;
-        while (i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '.' || s[i] == '%')) i++;
+        while (i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '.' || s[i] == '%' || s[i] == '-')) i++;
         var tok = s.Substring(start, i - start);
+        if (i < s.Length && s[i] == '(')
+        {
+            // a nested function: min(), max(), clamp(), var() already resolved, calc()
+            var depth = 0;
+            var j = i;
+            for (; j < s.Length; j++) { if (s[j] == '(') depth++; else if (s[j] == ')' && --depth == 0) { j++; break; } }
+            var call = s.Substring(start, j - start);
+            i = j;
+            return (Num(call), 0f);
+        }
         if (tok.EndsWith("%", StringComparison.Ordinal)) return (0f, Unit(tok));
         return (Unit(tok), 0f);
     }
@@ -642,7 +775,7 @@ internal static class StyleApplier
         var parts = SplitTopLevel(v);
         foreach (var part in parts)
         {
-            if (part == "solid" || part == "dashed" || part == "dotted" || part == "double") continue;
+            if (part is "solid" or "dashed" or "dotted" or "double" or "inset" or "outset" or "groove" or "ridge" or "none" or "hidden") continue; // the style keyword is read by the emitter
             if (IsNumber(part) || part.EndsWith("px", StringComparison.OrdinalIgnoreCase)) width = Num(part);
             else if (TryColor(part, out var c)) color = c;
             else warn?.Invoke($"css: border value \"{part}\" not understood");
@@ -677,7 +810,14 @@ internal static class StyleApplier
         return list;
     }
 
-    private static IEnumerable<(string name, string[] args)> Functions(string v)
+    /// <summary>A transform list the layout engine cannot represent (skew, matrix, 3D): the emitter takes it whole.</summary>
+    internal static bool NeedsMatrix(string transform)
+    {
+        var t = transform.ToLowerInvariant();
+        return t.Contains("skew") || t.Contains("matrix") || t.Contains("3d") || t.Contains("rotatex") || t.Contains("rotatey") || t.Contains("rotatez") || t.Contains("perspective");
+    }
+
+    internal static IEnumerable<(string name, string[] args)> Functions(string v)
     {
         var i = 0;
         while (i < v.Length)
@@ -696,24 +836,163 @@ internal static class StyleApplier
 
     // ---- colour ----
 
-    private static readonly Dictionary<string, Color> Named = new(StringComparer.OrdinalIgnoreCase)
+    /// <summary>The 148 CSS named colours (CSS Color Level 4), plus transparent.</summary>
+    private static readonly Dictionary<string, Color> Named = BuildNamed(
+        "aliceblue f0f8ff antiquewhite faebd7 aqua 00ffff aquamarine 7fffd4 azure f0ffff beige f5f5dc bisque ffe4c4 black 000000 " +
+        "blanchedalmond ffebcd blue 0000ff blueviolet 8a2be2 brown a52a2a burlywood deb887 cadetblue 5f9ea0 chartreuse 7fff00 " +
+        "chocolate d2691e coral ff7f50 cornflowerblue 6495ed cornsilk fff8dc crimson dc143c cyan 00ffff darkblue 00008b " +
+        "darkcyan 008b8b darkgoldenrod b8860b darkgray a9a9a9 darkgreen 006400 darkgrey a9a9a9 darkkhaki bdb76b darkmagenta 8b008b " +
+        "darkolivegreen 556b2f darkorange ff8c00 darkorchid 9932cc darkred 8b0000 darksalmon e9967a darkseagreen 8fbc8f " +
+        "darkslateblue 483d8b darkslategray 2f4f4f darkslategrey 2f4f4f darkturquoise 00ced1 darkviolet 9400d3 deeppink ff1493 " +
+        "deepskyblue 00bfff dimgray 696969 dimgrey 696969 dodgerblue 1e90ff firebrick b22222 floralwhite fffaf0 forestgreen 228b22 " +
+        "fuchsia ff00ff gainsboro dcdcdc ghostwhite f8f8ff gold ffd700 goldenrod daa520 gray 808080 green 008000 greenyellow adff2f " +
+        "grey 808080 honeydew f0fff0 hotpink ff69b4 indianred cd5c5c indigo 4b0082 ivory fffff0 khaki f0e68c lavender e6e6fa " +
+        "lavenderblush fff0f5 lawngreen 7cfc00 lemonchiffon fffacd lightblue add8e6 lightcoral f08080 lightcyan e0ffff " +
+        "lightgoldenrodyellow fafad2 lightgray d3d3d3 lightgreen 90ee90 lightgrey d3d3d3 lightpink ffb6c1 lightsalmon ffa07a " +
+        "lightseagreen 20b2aa lightskyblue 87cefa lightslategray 778899 lightslategrey 778899 lightsteelblue b0c4de lightyellow ffffe0 " +
+        "lime 00ff00 limegreen 32cd32 linen faf0e6 magenta ff00ff maroon 800000 mediumaquamarine 66cdaa mediumblue 0000cd " +
+        "mediumorchid ba55d3 mediumpurple 9370db mediumseagreen 3cb371 mediumslateblue 7b68ee mediumspringgreen 00fa9a " +
+        "mediumturquoise 48d1cc mediumvioletred c71585 midnightblue 191970 mintcream f5fffa mistyrose ffe4e1 moccasin ffe4b5 " +
+        "navajowhite ffdead navy 000080 oldlace fdf5e6 olive 808000 olivedrab 6b8e23 orange ffa500 orangered ff4500 orchid da70d6 " +
+        "palegoldenrod eee8aa palegreen 98fb98 paleturquoise afeeee palevioletred db7093 papayawhip ffefd5 peachpuff ffdab9 " +
+        "peru cd853f pink ffc0cb plum dda0dd powderblue b0e0e6 purple 800080 rebeccapurple 663399 red ff0000 rosybrown bc8f8f " +
+        "royalblue 4169e1 saddlebrown 8b4513 salmon fa8072 sandybrown f4a460 seagreen 2e8b57 seashell fff5ee sienna a0522d " +
+        "silver c0c0c0 skyblue 87ceeb slateblue 6a5acd slategray 708090 slategrey 708090 snow fffafa springgreen 00ff7f " +
+        "steelblue 4682b4 tan d2b48c teal 008080 thistle d8bfd8 tomato ff6347 turquoise 40e0d0 violet ee82ee wheat f5deb3 " +
+        "white ffffff whitesmoke f5f5f5 yellow ffff00 yellowgreen 9acd32");
+
+    private static Dictionary<string, Color> BuildNamed(string table)
     {
-        ["black"] = Color.black, ["white"] = Color.white, ["red"] = Color.red, ["green"] = new Color(0, 0.5f, 0),
-        ["lime"] = Color.green, ["blue"] = Color.blue, ["yellow"] = Color.yellow, ["cyan"] = Color.cyan, ["aqua"] = Color.cyan,
-        ["magenta"] = Color.magenta, ["fuchsia"] = Color.magenta, ["gray"] = Color.gray, ["grey"] = Color.gray,
-        ["silver"] = new Color(0.75f, 0.75f, 0.75f), ["orange"] = new Color(1f, 0.647f, 0f), ["navy"] = new Color(0, 0, 0.5f),
-        ["teal"] = new Color(0, 0.5f, 0.5f), ["maroon"] = new Color(0.5f, 0, 0), ["purple"] = new Color(0.5f, 0, 0.5f),
-        ["olive"] = new Color(0.5f, 0.5f, 0), ["transparent"] = Color.clear,
-    };
+        var d = new Dictionary<string, Color>(StringComparer.OrdinalIgnoreCase) { ["transparent"] = Color.clear };
+        var parts = table.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i + 1 < parts.Length; i += 2)
+        {
+            var n = uint.Parse(parts[i + 1], NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+            d[parts[i]] = new Color(((n >> 16) & 0xFF) / 255f, ((n >> 8) & 0xFF) / 255f, (n & 0xFF) / 255f, 1f);
+        }
+        return d;
+    }
+
+    /// <summary>The face a generic family stands for here: the game's mono face for monospace, Barlow for sans, RBBook for serif.</summary>
+    public static string? MapGeneric(string family)
+    {
+        switch (family.Trim().Trim('"', '\'').ToLowerInvariant())
+        {
+            case "monospace": case "ui-monospace": return "code";
+            case "serif": case "ui-serif": return "RBBook SDF";
+            case "sans-serif": case "system-ui": case "ui-sans-serif": case "ui-rounded": case "cursive": case "fantasy": return "Barlow";
+        }
+        return null;
+    }
 
     /// <summary>#rgb #rgba #rrggbb #rrggbbaa rgb() rgba() hsl() and a few names. Managed code only:
     /// ColorUtility.TryParseHtmlString is a native call that fails headless.</summary>
+    /// <summary>The value for side index 0..3 (top right bottom left) of a 1-4 value list, as CSS repeats them.</summary>
+    internal static string SideOf(string[] parts, int side)
+    {
+        return parts.Length switch
+        {
+            1 => parts[0],
+            2 => parts[side % 2],
+            3 => side == 3 ? parts[1] : parts[side],
+            _ => parts[Math.Min(side, parts.Length - 1)],
+        };
+    }
+
+    /// <summary>
+    /// Logical properties as their physical ones for a horizontal, left-to-right page:
+    /// inline is x, block is y, start is left/top. A two-value pair (margin-inline: a b)
+    /// splits; a shorthand (border-inline: 1px solid) applies whole to both sides.
+    /// </summary>
+    internal static List<CssDeclaration> Expand(List<CssDeclaration> list)
+    {
+        List<CssDeclaration>? outp = null;
+        for (var i = 0; i < list.Count; i++)
+        {
+            var d = list[i];
+            var n = d.Name;
+            string? a = null, b = null;
+            var pair = false;
+            switch (n)
+            {
+                case "inline-size": a = "width"; break;
+                case "block-size": a = "height"; break;
+                case "min-inline-size": a = "min-width"; break;
+                case "max-inline-size": a = "max-width"; break;
+                case "min-block-size": a = "min-height"; break;
+                case "max-block-size": a = "max-height"; break;
+                case "border-start-start-radius": a = "border-top-left-radius"; break;
+                case "border-start-end-radius": a = "border-top-right-radius"; break;
+                case "border-end-start-radius": a = "border-bottom-left-radius"; break;
+                case "border-end-end-radius": a = "border-bottom-right-radius"; break;
+                case "overflow-inline": a = "overflow-x"; break;
+                case "overflow-block": a = "overflow-y"; break;
+                case "inset-inline-start": a = "left"; break;
+                case "inset-inline-end": a = "right"; break;
+                case "inset-block-start": a = "top"; break;
+                case "inset-block-end": a = "bottom"; break;
+                case "inset-inline": a = "left"; b = "right"; pair = true; break;
+                case "inset-block": a = "top"; b = "bottom"; pair = true; break;
+                case "text-align": case "float": case "clear":
+                {
+                    var kw = d.Value.Trim().ToLowerInvariant();
+                    if (kw is "start" or "inline-start") a = n;
+                    else if (kw is "end" or "inline-end") a = n;
+                    else break;
+                    outp ??= new List<CssDeclaration>(list.GetRange(0, i));
+                    outp.Add(new CssDeclaration(n, kw is "start" or "inline-start" ? "left" : "right", d.Important));
+                    a = null;
+                    continue;
+                }
+                default:
+                    if (n.IndexOf("-inline-start", StringComparison.Ordinal) >= 0) a = n.Replace("-inline-start", "-left");
+                    else if (n.IndexOf("-inline-end", StringComparison.Ordinal) >= 0) a = n.Replace("-inline-end", "-right");
+                    else if (n.IndexOf("-block-start", StringComparison.Ordinal) >= 0) a = n.Replace("-block-start", "-top");
+                    else if (n.IndexOf("-block-end", StringComparison.Ordinal) >= 0) a = n.Replace("-block-end", "-bottom");
+                    else if (n.IndexOf("-inline", StringComparison.Ordinal) >= 0) { a = n.Replace("-inline", "-left"); b = n.Replace("-inline", "-right"); pair = n.StartsWith("margin", StringComparison.Ordinal) || n.StartsWith("padding", StringComparison.Ordinal) || n.StartsWith("scroll", StringComparison.Ordinal); }
+                    else if (n.IndexOf("-block", StringComparison.Ordinal) >= 0) { a = n.Replace("-block", "-top"); b = n.Replace("-block", "-bottom"); pair = n.StartsWith("margin", StringComparison.Ordinal) || n.StartsWith("padding", StringComparison.Ordinal) || n.StartsWith("scroll", StringComparison.Ordinal); }
+                    break;
+            }
+            if (a == null) { outp?.Add(d); continue; }
+            outp ??= new List<CssDeclaration>(list.GetRange(0, i));
+            if (b == null) { outp.Add(new CssDeclaration(a, d.Value, d.Important)); continue; }
+            var va = d.Value.Trim();
+            var vb = va;
+            if (pair)
+            {
+                var parts = va.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2 && !parts[0].Contains('(')) { va = parts[0]; vb = parts[1]; }
+            }
+            outp.Add(new CssDeclaration(a, va, d.Important));
+            outp.Add(new CssDeclaration(b, vb, d.Important));
+        }
+        return outp ?? list;
+    }
+
     public static bool TryColor(string v, out Color color)
     {
         v = v.Trim();
         color = Color.white;
         if (v.Length == 0) return false;
         if (Named.TryGetValue(v, out color)) return true;
+        if (v.StartsWith("color-mix(", StringComparison.OrdinalIgnoreCase))
+        {
+            // color-mix(in <space>, A [p%], B [q%]): the percentages normalised as the spec
+            // says, mixed in sRGB. ponytail: oklab/oklch/hsl interpolation differs a little in hue paths
+            var closeParen = v.LastIndexOf(')');
+            if (closeParen < 10) return false;
+            var parts = CssParser.SplitTopLevel(v.Substring(10, closeParen - 10), ',');
+            if (parts.Count < 3) return false;
+            if (!MixPart(parts[1], out var ca, out var pa) || !MixPart(parts[2], out var cb, out var pb)) return false;
+            if (float.IsNaN(pa) && float.IsNaN(pb)) { pa = 50f; pb = 50f; }
+            else if (float.IsNaN(pa)) pa = 100f - pb;
+            else if (float.IsNaN(pb)) pb = 100f - pa;
+            var sum = pa + pb;
+            if (sum <= 0f) return false;
+            var t = pb / sum;
+            color = Color.Lerp(ca, cb, t);
+            return true;
+        }
 
         if (v[0] == '#')
         {
@@ -748,7 +1027,7 @@ internal static class StyleApplier
             }
             else
             {
-                var hue = Num(args[0]) / 360f;
+                var hue = Mathf.Repeat(Num(args[0]) / 360f, 1f);
                 var sat = Num(args[1]) / 100f;
                 var light = Num(args[2]) / 100f;
                 // HSL to RGB via HSV: v = l + s*min(l,1-l); s_v = 2*(1 - l/v)

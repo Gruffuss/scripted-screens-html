@@ -1,198 +1,199 @@
-# What works from HTML5, CSS and JS, and what does not — and why
+# Writing a page for a console: what works from HTML, CSS and JS
 
-State as of 2026-09-15, vector back-end, vector mod 0.11.20.0, everything below confirmed on a console. The pipeline decides everything below:
+State as of 2026-09-15 (branch `untested`, vector mod 0.11.21.0). Everything in the
+"works" tables below was seen on a console that day (`HtmlTest4` to `HtmlTest12`, on the
+2x2 and 3x3 test consoles). The contract is simple: **a page is written exactly as for a
+browser.** Anything a browser page does that fails here is a defect, not a convention, and
+the two lists at the end say what is still being finished.
 
 ```
-HTML + CSS  →  parse, cascade  →  UI Toolkit lays the boxes out (layout ONLY; grid is ours)
-            →  emitter translates the laid-out boxes to the vector mod's scene text
-            →  the vector mod draws it as geometry, off-thread, in the Fonts mod's faces
-JS          →  runs on a worker thread; its DOM writes re-run the translation
+HTML + CSS  →  parse, cascade  →  UI Toolkit lays the boxes out (layout only; grid and inline flow are ours)
+            →  the emitter translates the laid-out boxes to the vector mod's scene text
+            →  the vector mod draws geometry off-thread, text in the Fonts mod's faces
+JS          →  Jint on a worker thread; DOM writes land on the main thread and re-run the translation
 ```
 
-So a feature "works" when all three agree: the CSS parser understands it, the layout can
-place it, and the emitter has a vector node for it. Anything that needs **per-frame
-painting** (canvas, JS animation loops) or **per-pixel filters** (blur of the page itself,
-backdrop effects) is structurally out, because the vector layer draws geometry, not pixels.
-Pointer input reaches a page only as **clicks on buttons**, delivered to Lua.
+**What that pipeline means for a page author**
 
-The rule of thumb: **the page changes on data, motion is an expression.** JS and data
-decide what is on screen; anything that moves every frame is an SVG attribute written as
-`="…"` over `t` (seconds), `i` (instance) and `$name` (data), or a CSS transition or
-keyframe, which compiles to the same thing.
+- Static pages cost nothing after their first emit. Motion is written once and evaluated
+  by the vector mod: CSS transitions, keyframes and scroll-driven animations become
+  expressions; an SVG attribute may be an expression over `t` (seconds), `i` (instance)
+  and `$name` (data) directly.
+- Pointer input reaches the page: `:hover`, `:active`, `:focus`, `click`, `mousemove`
+  and friends on any element; the cursor over a world console is the crosshair when the
+  cursor is locked.
+- Form controls are ScriptedScreens' own controls placed inside the element's box (its
+  border and background are the page's). Images, video and audio are ScriptedScreens'
+  `image`, `media` and `sound` elements, so URLs the game can fetch work.
+- Network: `<link rel=stylesheet>`, `@import`, `<script src>` and module `import` from
+  http(s) URLs are fetched (a private GitHub repo answers 404; make it public). Page
+  `fetch()`/`XMLHttpRequest` are not provided: data comes from Lua through `data`.
 
 ---
 
 ## HTML
 
-### Works
-
-| Feature | Notes |
+| Area | What works |
 |---|---|
-| `<html> <head> <body> <style> <script>` | one page per `html` element, `src` prop |
-| `<meta name="viewport" content="width=768">` | design width; the page lays out at it and is stretched to the console |
-| Block containers: `div section header footer main nav article aside p h1–h6 ul ol li` | a block is a flex column; `display: flex` is a row; `display: grid` is a grid |
-| Inline text: `b i u s span small big sub sup mark code font br` | rendered as rich text inside one label |
-| Inline element **with an id** | kept as its own label so data and JS can target it |
-| `id`, `class`, inline `style` | |
-| Comments, entities (`&amp; &lt; &nbsp; &#x25BC;`) | |
-| `<hr>` | a 1px rule |
-| `<table>` with `thead/tbody/tfoot/tr/td/th/caption`, `colspan` | laid out as a grid, one column per cell of the widest row, columns of equal width (size them with CSS on the cells); `tr` is transparent, so a rule on `tr` styles nothing |
-| `<ul>/<ol>/<li>` | markers at the front of each item, as a browser draws them: disc, circle and square are shapes in the text colour (no font involved), decimal/alpha/roman are text; `list-style-type` on the list or the item, `none` for no marker |
-| `<a href>` | underlined link-coloured text; there is nowhere to navigate, so `href` is inert |
-| `<input type=text/password/number/search/…>`, `<textarea>` | a ScriptedScreens `textinput` over the box (`value`, `placeholder`, `title`); the page's `background`, `color` and `font-size` style it. Editing it fires `input` and `change` on the element in page script (`e.target.value`), and the page element's Lua `on_change(v)` gets `"name=value"` (the input's `name`, else its id) |
-| `<input type=checkbox>`, `<input type=radio name=g>` | drawn by the page: a box or ring sized by `width`/`height` (16px default), stroked in the text colour, filled with `accent-color` and a white tick or dot when checked. `checked` state is kept on the page, radios are exclusive per `name`. Restyle them the browser way: `appearance: none`, your own `border`/`background`/`border-radius`, and an `input:checked { … }` rule (`:checked`, `:disabled`, `:enabled` match the attributes). A click fires `change` on the element in script (`e.target.checked`) and reaches Lua as `"name=true"`/`"name=false"` |
-| `<input type=range min max value>` | a ScriptedScreens `slider`; `accent-color` is the fill; Lua gets the number |
-| `<select><option value>` | a ScriptedScreens `select`; `selected` on an option picks the initial one; script and Lua get the option's `value` (else its text) |
-| `<input type=button/submit/reset value>` | a click region like `<button>` |
-| Script writes to a control | `el.value = …` and `el.checked = …` update the control; `focus()`/`blur()` are no-ops |
-| `<img src>` | a ScriptedScreens `image` element placed over the box (URLs load through ScriptedScreens; raw GitHub works, Wikimedia refuses Unity's request); `width`/`height` attributes or CSS size the box. Confirmed 2026-09-15: stays through clicks and surface rebuilds. Host and single player only: the element is written to the local surface model, not sent to remote clients |
-| `<video src autoplay loop muted>`, `<audio src autoplay loop>` | ScriptedScreens `media` and `sound` elements, placed the same way as `<img>`; ScriptedScreens' own multiplayer and video gating applies. Not yet seen on a console |
-| `<button id>`, any element with `onclick`, `data-click`, or a script `click` listener | a click region in the vector scene. The click fires `click` on the element in page script (listeners, `onclick`, inline `onclick="…"`) and arrives at the page element's Lua `on_click(nodeId, player)` with the element's id |
-| `<svg>` with `line polyline polygon rect circle ellipse path g defs linearGradient radialGradient` | translated one-to-one to vector nodes; `viewBox`, `preserveAspectRatio="none"` (strokes keep one width: the scale is baked into coordinates), `fill stroke stroke-width opacity fill-opacity stroke-opacity stroke-linecap stroke-linejoin`, `fill="url(#id)"` |
-| SVG extensions | any attribute may be `="expression"`; `n="36"` on `polygon`/`polyline` makes a sampled band/line (`x y y2` per sample `i`); `n="42"` on `circle`/`rect`/`ellipse`/`path` repeats it (`hash(i)` for per-instance randoms); `fo2 fea fea_edge lod dash dofs` pass through to the vector layer |
-| Data binding by id | `data = { id = value }` from Lua: string/number → text, table → CSS, bool → display; an svg shape id takes `points`, an attribute table, or a **number array**, which binds the shape to `$id[i]` so the vector mod scrolls it between ticks. Ids always bind, and a page script's `data` handler gets the same payload afterwards; the whole payload is also forwarded flattened to the scene as `$a_b` |
+| Document | `html head body meta style script link title` (title is ignored); `<meta name="viewport" content="width=N">` sets the design width the page lays out at; the page is stretched to the console |
+| Blocks | `div section article aside header footer main nav p h1-h6 pre blockquote address figure figcaption fieldset legend hr dl dt dd details summary dialog` with sensible defaults; a block is a flex column, `display: flex` a row, `display: grid` a grid |
+| Inline text | `b strong i em u s span small big sub sup mark code kbd samp tt font br abbr cite q var time dfn del ins bdi wbr data strike ruby rt rp` as rich text inside one label; an inline element with an id, a class, or that is `img`/a control keeps its own element inside a wrapping row |
+| Inline flow | text and inline elements between blocks flow as one line box (a `::before` beside its text, a span before a nested list); a floated span floats; `::first-letter` is a drop cap with the text flowing beside it |
+| Lists | `ul ol li` with markers as a browser draws them: disc/circle/square as shapes, decimal/alpha/roman as text, `@counter-style` systems, `list-style-image`, `list-style-type: none`; nested lists |
+| Tables | `table thead tbody tfoot tr td th caption col`, `colspan`, a `width` attribute; rows and sections are real elements (`tr:nth-child` striping, hover); `caption-side`, `empty-cells`; cells share a table with a width equally, size to content without one |
+| Forms | `input` (text, number with min/max/step, checkbox, radio, range, email, url, password, search), `textarea` (rows/cols), `select` with `optgroup`, `button`, `label for`, `form` with `submit`, `progress`, `meter` (three colours), `fieldset`/`legend`; values reach Lua as `on_change("name=value")` and the page script as `input`/`change` events |
+| Details, dialog | `<details open>` toggles on the summary click; `dialog.showModal()`/`close()`; `:open`, `:modal` |
+| Media | `img` (`object-fit`, radius, `alt` ignored), `video`, `audio` (autoplay, loop, controls attributes as the ScriptedScreens elements allow), `picture`/`source` (first source) |
+| Inline SVG | see the SVG section |
+| Canvas | see the JS section |
+| Entities, comments | named, decimal and hex entities; comments dropped; whitespace collapsed as in HTML |
+| Attributes | `id class style title lang dir hidden disabled required readonly placeholder checked selected open data-*`, `onclick` |
 
-### Does not work
+## SVG
 
-| Feature | Why |
+An inline `<svg>` is resolved the way a browser resolves it, then written one shape to one
+vector node.
+
+| Area | What works |
 |---|---|
-| `<canvas>` | its whole model is "script repaints pixels every frame". The vector layer draws geometry once and animates it with expressions. A canvas is laid out but draws nothing. Use `<svg>` with expressions |
-| `<form>` submission, `<input type=file/date/color>`, `<datalist>` | a form is just a box (no submit, no navigation); those input types have no ScriptedScreens control. `<input type=date>` and friends fall back to a text field |
-| `<iframe> <object>` | no meaning here |
-| Text clipped to a rounded shape | a label under a rounded `overflow: hidden` box is clipped to the box's rectangle, not its rounded outline (the vector text layer masks with a rectangle). Standing limit; invisible at the radii dashboards use |
-| `<img>` etc. for remote players | the image, media and sound elements are written into the host's local surface model, not sent as Lua ops, so a remote client never receives them. Single player and the host see them. The route, if needed: issue them as upsert ops |
-
----
+| Shapes | `rect` (rx), `circle`, `ellipse`, `line`, `polyline`, `polygon`, `path` (full `d` syntax incl. arcs and relative commands) |
+| Structure | `g`, `defs`, `symbol`, `use` (href to a shape or a symbol with its own viewBox, x/y/width/height), `clipPath` on shapes and groups (convex and concave), `title`/`desc`/`metadata` skipped |
+| Presentation | attributes, inline `style`, and stylesheet rules on shape nodes (`.bar:nth-child(2) { fill }`, `svg circle { stroke }`); `fill stroke stroke-width fill-opacity stroke-opacity opacity stroke-linecap stroke-linejoin stroke-dasharray stroke-dashoffset stroke-miterlimit fill-rule` inherit through groups as in SVG |
+| Transforms | `transform` attribute with `translate rotate(a[,cx,cy]) scale skewX skewY matrix`, composed through nested groups |
+| Gradients | `linearGradient`, `radialGradient` with stops (`offset`, `stop-color`, `stop-opacity`, inline style), `gradientUnits`; ids scoped per svg |
+| Text | `text` and `tspan` (own x/y start a line; tspan `fill`/`font-weight`/`font-style` as rich text), `font-size` in viewBox units, `text-anchor`, `dominant-baseline`, `font-family`, `letter-spacing` |
+| Image | `<image href>` with `preserveAspectRatio` (fill/contain/cover) |
+| Fit | `viewBox`, `preserveAspectRatio="none"` (non-uniform scale baked into coordinates so strokes keep one width) |
+| Expressions | any attribute may be `="expression"` for the vector mod (`t`, `i`, `$data`, `hash`); `n="36"` on polygon/polyline is a sampled band/line, on other shapes a repeat; `fo2 fea fea_edge lod dash dofs ml sh sd sdo fr` pass through |
+| Data binding | a shape with an id takes `data` from Lua: a string sets `points`, a map sets attributes, a number array becomes evenly spaced y values |
 
 ## CSS
 
-### Works
+### Cascade and selectors
 
-**Selectors:** `tag`, `.class`, `#id`, compounds (`div.a#b`), descendant (`a b`), child
-(`a > b`), adjacent sibling (`a + b`), selector lists (`a, b`), specificity and source
-order, `!important`, `:root`, `:first-child`, `:last-child`, `:nth-child(an+b | odd | even)`,
-`:not(compound)`. State pseudo-classes (`:hover :active :focus …`) parse and never match:
-there is no pointer.
-
-**Values:** `px`, `%`, `em`, `rem`, `vw`, `vh`, `vmin`, `pt`; `calc()` with `+ - * /` and
-parentheses (px and % kept apart: the non-zero part wins); custom properties (`--x` on any
-element, inherited) and `var(--x, fallback)`.
-
-**Box model:** `width height min-* max-*`, `margin` and per-side, `padding` and per-side,
-`position: absolute | relative`, `top right bottom left`, `inset`, `display: none | block |
-flex | grid`, `overflow: hidden` (a clip, rounded corners honoured), `visibility`,
-`outline` / `outline-offset` (a stroke outside the border box, `outline-style` solid only), `pointer-events: none` (the element is no click region), `opacity` (whole subtree), `z-index` (siblings painted in z order, document order within
-a value; text obeys it too, since vector mod 0.11.12.0 draws labels in scene order),
-`box-sizing` (always border-box, as UI Toolkit is).
-
-**Flexbox:** `flex-direction`, `flex-wrap`, `flex`, `flex-grow/shrink/basis`,
-`justify-content`, `align-items`, `align-self`, `align-content`, `gap` / `row-gap` /
-`column-gap` (as margins on the children).
-
-**Grid:** `grid-template-columns` / `-rows` in `px`, `%`, `fr`, `auto`, `repeat()`,
-`minmax()` (its max); `grid-auto-rows`; `gap`; auto placement row-first; `grid-column` /
-`grid-row` as `a`, `a / b`, `span n`, `a / span n`, negative lines (`1 / -1`). Children fill
-their cells; auto rows take the tallest child. Not: named lines and areas, dense packing,
-`justify-items`/`align-items` inside a cell.
-
-**Paint:** `color`, `background`/`background-color`, `linear-gradient(...)` (angle or `to
-side`, any number of stops, **hard stops** split geometrically so the edge is exact),
-`radial-gradient(...)` (`circle`/`ellipse`, `at x y`, size keywords approximated by radius; affordable since vector mod 0.11.20.0: the whole 2x2 test page including its 90x50 radial box is 11,403 vertices at 1,408 px on screen, where it was 53,482 before),
-`border` shorthand, per-side `border-*-width` and `border-*-color`, a rounded box with a
-differently coloured side (drawn as arcs), `border-style: dashed | dotted`, `border-radius`
-and per-corner (CSS overflow clamp applied), `box-shadow` (offset, blur, spread, colour,
-several; drawn as geometry by the vector mod; `inset` skipped).
-
-**Text:** `font-family` (any face in the Fonts mod's folder: `'Barlow'`, `'Barlow
-SemiBold'`, game faces such as `'noto-punc'`), `font-size`, `font` shorthand,
-`font-weight` (bold ≥ 600, not applied twice on a face that is already a named weight),
-`text-align`, `white-space: nowrap`, `letter-spacing`, `text-overflow: ellipsis` (with
-overflow hidden), wrapping (a label laid out on more than one line wraps in the vector
-layer too), `line-height` (number, px, em or %), `text-transform`, `text-decoration:
-underline | line-through`, `text-shadow` (one per label, via the font shader's underlay),
-quotes, backslashes and line breaks in text.
-
-**Transform:** `transform: translate() translateX/Y() rotate() scale() scaleX/Y()` — a
-vector group with anchor at the box centre.
-
-**Motion:** `transition` (property, duration, easing, delay) on layout properties, `opacity`
-and `transform`, and `@keyframes` + `animation` (duration, delay, easing, iteration count,
-`infinite`, `reverse`, `alternate`). Compiled to vector expressions over `t`: a change is
-emitted once as `=from+(to-from)*ease(clamp((t-start)/dur,0,1))`, the vector mod moves it
-every frame, and the scene is re-emitted with plain numbers when the last tween ends.
-Easings: `linear`, `ease-in`, `ease-out`, everything else is smoothstep.
-
-### Does not work
-
-| Feature | Why |
+| Area | What works |
 |---|---|
-| `display: inline`, `inline-block`, `float`, inline flow | no inline formatting context. A block is either all text (one label, rich text) or all boxes (a container); mixed content becomes a wrapping row |
-| `transition` on `color`/`background-color`, colour keyframes | the vector mod animates a colour by sampling a gradient at an expression (`f = { grad, at }`), but that form exists only as a structured prop and the page reaches the vector mod through the scene text, which has no map syntax; colour changes snap until the text form gains it (asked for as `fat=`/`sat=`). Layout, opacity and transform transitions animate |
-| `filter`, `backdrop-filter`, `mix-blend-mode` | per-pixel effects on the page need an offscreen pass; the vector layer is geometry |
-| `box-shadow: inset`, more than one `text-shadow` | the vector shadow is a drop shadow only; the text underlay is a single layer (a second is reported in the log) |
-| `outline` | not mapped; use a border |
-| `@font-face`, `@import` | fonts come from the Fonts mod folder; there is nothing to import from. `@media` **works**: decided once against the design size (`min/max-width/height`, `orientation`, `aspect-ratio`, `screen`, `print`, `not`, `and`, commas); `@supports` is taken as true |
-| Pseudo-elements other than `::before`/`::after` | `::before` and `::after` **work** with `content` (quoted strings with `\25B2` escapes, `attr(name)`, `none`), as a generated inline child that takes the rule's own styles, so a decorative dot with `width`/`height`/`background` is a box; `counter()` does not exist. Attribute selectors (`[a]`, `[a=v]`, `~= |= ^= $= *=`) and the `~` combinator **work** |
-| `background-image: url()`, `background-size/position/repeat`, multiple backgrounds | images are elements (`<img>`), not paint |
-| `cursor`, `user-select`, `scroll-behavior`, `scroll-snap-*` | no hover cursor, no selection, no scroll animation; accepted silently. `overflow: auto`/`scroll` **works** (vertical): the box becomes the vector mod's scroll container, wheel or drag over it slides the content client-side, one rebuild per notch and no tick. Horizontal overflow clips. `position: sticky; top: N` inside such a box pins as in a browser (give it a `z-index` to paint over later rows, as in a browser). `pointer-events: none` is honoured (see above) |
+| Rules | selector lists, specificity, source order, `!important`, inline `style`, tag defaults, CSS nesting with `&`, nested `@media`/`@supports`/`@layer`/`@container` |
+| Combinators | descendant, `>`, `+`, `~` |
+| Simple selectors | tag, `.class`, `#id`, `*`, attribute selectors (`[a]`, `=`, `~=`, `|=`, `^=`, `$=`, `*=`, `i` flag) |
+| Pseudo-classes | `:root :first-child :last-child :only-child :nth-child() :nth-last-child() :nth-of-type() :nth-last-of-type() :first-of-type :last-of-type :only-of-type :empty :not() :is() :where() :has() :hover :active :focus :focus-visible :focus-within :checked :disabled :enabled :required :optional :read-only :read-write :placeholder-shown :default :indeterminate :valid :invalid :in-range :out-of-range :open :modal :link :any-link :lang() :dir()`; `:visited`/`:target` never match |
+| Pseudo-elements | `::before`/`::after` with `content` (strings, `attr()`, `counter()`, `counters()`), `::marker`, `::placeholder` (colour), `::first-letter`, `::first-line` (colour, size, weight, face), `::-webkit-scrollbar`, `-thumb`, `-track` |
+| At-rules | `@media` (width/height/min/max/orientation/`not`/`and`/lists, decided against the design size), `@supports`, `@keyframes`, `@font-face` (a font file the Fonts mod has, by file name), `@import`, `@layer` (source order), `@scope (root)`, `@container` (size queries decided against the design size), `@property` (`initial-value`), `@counter-style` |
+| Values | custom properties with `var()` and fallbacks, `inherit`, `initial`, `unset`, `revert`, `currentColor`, `calc()` (nested), `min()`, `max()`, `clamp()`, `attr()` in content |
+| Units | `px em rem % vw vh vmin vmax ch ex cm mm in pt pc q fr deg rad turn grad s ms` |
+| Colours | 148 named, `#rgb #rgba #rrggbb #rrggbbaa`, `rgb()/rgba()` (legacy and modern), `hsl()/hsla()`, `transparent`, `color-mix(in srgb, ...)` |
+| Logical properties | `inline-size block-size min/max-*-size`, `margin/padding/border/inset-inline|block(-start|-end)`, `border-start-start-radius` and siblings, `overflow-inline/block`, `text-align: start/end`, `float: inline-start/end` (a horizontal, left-to-right page) |
 
----
+### Layout
+
+| Area | What works |
+|---|---|
+| Box model | `width height min-* max-* margin padding border box-sizing` (content-box is the default, as in CSS) |
+| Display | `block inline inline-block flex inline-flex grid none contents -webkit-box`; `visibility` |
+| Flex | `flex-direction flex-wrap flex-flow flex flex-grow flex-shrink flex-basis justify-content align-items align-self align-content gap row-gap column-gap order place-items place-content place-self` |
+| Grid | `grid-template-columns/rows` (px % fr auto minmax repeat), `grid-template-areas`, `grid-template`, `grid-area` (name or lines), `grid-column/row(-start/-end)` incl. negative lines and `span`, `gap`, `grid-auto-rows/columns/flow`, auto placement, content-sized auto tracks |
+| Position | `static relative absolute fixed sticky` (sticky inside a scrolling box), `top right bottom left inset`, `z-index` (across parents) |
+| Overflow | `hidden`, `clip`, `auto`/`scroll` (a real scroll box: wheel and drag, `scrollTop` from script, `scrollIntoView`), drawn scrollbars styled by `scrollbar-width`, `scrollbar-color` or `::-webkit-scrollbar*` |
+| Float, columns | `float: left/right` with text flowing beside, `clear`, `column-count` |
+| Other | `aspect-ratio`, `-webkit-line-clamp`/`line-clamp` (ellipsis on the last line) |
+
+### Paint
+
+| Area | What works |
+|---|---|
+| Background | `background-color`, `background` shorthand, `background-image: url()` (`background-size` contain/cover/percent/px, `background-position`, `background-repeat` no-repeat), `linear-gradient` (angles, `to` keywords, positioned stops, hard stops), `radial-gradient` (shape, size keywords, position), `conic-gradient` (`from`, `at`), `repeating-linear-gradient`, `background-clip: text` with a gradient |
+| Borders | `border` and every per-side longhand (`width`, `color`, `style` incl. per side), `solid dashed dotted double inset outset groove ridge none hidden`, `border-radius` per corner incl. elliptical, `corner-shape: bevel/scoop/notch`, `border-image` (gradient source as a gradient frame, image source as nine slices in percent), `outline` (`width style color offset`) |
+| Shadows | `box-shadow` (offset, blur, spread, colour, `inset`, several), `text-shadow` (several), `filter: drop-shadow()` |
+| Effects | `opacity`, `filter: brightness contrast saturate hue-rotate grayscale sepia invert drop-shadow` (on the subtree), `clip-path: inset() circle() ellipse() polygon()` (also concave), `mask-image: linear-gradient(...)`, `mix-blend-mode` and `backdrop-filter` accepted without effect (per-pixel) |
+| Transforms | `transform` with `translate scale rotate skew matrix` (and the X/Y/3d spellings; `rotateX/Y` as their flat foreshortening, `perspective` ignored), `transform-origin`, `backface-visibility: hidden` |
+
+### Text
+
+| Area | What works |
+|---|---|
+| Fonts | `font-family` resolves the Fonts mod's font files (family + weight + style, e.g. `Barlow`, `Barlow SemiBold`, `Barlow Condensed`), then registered TextMeshPro faces, then generic families mapped to what is installed (`monospace` to `code`); `font-size` (px em rem % keywords), `font-weight` (numeric weights pick real faces), `font-style`, `font` shorthand, `@font-face` aliases |
+| Layout | `line-height`, `letter-spacing`, `word-spacing`, `text-align` (incl. `justify`), `text-align-last`, `text-indent`, `white-space` (normal, nowrap, pre), `word-break: break-all`, `overflow-wrap`, `text-overflow: ellipsis`, `writing-mode: vertical-rl/lr, sideways-*`, `vertical-align` (sub, super, offsets) |
+| Decoration | `text-decoration` and `-line/-color/-style/-thickness`, `text-underline-offset` (underline, overline, line-through; solid, double, dotted, dashed, wavy), `text-transform`, `font-variant-numeric: tabular-nums`, `color` |
+| Lists, counters | `list-style`, `list-style-type` (incl. `@counter-style` names), `list-style-image`, `list-style-position`, `counter-reset`, `counter-increment`, `counter-set`, `counter()`, `counters()` |
+
+### Motion and interaction
+
+| Area | What works |
+|---|---|
+| Transitions | `transition` on size, position, opacity, transform and colours (`transition-property/duration/delay/timing-function`, `steps()`, `cubic-bezier()`); compiled to expressions, no per-frame work |
+| Keyframes | `@keyframes` with `animation-name/duration/delay/iteration-count/direction/fill-mode/play-state/timing-function`, `Element.animate()` |
+| Scroll-driven | `animation-timeline: scroll()` and `view()` over opacity and 2D transforms, evaluated from the scroll offset |
+| Pointer | `:hover` (follows the cursor, or the crosshair), `:active` (while pressed), `:focus`/`:focus-within` (after a click), `pointer-events: none`, `cursor` accepted |
+
+### Accepted without effect
+
+These parse without a warning and change nothing here, because there is no printer, no
+pointer physics, no font hinting and no snap physics: `scroll-snap-*`, `scroll-margin*`,
+`scroll-padding*`, `scroll-behavior`, `overscroll-behavior*`, `will-change`, `contain`,
+`content-visibility`, `isolation`, `touch-action`, `-webkit-font-smoothing`,
+`text-rendering`, `image-rendering`, `color-scheme`, `zoom`, `all`, `text-wrap`,
+`text-size-adjust`, `-webkit-tap-highlight-color`, `print-color-adjust`, `resize`,
+`caret-color`, `tab-size`, `orphans`, `widows`, `page-break-*`, `break-*`,
+`unicode-bidi`, `direction`, `font-kerning`, `font-feature-settings`,
+`font-optical-sizing`, `font-synthesis`, `font-stretch`, `font-variant*`, `quotes`,
+`hanging-punctuation`, `background-attachment`, `container*`, `perspective*`,
+`transform-style`, `ruby-*`, `appearance`, `user-select`, `accent-color`.
+
+Coverage measured against the MDN list: 285 of 491 standard CSS properties handled
+(`ScriptedScreensHtml.Tests/inventory.py`).
 
 ## JavaScript
 
-Runs on a **worker thread** in Jint (a .NET ES2023 engine). The language itself is
-complete: classes, arrow functions, destructuring, template strings, `Proxy`, `JSON`,
-`Math`, `Date`, regular expressions, `Map`/`Set`, generators, promises.
+Page scripts run on a worker thread (Jint). A script frame has 15 seconds before it is
+stopped, which only a game load ever approaches.
 
-### Works
-
-| API | Notes |
+| Area | What works |
 |---|---|
-| `document.getElementById`, `document.querySelector`, `document.querySelectorAll`, `document.body` | simple selectors (tag, `.class`, `#id`, descendant) |
-| `document.createElement`, `createTextNode`, `el.appendChild`, `el.append`, `el.removeChild`, `el.remove()` | an element is built detached and serialised to HTML when appended to a live one; it is cascaded like page markup and gets an id if it had none, then forwards its writes by id |
-| element `.style.prop = v` | any CSS property from the list above |
-| `.innerHTML =`, `.textContent =`, `.innerText =` | a fragment is parsed and cascaded with the page's stylesheet |
-| `.className`, `.classList.add/remove/toggle/contains` | re-cascades the element |
-| `.getAttribute/.setAttribute`, `.dataset`, `.tagName` | attributes on the page tree, SVG shape attributes included (set an expression at runtime) |
-| `.clientWidth/.clientHeight/.offsetWidth` | layout sizes, snapshotted per frame |
-| `setTimeout`, `setInterval`, `requestAnimationFrame` | rAF is capped at 30 Hz |
-| `console.log/error` | to the BepInEx log |
-| `addEventListener('data', e => e.detail)`, `window.ondata` | the Lua `data` payload, as an object |
-| `performance.now()` | |
+| Loading | inline `<script>`, `<script src=URL>`, `<script type="module">` with `import ... from "https://..."` (named and default exports), `DOMContentLoaded`, `load`, `readyState` |
+| Lookup | `getElementById`, `querySelector(All)` (the same selectors as CSS), `getElementsByClassName/TagName/Name`, `closest`, `matches`, `contains` |
+| Tree | `createElement`, `createTextNode`, `createDocumentFragment`, `appendChild`, `append`, `prepend`, `before`, `after`, `insertAdjacentHTML/Element/Text`, `replaceWith`, `replaceChildren`, `removeChild`, `remove`, `cloneNode`, `innerHTML` (read and write, inline text or built elements), `outerHTML`, `textContent`, `innerText`, `children`, `childNodes`, `firstChild`, `parentElement`, `nextElementSibling`, `previousElementSibling`; a read right after a write sees the write |
+| Attributes, style | `getAttribute`, `setAttribute`, `removeAttribute`, `hasAttribute`, `toggleAttribute`, `dataset`, `id`, `className`, `classList` (add/remove/toggle/contains/replace), `hidden`, `disabled`, `value`, `checked`, `open`, `style.x = ...`, `style.cssText`, `setProperty`, `getPropertyValue`, `getComputedStyle` |
+| Geometry | `getBoundingClientRect`, `clientWidth/Height`, `offsetWidth/Height`, `scrollWidth/Height`, `scrollTop` (read/write), `scrollTo`, `scrollBy`, `scrollIntoView`, `innerWidth/Height`, `matchMedia` |
+| Events | `addEventListener`/`removeEventListener`, `on*` properties, bubbling and capture, `preventDefault`, `stopPropagation`, `Event`, `CustomEvent`, `dispatchEvent`; `click`, `mousedown/up/move/over/out/enter/leave`, `pointer*`, `input`, `change`, `submit`, `keydown` (not delivered: no keyboard focus), `data` from Lua (`window.ondata` or a `data` event) |
+| Timers | `setTimeout`, `setInterval`, `requestAnimationFrame` (at most 30 a second, only while the page is awake), `requestIdleCallback`, `queueMicrotask`, `Promise` |
+| Web APIs | `localStorage`/`sessionStorage` (in memory), `URL`, `URLSearchParams`, `TextEncoder/Decoder`, `crypto.randomUUID/getRandomValues`, `structuredClone`, `JSON`, `Intl` basics, `performance.now`, `console.*` (to the BepInEx log), `alert` (to the log), `navigator`, `location`, `history` (inert), `screen`, `Image`, `Audio`, `MutationObserver`/`ResizeObserver`/`IntersectionObserver` (inert stubs), `Element.animate()` |
+| Canvas | `getContext('2d')` records every call and the frame is translated to vector paths: paths (`moveTo lineTo arc arcTo ellipse bezierCurveTo quadraticCurveTo rect roundRect closePath`), `fill` (nonzero/evenodd), `stroke`, `fillRect strokeRect clearRect`, `fillText strokeText measureText` (font, align, baseline, rotation), `clip`, `save/restore`, `translate rotate scale transform setTransform resetTransform`, `lineWidth lineCap lineJoin setLineDash lineDashOffset miterLimit`, `globalAlpha`, `shadow*`, `createLinearGradient/RadialGradient/ConicGradient`, `drawImage`; a static drawing costs nothing after its first frame, a `requestAnimationFrame` loop costs one emit per frame |
 
-**Cost model:** every DOM write re-translates the page and, if the scene text changed,
-resends it to the vector mod (a parse of ~40 KB for the gas console). Cheap at data
-rates (0.5 s), wrong at frame rates. JS decides *what* is shown; expressions move it.
+Not provided, by decision: `fetch`, `XMLHttpRequest`, `WebSocket`, `eval`-loaded
+third-party libraries that need a real DOM, `Worker`. Data comes from Lua.
 
-### Does not work
+## Diagnostics
 
-| API | Why |
-|---|---|
-| Canvas 2D drawing (`getContext('2d')` and its calls) | recorded, never drawn in vector mode — see `<canvas>` above |
-| `requestAnimationFrame` **as an animation loop** | it runs, at 30 Hz, but each frame's DOM writes re-emit the scene, which is the cost that killed the texture back-end. Use it for logic only |
-| `mousemove`, `mouseover`, `keydown` and other pointer or keyboard events | only clicks exist: no hover, no drag, no keyboard on the page. `click` **works**: `el.addEventListener('click', fn)`, `el.onclick = fn` and an inline `onclick="…"` attribute all run in page script (`e.target`, `this`), and any element with one becomes a click region; Lua's `on_click(nodeId)` still fires too |
-| `fetch`, `XMLHttpRequest`, `WebSocket` | no network from a page by design; data comes from the chip |
-| `localStorage`, `sessionStorage`, `IndexedDB`, cookies | no persistence in the page; keep state in Lua or in JS variables. `localStorage`/`sessionStorage` exist as in-memory stores so a page using them runs; they forget on rebuild |
-| `Range`, `Selection`, `document.write`, `contentEditable` | no text selection or in-place editing. Tree reads and writes **work**: `children`, `childNodes`, `firstElementChild`, `parentElement`, siblings, `textContent`/`innerHTML`/`outerHTML` read back, `attributes`, `hasAttribute`/`removeAttribute`, `matches`, `closest`, `contains`, scoped `querySelector(All)`, `insertBefore`, `replaceChild`, `cloneNode` (ids are dropped from the clone, so the original keeps them), `createDocumentFragment` |
-| `getComputedStyle`, CSSOM (`document.styleSheets`, `insertRule`) | no computed-style query and no stylesheet object model; write styles on elements. `getBoundingClientRect()`, `offsetLeft`/`offsetTop` and `clientWidth`/`clientHeight` **work**, in page pixels from the last layout |
-| Web Animations (`el.animate()`) | not implemented; use CSS animations. `MutationObserver`, `ResizeObserver` and `IntersectionObserver` exist and never fire |
-| `window.location`, `history`, `navigator`, `alert`/`confirm`/`prompt`, `import()` | no browser, no modules. The globals exist as inert stubs (`alert` writes to the log, `confirm` answers true) so a script that touches them does not throw |
-| Timers driving visual motion | same reason as rAF: a timer that writes the DOM every 30 ms re-emits the scene 30 times a second |
+`BepInEx/config/gruffuss.stationeers.scriptedscreens.html.cfg`: `Diagnostics.Enabled`
+prints a line per page per second (emits, layout and translate ms, nodes, tweens, script
+ms); `Diagnostics.DumpScenes` writes the exact scene text to `scenes/<page id>.txt` beside
+the DLL. A page whose scene the vector mod refuses shows a magenta hatched frame, one stripe
+per problem, with the reason in the log. Script errors are logged with their message and
+stack. Unsupported CSS is logged once per property as `css: ... not supported`.
 
----
+## Being finished
 
-## The vector mod side — additions used, and the one still open
+Pending on the vector side (`FOR-VECTOR-SESSION.md`):
 
-Everything above runs on the vector mod as it is, plus these additions it gained for this
-front-end (all additive): `wrap=1`, `lh`, string escapes (0.10.1.0); `sh` on closed shapes
-and on `T` (0.10.2.0).
+- **17. Holes under a clip.** Every inline svg is clipped to its box, and the vector mod
+  drops holes in a clipped fill, so a path with a hole inside an svg draws solid.
 
-Reported to the vector side on 2026-09-14 and fixed there by 0.11.20.0, both confirmed on
-the 2x2 test page on 2026-09-15: the radial fill vertex count (page 53,482 → 11,403
-vertices, so the button after the radial box no longer drops past the 60,000 cap) and the
-`VectorSlice` error spam on capture (three captures, zero errors).
+Approximations in this layer, listed to be replaced, not kept:
 
-Still open, only if a page needs it: non-convex clips by convex decomposition of the clip
-polygon on the existing geometric path. A stencil pass does not fit a one-mesh, one-material
-renderer. Sixteen mote fields at nose distance reach the 60,000-vertex mesh cap (nothing
-visible was lost at the closest the camera can get); 32-bit indices would lift it.
+- `@container` size queries are decided against the design size, not the container's.
+- `::after` content is generated before the element's children, so a `counter()` in it does
+  not see increments by descendants.
+- `ruby`: the annotation is small and raised after its base, not stacked above it.
+- `border-image` with `px`/number slices reads them as thirds (percent slices are exact).
+- `text-decoration` colour, thickness, offset and style are drawn on single-line labels;
+  a wrapped label keeps the plain underline.
+- `rotateX`/`rotateY` are the flat foreshortening, no perspective.
+- `animation-timeline` covers opacity and 2D transform functions; `animation-range` is ignored.
+- `word-break: break-all` estimates its wrapped height in the layout from an average glyph width.
+- `:hover` uses the page rect, not a raycast: something standing between the player and
+  the console does not block it.
+
+Out, with the reason: `::selection` (no text selection), `@page` (print),
+`@view-transition` (no document navigation), `shape-outside` (no inline formatting context
+around floats), MathML (no user), per-pixel effects (`filter: blur()`, `backdrop-filter`,
+`mix-blend-mode`: the vector layer draws geometry, not pixels), network from a page.
