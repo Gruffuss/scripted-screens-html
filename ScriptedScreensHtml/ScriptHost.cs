@@ -64,7 +64,49 @@ internal sealed class ScriptHost : IDisposable
     /// <summary>The page's built result and a re-emit hook, for attribute writes that change layout (dialog/details `open`).</summary>
     private HtmlRenderer.Result? _built;
     private Action? _onLayoutAttr;
-    public void Attach(HtmlRenderer.Result built, Action onLayoutAttr) { _built = built; _onLayoutAttr = onLayoutAttr; }
+    private UnityEngine.Vector2 _viewport = new(460f, 460f);
+    private Func<VisualElement, CssKeyframes, AnimationSpec, int>? _animate;
+    private Action<int>? _cancelAnimation;
+    public void Attach(HtmlRenderer.Result built, Action onLayoutAttr, UnityEngine.Vector2 viewport, Func<VisualElement, CssKeyframes, AnimationSpec, int> animate, Action<int> cancelAnimation)
+    {
+        _built = built; _onLayoutAttr = onLayoutAttr; _viewport = viewport; _animate = animate; _cancelAnimation = cancelAnimation;
+    }
+
+    /// <summary>The cascaded value of a property on an element, for getComputedStyle and style read-back.</summary>
+    private string CssOf(string id, string prop)
+    {
+        var ve = _find(id);
+        return ve != null && _built != null && _built.CssOf(ve).TryGetValue(prop, out var v) ? v : string.Empty;
+    }
+
+    /// <summary>Element.animate: frames as "pct|prop:val;prop:val" strings, options as "durationMs,delayMs,iterations,direction,easing,fill". Returns a handle.</summary>
+    private int Animate(string id, string[] frames, string options)
+    {
+        var kf = new CssKeyframes { Name = "js" };
+        foreach (var f in frames)
+        {
+            var bar = f.IndexOf('|');
+            if (bar < 0) continue;
+            var frame = new CssKeyframe { Percent = float.TryParse(f.Substring(0, bar), NumberStyles.Float, CultureInfo.InvariantCulture, out var p) ? p : 0f };
+            frame.Declarations.AddRange(CssParser.ParseDeclarations(f.Substring(bar + 1)));
+            kf.Frames.Add(frame);
+        }
+        kf.Frames.Sort((a, b) => a.Percent.CompareTo(b.Percent));
+        var o = options.Split(',');
+        var spec = new AnimationSpec { Name = "js" };
+        if (o.Length > 0 && float.TryParse(o[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var dur)) spec.Duration = dur / 1000f;
+        if (o.Length > 1 && float.TryParse(o[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var delay)) spec.Delay = delay / 1000f;
+        if (o.Length > 2) { var t = 0; spec.ApplyToken(o[2] == "Infinity" ? "infinite" : o[2], ref t); }
+        if (o.Length > 3 && o[3].Length > 0) { var t = 0; spec.ApplyToken(o[3], ref t); }
+        if (o.Length > 4 && o[4].Length > 0) { var t = 0; spec.ApplyToken(o[4], ref t); }
+        if (o.Length > 5 && o[5].Length > 0) { var t = 0; spec.ApplyToken(o[5], ref t); }
+        var handle = 0;
+        var ve = _find(id);
+        if (ve == null || _animate == null) return 0;
+        using var doneEvent = new System.Threading.ManualResetEventSlim(false);
+        _toMain.Enqueue(() => { handle = _animate(ve, kf, spec); doneEvent.Set(); });
+        return doneEvent.Wait(50) ? handle : -1; // ponytail: the handle is needed synchronously; the main thread answers within a frame
+    }
     /// <summary>Layout rects per id, relative to the page, refreshed every frame for getBoundingClientRect.</summary>
     private readonly ConcurrentDictionary<string, (float x, float y, float w, float h)> _rects = new(StringComparer.Ordinal);
 
@@ -99,6 +141,7 @@ internal sealed class ScriptHost : IDisposable
         {
             if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: running page script ({script.Length} chars)");
             _engine!.Execute(script);
+            _engine.Invoke("__ready");
             AfterRun();
             if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: page script done, data handler {_hasDataHandler}, pending work {_hasPendingWork}");
         });
@@ -302,6 +345,19 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__setValue", new Action<string, string>((id, v) => _toMain.Enqueue(() => _setValue(id, v))));
             _engine.SetValue("__wantClicks", new Action<string>(id => _toMain.Enqueue(() => _wantClicks(id))));
             _engine.SetValue("__wantPointer", new Action<string>(type => _pointerTypes.Add(type)));
+            _engine.SetValue("__cssOf", new Func<string, string, string>(CssOf));
+            _engine.SetValue("__viewport", new Func<double[]>(() => new[] { (double)_viewport.x, (double)_viewport.y }));
+            _engine.SetValue("__media", new Func<string, bool>(CssParser.MediaMatches));
+            _engine.SetValue("__animate", new Func<string, string[], string, int>(Animate));
+            _engine.SetValue("__cancelAnimation", new Action<int>(h => _toMain.Enqueue(() => _cancelAnimation?.Invoke(h))));
+            _engine.SetValue("__children_rects", new Func<string, double[]>(id =>
+            {
+                // the content extent below and right of an element's own top-left: scrollWidth / scrollHeight
+                var right = 0.0; var bottom = 0.0;
+                var own = RectOf(id);
+                foreach (var c in ChildrenOf(id)) { var r = RectOf(c); right = Math.Max(right, r[0] + r[2] - own[0]); bottom = Math.Max(bottom, r[1] + r[3] - own[1]); }
+                return new[] { Math.Max(right, own[2]), Math.Max(bottom, own[3]) };
+            }));
             _engine.SetValue("__textOf", new Func<string, string>(TextOf));
             _engine.SetValue("__htmlOf", new Func<string, bool, string>(HtmlOf));
             _engine.SetValue("__children", new Func<string, string[]>(ChildrenOf));
@@ -611,7 +667,133 @@ function __ctx(id){
 }
 function __flushCanvases(){ for (var k in __canvases) { var c = __canvases[k]; if (c.__cmds.length) c.__flush(); } }
 
-var __textCache = {}, __htmlCache = {};
+var __textCache = {}, __htmlCache = {}, __styleCache = {}, __scrollCache = {};
+// ---- readiness: after the page script, as a browser fires them after parsing ----
+document_readyState = 'loading';
+function __ready(){
+  document_readyState = 'interactive';
+  __emit('DOMContentLoaded', null);
+  document_readyState = 'complete';
+  __emit('load', null);
+  if (typeof window.onload === 'function') { try { window.onload({ type: 'load' }); } catch (e) { console.error(String(e && e.stack || e)); } }
+}
+// ---- Event constructors and dispatch ----
+function Event(type, init){ this.type = type; init = init || {}; this.bubbles = !!init.bubbles; this.cancelable = !!init.cancelable; this.defaultPrevented = false; this.detail = init.detail === undefined ? null : init.detail; }
+Event.prototype.preventDefault = function(){ this.defaultPrevented = true; };
+Event.prototype.stopPropagation = function(){ this.__stop = true; };
+Event.prototype.stopImmediatePropagation = function(){ this.__stop = true; };
+function CustomEvent(type, init){ Event.call(this, type, init); }
+CustomEvent.prototype = Object.create(Event.prototype);
+var MouseEvent = Event, KeyboardEvent = Event, InputEvent = Event, FocusEvent = Event;
+function __dispatchOn(id, ev){
+  // listeners on the element, then its ancestors (bubbling), then document/window
+  ev.target = ev.target || __el(id);
+  var cur = id;
+  while (cur) {
+    ev.currentTarget = __el(cur);
+    var fns = (__elListeners[cur] || {})[ev.type] || [];
+    for (var i = 0; i < fns.length; i++) { try { fns[i].call(ev.currentTarget, ev); } catch (e) { console.error(String(e && e.stack || e)); } if (ev.__stop) return ev; }
+    var h = (__elHandlers[cur] || {})['on' + ev.type];
+    if (typeof h === 'function') { try { h.call(ev.currentTarget, ev); } catch (e) { console.error(String(e && e.stack || e)); } if (ev.__stop) return ev; }
+    var code = __getAttr(cur, 'on' + ev.type);
+    if (code) { try { (new Function('event', code)).call(ev.currentTarget, ev); } catch (e) { console.error('on' + ev.type + ' of #' + cur + ': ' + String(e && e.stack || e)); } if (ev.__stop) return ev; }
+    if (ev.bubbles === false && cur === id) break;
+    cur = __parent(cur);
+  }
+  var gl = __listeners[ev.type] || [];
+  for (var j = 0; j < gl.length; j++) { try { gl[j](ev); } catch (e) { console.error(String(e && e.stack || e)); } if (ev.__stop) break; }
+  return ev;
+}
+function URLSearchParams(init){
+  var self = this; this.__p = [];
+  function add(k, v){ self.__p.push([String(k), String(v)]); }
+  if (typeof init === 'string') { init.replace(/^\?/, '').split('&').forEach(function(kv){ if (!kv) return; var i = kv.indexOf('='); add(decodeURIComponent(i < 0 ? kv : kv.slice(0, i)), decodeURIComponent(i < 0 ? '' : kv.slice(i + 1)).replace(/\+/g, ' ')); }); }
+  else if (init && typeof init === 'object') { for (var k in init) add(k, init[k]); }
+  this.get = function(k){ for (var i = 0; i < self.__p.length; i++) if (self.__p[i][0] === k) return self.__p[i][1]; return null; };
+  this.getAll = function(k){ return self.__p.filter(function(p){ return p[0] === k; }).map(function(p){ return p[1]; }); };
+  this.has = function(k){ return self.get(k) !== null; };
+  this.set = function(k, v){ self.delete(k); add(k, v); };
+  this.append = add;
+  this.delete = function(k){ self.__p = self.__p.filter(function(p){ return p[0] !== k; }); };
+  this.forEach = function(fn){ self.__p.forEach(function(p){ fn(p[1], p[0]); }); };
+  this.toString = function(){ return self.__p.map(function(p){ return encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1]); }).join('&'); };
+}
+function URL(href, base){
+  var m = /^([a-z][a-z0-9+.-]*:)?(?:\/\/([^\/?#]*))?([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(String(href)) || [];
+  this.href = String(href); this.protocol = m[1] || ''; this.host = m[2] || ''; this.hostname = this.host.split(':')[0]; this.port = this.host.split(':')[1] || '';
+  this.pathname = m[3] || '/'; this.search = m[4] || ''; this.hash = m[5] || ''; this.origin = this.protocol + '//' + this.host;
+  this.searchParams = new URLSearchParams(this.search);
+  this.toString = function(){ return this.href; };
+}
+function TextEncoder(){ this.encode = function(s){ s = unescape(encodeURIComponent(String(s))); var a = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; }; }
+function TextDecoder(){ this.decode = function(a){ var s = ''; for (var i = 0; i < a.length; i++) s += String.fromCharCode(a[i]); try { return decodeURIComponent(escape(s)); } catch (e) { return s; } }; }
+function structuredClone(v){ return JSON.parse(JSON.stringify(v)); }
+function queueMicrotask(fn){ Promise.resolve().then(fn); }
+var crypto = { randomUUID: function(){ return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c){ var r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }); },
+               getRandomValues: function(a){ for (var i = 0; i < a.length; i++) a[i] = Math.random() * 256 | 0; return a; } };
+console.table = function(d){ console.log(JSON.stringify(d)); }; console.group = function(l){ console.log(l || ''); }; console.groupEnd = function(){}; console.debug = console.log;
+console.time = function(){}; console.timeEnd = function(){}; console.assert = function(c, m){ if (!c) console.error('assert: ' + (m || '')); }; console.trace = function(){}; console.dir = console.log;
+function Image(){ var o = __detached('img'); var self = o; Object.defineProperty(o, 'src', { set: function(v){ o.setAttribute('src', String(v)); if (o.__live) __setAttr(o.id, 'src', String(v)); setTimeout(function(){ if (typeof self.onload === 'function') self.onload({ type: 'load', target: self }); }, 0); }, get: function(){ return o.getAttribute('src') || ''; } }); o.complete = true; o.naturalWidth = 0; o.naturalHeight = 0; return o; }
+function Audio(src){ var o = __detached('audio'); if (src) o.setAttribute('src', String(src));
+  o.play = function(){ o.setAttribute('autoplay', ''); if (!o.__live) document.body.appendChild(o); return Promise.resolve(); };
+  o.pause = function(){ if (o.__live) __remove(o.id); o.__live = false; };
+  o.load = function(){}; o.volume = 1; o.loop = false; o.currentTime = 0; o.paused = true; return o; }
+function matchMedia(q){ var m = __media(String(q)); return { matches: m, media: String(q), addEventListener: function(){}, removeEventListener: function(){}, addListener: function(){}, removeListener: function(){}, onchange: null }; }
+function getComputedStyle(el){
+  var id = el && el.id; var r = id ? __rect(id) : [0, 0, 0, 0];
+  var o = { width: r[2] + 'px', height: r[3] + 'px', getPropertyValue: function(p){ p = __kebab(p); if (p === 'width') return r[2] + 'px'; if (p === 'height') return r[3] + 'px'; var c = (__styleCache[id] || {})[p]; return c !== undefined ? c : (id ? __cssOf(id, p) : ''); } };
+  return new Proxy(o, { get: function(t, p){ if (p in t) return t[p]; return t.getPropertyValue(String(p)); } });
+}
+var screen = { get width(){ return __viewport()[0]; }, get height(){ return __viewport()[1]; }, get availWidth(){ return __viewport()[0]; }, get availHeight(){ return __viewport()[1]; }, colorDepth: 24, pixelDepth: 24 };
+var devicePixelRatio = 1;
+Object.defineProperty(window, 'innerWidth', { get: function(){ return __viewport()[0]; } });
+Object.defineProperty(window, 'innerHeight', { get: function(){ return __viewport()[1]; } });
+Object.defineProperty(window, 'outerWidth', { get: function(){ return __viewport()[0]; } });
+Object.defineProperty(window, 'outerHeight', { get: function(){ return __viewport()[1]; } });
+window.scrollTo = function(){}; window.scrollBy = function(){}; window.scrollX = 0; window.scrollY = 0; window.pageXOffset = 0; window.pageYOffset = 0;
+window.getSelection = function(){ return { toString: function(){ return ''; }, removeAllRanges: function(){}, rangeCount: 0 }; };
+window.open = function(){ return null; }; window.close = function(){}; window.print = function(){}; window.focus = function(){}; window.blur = function(){};
+window.requestIdleCallback = function(fn){ return setTimeout(function(){ fn({ timeRemaining: function(){ return 10; }, didTimeout: false }); }, 1); }; window.cancelIdleCallback = clearTimeout;
+window.self = window; window.top = window; window.parent = window; window.frames = [];
+function __styleProxy(id){
+  var cache = __styleCache[id] = __styleCache[id] || {};
+  var target = {
+    setProperty: function(p, v){ p = __kebab(p); cache[p] = String(v); __setStyle(id, p, String(v)); },
+    getPropertyValue: function(p){ p = __kebab(p); return cache[p] !== undefined ? cache[p] : ''; },
+    removeProperty: function(p){ p = __kebab(p); var old = cache[p]; delete cache[p]; __setStyle(id, p, ''); return old || ''; },
+    get cssText(){ var s = ''; for (var k in cache) s += k + ': ' + cache[k] + '; '; return s.trim(); },
+    set cssText(v){ String(v).split(';').forEach(function(d){ var i = d.indexOf(':'); if (i > 0) target.setProperty(d.slice(0, i).trim(), d.slice(i + 1).trim()); }); },
+    get length(){ return Object.keys(cache).length; }
+  };
+  return new Proxy(target, {
+    set: function(t, p, v){ if (p in t) { t[p] = v; return true; } var k = __kebab(String(p)); cache[k] = String(v); __setStyle(id, k, String(v)); return true; },
+    get: function(t, p){ if (p in t) return t[p]; var k = __kebab(String(p)); return cache[k] !== undefined ? cache[k] : ''; }
+  });
+}
+// ---- Element.animate: the keyframe runner the page's CSS animations use ----
+function __toFrames(keyframes){
+  var out = [];
+  if (Array.isArray(keyframes)) {
+    var n = keyframes.length;
+    keyframes.forEach(function(k, i){ var pct = k.offset !== undefined ? k.offset * 100 : (n === 1 ? 100 : i * 100 / (n - 1)); var d = []; for (var p in k) { if (p === 'offset' || p === 'easing' || p === 'composite') continue; d.push(__kebab(p) + ':' + k[p]); } out.push(pct + '|' + d.join(';')); });
+  } else if (keyframes && typeof keyframes === 'object') {
+    var props = Object.keys(keyframes); var len = 0; props.forEach(function(p){ if (Array.isArray(keyframes[p])) len = Math.max(len, keyframes[p].length); });
+    for (var i = 0; i < len; i++) { var d = []; props.forEach(function(p){ var v = keyframes[p]; var vi = Array.isArray(v) ? v[Math.min(i, v.length - 1)] : v; d.push(__kebab(p) + ':' + vi); }); out.push((len === 1 ? 100 : i * 100 / (len - 1)) + '|' + d.join(';')); }
+  }
+  return out;
+}
+function __animate_el(id, keyframes, options){
+  var o = typeof options === 'number' ? { duration: options } : (options || {});
+  var opts = [o.duration || 0, o.delay || 0, o.iterations === Infinity ? 'Infinity' : (o.iterations || 1), o.direction || '', o.easing || '', o.fill || ''].join(',');
+  var h = __animate(id, __toFrames(keyframes), opts);
+  var anim = { id: h, playState: 'running', currentTime: 0, effect: null, onfinish: null, oncancel: null,
+    cancel: function(){ __cancelAnimation(h); anim.playState = 'idle'; if (typeof anim.oncancel === 'function') anim.oncancel(); },
+    finish: function(){ __cancelAnimation(h); anim.playState = 'finished'; if (typeof anim.onfinish === 'function') anim.onfinish(); },
+    pause: function(){ anim.playState = 'paused'; }, play: function(){ anim.playState = 'running'; }, reverse: function(){},
+    addEventListener: function(t, fn){ if (t === 'finish') anim.onfinish = fn; if (t === 'cancel') anim.oncancel = fn; } };
+  anim.finished = new Promise(function(res){ setTimeout(function(){ if (anim.playState === 'running') { anim.playState = 'finished'; if (typeof anim.onfinish === 'function') anim.onfinish(); } res(anim); }, (o.duration || 0) * (o.iterations === Infinity ? 1e9 : (o.iterations || 1)) + (o.delay || 0)); });
+  return anim;
+}
 function __sibling(id, step){
   var p = __parent(id); if (!p) return null;
   var c = __children(p); var i = c.indexOf(id) + step;
@@ -625,20 +807,13 @@ function IntersectionObserver(){ this.observe = function(){}; this.unobserve = f
 // ---- controls: values, per-element listeners, events ----
 var __values = {}, __elListeners = {}, __elHandlers = {};
 function __fire(id, type, detail, x, y){
-  var el = __el(id);
   var r = (x !== undefined) ? __rect(id) : [0, 0, 0, 0];
-  var ev = { type: type, target: el, currentTarget: el, detail: detail, defaultPrevented: false, button: 0, buttons: type === 'mousedown' ? 1 : 0,
-             clientX: x || 0, clientY: y || 0, pageX: x || 0, pageY: y || 0, x: x || 0, y: y || 0,
-             offsetX: (x || 0) - r[0], offsetY: (y || 0) - r[1],
-             preventDefault: function(){ this.defaultPrevented = true; }, stopPropagation: function(){}, stopImmediatePropagation: function(){} };
-  var fns = (__elListeners[id] || {})[type] || [];
-  for (var i = 0; i < fns.length; i++) { try { fns[i].call(el, ev); } catch (e) { console.error(String(e && e.stack || e)); } }
-  var h = (__elHandlers[id] || {})['on' + type];
-  if (typeof h === 'function') { try { h.call(el, ev); } catch (e) { console.error(String(e && e.stack || e)); } }
-  // An inline handler attribute, as a browser runs it: the code with `event` and `this`.
-  var code = __getAttr(id, 'on' + type);
-  if (code) { try { (new Function('event', code)).call(el, ev); } catch (e) { console.error('on' + type + ' of #' + id + ': ' + String(e && e.stack || e)); } }
-  return ev;
+  var ev = new Event(type, { bubbles: true, cancelable: true, detail: detail });
+  ev.button = 0; ev.buttons = type === 'mousedown' ? 1 : 0;
+  ev.clientX = x || 0; ev.clientY = y || 0; ev.pageX = x || 0; ev.pageY = y || 0; ev.x = x || 0; ev.y = y || 0;
+  ev.offsetX = (x || 0) - r[0]; ev.offsetY = (y || 0) - r[1];
+  ev.target = __el(id);
+  return __dispatchOn(id, ev);
 }
 function __input(id, value){
   __values[id] = value;
@@ -660,7 +835,23 @@ function __pointer(id, type, x, y){
 // ---- elements ----
 function __el(id){
   var el = {
-    id: id,
+    dispatchEvent: function(ev){ if (!ev || !ev.type) return true; ev.target = ev.target || el; __dispatchOn(id, ev); return !ev.defaultPrevented; },
+    insertAdjacentHTML: function(where, html){ where = String(where).toLowerCase(); if (where === 'beforeend') __appendHtml(id, String(html)); else if (where === 'afterbegin') { var c = __children(id); if (c.length) __insertHtml(id, String(html), c[0]); else __appendHtml(id, String(html)); } else if (where === 'beforebegin') { var p = __parent(id); if (p) __insertHtml(p, String(html), id); } else if (where === 'afterend') { var p2 = __parent(id); var s = __sibling(id, 1); if (p2) { if (s) __insertHtml(p2, String(html), s.id); else __appendHtml(p2, String(html)); } } },
+    insertAdjacentElement: function(where, n){ el.insertAdjacentHTML(where, __serialize(n)); if (n.__adopt) n.__adopt(); return n; },
+    insertAdjacentText: function(where, t){ el.insertAdjacentHTML(where, __escape(t)); },
+    before: function(){ var p = __parent(id); if (!p) return; for (var i = 0; i < arguments.length; i++) { var n = arguments[i]; __insertHtml(p, typeof n === 'string' ? __escape(n) : __serialize(n), id); if (n && n.__adopt) n.__adopt(); } },
+    after: function(){ var p = __parent(id); if (!p) return; var s = __sibling(id, 1); for (var i = 0; i < arguments.length; i++) { var n = arguments[i]; var h = typeof n === 'string' ? __escape(n) : __serialize(n); if (s) __insertHtml(p, h, s.id); else __appendHtml(p, h); if (n && n.__adopt) n.__adopt(); } },
+    prepend: function(){ for (var i = arguments.length - 1; i >= 0; i--) el.insertAdjacentHTML('afterbegin', typeof arguments[i] === 'string' ? __escape(arguments[i]) : __serialize(arguments[i])); },
+    replaceWith: function(){ el.before.apply(el, arguments); __remove(id); },
+    toggleAttribute: function(n, force){ var has = __getAttr(id, n) !== null; var want = force === undefined ? !has : !!force; if (want && !has) __setAttr(id, n, ''); if (!want && has) __removeAttr(id, n); return want; },
+    get className(){ return __getAttr(id, 'class') || ''; },
+    animate: function(k, o){ return __animate_el(id, k, o); },
+    getAnimations: function(){ return []; },
+    get scrollWidth(){ return __children_rects(id)[0]; }, get scrollHeight(){ return __children_rects(id)[1]; },
+    get scrollTop(){ return __scrollCache[id] || 0; }, set scrollTop(v){ __scrollCache[id] = Number(v) || 0; },
+    get scrollLeft(){ return 0; }, set scrollLeft(v){},
+    scrollTo: function(){}, scrollBy: function(){}, scrollIntoView: function(){},
+    get offsetParent(){ return el.parentElement; },
     get value(){ return __values[id] !== undefined ? __values[id] : (__getAttr(id, 'value') || ''); },
     set value(v){ __values[id] = String(v); __setValue(id, String(v)); },
     get checked(){ var v = __values[id]; return v !== undefined ? v === 'true' : __getAttr(id, 'checked') !== null; },
@@ -669,7 +860,7 @@ function __el(id){
     get onclick(){ return (__elHandlers[id] || {}).onclick; }, set onclick(f){ (__elHandlers[id] = __elHandlers[id] || {}).onclick = f; __wantClicks(id); },
     get oninput(){ return (__elHandlers[id] || {}).oninput; }, set oninput(f){ (__elHandlers[id] = __elHandlers[id] || {}).oninput = f; },
     select: function(){},
-    get style(){ return new Proxy({}, { set: function(o, p, v){ __setStyle(id, String(p), String(v)); return true; }, get: function(){ return ''; } }); },
+    get style(){ return __styleProxy(id); },
     set textContent(v){ __textCache[id] = String(v); delete __htmlCache[id]; __setText(id, String(v)); }, get textContent(){ return __textCache[id] !== undefined ? __textCache[id] : __textOf(id); },
     set innerText(v){ el.textContent = v; }, get innerText(){ return el.textContent; },
     set innerHTML(v){ __htmlCache[id] = String(v); delete __textCache[id]; __setHtml(id, String(v)); }, get innerHTML(){ return __htmlCache[id] !== undefined ? __htmlCache[id] : __htmlOf(id, false); },
@@ -708,6 +899,7 @@ function __el(id){
     get max(){ return __getAttr(id, 'max'); }, set max(v){ __setAttr(id, 'max', String(v)); },
     get min(){ return __getAttr(id, 'min'); }, set min(v){ __setAttr(id, 'min', String(v)); },
     set className(v){ __setClass(id, String(v)); },
+    get id(){ return id; }, set id(v){ console.warn('setting id is not supported; ids are fixed at build'); },
     classList: { add: function(){ }, remove: function(){ } },
     get clientWidth(){ return __size(id)[0]; }, get clientHeight(){ return __size(id)[1]; },
     get offsetWidth(){ return __size(id)[0]; }, get offsetHeight(){ return __size(id)[1]; },
@@ -773,7 +965,23 @@ var document = {
   querySelectorAll: function(sel){ return __query(sel).map(__el); },
   querySelector: function(sel){ var r = __query(sel); return r.length ? __el(r[0]) : null; },
   createElement: __detached,
+  createElementNS: function(ns, tag){ return __detached(tag); },
   createTextNode: function(t){ return { textContent: String(t) }; },
+  getElementsByClassName: function(c){ return __query('.' + String(c).trim().split(/\s+/).join('.')).map(__el); },
+  getElementsByTagName: function(t){ return __query(String(t) === '*' ? '*' : String(t)).map(__el); },
+  getElementsByName: function(n){ return __query('[name=' + JSON.stringify(String(n)) + ']').map(__el); },
+  get readyState(){ return document_readyState; },
+  get activeElement(){ return null; },
+  get cookie(){ return ''; }, set cookie(v){},
+  get hidden(){ return false; }, get visibilityState(){ return 'visible'; },
+  get location(){ return location; },
+  get defaultView(){ return window; },
+  createEvent: function(){ return new Event(''); },
+  hasFocus: function(){ return true; },
+  execCommand: function(){ return false; },
+  fonts: { ready: Promise.resolve(), load: function(){ return Promise.resolve([]); }, check: function(){ return true; } },
+  get head(){ return __has('head') ? __el('head') : __el('body'); },
+  get forms(){ return __query('form').map(__el); }, get images(){ return __query('img').map(__el); }, get links(){ return __query('a').map(__el); }, get scripts(){ return []; },
   createDocumentFragment: function(){ return __detached('div'); },
   get documentElement(){ return __el('body'); },
   get title(){ return ''; }, set title(v){},

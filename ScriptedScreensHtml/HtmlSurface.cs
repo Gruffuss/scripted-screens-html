@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
 using UnityEngine;
+using UnityEngine.Networking;
 using UnityEngine.UI;
 using UnityEngine.UIElements;
 using SS = ScriptedScreens.ScriptableUi.ScriptedScreensScriptableUiSystem;
@@ -438,7 +439,14 @@ internal sealed class HtmlSurface : MonoBehaviour
                     }
                 });
         }
-        _script?.Attach(built, () => { _dirty = true; Wake(); });
+        _script?.Attach(built, () => { _dirty = true; Wake(); }, LayoutSize(), StartAnimation, CancelAnimation);
+        // <link rel=stylesheet href> and <script src>: fetched the way ScriptedScreens fetches
+        // an image, then the sheet is inlined and the page rebuilt, or the script run after
+        // the inline ones. ponytail: http(s) only, no caching, 15 s timeout.
+        foreach (var href in built.ExternalStyles)
+            if (_fetched.Add("css:" + href)) StartCoroutine(Fetch(href, css => { _source = InlineStylesheet(_source, href, css); Build(); }));
+        foreach (var src in built.ExternalScripts)
+            if (_fetched.Add("js:" + src)) StartCoroutine(Fetch(src, js => _script?.Run(src.EndsWith(".mjs", StringComparison.OrdinalIgnoreCase) ? HtmlRenderer.StripModuleSyntax(js) : js)));
         _svgs.Clear();
         foreach (var shape in _shapes.Values)
         {
@@ -940,6 +948,57 @@ internal sealed class HtmlSurface : MonoBehaviour
             foreach (var kv in _built.NodeOf)
                 if (kv.Value == node) { _built.Reclass(kv.Key, node.Attr("class") ?? string.Empty); break; }
     }
+
+    private readonly HashSet<string> _fetched = new(StringComparer.Ordinal);
+
+    private static System.Collections.IEnumerator Fetch(string url, Action<string> done)
+    {
+        if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: external \"{url}\": only http(s) urls are fetched");
+            yield break;
+        }
+        using var req = UnityWebRequest.Get(new Uri(url));
+        req.timeout = 15;
+        yield return req.SendWebRequest();
+        if (req.result != UnityWebRequest.Result.Success)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: external \"{url}\" failed: {req.error}");
+            yield break;
+        }
+        done(req.downloadHandler.text ?? string.Empty);
+    }
+
+    /// <summary>The &lt;link&gt; for this href becomes a &lt;style&gt; with the fetched text, so a rebuild sees it as page CSS.</summary>
+    private static string InlineStylesheet(string source, string href, string css)
+    {
+        var rx = new System.Text.RegularExpressions.Regex("<link[^>]*href=[\"']?" + System.Text.RegularExpressions.Regex.Escape(href) + "[\"']?[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return rx.Replace(source, "<style>" + css.Replace("</style>", string.Empty) + "</style>", 1);
+    }
+
+    /// <summary>Element.animate(): a keyframe runner made by the script; the handle cancels it.</summary>
+    private int StartAnimation(VisualElement ve, CssKeyframes frames, AnimationSpec spec)
+    {
+        var runner = new KeyframeRunner(ve, frames, spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m));
+        _animations.Add(runner);
+        _scriptAnimations[++_animationSeq] = runner;
+        _awakeFrames = Mathf.Max(_awakeFrames, 2);
+        return _animationSeq;
+    }
+
+    private void CancelAnimation(int handle)
+    {
+        if (!_scriptAnimations.TryGetValue(handle, out var runner)) return;
+        _scriptAnimations.Remove(handle);
+        _animations.Remove(runner);
+        if (_built != null && _built.NodeOf.TryGetValue(runner.Element, out var n))
+            _built.Reclass(runner.Element, n.Attr("class") ?? string.Empty);
+        _dirty = true;
+        Wake();
+    }
+
+    private readonly Dictionary<int, KeyframeRunner> _scriptAnimations = new();
+    private int _animationSeq;
 
     /// <summary>A click on a page click region: the script gets a `click` event on the element, with the pointer's page coordinates. A submit button also fires `submit` on its form.</summary>
     internal void OnPageClick(string key)

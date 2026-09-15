@@ -36,6 +36,9 @@ internal static class HtmlRenderer
         public readonly Dictionary<string, SvgShape> Shapes = new(StringComparer.Ordinal);
         public readonly List<(VisualElement element, AnimationSpec spec)> Animations = new();
         public string Script = string.Empty;
+        /// <summary>&lt;script src&gt; urls in document order and &lt;link rel=stylesheet href&gt; urls; the surface fetches them.</summary>
+        public readonly List<string> ExternalScripts = new();
+        public readonly List<string> ExternalStyles = new();
         /// <summary>Design width from meta viewport, or 0 to use the element's own width.</summary>
         public float ViewportWidth;
         /// <summary>Stylesheet rules and the node each element came from, for className changes at runtime.</summary>
@@ -110,7 +113,7 @@ internal static class HtmlRenderer
         CssParser.ViewportWidth = result.ViewportWidth > 0f ? result.ViewportWidth : 460f;
         CssParser.ViewportHeight = CssParser.ViewportWidth * SurfaceAspect;
         CssParser.FontFaces.Clear();
-        Collect(doc, rules, script, result.Keyframes, Warn);
+        Collect(doc, rules, script, result.Keyframes, Warn, result);
         foreach (var (family, src, weight, style) in CssParser.FontFaces)
             FontLibrary.Alias(family, src, weight, style);
         result.Script = script.ToString();
@@ -142,7 +145,7 @@ internal static class HtmlRenderer
     /// <summary>Height over width of the surface being built, for vh; set by the surface before Build.</summary>
     internal static float SurfaceAspect = 1f;
 
-    private static void Collect(HtmlNode node, List<CssRule> rules, StringBuilder script, Dictionary<string, CssKeyframes> keyframes, Action<string> warn)
+    private static void Collect(HtmlNode node, List<CssRule> rules, StringBuilder script, Dictionary<string, CssKeyframes> keyframes, Action<string> warn, Result? result = null)
     {
         if (node.Tag == "style")
         {
@@ -150,14 +153,48 @@ internal static class HtmlRenderer
                 rules.AddRange(CssParser.ParseStylesheet(c.Text, warn, keyframes));
             return;
         }
+        if (node.Tag == "link" && string.Equals(node.Attr("rel"), "stylesheet", StringComparison.OrdinalIgnoreCase) && node.Attr("href") is { } href)
+        {
+            result?.ExternalStyles.Add(href);
+            return;
+        }
         if (node.Tag == "script")
         {
+            var type = (node.Attr("type") ?? string.Empty).Trim().ToLowerInvariant();
+            if (type.Length > 0 && type != "module" && !type.Contains("javascript") && type != "text/ecmascript")
+                return; // JSON, templates, importmaps: not code
+            if (node.Attr("src") is { } src)
+            {
+                result?.ExternalScripts.Add(src);
+                return;
+            }
             foreach (var c in node.Children)
-                script.Append(c.Text).Append('\n');
+                script.Append(type == "module" ? StripModuleSyntax(c.Text) : c.Text).Append('\n');
             return;
         }
         foreach (var c in node.Children)
-            Collect(c, rules, script, keyframes, warn);
+            Collect(c, rules, script, keyframes, warn, result);
+    }
+
+    /// <summary>
+    /// A module script runs as a classic one: import lines go (there is no module graph to
+    /// resolve, so they would only throw) and `export` is dropped from declarations.
+    /// ponytail: real modules need a loader; pages that import from a URL will not work.
+    /// </summary>
+    internal static string StripModuleSyntax(string js)
+    {
+        var lines = js.Split('\n');
+        var sb = new StringBuilder();
+        foreach (var line in lines)
+        {
+            var t = line.TrimStart();
+            if (t.StartsWith("import ", StringComparison.Ordinal) && t.Contains(" from ")) continue;
+            if (t.StartsWith("import '", StringComparison.Ordinal) || t.StartsWith("import \"", StringComparison.Ordinal)) continue;
+            if (t.StartsWith("export default ", StringComparison.Ordinal)) { sb.Append(line.Replace("export default ", "var __default = ")).Append('\n'); continue; }
+            if (t.StartsWith("export ", StringComparison.Ordinal)) { sb.Append(line.Replace("export ", string.Empty)).Append('\n'); continue; }
+            sb.Append(line).Append('\n');
+        }
+        return sb.ToString();
     }
 
     /// <summary>
