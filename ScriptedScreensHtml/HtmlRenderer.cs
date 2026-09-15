@@ -139,6 +139,7 @@ internal static class HtmlRenderer
         var root = new VisualElement { name = "body" };
         root.style.flexGrow = 1;
         root.style.color = Color.white;
+        root.style.fontSize = 16; // a browser's default, so a page that names no font-size still has text
         root.style.whiteSpace = WhiteSpace.Normal;
         if (font != null)
             root.style.unityFont = font;
