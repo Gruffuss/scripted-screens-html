@@ -946,7 +946,11 @@ internal static class VectorEmitter
             if (fl.TryGetValue("color", out var flc) && StyleApplier.TryColor(flc, out var flcol)) attrs.Append(" f=").Append(Hex(flcol));
             if (fl.TryGetValue("font-size", out var fls)) attrs.Append(" size=").Append(F(fls.EndsWith("em", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(fls) * rs.fontSize : fls.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(fls) / 100f * rs.fontSize : StyleApplier.Num(fls)));
             if (fl.TryGetValue("font-weight", out var flw) && (flw == "bold" || flw == "bolder" || (StyleApplier.IsNumber(flw) && StyleApplier.Num(flw) >= 600))) attrs.Append(" weight=bold");
-            if (fl.TryGetValue("font-family", out var flf) && flf.Split(',')[0].Trim().Trim('"', '\'') is { Length: > 0 } flFace && flFace.IndexOf(' ') < 0) attrs.Append(" font=").Append(FontLibrary.ResolveFace(flFace));
+            if (fl.TryGetValue("font-family", out var flf) && flf.Split(',')[0].Trim().Trim('"', '\'') is { Length: > 0 } flFace)
+            {
+                var face = FontLibrary.ResolveFace(flFace);
+                attrs.Append(" font=").Append(face.IndexOf(' ') >= 0 ? "'" + face + "'" : face); // fl quotes spaced values with '...'
+            }
             if (attrs.Length > 0)
             {
                 if (wraps) sb.Append(" fl=\"").Append(attrs.ToString().Trim()).Append('"');
