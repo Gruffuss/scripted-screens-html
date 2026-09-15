@@ -843,7 +843,7 @@ internal static class VectorEmitter
         // A label in a scrolling box is not clipped to a line: the container slides it.
         var clipped = (label.style.overflow.value == Overflow.Hidden && !Scrolls(css))
                       || (label.parent != null && label.parent.style.overflow.value == Overflow.Hidden && !Scrolls(ctx.Built.CssOf(label.parent)));
-        var wraps = rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && text.IndexOf(' ') >= 0;
+        var wraps = rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && (text.IndexOf(' ') >= 0 || text.IndexOf('​') >= 0);
         if (!clipped && !wraps)
         {
             // The layout width is UI Toolkit's measure of the text; TextMeshPro measures the
