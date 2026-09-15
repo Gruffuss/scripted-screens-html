@@ -186,29 +186,23 @@ What the vector session implements, with the shape the HTML emitter will write:
 Not vector work after all: `:hover` and click coordinates are done on the HTML side from
 its own layout boxes and the pointer position (Batch A and D).
 
-## Status (2026-09-15, branch `untested`)
+## Status (2026-09-15 evening, branch `untested`, seen on consoles 561 and 586)
 
-| Batch | Commit | Built | Headless checks | On a console |
-|---|---|---|---|---|
-| A cascade and values | `8df1951` | yes | parser tests | not yet (HtmlTest4) |
-| B HTML coverage | `610bb96` | yes | parser tests | not yet (HtmlTest5) |
-| D script DOM | `38c4c01` | yes | parser tests, prelude smoke test in Node | not yet (HtmlTest6) |
-| C paint | `b72f674` | yes | parser tests | not yet (HtmlTest7); the vector work it needs is built as 0.11.21.0, unconfirmed |
-| E canvas | see git | yes | prelude smoke test records a frame | not yet (HtmlTest8) |
-| F1 SVG and numbers | see git | yes | parser tests | not yet (HtmlTest9); `<image>` needs vector 9, the concave clip vector 8 |
-| F2 cascade | see git | yes | parser tests (at-rules, form pseudo-classes, pseudo-elements) | not yet (HtmlTest10) |
-| F3 text, lists, tables, layout, script | see git | yes | parser tests, prelude smoke test (fragments) | not yet (HtmlTest11) |
-| F4 rescued items | see git | yes | parser tests (@counter-style, pseudo-elements) | not yet (HtmlTest12); first-line needs vector 15, nine-slice vector 16, gradient text vector 14 |
-| F5 silent list | see git | yes | (no behaviour) | n/a |
+| Batch | On a console | Fixed from what the console showed |
+|---|---|---|
+| A cascade and values | HtmlTest4: all rows, motion row by eye | :hover followed presses, not the cursor (legacy input module sends no moves: polled now) |
+| B HTML coverage | HtmlTest5: all rows | |
+| D script DOM | HtmlTest6: all PASS, external script loaded (repo made public) | reads after DOM writes saw the old tree; script-made elements lacked the live API once adopted; `load` fired per script; `innerHTML` on a container did not replace built children |
+| C paint | HtmlTest7: all rows; vector 1, 2, 4, 5, 8, 9, 10, 11, 12, 13 seen | float in a sentence sat left; conic stops all at 0; 3D border keywords warned |
+| E canvas | HtmlTest8: emits per frame in the log; not yet confirmed by eye | |
+| F1 SVG and numbers | HtmlTest9: all rows except the `evenodd` hole (vector 17) | svg text/image lost their own x/y/size; clipPath defs were viewBox-space |
+| F2 cascade | HtmlTest10: all rows | controls had no border and clipped their text |
+| F3 text, lists, tables, layout, script | HtmlTest11: not yet | |
+| F4 rescued items | HtmlTest12: all rows; vector 7, 14, 15, 16 seen | ::first-letter only ran with an ::after; the border-image gradient came out flat (def now in scene space) |
+| F5 silent list | n/a | |
 
-SUPPORT.md is rewritten from this file once the pages have been seen on a console.
-
-## Order
-
-A, then B, then D, then C, then E. A first because a real stylesheet hits `box-sizing`,
-`currentColor`, `hsl()` and nesting on its first screen; B because pages use the tags; D because
-scripts written from habit use `insertAdjacentHTML` and `dispatchEvent` before they use any
-paint effect; C and E are visual polish and can run while the vector asks are in flight.
+Not verifiable by capture: anything a script draws or changes after load, and any animation,
+because a capture rebuilds the page and grabs it before its script ran. Those rows need eyes.
 
 ## Approximations left by Batch F (to finish, not limits)
 
