@@ -1033,9 +1033,10 @@ internal static class HtmlRenderer
             if (!IsInlineOnly(c))
                 return false;
             // An inline element with an id (data-binding target) or a class (styled box,
-            // like the mockup's <span class="dia">) keeps its own element; the parent then
-            // becomes a wrapping row (see Append). Bare <b>/<i>/<span> still fold into text.
-            if (KeepsOwnElement(c))
+            // like the mockup's <span class="dia">) keeps its own element, and so does one
+            // holding such an element; the parent then becomes a wrapping row (see Append).
+            // Bare <b>/<i>/<span> still fold into text.
+            if (KeepsOwnElement(c) || HasKeptDescendant(c))
                 return false;
             anyText = true;
         }
@@ -1615,10 +1616,21 @@ internal static class HtmlRenderer
                 continue;
             if (!Inline.Contains(c.Tag!) || !IsInlineOnly(c))
                 return false;
-            if (KeepsOwnElement(c))
+            if (KeepsOwnElement(c) || HasKeptDescendant(c))
                 return false;
         }
         return true;
+    }
+
+    /// <summary>True when some descendant must stay its own element (an id, a class, a control, an image, generated content).</summary>
+    private static bool HasKeptDescendant(HtmlNode node)
+    {
+        foreach (var c in node.Children)
+        {
+            if (c.IsText) continue;
+            if (KeepsOwnElement(c) || HasKeptDescendant(c)) return true;
+        }
+        return false;
     }
 
     /// <summary>A block whose children are text and inline tags, at least one carrying an id or class.</summary>
@@ -1631,7 +1643,7 @@ internal static class HtmlRenderer
                 continue;
             if (!Inline.Contains(c.Tag!) || !IsInlineOnly(c))
                 return false;
-            if (KeepsOwnElement(c))
+            if (KeepsOwnElement(c) || HasKeptDescendant(c))
                 anyId = true;
         }
         return anyId;
