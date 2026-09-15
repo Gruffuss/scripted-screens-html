@@ -228,3 +228,5 @@ firing for `$name` expression keys.
 - `rotateX`/`rotateY` are the flat foreshortening (`cos`), no perspective.
 - `animation-timeline: scroll()/view()` covers opacity and the 2D transform functions
   in the keyframes; `animation-range` is ignored.
+- An inline-block box beside text (a small LED span) sits at the bottom of the line, not on
+  the text baseline; `vertical-align` on it is not applied.

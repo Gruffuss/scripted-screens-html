@@ -192,6 +192,8 @@ Approximations in this layer, listed to be replaced, not kept:
 - `word-break: break-all` estimates its wrapped height in the layout from an average glyph width.
 - `:hover` uses the page rect, not a raycast: something standing between the player and
   the console does not block it.
+- An inline-block box beside text (a small LED span) sits at the bottom of the line, not on
+  the text baseline; `vertical-align` on it is not applied.
 
 Out, with the reason: `::selection` (no text selection), `@page` (print),
 `@view-transition` (no document navigation), `shape-outside` (no inline formatting context
