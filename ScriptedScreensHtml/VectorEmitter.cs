@@ -278,8 +278,22 @@ internal static class VectorEmitter
             var sameWidth = Mathf.Approximately(bw, rs.borderRightWidth) && Mathf.Approximately(bw, rs.borderBottomWidth) && Mathf.Approximately(bw, rs.borderLeftWidth);
             var sameColour = rs.borderTopColor == rs.borderRightColor && rs.borderTopColor == rs.borderBottomColor && rs.borderTopColor == rs.borderLeftColor;
             var rounded = rs.borderTopLeftRadius > 0.01f || rs.borderTopRightRadius > 0.01f || rs.borderBottomRightRadius > 0.01f || rs.borderBottomLeftRadius > 0.01f;
-            var bstyle = BorderStyle(css);
-            if (bw > 0.01f && sameWidth && bstyle == "double")
+            var styles = new[] { SideStyle(css, "top", 0), SideStyle(css, "right", 1), SideStyle(css, "bottom", 2), SideStyle(css, "left", 3) };
+            var bstyle = styles[0];
+            var mixed = styles[0] != styles[1] || styles[0] != styles[2] || styles[0] != styles[3];
+            if (!mixed && bstyle is "none" or "hidden")
+            {
+                // border-style: none with a width: no border, as CSS computes it
+            }
+            else if (mixed && (bw > 0.01f || rs.borderRightWidth > 0.01f || rs.borderBottomWidth > 0.01f || rs.borderLeftWidth > 0.01f))
+            {
+                // Different styles per side: each side its own stroke, dashed or dotted as it says, none drawing nothing.
+                SideLine(ctx, indent, styles[0], x, y + rs.borderTopWidth * 0.5f, x + w, y + rs.borderTopWidth * 0.5f, rs.borderTopWidth, rs.borderTopColor);
+                SideLine(ctx, indent, styles[1], x + w - rs.borderRightWidth * 0.5f, y, x + w - rs.borderRightWidth * 0.5f, y + h, rs.borderRightWidth, rs.borderRightColor);
+                SideLine(ctx, indent, styles[2], x, y + h - rs.borderBottomWidth * 0.5f, x + w, y + h - rs.borderBottomWidth * 0.5f, rs.borderBottomWidth, rs.borderBottomColor);
+                SideLine(ctx, indent, styles[3], x + rs.borderLeftWidth * 0.5f, y, x + rs.borderLeftWidth * 0.5f, y + h, rs.borderLeftWidth, rs.borderLeftColor);
+            }
+            else if (bw > 0.01f && sameWidth && bstyle == "double")
             {
                 // double: two strokes a third of the width each, at the outer and inner edges
                 var third = bw / 3f;
@@ -533,22 +547,7 @@ internal static class VectorEmitter
     }
 
     /// <summary>border-style dashed/dotted (from the shorthand or the property) as a dash pattern in border widths.</summary>
-    private static string Dash(Dictionary<string, string> css, float bw)
-    {
-        string? style = null;
-        if (css.TryGetValue("border-style", out var bs)) style = bs;
-        else if (css.TryGetValue("border", out var b))
-        {
-            foreach (var p in b.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                if (p == "dashed" || p == "dotted" || p == "solid") style = p;
-        }
-        return style switch
-        {
-            "dashed" => " dash=[" + F(bw * 3f) + "," + F(bw * 2f) + "]",
-            "dotted" => " dash=[" + F(bw) + "," + F(bw) + "] cap=round",
-            _ => string.Empty,
-        };
-    }
+    private static string Dash(Dictionary<string, string> css, float bw) => DashFor(SideStyle(css, "top", 0), bw);
 
     /// <summary>
     /// radial-gradient([circle|ellipse] [size] [at x y,] stops): a GR def in bounding-box
@@ -775,10 +774,14 @@ internal static class VectorEmitter
             return;
         if (css.TryGetValue("text-transform", out var tt))
             text = Transform(text, tt.Trim().ToLowerInvariant());
-        if (css.TryGetValue("text-decoration", out var td))
+        var deco = Decoration(css);
+        var ox = x; var ow = w;
+        var drawDeco = deco.line != 0 && !(rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && text.IndexOf(' ') >= 0) && (deco.colour != null || deco.style != "solid" || deco.thickness > 0f || !float.IsNaN(deco.offset) || (deco.line & 4) != 0);
+        if (!drawDeco)
         {
-            if (td.Contains("underline")) text = "<u>" + text + "</u>";
-            if (td.Contains("line-through")) text = "<s>" + text + "</s>";
+            // TextMeshPro draws the plain forms itself, wrapped lines included
+            if ((deco.line & 1) != 0) text = "<u>" + text + "</u>";
+            if ((deco.line & 2) != 0) text = "<s>" + text + "</s>";
         }
         // Scene text escapes (vector mod 0.10.1.0): backslash first, then the quote; a line
         // break in the text becomes the two characters backslash-n.
@@ -887,6 +890,110 @@ internal static class VectorEmitter
         }
         sb.Append(NodeId(ctx, label)).Append('\n');
         ctx.Body.Append(sb);
+        ctx.Out.Nodes++;
+        if (drawDeco)
+            EmitDecoration(ctx, label, deco, rs, ox, y, ow, h, centre, right, indent);
+    }
+
+    private struct Deco
+    {
+        /// <summary>Bit 1 underline, 2 line-through, 4 overline.</summary>
+        public int line;
+        public string style;
+        public Color? colour;
+        public float thickness;
+        /// <summary>text-underline-offset in px, NaN for auto.</summary>
+        public float offset;
+    }
+
+    /// <summary>text-decoration and its longhands: the lines, style, colour, thickness and underline offset.</summary>
+    private static Deco Decoration(Dictionary<string, string> css)
+    {
+        var d = new Deco { style = "solid", offset = float.NaN };
+        void Lines(string v)
+        {
+            d.line = 0;
+            foreach (var p in v.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (p == "underline") d.line |= 1;
+                else if (p == "line-through") d.line |= 2;
+                else if (p == "overline") d.line |= 4;
+                else if (p == "none") d.line = 0;
+            }
+        }
+        if (css.TryGetValue("text-decoration", out var td))
+        {
+            Lines(td);
+            foreach (var p in td.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var lp = p.ToLowerInvariant();
+                if (lp is "solid" or "double" or "dotted" or "dashed" or "wavy") d.style = lp;
+                else if (lp is "underline" or "overline" or "line-through" or "none" or "blink") { }
+                else if (char.IsDigit(lp[0]) || lp[0] == '.') d.thickness = StyleApplier.Num(lp);
+                else if (StyleApplier.TryColor(p, out var c)) d.colour = c;
+            }
+        }
+        if (css.TryGetValue("text-decoration-line", out var tl)) Lines(tl);
+        if (css.TryGetValue("text-decoration-style", out var ts)) d.style = ts.Trim().ToLowerInvariant();
+        if (css.TryGetValue("text-decoration-color", out var tc) && StyleApplier.TryColor(tc, out var col)) d.colour = col;
+        if (css.TryGetValue("text-decoration-thickness", out var tt) && tt.Trim() is not ("auto" or "from-font")) d.thickness = StyleApplier.Num(tt);
+        if (css.TryGetValue("text-underline-offset", out var to) && to.Trim() != "auto") d.offset = StyleApplier.Num(to);
+        return d;
+    }
+
+    /// <summary>
+    /// Decoration lines drawn as geometry under a single-line label: underline, overline
+    /// and line-through in their colour, thickness, style and offset. The text width is
+    /// the layout's measure; the vertical positions follow the label's middle alignment.
+    /// </summary>
+    private static void EmitDecoration(Ctx ctx, Label label, Deco d, IResolvedStyle rs, float x, float y, float w, float h, bool centre, bool right, string indent)
+    {
+        var fs = rs.fontSize;
+        if (fs <= 0f) return;
+        var tw = label.MeasureTextSize(label.text ?? string.Empty, 0f, VisualElement.MeasureMode.Undefined, 0f, VisualElement.MeasureMode.Undefined).x;
+        if (float.IsNaN(tw) || tw <= 0f) tw = w;
+        tw = Mathf.Min(tw, w);
+        var left = centre ? x + (w - tw) * 0.5f : right ? x + w - tw : x;
+        var colour = d.colour ?? rs.color;
+        var t = d.thickness > 0f ? d.thickness : Mathf.Max(1f, fs / 14f);
+        var mid = y + h * 0.5f;
+        var baseline = mid + fs * 0.32f;
+        var offset = float.IsNaN(d.offset) ? fs * 0.1f : d.offset;
+        void Line(float ly)
+        {
+            if (d.style == "double")
+            {
+                Stroke(ctx, indent, left, ly - t, left + tw, ly - t, t, colour, string.Empty);
+                Stroke(ctx, indent, left, ly + t, left + tw, ly + t, t, colour, string.Empty);
+            }
+            else if (d.style == "wavy")
+            {
+                // a quadratic wave, half a period per segment, amplitude one thickness
+                var period = Mathf.Max(2f, t * 4f);
+                var sb = new StringBuilder("P d=\"M").Append(F(left)).Append(' ').Append(F(ly));
+                var n = Mathf.Min(400, Mathf.CeilToInt(tw / (period * 0.5f)));
+                for (var i = 0; i < n; i++)
+                {
+                    var x0 = left + i * period * 0.5f;
+                    var x1 = Mathf.Min(left + tw, x0 + period * 0.5f);
+                    var cy = ly + (i % 2 == 0 ? -1f : 1f) * t * 2f;
+                    sb.Append(" Q").Append(F((x0 + x1) * 0.5f)).Append(' ').Append(F(cy)).Append(' ').Append(F(x1)).Append(' ').Append(F(ly));
+                }
+                sb.Append("\" f=none s=").Append(Hex(colour)).Append(" sw=").Append(F(t)).Append('\n');
+                ctx.Body.Append(indent).Append(sb);
+                ctx.Out.Nodes++;
+            }
+            else
+                Stroke(ctx, indent, left, ly, left + tw, ly, t, colour, DashFor(d.style, t));
+        }
+        if ((d.line & 1) != 0) Line(baseline + offset + t * 0.5f);
+        if ((d.line & 4) != 0) Line(mid - fs * 0.58f + t * 0.5f);
+        if ((d.line & 2) != 0) Line(mid - fs * 0.02f);
+    }
+
+    private static void Stroke(Ctx ctx, string indent, float x1, float y1, float x2, float y2, float width, Color c, string extra)
+    {
+        ctx.Body.Append(indent).Append("L p=[").Append(F(x1)).Append(',').Append(F(y1)).Append(',').Append(F(x2)).Append(',').Append(F(y2)).Append("] s=").Append(Hex(c)).Append(" sw=").Append(F(width)).Append(extra).Append('\n');
         ctx.Out.Nodes++;
     }
 
@@ -1967,13 +2074,45 @@ internal static class VectorEmitter
     }
 
     /// <summary>border-style from the property or the shorthand: solid (default), dashed, dotted, double, groove, ridge, inset, outset, none.</summary>
-    private static string BorderStyle(Dictionary<string, string> css)
+    private static string BorderStyle(Dictionary<string, string> css) => SideStyle(css, "top", 0);
+
+    private static bool IsBorderStyle(string p) => p is "solid" or "dashed" or "dotted" or "double" or "groove" or "ridge" or "inset" or "outset" or "none" or "hidden";
+
+    /// <summary>One side's border style: border-&lt;side&gt;-style, then the border-&lt;side&gt; shorthand, then border-style (1-4 values), then the border shorthand, else solid.</summary>
+    private static string SideStyle(Dictionary<string, string> css, string side, int index)
     {
-        if (css.TryGetValue("border-style", out var bs)) return bs.Trim().Split(' ')[0].ToLowerInvariant();
+        if (css.TryGetValue("border-" + side + "-style", out var own)) return own.Trim().ToLowerInvariant();
+        if (css.TryGetValue("border-" + side, out var sh))
+            foreach (var p in sh.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                if (IsBorderStyle(p)) return p;
+        if (css.TryGetValue("border-style", out var bs))
+        {
+            var parts = bs.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length > 0) return StyleApplier.SideOf(parts, index);
+        }
         if (css.TryGetValue("border", out var b))
-            foreach (var p in b.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                if (p is "solid" or "dashed" or "dotted" or "double" or "groove" or "ridge" or "inset" or "outset" or "none") return p;
+            foreach (var p in b.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                if (IsBorderStyle(p)) return p;
         return "solid";
+    }
+
+    private static string DashFor(string style, float bw)
+    {
+        return style switch
+        {
+            "dashed" => " dash=[" + F(bw * 3f) + "," + F(bw * 2f) + "]",
+            "dotted" => " dash=[" + F(bw) + "," + F(bw) + "] cap=round",
+            _ => string.Empty,
+        };
+    }
+
+    /// <summary>One border side as a stroked line in its own style; none/hidden draws nothing.</summary>
+    private static void SideLine(Ctx ctx, string indent, string style, float x1, float y1, float x2, float y2, float width, Color c)
+    {
+        if (width <= 0.01f || c.a <= 0.002f || style is "none" or "hidden")
+            return;
+        ctx.Body.Append(indent).Append("L p=[").Append(F(x1)).Append(',').Append(F(y1)).Append(',').Append(F(x2)).Append(',').Append(F(y2)).Append("] s=").Append(Hex(c)).Append(" sw=").Append(F(width)).Append(DashFor(style, width)).Append('\n');
+        ctx.Out.Nodes++;
     }
 
     /// <summary>

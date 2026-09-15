@@ -39,6 +39,8 @@ internal static class HtmlRenderer
         /// <summary>&lt;script src&gt; urls in document order and &lt;link rel=stylesheet href&gt; urls; the surface fetches them.</summary>
         public readonly List<string> ExternalScripts = new();
         public readonly List<string> ExternalStyles = new();
+        /// <summary>@import urls; the surface fetches each and inlines it in place of the statement.</summary>
+        public readonly List<string> ExternalImports = new();
         /// <summary>Design width from meta viewport, or 0 to use the element's own width.</summary>
         public float ViewportWidth;
         /// <summary>Stylesheet rules and the node each element came from, for className changes at runtime.</summary>
@@ -113,7 +115,10 @@ internal static class HtmlRenderer
         CssParser.ViewportWidth = result.ViewportWidth > 0f ? result.ViewportWidth : 460f;
         CssParser.ViewportHeight = CssParser.ViewportWidth * SurfaceAspect;
         CssParser.FontFaces.Clear();
+        CssParser.Imports.Clear();
+        CssParser.PropertyInitials.Clear();
         Collect(doc, rules, script, result.Keyframes, Warn, result);
+        result.ExternalImports.AddRange(CssParser.Imports);
         foreach (var (family, src, weight, style) in CssParser.FontFaces)
             FontLibrary.Alias(family, src, weight, style);
         result.Script = script.ToString();
@@ -1395,7 +1400,7 @@ internal static class HtmlRenderer
                 }
                 case "font-weight": bold = d.Value == "bold" || d.Value == "bolder" || (StyleApplier.IsNumber(d.Value) && StyleApplier.Num(d.Value) >= 600); break;
                 case "font-style": italic = d.Value == "italic" || d.Value == "oblique"; break;
-                case "text-decoration": underline = d.Value.Contains("underline"); strike = d.Value.Contains("line-through"); break;
+                case "text-decoration": case "text-decoration-line": underline = d.Value.Contains("underline"); strike = d.Value.Contains("line-through"); break;
                 case "font":
                     foreach (var part in d.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                     {
@@ -1565,7 +1570,7 @@ internal static class HtmlRenderer
             string? found = null;
             for (var n = node; n != null && found == null; n = n.Parent)
                 if (n.Vars != null && n.Vars.TryGetValue(name, out var v)) found = v;
-            found ??= fallback != null ? ResolveVars(fallback, node) : string.Empty;
+            found ??= fallback != null ? ResolveVars(fallback, node) : CssParser.PropertyInitials.TryGetValue(name, out var initial) ? initial : string.Empty;
             sb.Append(found);
             i = j + 1;
         }
@@ -1644,6 +1649,7 @@ internal static class HtmlRenderer
                 (d.Important ? important : ordered).Add(d);
         }
         ordered.AddRange(important);
+        ordered = StyleApplier.Expand(ordered);
 
         AnimationSpec? anim = null;
         var record = result.CssOf(ve);
@@ -1698,6 +1704,23 @@ internal static class HtmlRenderer
                 continue;
             }
             StyleApplier.Apply(ve, d, Warn);
+        }
+        // ::placeholder: the field is a ScriptedScreens control, so its placeholder colour is
+        // read off the rules that match a placeholder pseudo-element of this node and handed
+        // to the control as placeholder_color. ponytail: colour only, last matching rule wins
+        if (node.Tag is "input" or "textarea")
+        {
+            var ph = new HtmlNode { Tag = "span", Parent = node };
+            ph.Attributes["data-pseudo"] = "placeholder";
+            string? pc = null;
+            foreach (var rule in rules)
+            {
+                var hit = false;
+                foreach (var sel in rule.Selectors) if (sel.Matches(ph)) { hit = true; break; }
+                if (!hit) continue;
+                foreach (var d in rule.Declarations) if (d.Name == "color") pc = d.Value;
+            }
+            if (pc != null) node.Attributes["data-placeholder-color"] = pc.IndexOf("var(", StringComparison.Ordinal) >= 0 ? ResolveVars(pc, node) : pc;
         }
         // CSS sizes a box content-box unless told otherwise; the layout engine is border-box.
         // A width the page set therefore grows by its padding and border, unless the page

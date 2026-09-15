@@ -137,5 +137,40 @@ Console.WriteLine("Keyframes, child combinator, !important");
     Check(rules[1].Declarations[0].Important && !rules[1].Declarations[1].Important, "!important flag set per declaration");
 }
 
+// Batch F2: at-rules, form pseudo-classes, pseudo-elements
+{
+    var warnings = new List<string>();
+    CssParser.Imports.Clear();
+    CssParser.PropertyInitials.Clear();
+    var rules = CssParser.ParseStylesheet(
+        "@import url(https://x/a.css) screen; @import \"https://x/b.css\";" +
+        "@layer base { p { color: red } } @layer { q { color: blue } }" +
+        "@scope (.card) { img { width: 1px } :scope { padding: 1px } }" +
+        "@container side (min-width: 100px) { .in { color: green } } @container (min-width: 99999px) { .out { color: green } }" +
+        "@property --gap { syntax: '<length>'; inherits: false; initial-value: 7px; }" +
+        "input:required { a: 1 } input:invalid { a: 2 } input:in-range { a: 3 } input::placeholder { color: gray } li::marker { color: red } a:any-link { a: 4 } p:lang(en) { a: 5 } div:dir(rtl) { a: 6 }",
+        m => warnings.Add(m), new Dictionary<string, CssKeyframes>());
+    Check(CssParser.Imports.Count == 2 && CssParser.Imports[0] == "https://x/a.css" && CssParser.Imports[1] == "https://x/b.css", "@import urls collected (url() and quoted forms)");
+    Check(rules.Exists(r => r.Selectors[0].Matches(HtmlParser.Parse("<p></p>").Children[0])) && rules.Exists(r => r.Selectors[0].Matches(HtmlParser.Parse("<q></q>").Children[0])), "@layer blocks parsed, named and anonymous");
+    var card = HtmlParser.Parse("<div class=card><img></div>").Children[0];
+    Check(rules.Exists(r => r.Selectors[0].Matches(card.Children[0])) && rules.Exists(r => r.Selectors[0].Matches(card) && r.Declarations[0].Name == "padding"), "@scope prefixes its rules with the root; :scope is the root");
+    Check(rules.Exists(r => r.Declarations[0].Value.Trim() == "green" && r.Selectors[0].Matches(HtmlParser.Parse("<div class=in></div>").Children[0])) && !rules.Exists(r => r.Selectors[0].Matches(HtmlParser.Parse("<div class=out></div>").Children[0])), "@container decided like @media");
+    Check(CssParser.PropertyInitials.TryGetValue("--gap", out var init) && init == "7px", "@property initial-value recorded");
+    var form = HtmlParser.Parse("<input id=r required><input id=v type=number min=1 max=5 value=3><input id=o type=number min=1 max=5 value=9><a id=l href=x></a><p id=p lang=en-GB></p><div dir=rtl><div id=d></div></div>");
+    HtmlNode ById(HtmlNode n, string id) { if (n.Attr("id") == id) return n; foreach (var c in n.Children) { var f = ById(c, id); if (f != null) return f; } return null!; }
+    CssSelector Sel(string s) => CssParser.ParseSelector(s, null)!;
+    Check(Sel("input:required").Matches(ById(form, "r")) && !Sel("input:required").Matches(ById(form, "v")), ":required from the attribute");
+    Check(Sel("input:invalid").Matches(ById(form, "r")) && !Sel("input:invalid").Matches(ById(form, "v")) && Sel("input:invalid").Matches(ById(form, "o")), ":invalid for an empty required field and an out-of-range number");
+    Check(Sel("input:in-range").Matches(ById(form, "v")) && Sel("input:out-of-range").Matches(ById(form, "o")) && !Sel("input:in-range").Matches(ById(form, "r")), ":in-range/:out-of-range from min/max");
+    Check(Sel("a:any-link").Matches(ById(form, "l")) && Sel("p:lang(en)").Matches(ById(form, "p")) && Sel("div:dir(rtl)").Matches(ById(form, "d")) && !Sel("div:dir(ltr)").Matches(ById(form, "d")), ":any-link, :lang() prefix, :dir() inherited");
+    var marker = HtmlParser.Parse("<li><span data-marker=disc></span>text</li>").Children[0].Children[0];
+    Check(Sel("li::marker").Matches(marker) && !Sel("li span").Matches(marker), "::marker matches the marker span and ordinary selectors do not");
+    var field = HtmlParser.Parse("<input>").Children[0];
+    var ph = new HtmlNode { Tag = "span", Parent = field };
+    ph.Attributes["data-pseudo"] = "placeholder";
+    Check(Sel("input::placeholder").Matches(ph) && Sel("input::-webkit-input-placeholder").Matches(ph), "::placeholder (and the vendor spelling) matches the field's placeholder pseudo-element");
+    Check(warnings.Count == 0, $"no warnings for the F2 sheet (got {string.Join("; ", warnings)})");
+}
+
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");
 return failures.Count == 0 ? 0 : 1;

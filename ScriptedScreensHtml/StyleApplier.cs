@@ -125,6 +125,20 @@ internal static class StyleApplier
             case "border-right-width": s.borderRightWidth = Num(v); break;
             case "border-bottom-width": s.borderBottomWidth = Num(v); break;
             case "border-left-width": s.borderLeftWidth = Num(v); break;
+            case "border-top-style": if (v is "none" or "hidden") s.borderTopWidth = 0f; break;
+            case "border-right-style": if (v is "none" or "hidden") s.borderRightWidth = 0f; break;
+            case "border-bottom-style": if (v is "none" or "hidden") s.borderBottomWidth = 0f; break;
+            case "border-left-style": if (v is "none" or "hidden") s.borderLeftWidth = 0f; break;
+            case "border-style":
+            {
+                var parts = v.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 0) break;
+                if (SideOf(parts, 0) is "none" or "hidden") s.borderTopWidth = 0f;
+                if (SideOf(parts, 1) is "none" or "hidden") s.borderRightWidth = 0f;
+                if (SideOf(parts, 2) is "none" or "hidden") s.borderBottomWidth = 0f;
+                if (SideOf(parts, 3) is "none" or "hidden") s.borderLeftWidth = 0f;
+                break;
+            }
             case "border-top-color": if (TryColor(v, out var btc)) s.borderTopColor = btc; else Unknown(d, warn); break;
             case "border-right-color": if (TryColor(v, out var brc)) s.borderRightColor = brc; else Unknown(d, warn); break;
             case "border-bottom-color": if (TryColor(v, out var bbc)) s.borderBottomColor = bbc; else Unknown(d, warn); break;
@@ -424,8 +438,28 @@ internal static class StyleApplier
     }
 
     /// <summary>Handled outside the style object: by the grid layout, the emitter, or by the box model itself.</summary>
+    private static bool MixPart(string part, out Color c, out float pct)
+    {
+        pct = float.NaN;
+        var tokens = part.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var colourText = part.Trim();
+        if (tokens.Length >= 2 && tokens[tokens.Length - 1].EndsWith("%", StringComparison.Ordinal))
+        {
+            pct = Num(tokens[tokens.Length - 1]);
+            colourText = colourText.Substring(0, colourText.Length - tokens[tokens.Length - 1].Length).Trim();
+        }
+        else if (tokens.Length >= 2 && tokens[0].EndsWith("%", StringComparison.Ordinal))
+        {
+            pct = Num(tokens[0]);
+            colourText = colourText.Substring(tokens[0].Length).Trim();
+        }
+        return TryColor(colourText, out c);
+    }
+
     private static readonly HashSet<string> Elsewhere = new(StringComparer.Ordinal)
     {
+        "container", "container-type", "container-name",
+        "text-decoration-line", "text-decoration-color", "text-decoration-style", "text-decoration-thickness", "text-underline-offset", "text-underline-position", "text-decoration-skip-ink",
         "gap", "row-gap", "column-gap", "grid-gap", "grid-row-gap", "grid-column-gap",
         "grid-template-columns", "grid-template-rows", "grid-auto-rows", "grid-auto-columns", "grid-auto-flow",
         "grid-column", "grid-row", "grid-column-start", "grid-column-end", "grid-row-start", "grid-row-end",
@@ -816,12 +850,112 @@ internal static class StyleApplier
 
     /// <summary>#rgb #rgba #rrggbb #rrggbbaa rgb() rgba() hsl() and a few names. Managed code only:
     /// ColorUtility.TryParseHtmlString is a native call that fails headless.</summary>
+    /// <summary>The value for side index 0..3 (top right bottom left) of a 1-4 value list, as CSS repeats them.</summary>
+    internal static string SideOf(string[] parts, int side)
+    {
+        return parts.Length switch
+        {
+            1 => parts[0],
+            2 => parts[side % 2],
+            3 => side == 3 ? parts[1] : parts[side],
+            _ => parts[Math.Min(side, parts.Length - 1)],
+        };
+    }
+
+    /// <summary>
+    /// Logical properties as their physical ones for a horizontal, left-to-right page:
+    /// inline is x, block is y, start is left/top. A two-value pair (margin-inline: a b)
+    /// splits; a shorthand (border-inline: 1px solid) applies whole to both sides.
+    /// </summary>
+    internal static List<CssDeclaration> Expand(List<CssDeclaration> list)
+    {
+        List<CssDeclaration>? outp = null;
+        for (var i = 0; i < list.Count; i++)
+        {
+            var d = list[i];
+            var n = d.Name;
+            string? a = null, b = null;
+            var pair = false;
+            switch (n)
+            {
+                case "inline-size": a = "width"; break;
+                case "block-size": a = "height"; break;
+                case "min-inline-size": a = "min-width"; break;
+                case "max-inline-size": a = "max-width"; break;
+                case "min-block-size": a = "min-height"; break;
+                case "max-block-size": a = "max-height"; break;
+                case "border-start-start-radius": a = "border-top-left-radius"; break;
+                case "border-start-end-radius": a = "border-top-right-radius"; break;
+                case "border-end-start-radius": a = "border-bottom-left-radius"; break;
+                case "border-end-end-radius": a = "border-bottom-right-radius"; break;
+                case "overflow-inline": a = "overflow-x"; break;
+                case "overflow-block": a = "overflow-y"; break;
+                case "inset-inline-start": a = "left"; break;
+                case "inset-inline-end": a = "right"; break;
+                case "inset-block-start": a = "top"; break;
+                case "inset-block-end": a = "bottom"; break;
+                case "inset-inline": a = "left"; b = "right"; pair = true; break;
+                case "inset-block": a = "top"; b = "bottom"; pair = true; break;
+                case "text-align": case "float": case "clear":
+                {
+                    var kw = d.Value.Trim().ToLowerInvariant();
+                    if (kw is "start" or "inline-start") a = n;
+                    else if (kw is "end" or "inline-end") a = n;
+                    else break;
+                    outp ??= new List<CssDeclaration>(list.GetRange(0, i));
+                    outp.Add(new CssDeclaration(n, kw is "start" or "inline-start" ? "left" : "right", d.Important));
+                    a = null;
+                    continue;
+                }
+                default:
+                    if (n.IndexOf("-inline-start", StringComparison.Ordinal) >= 0) a = n.Replace("-inline-start", "-left");
+                    else if (n.IndexOf("-inline-end", StringComparison.Ordinal) >= 0) a = n.Replace("-inline-end", "-right");
+                    else if (n.IndexOf("-block-start", StringComparison.Ordinal) >= 0) a = n.Replace("-block-start", "-top");
+                    else if (n.IndexOf("-block-end", StringComparison.Ordinal) >= 0) a = n.Replace("-block-end", "-bottom");
+                    else if (n.IndexOf("-inline", StringComparison.Ordinal) >= 0) { a = n.Replace("-inline", "-left"); b = n.Replace("-inline", "-right"); pair = n.StartsWith("margin", StringComparison.Ordinal) || n.StartsWith("padding", StringComparison.Ordinal) || n.StartsWith("scroll", StringComparison.Ordinal); }
+                    else if (n.IndexOf("-block", StringComparison.Ordinal) >= 0) { a = n.Replace("-block", "-top"); b = n.Replace("-block", "-bottom"); pair = n.StartsWith("margin", StringComparison.Ordinal) || n.StartsWith("padding", StringComparison.Ordinal) || n.StartsWith("scroll", StringComparison.Ordinal); }
+                    break;
+            }
+            if (a == null) { outp?.Add(d); continue; }
+            outp ??= new List<CssDeclaration>(list.GetRange(0, i));
+            if (b == null) { outp.Add(new CssDeclaration(a, d.Value, d.Important)); continue; }
+            var va = d.Value.Trim();
+            var vb = va;
+            if (pair)
+            {
+                var parts = va.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2 && !parts[0].Contains('(')) { va = parts[0]; vb = parts[1]; }
+            }
+            outp.Add(new CssDeclaration(a, va, d.Important));
+            outp.Add(new CssDeclaration(b, vb, d.Important));
+        }
+        return outp ?? list;
+    }
+
     public static bool TryColor(string v, out Color color)
     {
         v = v.Trim();
         color = Color.white;
         if (v.Length == 0) return false;
         if (Named.TryGetValue(v, out color)) return true;
+        if (v.StartsWith("color-mix(", StringComparison.OrdinalIgnoreCase))
+        {
+            // color-mix(in <space>, A [p%], B [q%]): the percentages normalised as the spec
+            // says, mixed in sRGB. ponytail: oklab/oklch/hsl interpolation differs a little in hue paths
+            var closeParen = v.LastIndexOf(')');
+            if (closeParen < 10) return false;
+            var parts = CssParser.SplitTopLevel(v.Substring(10, closeParen - 10), ',');
+            if (parts.Count < 3) return false;
+            if (!MixPart(parts[1], out var ca, out var pa) || !MixPart(parts[2], out var cb, out var pb)) return false;
+            if (float.IsNaN(pa) && float.IsNaN(pb)) { pa = 50f; pb = 50f; }
+            else if (float.IsNaN(pa)) pa = 100f - pb;
+            else if (float.IsNaN(pb)) pb = 100f - pa;
+            var sum = pa + pb;
+            if (sum <= 0f) return false;
+            var t = pb / sum;
+            color = Color.Lerp(ca, cb, t);
+            return true;
+        }
 
         if (v[0] == '#')
         {

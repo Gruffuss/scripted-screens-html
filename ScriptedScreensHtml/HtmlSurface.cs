@@ -446,6 +446,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         // the inline ones. ponytail: http(s) only, no caching, 15 s timeout.
         foreach (var href in built.ExternalStyles)
             if (_fetched.Add("css:" + href)) StartCoroutine(Fetch(href, css => { _source = InlineStylesheet(_source, href, css); Build(); }));
+        foreach (var href in built.ExternalImports)
+            if (_fetched.Add("css:" + href)) StartCoroutine(Fetch(href, css => { _source = InlineImport(_source, href, css); Build(); }));
         foreach (var src in built.ExternalScripts)
             if (_fetched.Add("js:" + src)) StartCoroutine(Fetch(src, js => _script?.Run(src.EndsWith(".mjs", StringComparison.OrdinalIgnoreCase) ? HtmlRenderer.StripModuleSyntax(js) : js)));
         _svgs.Clear();
@@ -778,6 +780,8 @@ internal sealed class HtmlSurface : MonoBehaviour
                 props.Add(new SS.UiProp { Key = "value", Value = SS.UiValue.FromString(value) });
                 props.Add(new SS.UiProp { Key = "placeholder", Value = SS.UiValue.FromString(node.Attr("placeholder") ?? string.Empty) });
                 props.Add(new SS.UiProp { Key = "title", Value = SS.UiValue.FromString(node.Attr("title") ?? node.Attr("placeholder") ?? "Enter text") });
+                if (node.Attr("data-placeholder-color") is { } pc && StyleApplier.TryColor(pc, out var pcol))
+                    style.Add(new SS.UiProp { Key = "placeholder_color", Value = SS.UiValue.FromString(VectorEmitter.Hex(pcol)) });
                 break;
             }
         }
@@ -885,6 +889,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             }
         }
         _inputValues[key] = stored;
+        if (node.Tag is "input" or "textarea") { node.Attributes["value"] = stored; Recascade(node); }
         _externalState.Remove(ElementId + "/" + key);
         _dirty = true;
         Wake();
@@ -971,6 +976,13 @@ internal sealed class HtmlSurface : MonoBehaviour
     }
 
     /// <summary>The &lt;link&gt; for this href becomes a &lt;style&gt; with the fetched text, so a rebuild sees it as page CSS.</summary>
+    /// <summary>The @import statement naming <paramref name="href"/> replaced by the fetched sheet, in place, so its rules keep their position.</summary>
+    private static string InlineImport(string source, string href, string css)
+    {
+        var rx = new System.Text.RegularExpressions.Regex(@"@import\s+(?:url\()?[""']?" + System.Text.RegularExpressions.Regex.Escape(href) + @"[""']?\)?[^;]*;", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return rx.Replace(source, css.Replace("</style>", string.Empty), 1);
+    }
+
     private static string InlineStylesheet(string source, string href, string css)
     {
         var rx = new System.Text.RegularExpressions.Regex("<link[^>]*href=[\"']?" + System.Text.RegularExpressions.Regex.Escape(href) + "[\"']?[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -1175,9 +1187,10 @@ internal sealed class HtmlSurface : MonoBehaviour
             Wake();
             return;
         }
-        if (!_externalNodes.ContainsKey(key))
+        if (!_externalNodes.TryGetValue(key, out var field))
             return;
         _inputValues[key] = value;
+        if (field.Tag is "input" or "textarea") { field.Attributes["value"] = value; Recascade(field); }
         _externalState.Remove(ElementId + "/" + key);
         _dirty = true;
         Wake();

@@ -87,7 +87,7 @@ internal sealed class CssSelector
         // ::before/::after: the subject is a generated child carrying data-pseudo; the
         // selector proper is matched against its parent. Generated children match nothing else.
         var pseudoElement = Chain[idx].PseudoElement;
-        var generated = node.Attr("data-pseudo");
+        var generated = node.Attr("data-pseudo") ?? (node.Attr("data-marker") != null ? "marker" : null);
         if (pseudoElement != null)
         {
             if (node.Parent == null || !string.Equals(generated, pseudoElement, StringComparison.Ordinal))
@@ -200,6 +200,10 @@ internal static class CssParser
                 var brace = css.IndexOf('{', i);
                 if (brace < 0 || (semi >= 0 && semi < brace))
                 {
+                    // statement at-rules: @import is fetched by the surface; @layer lists and @charset are nothing to do
+                    var stmt = css.Substring(i + 1, (semi < 0 ? css.Length : semi) - i - 1).Trim();
+                    if (stmt.StartsWith("import", StringComparison.OrdinalIgnoreCase) && ImportUrl(stmt.Substring(6)) is { } importUrl)
+                        Imports.Add(importUrl);
                     i = semi < 0 ? css.Length : semi + 1;
                     continue;
                 }
@@ -263,6 +267,43 @@ internal static class CssParser
                             rules.Add(r);
                         }
                     }
+                }
+                else if (header.StartsWith("layer", StringComparison.OrdinalIgnoreCase) || header.StartsWith("container", StringComparison.OrdinalIgnoreCase) || header.StartsWith("scope", StringComparison.OrdinalIgnoreCase))
+                {
+                    // @layer: its rules in source order (layer precedence is source order here);
+                    // @container: decided against the design size like @media (ponytail: a real
+                    // container query needs the container's laid-out size and a re-cascade);
+                    // @scope (root): the block becomes a nested rule under the root selector.
+                    var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
+                    var take = true;
+                    if (header.StartsWith("container", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var paren = header.IndexOf('(');
+                        take = paren >= 0 && MediaMatches(header.Substring(paren));
+                    }
+                    else if (header.StartsWith("scope", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var paren = header.IndexOf('(');
+                        var closeParen = paren >= 0 ? header.IndexOf(')', paren) : -1;
+                        var root = closeParen > paren ? header.Substring(paren + 1, closeParen - paren - 1).Trim() : ":root";
+                        inner = root + " { " + inner.Replace(":scope", "&") + " }";
+                    }
+                    if (take)
+                    {
+                        foreach (var r in ParseStylesheet(inner, warn, keyframes))
+                        {
+                            r.Order = order++;
+                            rules.Add(r);
+                        }
+                    }
+                }
+                else if (header.StartsWith("property", StringComparison.OrdinalIgnoreCase))
+                {
+                    // @property --name { initial-value }: the value a var() falls back to
+                    var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
+                    var pname = header.Substring(8).Trim();
+                    foreach (var d in ParseDeclarations(inner))
+                        if (d.Name == "initial-value") PropertyInitials[pname] = d.Value.Trim();
                 }
                 else
                 {
@@ -367,8 +408,14 @@ internal static class CssParser
             if (sel.StartsWith("@", StringComparison.Ordinal))
             {
                 var header = sel.Substring(1).Trim();
-                if (header.StartsWith("media", StringComparison.OrdinalIgnoreCase) && !MediaMatches(header.Substring(5))) continue;
-                if (header.StartsWith("media", StringComparison.OrdinalIgnoreCase) || header.StartsWith("supports", StringComparison.OrdinalIgnoreCase))
+                var kind = header.Split(' ', '(')[0].ToLowerInvariant();
+                if (kind == "media" && !MediaMatches(header.Substring(5))) continue;
+                if (kind == "container")
+                {
+                    var paren = header.IndexOf('(');
+                    if (paren < 0 || !MediaMatches(header.Substring(paren))) continue;
+                }
+                if (kind is "media" or "supports" or "layer" or "container")
                     ParseRule("&", nbody, selectors, rules, ref order, warn, keyframes);
                 else
                     warn?.Invoke($"css: nested @{header.Split(' ')[0]} skipped");
@@ -388,6 +435,80 @@ internal static class CssParser
 
     /// <summary>@font-face declarations collected while parsing; the renderer clears and registers them.</summary>
     public static readonly List<(string family, string src, string weight, string style)> FontFaces = new();
+
+    /// <summary>@import urls collected while parsing; the surface fetches and inlines them.</summary>
+    public static readonly List<string> Imports = new();
+
+    /// <summary>@property initial values, what an undefined var() of that name resolves to.</summary>
+    public static readonly Dictionary<string, string> PropertyInitials = new(StringComparer.Ordinal);
+
+    /// <summary>The url of an @import prelude: url(...) or a quoted string; the media/layer conditions after it are ignored.</summary>
+    private static string? ImportUrl(string prelude)
+    {
+        var p = prelude.Trim();
+        if (p.StartsWith("url(", StringComparison.OrdinalIgnoreCase))
+        {
+            var closeParen = p.IndexOf(')');
+            if (closeParen < 0) return null;
+            p = p.Substring(4, closeParen - 4);
+        }
+        else
+        {
+            var end = p.Length > 1 ? p.IndexOf(p[0], 1) : -1;
+            if (end > 0 && (p[0] == '"' || p[0] == '\'')) p = p.Substring(0, end + 1);
+        }
+        p = p.Trim().Trim('"', '\'');
+        return p.Length > 0 ? p : null;
+    }
+
+    private static bool IsField(HtmlNode n) => n.Tag is "input" or "textarea" or "select";
+
+    private static string? FieldValue(HtmlNode n)
+    {
+        if (n.Attr("value") is { } v) return v;
+        if (n.Tag != "textarea") return null;
+        var sb = new StringBuilder();
+        foreach (var c in n.Children) if (c.IsText) sb.Append(c.Text);
+        return sb.ToString();
+    }
+
+    /// <summary>Constraint validation as a browser runs it: required, pattern, minlength/maxlength, type email/url/number, min/max.</summary>
+    private static bool Valid(HtmlNode n)
+    {
+        var v = FieldValue(n) ?? string.Empty;
+        var type = (n.Attr("type") ?? "text").ToLowerInvariant();
+        if (n.Attr("required") != null)
+        {
+            if (type is "checkbox" or "radio") { if (n.Attr("checked") == null) return false; }
+            else if (v.Trim().Length == 0) return false;
+        }
+        if (v.Length == 0) return true;
+        if (n.Attr("pattern") is { } pat)
+        {
+            try { if (!System.Text.RegularExpressions.Regex.IsMatch(v, "^(?:" + pat + ")$")) return false; }
+            catch (ArgumentException) { }
+        }
+        if (n.Attr("minlength") is { } mn && int.TryParse(mn, out var minLen) && v.Length < minLen) return false;
+        if (n.Attr("maxlength") is { } mx && int.TryParse(mx, out var maxLen) && v.Length > maxLen) return false;
+        if (type == "email" && !System.Text.RegularExpressions.Regex.IsMatch(v.Trim(), @"^[^@\s]+@[^@\s]+\.[^@\s]+$")) return false;
+        if (type == "url" && !Uri.TryCreate(v.Trim(), UriKind.Absolute, out _)) return false;
+        if (type is "number" or "range")
+        {
+            if (!float.TryParse(v.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _)) return false;
+            if (InRange(n) == false) return false;
+        }
+        return true;
+    }
+
+    /// <summary>For a number/range input with a value: inside min/max or not; null when the question does not apply.</summary>
+    private static bool? InRange(HtmlNode n)
+    {
+        if (n.Tag != "input" || (n.Attr("type") ?? "text").ToLowerInvariant() is not ("number" or "range")) return null;
+        if (!float.TryParse((FieldValue(n) ?? string.Empty).Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x)) return null;
+        if (n.Attr("min") is { } mn && float.TryParse(mn, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var min) && x < min) return false;
+        if (n.Attr("max") is { } mx && float.TryParse(mx, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var max) && x > max) return false;
+        return true;
+    }
 
     /// <summary>
     /// A media query list against the design size: min/max-width/height, orientation,
@@ -695,8 +816,11 @@ internal static class CssParser
             }
             if (element || name == "before" || name == "after")
             {
-                // ::before / ::after (and the legacy one-colon spelling); other pseudo-elements skip the rule.
-                if (name != "before" && name != "after") return false;
+                // ::before / ::after (and the legacy one-colon spelling), ::marker (the list
+                // marker span), ::placeholder (the field's placeholder, colour only); other
+                // pseudo-elements skip the rule.
+                if (name is "-webkit-input-placeholder" or "-moz-placeholder" or "-ms-input-placeholder") name = "placeholder";
+                if (name is not ("before" or "after" or "marker" or "placeholder")) return false;
                 compound.PseudoElement = name;
                 continue;
             }
@@ -833,7 +957,43 @@ internal static class CssParser
                     UsesPointerState = true;
                     compound.Pseudos.Add(n => n.Attr("data-focus") != null || AnyDescendant(n, FocusSel, false));
                     break;
-                case "visited": case "link": case "target": case "placeholder-shown":
+                case "required": compound.Pseudos.Add(n => n.Attr("required") != null); break;
+                case "optional": compound.Pseudos.Add(n => IsField(n) && n.Attr("required") == null); break;
+                case "read-only": compound.Pseudos.Add(n => !IsField(n) || n.Attr("readonly") != null || n.Attr("disabled") != null); break;
+                case "read-write": compound.Pseudos.Add(n => IsField(n) && n.Attr("readonly") == null && n.Attr("disabled") == null); break;
+                case "placeholder-shown": compound.Pseudos.Add(n => n.Attr("placeholder") != null && string.IsNullOrEmpty(FieldValue(n))); break;
+                case "default": compound.Pseudos.Add(n => n.Attr("checked") != null || n.Attr("selected") != null || n.Attr("default") != null); break;
+                case "indeterminate": compound.Pseudos.Add(n => n.Attr("indeterminate") != null || (n.Tag == "progress" && n.Attr("value") == null)); break;
+                case "valid": compound.Pseudos.Add(n => IsField(n) && Valid(n)); break;
+                case "invalid": compound.Pseudos.Add(n => IsField(n) && !Valid(n)); break;
+                case "in-range": compound.Pseudos.Add(n => InRange(n) == true); break;
+                case "out-of-range": compound.Pseudos.Add(n => InRange(n) == false); break;
+                case "open": compound.Pseudos.Add(n => n.Attr("open") != null); break;
+                case "modal": compound.Pseudos.Add(n => n.Tag == "dialog" && n.Attr("data-modal") != null); break;
+                case "link": case "any-link": compound.Pseudos.Add(n => n.Tag is "a" or "area" && n.Attr("href") != null); break;
+                case "lang":
+                {
+                    var want = arg.Trim().Trim('"', '\'').ToLowerInvariant();
+                    compound.Pseudos.Add(n =>
+                    {
+                        for (var p = n; p != null; p = p.Parent)
+                            if (p.Attr("lang") is { } l) { l = l.ToLowerInvariant(); return l == want || l.StartsWith(want + "-", StringComparison.Ordinal); }
+                        return false;
+                    });
+                    break;
+                }
+                case "dir":
+                {
+                    var want = arg.Trim().ToLowerInvariant();
+                    compound.Pseudos.Add(n =>
+                    {
+                        for (var p = n; p != null; p = p.Parent)
+                            if (p.Attr("dir") is { } d) return string.Equals(d, want, StringComparison.OrdinalIgnoreCase);
+                        return want == "ltr";
+                    });
+                    break;
+                }
+                case "visited": case "target":
                     compound.Pseudos.Add(_ => false);
                     break;
                 default:

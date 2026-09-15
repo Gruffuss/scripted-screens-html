@@ -196,6 +196,7 @@ its own layout boxes and the pointer position (Batch A and D).
 | C paint | `b72f674` | yes | parser tests | not yet (HtmlTest7); the vector work it needs is built as 0.11.21.0, unconfirmed |
 | E canvas | see git | yes | prelude smoke test records a frame | not yet (HtmlTest8) |
 | F1 SVG and numbers | see git | yes | parser tests | not yet (HtmlTest9); `<image>` needs vector 9, the concave clip vector 8 |
+| F2 cascade | see git | yes | parser tests (at-rules, form pseudo-classes, pseudo-elements) | not yet (HtmlTest10) |
 
 SUPPORT.md is rewritten from this file once the pages have been seen on a console.
 
