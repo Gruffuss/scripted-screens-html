@@ -774,7 +774,7 @@ Event.prototype.stopPropagation = function(){ this.__stop = true; };
 Event.prototype.stopImmediatePropagation = function(){ this.__stop = true; };
 function CustomEvent(type, init){ Event.call(this, type, init); }
 CustomEvent.prototype = Object.create(Event.prototype);
-var MouseEvent = Event, KeyboardEvent = Event, InputEvent = Event, FocusEvent = Event;
+var FocusEvent = Event; // MouseEvent, KeyboardEvent, PointerEvent and InputEvent are defined below with their fields
 function __dispatchOn(id, ev){
   // listeners on the element, then its ancestors (bubbling), then document/window
   ev.target = ev.target || __el(id);
@@ -843,6 +843,24 @@ Object.defineProperty(window, 'outerHeight', { get: function(){ return __viewpor
 window.scrollTo = function(){}; window.scrollBy = function(){}; window.scrollX = 0; window.scrollY = 0; window.pageXOffset = 0; window.pageYOffset = 0;
 window.getSelection = function(){ return { toString: function(){ return ''; }, removeAllRanges: function(){}, rangeCount: 0 }; };
 window.open = function(){ return null; }; window.close = function(){}; window.print = function(){}; window.focus = function(){}; window.blur = function(){};
+// base64, the event constructors a page may build, and the interfaces it may test with instanceof
+var __b64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+window.btoa = function(s){ var str = String(s), out = '', i = 0; while (i < str.length) { var c1 = str.charCodeAt(i++), c2 = str.charCodeAt(i++), c3 = str.charCodeAt(i++); var e1 = c1 >> 2, e2 = ((c1 & 3) << 4) | ((c2 || 0) >> 4), e3 = isNaN(c2) ? 64 : ((c2 & 15) << 2) | ((c3 || 0) >> 6), e4 = isNaN(c3) ? 64 : c3 & 63; out += __b64.charAt(e1) + __b64.charAt(e2) + (e3 === 64 ? '=' : __b64.charAt(e3)) + (e4 === 64 ? '=' : __b64.charAt(e4)); } return out; };
+window.atob = function(s){ var str = String(s).replace(/[^A-Za-z0-9+\/]/g, ''), out = '', i = 0; while (i < str.length) { var ix = function(c){ return c ? __b64.indexOf(c) : -1; }; var e1 = ix(str.charAt(i++)), e2 = ix(str.charAt(i++)), e3 = ix(str.charAt(i++)), e4 = ix(str.charAt(i++)); out += String.fromCharCode((e1 << 2) | (e2 >> 4)); if (e3 >= 0) out += String.fromCharCode(((e2 & 15) << 4) | (e3 >> 2)); if (e4 >= 0) out += String.fromCharCode(((e3 & 3) << 6) | e4); } return out; };
+function KeyboardEvent(type, init){ Event.call(this, type, init); init = init || {}; this.key = init.key || ''; this.code = init.code || ''; this.keyCode = init.keyCode || 0; this.ctrlKey = !!init.ctrlKey; this.shiftKey = !!init.shiftKey; this.altKey = !!init.altKey; this.metaKey = !!init.metaKey; this.repeat = !!init.repeat; }
+KeyboardEvent.prototype = Object.create(Event.prototype);
+function PointerEvent(type, init){ Event.call(this, type, init); init = init || {}; this.clientX = init.clientX || 0; this.clientY = init.clientY || 0; this.pointerType = init.pointerType || 'mouse'; this.button = init.button || 0; this.buttons = init.buttons || 0; }
+PointerEvent.prototype = Object.create(Event.prototype);
+var MouseEvent = PointerEvent;
+function InputEvent(type, init){ Event.call(this, type, init); init = init || {}; this.data = init.data === undefined ? null : init.data; this.inputType = init.inputType || ''; this.isComposing = !!init.isComposing; }
+InputEvent.prototype = Object.create(Event.prototype);
+function __interface(name, test){ var f = function(){ throw new TypeError('Illegal constructor'); }; Object.defineProperty(f, Symbol.hasInstance, { value: test }); return f; }
+var __isElement = function(o){ return !!o && typeof o === 'object' && (typeof o.tagName === 'string' || typeof o.__tag === 'string'); };
+var __isNode = function(o){ return __isElement(o) || (!!o && typeof o === 'object' && (o === document || typeof o.textContent === 'string')); };
+var EventTarget = __interface('EventTarget', function(o){ return __isNode(o) || o === window; });
+var Node = __interface('Node', __isNode), Element = __interface('Element', __isElement), HTMLElement = __interface('HTMLElement', __isElement);
+var HTMLInputElement = __interface('HTMLInputElement', function(o){ return __isElement(o) && String(o.tagName).toUpperCase() === 'INPUT'; }), SVGElement = __interface('SVGElement', function(o){ return __isElement(o) && String(o.tagName).toUpperCase() === 'SVG'; });
+function Option(text, value, defaultSelected, selected){ var o = __detached('option'); o.textContent = text === undefined ? '' : String(text); if (value !== undefined) o.setAttribute('value', String(value)); if (selected || defaultSelected) o.setAttribute('selected', ''); return o; }
 window.requestIdleCallback = function(fn){ return setTimeout(function(){ fn({ timeRemaining: function(){ return 10; }, didTimeout: false }); }, 1); }; window.cancelIdleCallback = clearTimeout;
 window.self = window; window.top = window; window.parent = window; window.frames = [];
 function __styleProxy(id){
@@ -975,6 +993,17 @@ function __el(id){
     getBoundingClientRect: function(){ var r = __rect(id); return { x: r[0], y: r[1], left: r[0], top: r[1], width: r[2], height: r[3], right: r[0] + r[2], bottom: r[1] + r[3] }; },
     get offsetLeft(){ return __rect(id)[0]; }, get offsetTop(){ return __rect(id)[1]; },
     hasAttribute: function(n){ return __getAttr(id, n) !== null; },
+    replaceChildren: function(){ __setHtml(id, ''); for (var i = 0; i < arguments.length; i++) el.appendChild(typeof arguments[i] === 'string' ? { textContent: arguments[i] } : arguments[i]); },
+    getClientRects: function(){ return [el.getBoundingClientRect()]; },
+    get clientTop(){ return parseFloat(__cssOf(id, 'border-top-width')) || 0; }, get clientLeft(){ return parseFloat(__cssOf(id, 'border-left-width')) || 0; },
+    normalize: function(){},
+    get placeholder(){ return __getAttr(id, 'placeholder') || ''; }, set placeholder(v){ __setAttr(id, 'placeholder', String(v)); },
+    get alt(){ return __getAttr(id, 'alt') || ''; }, set alt(v){ __setAttr(id, 'alt', String(v)); },
+    get tabIndex(){ var t = __getAttr(id, 'tabindex'); return t === null ? -1 : (parseInt(t, 10) || 0); }, set tabIndex(v){ __setAttr(id, 'tabindex', String(v)); },
+    get selected(){ return __getAttr(id, 'selected') !== null; }, set selected(v){ if (v) __setAttr(id, 'selected', ''); else __removeAttr(id, 'selected'); },
+    get options(){ return __query('#' + id + ' option').map(__el); },
+    get selectedIndex(){ var o = el.options; for (var i = 0; i < o.length; i++) if (o[i].selected) return i; return o.length ? 0 : -1; },
+    set selectedIndex(v){ var o = el.options; for (var i = 0; i < o.length; i++) o[i].selected = (i === Number(v)); if (o[Number(v)]) __setValue(id, o[Number(v)].value); },
     removeAttribute: function(n){ __removeAttr(id, n); },
     get attributes(){ var a = __attrs(id), out = []; for (var i = 0; i < a.length; i += 2) out.push({ name: a[i], value: a[i + 1] }); return out; },
     matches: function(sel){ return __query(sel).indexOf(id) >= 0; },

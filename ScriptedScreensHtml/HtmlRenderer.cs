@@ -26,7 +26,7 @@ internal static class HtmlRenderer
 
     private static readonly HashSet<string> Skipped = new(StringComparer.OrdinalIgnoreCase)
     {
-        "head", "title", "meta", "link", "script", "style", "template",
+        "head", "title", "meta", "link", "script", "style", "template", "noscript",
     };
 
     public sealed class Result

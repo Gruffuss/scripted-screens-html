@@ -43,7 +43,7 @@ JS          →  Jint on a worker thread; DOM writes land on the main thread and
 | Tables | `table thead tbody tfoot tr td th caption col`, `colspan`, a `width` attribute; rows and sections are real elements (`tr:nth-child` striping, hover); `caption-side`, `empty-cells`; cells share a table with a width equally, size to content without one |
 | Forms | `input` (text, number with min/max/step, checkbox, radio, range, email, url, password, search), `textarea` (rows/cols), `select` with `optgroup`, `button`, `label for`, `form` with `submit`, `progress`, `meter` (three colours), `fieldset`/`legend`; values reach Lua as `on_change("name=value")` and the page script as `input`/`change` events |
 | Details, dialog | `<details open>` toggles on the summary click; `dialog.showModal()`/`close()`; `:open`, `:modal` |
-| Media | `img` (`object-fit`, radius, `alt` ignored), `video`, `audio` (autoplay, loop, controls attributes as the ScriptedScreens elements allow), `picture`/`source` (first source) |
+| Media | `img` (`object-fit`, radius, `alt` ignored), `video`, `audio` (autoplay, loop, controls attributes as the ScriptedScreens elements allow); a `picture` renders its `img` and ignores its `source` candidates (see GAPS.md) |
 | Inline SVG | see the SVG section |
 | Canvas | see the JS section |
 | Entities, comments | named, decimal and hex entities; comments dropped; whitespace collapsed as in HTML |
