@@ -629,8 +629,11 @@ internal static class HtmlRenderer
             if (t.EndsWith(" ", StringComparison.Ordinal)) l.style.marginRight = 4;
             if (afterLetter)
             {
-                // the text after a ::first-letter fills the rest of the line and wraps beside the letter, a drop cap
-                l.style.flexGrow = 1; l.style.flexBasis = 0; l.style.minWidth = 0; l.style.whiteSpace = WhiteSpace.Normal;
+                // the text after a drop letter or a list marker shares the line with it: content
+                // basis (so a shrink-wrapped list is as wide as its text), shrinkable and wrapping
+                // inside its own box when the line is narrower; the row itself does not wrap.
+                l.style.flexGrow = 1; l.style.flexShrink = 1; l.style.flexBasis = StyleKeyword.Auto; l.style.minWidth = 0; l.style.whiteSpace = WhiteSpace.Normal;
+                ve.style.flexWrap = UnityEngine.UIElements.Wrap.NoWrap;
                 afterLetter = false;
             }
             ve.Add(l);
