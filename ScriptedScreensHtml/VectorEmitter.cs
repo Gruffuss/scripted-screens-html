@@ -95,11 +95,11 @@ internal static class VectorEmitter
         var css = ctx.Built.CssOf(ve);
         var indent = new string(' ', depth * 2);
 
-        if (ctx.Built.Externals.TryGetValue(ve, out var external))
-        {
-            ctx.Out.Externals.Add(new External { Key = ve.name, Node = external, Ve = ve, X = x, Y = y, W = w, H = h });
-            return;
-        }
+        // A ScriptedScreens control (input, select, video...) fills the element's content box:
+        // the page still paints the element's background and border around it, as a browser does.
+        ctx.Built.Externals.TryGetValue(ve, out var external);
+        if (external != null)
+            ctx.Out.Externals.Add(new External { Key = ve.name, Node = external, Ve = ve, X = x + rs.borderLeftWidth, Y = y + rs.borderTopWidth, W = Mathf.Max(1f, w - rs.borderLeftWidth - rs.borderRightWidth), H = Mathf.Max(1f, h - rs.borderTopWidth - rs.borderBottomWidth) });
 
         // A positioned element with a z-index paints above its parent's later siblings: it is
         // emitted at the root after everything, in z order, unless we are already doing that.
@@ -374,6 +374,8 @@ internal static class VectorEmitter
 
         switch (ve)
         {
+            case VisualElement when external != null:
+                break; // the control draws the content
             case not Label when ctx.Built.NodeOf.TryGetValue(ve, out var cnode) && cnode.Attr("data-control") is { } control:
                 EmitCheck(ctx, control, cnode, css, rs, x, y, w, h, indent);
                 break;
@@ -2274,7 +2276,11 @@ internal static class VectorEmitter
             var rad = angle * Mathf.Deg2Rad;
             var len = w * Mathf.Abs(Mathf.Sin(rad)) + h * Mathf.Abs(Mathf.Cos(rad));
             var gid = "bimg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-            GradientDefLine(ctx, gid, Mathf.Sin(rad) * len * 0.5f / w, -Mathf.Cos(rad) * len * 0.5f / h, 0f, 1f, stops);
+            var cx = x + w * 0.5f; var cy = y + h * 0.5f;
+            var hx = Mathf.Sin(rad) * len * 0.5f; var hy = -Mathf.Cos(rad) * len * 0.5f;
+            ctx.Defs.Append("  GL id=").Append(gid).Append(" x1=").Append(F(cx - hx)).Append(" y1=").Append(F(cy - hy)).Append(" x2=").Append(F(cx + hx)).Append(" y2=").Append(F(cy + hy)).Append(" stops=[");
+            for (var i = 0; i < stops.Count; i++) { if (i > 0) ctx.Defs.Append(','); ctx.Defs.Append('[').Append(F(stops[i].at)).Append(',').Append(Hex(stops[i].c)).Append(']'); }
+            ctx.Defs.Append("]\n");
             // one stroke when the widths agree, four gradient-filled sides otherwise
             if (Mathf.Approximately(bw[0], bw[1]) && Mathf.Approximately(bw[0], bw[2]) && Mathf.Approximately(bw[0], bw[3]))
             {

@@ -65,6 +65,12 @@ local page = [[
 </style>
 </head>
 <body>
+  <h2>backface</h2>
+  <div class="row"><div class="card"></div><div class="card half"></div><div class="card turned"></div><div class="lbl">full, narrow, gone</div></div>
+
+  <h2>gradient text</h2>
+  <div class="row"><div class="gtext">AMBER TO BLUE</div></div>
+
   <h2>first-letter, first-line</h2>
   <div class="row">
     <p class="drop">Once upon a time a page was written the way a browser reads it.</p>
@@ -93,11 +99,6 @@ local page = [[
   <h2>scroll-driven animation</h2>
   <div class="row"><div class="scroller"><div class="bar"></div><div class="filler"></div></div><div class="lbl">scroll: the bar fades in and slides right</div></div>
 
-  <h2>backface</h2>
-  <div class="row"><div class="card"></div><div class="card half"></div><div class="card turned"></div><div class="lbl">full, narrow, gone</div></div>
-
-  <h2>gradient text</h2>
-  <div class="row"><div class="gtext">AMBER TO BLUE</div></div>
 </body>
 </html>
 ]]

@@ -796,7 +796,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (type is "textinput" or "select")
         {
             style.Add(new SS.UiProp { Key = "text", Value = SS.UiValue.FromString(VectorEmitter.Hex(rs.color)) });
-            style.Add(new SS.UiProp { Key = "font_size", Value = SS.UiValue.FromNumber(Mathf.Max(8f, rs.fontSize * sx)) });
+            // the control pads its text; a font taller than about two thirds of the field is clipped
+            style.Add(new SS.UiProp { Key = "font_size", Value = SS.UiValue.FromNumber(Mathf.Max(8f, Mathf.Min(rs.fontSize, ext.H * 0.62f) * sx)) });
         }
         return type;
     }

@@ -832,7 +832,21 @@ internal static class HtmlRenderer
             {
                 if (c.IsText) { sb.Append(c.Text); continue; }
                 if (c.Tag == "tspan" && (c.Attr("x") != null || c.Attr("y") != null) && sb.Length > 0) sb.Append('\n');
+                // a tspan's own fill / weight / style travel as rich-text tags
+                var open = new StringBuilder(); var close = new StringBuilder();
+                var style = c.Attr("style");
+                string? fill = c.Attr("fill"), weight = c.Attr("font-weight"), fstyle = c.Attr("font-style");
+                if (style != null)
+                    foreach (var d in CssParser.ParseDeclarations(style))
+                    {
+                        if (d.Name == "fill") fill = d.Value; else if (d.Name == "font-weight") weight = d.Value; else if (d.Name == "font-style") fstyle = d.Value;
+                    }
+                if (fill != null && StyleApplier.TryColor(fill, out var fc)) { open.Append("<color=").Append(VectorEmitter.Hex(fc)).Append('>'); close.Insert(0, "</color>"); }
+                if (weight != null && (weight.Trim() is "bold" or "bolder" || (StyleApplier.IsNumber(weight.Trim()) && StyleApplier.Num(weight) >= 600))) { open.Append("<b>"); close.Insert(0, "</b>"); }
+                if (fstyle != null && fstyle.Trim() is "italic" or "oblique") { open.Append("<i>"); close.Insert(0, "</i>"); }
+                sb.Append(open);
                 Walk(c);
+                sb.Append(close);
             }
         }
         Walk(text);
@@ -1063,6 +1077,7 @@ internal static class HtmlRenderer
         // ponytail: ::after is generated here, before the children, so a counter it
         // shows does not include increments by descendants; move it after the subtree if a page needs that
         ApplyCounters(node, node, Cascaded(node, rules));
+        FirstLetter(node, rules);
         foreach (var which in new[] { "before", "after" })
         {
             var probe = new HtmlNode { Tag = "span", Parent = node };
@@ -1087,7 +1102,6 @@ internal static class HtmlRenderer
             }
             if (content == null) continue;
             ApplyCounters(probe, node, pseudoDecls);
-            if (which == "after") FirstLetter(node, rules);
             var text = GeneratedText(content, node);
             if (text == null) continue;
             probe.Children.Add(new HtmlNode { Text = text, Parent = probe });

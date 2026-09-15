@@ -76,7 +76,7 @@ local page = [[
       var rep = document.createElement('span'); rep.id = 'rep'; rep.textContent = ' replaced';
       mid.replaceWith(rep);
       check('replaceWith swaps the node', !document.getElementById('mid') && !!document.getElementById('rep'));
-      card.toggleAttribute('data-flag');
+      card.toggleAttribute('data-flag', true);
       check('toggleAttribute sets then reads', card.hasAttribute('data-flag'));
       card.classList.add('hot');
       check('className reads back', card.className.indexOf('hot') >= 0);
