@@ -1597,7 +1597,7 @@ internal static class HtmlRenderer
         var shape = type is "circle" or "square" ? type : "disc";
         var span = new HtmlNode { Tag = "span", Parent = li };
         span.Attributes["data-marker"] = shape;
-        span.Attributes["style"] = "width: 0.4em; height: 0.4em; margin-right: 0.5em; align-self: center; flex-shrink: 0";
+        span.Attributes["style"] = "width: 0.4em; height: 0.4em; margin-right: 0.5em; margin-top: 0.45em; align-self: flex-start; flex-shrink: 0"; // on the first line, as a browser places it
         li.Children.Insert(0, span);
     }
 
