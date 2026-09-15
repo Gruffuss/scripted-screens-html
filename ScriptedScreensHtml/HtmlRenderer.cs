@@ -571,6 +571,7 @@ internal static class HtmlRenderer
         // Merge runs between id-bearing inline elements into single labels so "a <b>b</b>"
         // stays one label, and spaces at run edges survive as spaces.
         var run = new StringBuilder();
+        var afterLetter = false;
         void FlushRun()
         {
             var t = run.ToString();
@@ -580,6 +581,12 @@ internal static class HtmlRenderer
             var l = new Label(t.Trim());
             if (t.StartsWith(" ", StringComparison.Ordinal)) l.style.marginLeft = 4;
             if (t.EndsWith(" ", StringComparison.Ordinal)) l.style.marginRight = 4;
+            if (afterLetter)
+            {
+                // the text after a ::first-letter fills the rest of the line and wraps beside the letter, a drop cap
+                l.style.flexGrow = 1; l.style.flexBasis = 0; l.style.minWidth = 0; l.style.whiteSpace = WhiteSpace.Normal;
+                afterLetter = false;
+            }
             ve.Add(l);
         }
         foreach (var child in node.Children)
@@ -588,6 +595,7 @@ internal static class HtmlRenderer
             {
                 FlushRun();
                 Append(ve, child, rules, result);
+                afterLetter = child.Attr("data-pseudo") == "first-letter";
                 continue;
             }
             AppendRich(run, child, rules);
