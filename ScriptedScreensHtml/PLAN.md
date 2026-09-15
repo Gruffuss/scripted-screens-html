@@ -177,6 +177,18 @@ What the vector session implements, with the shape the HTML emitter will write:
 Not vector work after all: `:hover` and click coordinates are done on the HTML side from
 its own layout boxes and the pointer position (Batch A and D).
 
+## Status (2026-09-15, branch `untested`)
+
+| Batch | Commit | Built | Headless checks | On a console |
+|---|---|---|---|---|
+| A cascade and values | `8df1951` | yes | parser tests | not yet (HtmlTest4) |
+| B HTML coverage | `610bb96` | yes | parser tests | not yet (HtmlTest5) |
+| D script DOM | `38c4c01` | yes | parser tests, prelude smoke test in Node | not yet (HtmlTest6) |
+| C paint | `b72f674` | yes | parser tests | not yet (HtmlTest7); rows marked with a requirement number wait for the vector work |
+| E canvas | see git | yes | prelude smoke test records a frame | not yet (HtmlTest8) |
+
+SUPPORT.md is rewritten from this file once the pages have been seen on a console.
+
 ## Order
 
 A, then B, then D, then C, then E. A first because a real stylesheet hits `box-sizing`,

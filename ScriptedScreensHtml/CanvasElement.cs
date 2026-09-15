@@ -41,13 +41,22 @@ internal sealed class CanvasElement : VisualElement
     }
 
     /// <summary>Replace the frame's command list. Colours are parsed once per distinct string.</summary>
+    /// <summary>The recorded frame as the emitter reads it: opcodes and numbers, plus the string table (colours, gradients, text, fonts, image sources).</summary>
+    public float[] Commands => _commands;
+    public int Count => _count;
+    public readonly List<string> Strings = new();
+
     public void SetFrame(float[] commands, int count, List<string> colours)
     {
         _commands = commands;
         _count = count;
         _colours.Clear();
+        Strings.Clear();
         foreach (var c in colours)
+        {
+            Strings.Add(c);
             _colours.Add(StyleApplier.TryColor(c, out var col) ? col : Color.magenta);
+        }
         MarkDirtyRepaint();
     }
 

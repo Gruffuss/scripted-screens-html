@@ -354,8 +354,8 @@ internal static class VectorEmitter
             case SvgElement svg:
                 EmitSvg(ctx, svg, x, y, w, h, indent);
                 break;
-            case CanvasElement:
-                Warn(ctx, "html: <canvas> is not drawn in vector mode; use <svg> with expressions");
+            case CanvasElement cv:
+                EmitCanvas(ctx, cv, css, x, y, w, h, indent);
                 break;
             default:
             {
@@ -1345,6 +1345,350 @@ internal static class VectorEmitter
             ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(Mathf.Max(h, w * frac))).Append(" h=").Append(F(h)).Append(" rx=").Append(F(rx)).Append(" f=").Append(Hex(accent)).Append('\n');
             ctx.Out.Nodes++;
         }
+    }
+
+    // ---------------------------------------------------------------- canvas: recorded 2D ops to nodes
+
+    /// <summary>
+    /// A recorded canvas frame as vector nodes: paths become P, rects R, text T, images IMG,
+    /// gradients GL/GR/GC defs, clip() a CP group, and the transform stack is baked into the
+    /// coordinates. Canvas units map onto the element's box (the width/height attributes
+    /// against the layout size), as a browser scales its bitmap. Per-pixel calls have no
+    /// equivalent. A frame that repaints every animation frame re-emits the scene at 30 Hz.
+    /// </summary>
+    private static void EmitCanvas(Ctx ctx, CanvasElement cv, Dictionary<string, string> css, float x, float y, float w, float h, string indent)
+    {
+        var cmds = cv.Commands;
+        var n = cv.Count;
+        if (cmds == null || n == 0 || cv.CanvasWidth <= 0f || cv.CanvasHeight <= 0f) return;
+        var strings = cv.Strings;
+        var sx = w / cv.CanvasWidth;
+        var sy = h / cv.CanvasHeight;
+
+        // transform stack: current matrix maps canvas space to canvas space; page = box + scaled
+        var m = new[] { 1f, 0f, 0f, 1f, 0f, 0f };
+        var stack = new Stack<(float[] m, int groups, string shadow, string dash, string rule)>();
+        var groups = 0;         // open G clip groups at this level
+        var shadow = string.Empty;
+        var dash = string.Empty;
+        var rule = "nonzero";
+        var path = new StringBuilder();
+        var hasCurrent = false;
+        float curX = 0f, curY = 0f, startX = 0f, startY = 0f;
+
+        Vector2 P(float px, float py)
+        {
+            var tx = m[0] * px + m[2] * py + m[4];
+            var ty = m[1] * px + m[3] * py + m[5];
+            return new Vector2(x + tx * sx, y + ty * sy);
+        }
+        float Scale() => Mathf.Sqrt(Mathf.Abs(m[0] * m[3] - m[1] * m[2])) * (sx + sy) * 0.5f;
+        void Mul(float a, float b, float c, float d, float e, float f)
+        {
+            m = new[] { m[0] * a + m[2] * b, m[1] * a + m[3] * b, m[0] * c + m[2] * d, m[1] * c + m[3] * d, m[0] * e + m[2] * f + m[4], m[1] * e + m[3] * f + m[5] };
+        }
+        string Str(int idx) => idx >= 0 && idx < strings.Count ? strings[idx] : string.Empty;
+        string Ind() => indent + new string(' ', groups * 2);
+        void MoveTo(float px, float py) { var p = P(px, py); path.Append('M').Append(F(p.x)).Append(' ').Append(F(p.y)).Append(' '); curX = px; curY = py; startX = px; startY = py; hasCurrent = true; }
+        void LineTo(float px, float py) { if (!hasCurrent) { MoveTo(px, py); return; } var p = P(px, py); path.Append('L').Append(F(p.x)).Append(' ').Append(F(p.y)).Append(' '); curX = px; curY = py; }
+        void ArcSeg(float cx, float cy, float rx, float ry, float rot, float a0, float a1, bool ccw)
+        {
+            // canvas arc: a line from the current point to the arc start, then the arc; a full turn is two halves
+            var sweep = ccw ? -1f : 1f;
+            var delta = a1 - a0;
+            if (!ccw && delta < 0f) delta += Mathf.PI * 2f * Mathf.Ceil(-delta / (Mathf.PI * 2f));
+            if (ccw && delta > 0f) delta -= Mathf.PI * 2f * Mathf.Ceil(delta / (Mathf.PI * 2f));
+            if (Mathf.Abs(delta) >= Mathf.PI * 2f - 1e-4f) delta = sweep * (Mathf.PI * 2f - 1e-3f);
+            Vector2 On(float a)
+            {
+                var ex = rx * Mathf.Cos(a); var ey = ry * Mathf.Sin(a);
+                var cr = Mathf.Cos(rot); var sr = Mathf.Sin(rot);
+                return new Vector2(cx + ex * cr - ey * sr, cy + ex * sr + ey * cr);
+            }
+            var s0 = On(a0);
+            if (hasCurrent) LineTo(s0.x, s0.y); else MoveTo(s0.x, s0.y);
+            var steps = Mathf.Abs(delta) > Mathf.PI ? 2 : 1;
+            for (var k = 1; k <= steps; k++)
+            {
+                var a = a0 + delta * k / steps;
+                var e = On(a);
+                var pe = P(e.x, e.y);
+                // radii in page units: scale by the box; a rotation under a non-uniform transform is approximate
+                var prx = rx * sx * Mathf.Sqrt(Mathf.Abs(m[0] * m[3] - m[1] * m[2]));
+                var pry = ry * sy * Mathf.Sqrt(Mathf.Abs(m[0] * m[3] - m[1] * m[2]));
+                var large = Mathf.Abs(delta / steps) > Mathf.PI ? 1 : 0;
+                path.Append('A').Append(F(prx)).Append(' ').Append(F(pry)).Append(' ').Append(F(rot * Mathf.Rad2Deg)).Append(' ').Append(large).Append(' ').Append(ccw ? 0 : 1).Append(' ').Append(F(pe.x)).Append(' ').Append(F(pe.y)).Append(' ');
+                curX = e.x; curY = e.y;
+            }
+        }
+        string Paint(int idx, out bool ok)
+        {
+            // a colour, or a gradient recorded as GL|x0|y0|x1|y1|off:col;... (canvas units), GR|x0|y0|r0|x1|y1|r1|..., GC|x|y|a|...
+            var s = Str(idx);
+            ok = true;
+            if (s.StartsWith("GL|", StringComparison.Ordinal) || s.StartsWith("GR|", StringComparison.Ordinal) || s.StartsWith("GC|", StringComparison.Ordinal))
+            {
+                var parts = s.Split('|');
+                var stops = new StringBuilder();
+                foreach (var st in parts[parts.Length - 1].Split(';'))
+                {
+                    var colon = st.IndexOf(':');
+                    if (colon < 0 || !StyleApplier.TryColor(st.Substring(colon + 1), out var sc)) continue;
+                    if (stops.Length > 0) stops.Append(',');
+                    stops.Append('[').Append(F(StyleApplier.Num(st.Substring(0, colon)))).Append(',').Append(Hex(sc)).Append(']');
+                }
+                var id = "cg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+                float N(int i) => i < parts.Length && float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : 0f;
+                if (s[1] == 'L')
+                {
+                    var a = P(N(1), N(2)); var b = P(N(3), N(4));
+                    ctx.Defs.Append("  GL id=").Append(id).Append(" x1=").Append(F(a.x)).Append(" y1=").Append(F(a.y)).Append(" x2=").Append(F(b.x)).Append(" y2=").Append(F(b.y)).Append(" stops=[").Append(stops).Append("]\n");
+                }
+                else if (s[1] == 'R')
+                {
+                    var c1 = P(N(4), N(5)); var f0 = P(N(1), N(2));
+                    ctx.Defs.Append("  GR id=").Append(id).Append(" cx=").Append(F(c1.x)).Append(" cy=").Append(F(c1.y)).Append(" r=").Append(F(N(6) * Scale())).Append(" fx=").Append(F(f0.x)).Append(" fy=").Append(F(f0.y)).Append(" stops=[").Append(stops).Append("]\n");
+                }
+                else
+                {
+                    var c1 = P(N(1), N(2));
+                    ctx.Defs.Append("  GC id=").Append(id).Append(" cx=").Append(F(c1.x)).Append(" cy=").Append(F(c1.y)).Append(" a=").Append(F(N(3) * Mathf.Rad2Deg)).Append(" stops=[").Append(stops).Append("]\n");
+                }
+                return "@" + id;
+            }
+            if (StyleApplier.TryColor(s, out var col)) return Hex(col);
+            ok = false;
+            return "#FF00FF";
+        }
+        string Shadow(int idx)
+        {
+            var s = Str(idx);
+            if (!s.StartsWith("SH|", StringComparison.Ordinal)) return string.Empty;
+            var p = s.Split('|');
+            if (p.Length < 5 || !StyleApplier.TryColor(p[4], out var c) || c.a <= 0.002f) return string.Empty;
+            var k = Scale();
+            return " sh=[[" + F(StyleApplier.Num(p[1]) * k) + "," + F(StyleApplier.Num(p[2]) * k) + "," + F(StyleApplier.Num(p[3]) * k) + ",0," + Hex(c) + "]]";
+        }
+        string DashAttr(float lw)
+        {
+            if (dash.Length == 0) return string.Empty;
+            var k = Scale();
+            var parts = dash.Split(',');
+            var sb = new StringBuilder(" dash=[");
+            for (var i = 0; i < parts.Length; i++) { if (i > 0) sb.Append(','); sb.Append(F(StyleApplier.Num(parts[i]) * k)); }
+            return sb.Append(']').ToString();
+        }
+        static string Cap(float c) => c switch { 2 => "round", 1 => "square", _ => "butt" };
+        static string Join(float j) => j switch { 2 => "round", 1 => "bevel", _ => "miter" };
+        void CanvasText(int textIdx, float tx, float ty, float maxW, int fontIdx, int alignIdx, int baseIdx, string fill, float alpha, string stroke, float lw)
+        {
+            var text = Str(textIdx);
+            if (text.Length == 0) return;
+            // font: "[italic] [bold|600] 14px Family"
+            var font = Str(fontIdx);
+            var size = 10f; var family = string.Empty; var bold = false; var italic = false;
+            foreach (var part in font.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (part.EndsWith("px", StringComparison.OrdinalIgnoreCase) && StyleApplier.IsNumber(part.Substring(0, part.Length - 2))) { size = StyleApplier.Num(part); family = string.Empty; continue; }
+                if (part == "bold" || part == "bolder" || (StyleApplier.IsNumber(part) && StyleApplier.Num(part) >= 600)) { bold = true; continue; }
+                if (part == "italic" || part == "oblique") { italic = true; continue; }
+                if (part == "normal" || StyleApplier.IsNumber(part)) continue;
+                family = family.Length == 0 ? part : family + " " + part;
+            }
+            family = family.Trim().Trim('"', '\'').Split(',')[0].Trim();
+            var k = Scale();
+            var ps = size * k;
+            var width = text.Length * ps * 0.6f + ps;
+            if (maxW > 0f) width = Mathf.Min(width, maxW * k + ps * 0.5f);
+            var align = Str(alignIdx);
+            var baseline = Str(baseIdx);
+            var p = P(tx, ty);
+            var left = align is "center" ? p.x - width * 0.5f : align is "right" or "end" ? p.x - width : p.x;
+            var top = baseline switch { "top" or "hanging" => p.y, "middle" => p.y - ps * 0.6f, "bottom" or "ideographic" => p.y - ps * 1.2f, _ => p.y - ps * 0.95f };
+            var esc = text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ");
+            if (italic) esc = "<i>" + esc + "</i>";
+            if (float.TryParse(esc.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out _)) esc = "<noparse>" + esc + "</noparse>";
+            var sb = new StringBuilder(Ind());
+            sb.Append("T x=").Append(F(left)).Append(" y=").Append(F(top)).Append(" w=").Append(F(width)).Append(" h=").Append(F(ps * 1.25f)).Append(" text=\"").Append(esc).Append("\" size=").Append(F(ps));
+            if (stroke.Length > 0) sb.Append(" f=").Append(stroke); else sb.Append(" f=").Append(fill);
+            if (alpha < 0.999f) sb.Append(" fo=").Append(F(alpha));
+            if (family.Length > 0 && !IsGeneric(family)) sb.Append(" font=\"").Append(FontLibrary.ResolveFace(family)).Append('"');
+            else if (family.Length > 0 && StyleApplier.MapGeneric(family) is { } g) sb.Append(" font=\"").Append(g).Append('"');
+            if (bold && !NamedWeight(family)) sb.Append(" weight=bold");
+            if (align is "center") sb.Append(" align=center"); else if (align is "right" or "end") sb.Append(" align=right");
+            sb.Append(" valign=top");
+            if (shadow.Length > 0) sb.Append(shadow);
+            ctx.Body.Append(sb).Append('\n');
+            ctx.Out.Nodes++;
+        }
+
+        var i = 0;
+        while (i < n)
+        {
+            var op = (int)cmds[i++];
+            switch (op)
+            {
+                case CanvasElement.OpBeginPath: path.Clear(); hasCurrent = false; break;
+                case CanvasElement.OpMoveTo: MoveTo(cmds[i], cmds[i + 1]); i += 2; break;
+                case CanvasElement.OpLineTo: LineTo(cmds[i], cmds[i + 1]); i += 2; break;
+                case CanvasElement.OpQuadTo:
+                {
+                    if (!hasCurrent) MoveTo(cmds[i], cmds[i + 1]);
+                    var c1 = P(cmds[i], cmds[i + 1]); var e = P(cmds[i + 2], cmds[i + 3]);
+                    path.Append('Q').Append(F(c1.x)).Append(' ').Append(F(c1.y)).Append(' ').Append(F(e.x)).Append(' ').Append(F(e.y)).Append(' ');
+                    curX = cmds[i + 2]; curY = cmds[i + 3]; i += 4; break;
+                }
+                case CanvasElement.OpCubicTo:
+                {
+                    if (!hasCurrent) MoveTo(cmds[i], cmds[i + 1]);
+                    var c1 = P(cmds[i], cmds[i + 1]); var c2 = P(cmds[i + 2], cmds[i + 3]); var e = P(cmds[i + 4], cmds[i + 5]);
+                    path.Append('C').Append(F(c1.x)).Append(' ').Append(F(c1.y)).Append(' ').Append(F(c2.x)).Append(' ').Append(F(c2.y)).Append(' ').Append(F(e.x)).Append(' ').Append(F(e.y)).Append(' ');
+                    curX = cmds[i + 4]; curY = cmds[i + 5]; i += 6; break;
+                }
+                case CanvasElement.OpArc: ArcSeg(cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 2], 0f, cmds[i + 3], cmds[i + 4], cmds[i + 5] > 0.5f); i += 6; break;
+                case CanvasElement.OpClosePath: if (hasCurrent) { path.Append("Z "); curX = startX; curY = startY; } break;
+                case CanvasElement.OpFill:
+                {
+                    var fill = Paint((int)cmds[i], out _); var alpha = cmds[i + 1]; i += 2;
+                    if (path.Length > 0)
+                    {
+                        ctx.Body.Append(Ind()).Append("P d=\"").Append(path.ToString().TrimEnd()).Append("\" f=").Append(fill);
+                        if (alpha < 0.999f) ctx.Body.Append(" fo=").Append(F(alpha));
+                        if (rule == "evenodd") ctx.Body.Append(" fr=evenodd");
+                        ctx.Body.Append(shadow).Append('\n');
+                        ctx.Out.Nodes++;
+                    }
+                    break;
+                }
+                case CanvasElement.OpStroke:
+                {
+                    var col = Paint((int)cmds[i], out _); var alpha = cmds[i + 1]; var lw = cmds[i + 2] * Scale(); var cap = Cap(cmds[i + 3]); var join = Join(cmds[i + 4]); i += 5;
+                    if (path.Length > 0)
+                    {
+                        ctx.Body.Append(Ind()).Append("P d=\"").Append(path.ToString().TrimEnd()).Append("\" f=none s=").Append(col).Append(" sw=").Append(F(Mathf.Max(0.5f, lw))).Append(" cap=").Append(cap).Append(" join=").Append(join);
+                        if (alpha < 0.999f) ctx.Body.Append(" so=").Append(F(alpha));
+                        ctx.Body.Append(DashAttr(lw)).Append(shadow).Append('\n');
+                        ctx.Out.Nodes++;
+                    }
+                    break;
+                }
+                case CanvasElement.OpFillRect:
+                case 12:
+                {
+                    var rx = cmds[i]; var ry = cmds[i + 1]; var rw = cmds[i + 2]; var rh = cmds[i + 3];
+                    var col = Paint((int)cmds[i + 4], out _); var alpha = cmds[i + 5];
+                    var isStroke = op == 12;
+                    var lw = isStroke ? cmds[i + 6] * Scale() : 0f;
+                    var cap = isStroke ? Cap(cmds[i + 7]) : "butt"; var join = isStroke ? Join(cmds[i + 8]) : "miter";
+                    i += isStroke ? 9 : 6;
+                    var axisAligned = Mathf.Abs(m[1]) < 1e-4f && Mathf.Abs(m[2]) < 1e-4f;
+                    if (axisAligned)
+                    {
+                        var a = P(rx, ry); var b = P(rx + rw, ry + rh);
+                        var left = Mathf.Min(a.x, b.x); var top = Mathf.Min(a.y, b.y);
+                        ctx.Body.Append(Ind()).Append("R x=").Append(F(left)).Append(" y=").Append(F(top)).Append(" w=").Append(F(Mathf.Abs(b.x - a.x))).Append(" h=").Append(F(Mathf.Abs(b.y - a.y)));
+                    }
+                    else
+                    {
+                        var p0 = P(rx, ry); var p1 = P(rx + rw, ry); var p2 = P(rx + rw, ry + rh); var p3 = P(rx, ry + rh);
+                        ctx.Body.Append(Ind()).Append("Y p=[").Append(F(p0.x)).Append(',').Append(F(p0.y)).Append(',').Append(F(p1.x)).Append(',').Append(F(p1.y)).Append(',').Append(F(p2.x)).Append(',').Append(F(p2.y)).Append(',').Append(F(p3.x)).Append(',').Append(F(p3.y)).Append(']');
+                    }
+                    if (isStroke) ctx.Body.Append(" f=none s=").Append(col).Append(" sw=").Append(F(Mathf.Max(0.5f, lw))).Append(" cap=").Append(cap).Append(" join=").Append(join).Append(DashAttr(lw));
+                    else ctx.Body.Append(" f=").Append(col);
+                    if (alpha < 0.999f) ctx.Body.Append(isStroke ? " so=" : " fo=").Append(F(alpha));
+                    ctx.Body.Append(shadow).Append('\n');
+                    ctx.Out.Nodes++;
+                    break;
+                }
+                case CanvasElement.OpArcTo:
+                {
+                    // ponytail: the tangent arc as a quadratic through the corner; right for the rounded corners it is used for
+                    if (!hasCurrent) MoveTo(cmds[i], cmds[i + 1]);
+                    var c1 = P(cmds[i], cmds[i + 1]); var e = P(cmds[i + 2], cmds[i + 3]);
+                    path.Append('Q').Append(F(c1.x)).Append(' ').Append(F(c1.y)).Append(' ').Append(F(e.x)).Append(' ').Append(F(e.y)).Append(' ');
+                    curX = cmds[i + 2]; curY = cmds[i + 3]; i += 5; break;
+                }
+                case CanvasElement.OpRect:
+                {
+                    var rx = cmds[i]; var ry = cmds[i + 1]; var rw = cmds[i + 2]; var rh = cmds[i + 3]; i += 4;
+                    MoveTo(rx, ry); LineTo(rx + rw, ry); LineTo(rx + rw, ry + rh); LineTo(rx, ry + rh); path.Append("Z "); curX = rx; curY = ry;
+                    break;
+                }
+                case 13:
+                {
+                    var keep = shadow; shadow = Shadow((int)cmds[i + 9]);
+                    CanvasText((int)cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], (int)cmds[i + 4], (int)cmds[i + 5], (int)cmds[i + 6], Paint((int)cmds[i + 7], out _), cmds[i + 8], string.Empty, 0f);
+                    shadow = keep; i += 10; break;
+                }
+                case 14: CanvasText((int)cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], (int)cmds[i + 4], (int)cmds[i + 5], (int)cmds[i + 6], "#000000", cmds[i + 8], Paint((int)cmds[i + 7], out _), cmds[i + 9]); i += 10; break;
+                case 15: Mul(1, 0, 0, 1, cmds[i], cmds[i + 1]); i += 2; break;
+                case 16: { var r = cmds[i]; Mul(Mathf.Cos(r), Mathf.Sin(r), -Mathf.Sin(r), Mathf.Cos(r), 0, 0); i += 1; break; }
+                case 17: Mul(cmds[i], 0, 0, cmds[i + 1], 0, 0); i += 2; break;
+                case 18: m = new[] { cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], cmds[i + 4], cmds[i + 5] }; i += 6; break;
+                case 19: Mul(cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], cmds[i + 4], cmds[i + 5]); i += 6; break;
+                case 20: m = new[] { 1f, 0f, 0f, 1f, 0f, 0f }; break;
+                case 21: stack.Push(((float[])m.Clone(), groups, shadow, dash, rule)); break;
+                case 22:
+                {
+                    if (stack.Count == 0) break;
+                    var (pm, pg, psh, pd, pr) = stack.Pop();
+                    while (groups > pg) { groups--; ctx.Body.Append(Ind()).Append("}\n"); }
+                    m = pm; shadow = psh; dash = pd; rule = pr;
+                    break;
+                }
+                case 23:
+                {
+                    // clip(): the current path as a CP; the rest of this save level goes inside a clip group
+                    i += 1;
+                    if (path.Length == 0) break;
+                    var id = "cclip" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+                    ctx.Defs.Append("  CP id=").Append(id).Append(" { P d=\"").Append(path.ToString().TrimEnd()).Append("\" }\n");
+                    ctx.Body.Append(Ind()).Append("G clip=").Append(id).Append(" {\n");
+                    groups++;
+                    break;
+                }
+                case 24: ArcSeg(cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], cmds[i + 4], cmds[i + 5], cmds[i + 6], cmds[i + 7] > 0.5f); i += 8; break;
+                case 25:
+                {
+                    var src = Str((int)cmds[i]); var dx = cmds[i + 1]; var dy = cmds[i + 2]; var dw = cmds[i + 3]; var dh = cmds[i + 4]; var alpha = cmds[i + 5]; i += 6;
+                    if (src.Length == 0 || dw <= 0f || dh <= 0f) break;
+                    var a = P(dx, dy); var b = P(dx + dw, dy + dh);
+                    ctx.Body.Append(Ind()).Append("IMG x=").Append(F(Mathf.Min(a.x, b.x))).Append(" y=").Append(F(Mathf.Min(a.y, b.y))).Append(" w=").Append(F(Mathf.Abs(b.x - a.x))).Append(" h=").Append(F(Mathf.Abs(b.y - a.y))).Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=fill");
+                    if (alpha < 0.999f) ctx.Body.Append(" o=").Append(F(alpha));
+                    ctx.Body.Append('\n');
+                    ctx.Out.Nodes++;
+                    break;
+                }
+                case 26: dash = Str((int)cmds[i]); i += 1; break;
+                case 27:
+                {
+                    var rx = cmds[i]; var ry = cmds[i + 1]; var rw = cmds[i + 2]; var rh = cmds[i + 3]; var r = Mathf.Min(cmds[i + 4], Mathf.Min(rw, rh) * 0.5f); i += 5;
+                    MoveTo(rx + r, ry); LineTo(rx + rw - r, ry);
+                    ArcSeg(rx + rw - r, ry + r, r, r, 0f, -Mathf.PI * 0.5f, 0f, false); LineTo(rx + rw, ry + rh - r);
+                    ArcSeg(rx + rw - r, ry + rh - r, r, r, 0f, 0f, Mathf.PI * 0.5f, false); LineTo(rx + r, ry + rh);
+                    ArcSeg(rx + r, ry + rh - r, r, r, 0f, Mathf.PI * 0.5f, Mathf.PI, false); LineTo(rx, ry + r);
+                    ArcSeg(rx + r, ry + r, r, r, 0f, Mathf.PI, Mathf.PI * 1.5f, false); path.Append("Z ");
+                    break;
+                }
+                case 28:
+                {
+                    // a partial clearRect: painted over with the page background under the canvas, the nearest thing to erasing
+                    var rx = cmds[i]; var ry = cmds[i + 1]; var rw = cmds[i + 2]; var rh = cmds[i + 3]; i += 4;
+                    var a = P(rx, ry); var b = P(rx + rw, ry + rh);
+                    var under = css.TryGetValue("background-color", out var bgc) && StyleApplier.TryColor(bgc, out var bc) ? bc : new Color(0.043f, 0.086f, 0.133f);
+                    ctx.Body.Append(Ind()).Append("R x=").Append(F(Mathf.Min(a.x, b.x))).Append(" y=").Append(F(Mathf.Min(a.y, b.y))).Append(" w=").Append(F(Mathf.Abs(b.x - a.x))).Append(" h=").Append(F(Mathf.Abs(b.y - a.y))).Append(" f=").Append(Hex(under)).Append('\n');
+                    ctx.Out.Nodes++;
+                    break;
+                }
+                case 29: shadow = Shadow((int)cmds[i]); i += 1; break;
+                case 30: rule = Str((int)cmds[i]); i += 1; break;
+                default:
+                    Warn(ctx, $"html: canvas op {op} unknown; frame truncated");
+                    i = n;
+                    break;
+            }
+        }
+        while (groups > 0) { groups--; ctx.Body.Append(Ind()).Append("}\n"); }
     }
 
     // ---------------------------------------------------------------- Batch C helpers

@@ -77,4 +77,19 @@ localStorage.setItem('k', '1'); if (localStorage.getItem('k') !== '1') throw new
 document.getElementsByClassName('x').length === 1 || (() => { throw new Error('byClass'); })();
 if (document.getElementsByName('q').length !== 0) throw new Error('byName');
 new Audio('u.ogg').play(); new Image().src = 'i.png';
+// canvas recorder: every 2D call records, the frame flushes as numbers plus a string table
+let frame = null;
+globalThis.__canvasFrame = (id, cmds, cols, n) => { frame = { id, cmds: cmds.slice(0, n), cols }; };
+const cx = document.getElementById('a').getContext('2d');
+cx.fillStyle = '#ff0000'; cx.fillRect(1, 2, 3, 4);
+cx.beginPath(); cx.moveTo(0, 0); cx.lineTo(10, 10); cx.arc(5, 5, 3, 0, Math.PI); cx.closePath(); cx.lineWidth = 2; cx.strokeStyle = 'blue'; cx.stroke();
+const g = cx.createLinearGradient(0, 0, 10, 0); g.addColorStop(0, 'red'); g.addColorStop(1, 'blue'); cx.fillStyle = g; cx.fill('evenodd');
+cx.font = 'bold 14px Barlow'; cx.textAlign = 'center'; cx.fillText('hi', 5, 5);
+cx.save(); cx.translate(1, 1); cx.rotate(0.1); cx.scale(2, 2); cx.roundRect(0, 0, 4, 4, 1); cx.clip(); cx.restore();
+cx.shadowBlur = 2; cx.shadowColor = '#000'; cx.fillRect(0, 0, 1, 1);
+cx.setLineDash([2, 1]); cx.ellipse(1, 1, 2, 3, 0, 0, 1, false); cx.drawImage({ src: 'x.png', width: 4, height: 4 }, 0, 0);
+if (cx.measureText('abc').width <= 0) throw new Error('measureText');
+__flushCanvases();
+if (!frame || frame.cmds.length < 40 || frame.cols.indexOf('#ff0000') < 0 || !frame.cols.some(c => c.indexOf('GL|0|0|10|0|0:red;1:blue') === 0)) throw new Error('canvas frame ' + JSON.stringify(frame));
+if (frame.cols.indexOf('bold 14px Barlow') < 0 || frame.cols.indexOf('hi') < 0) throw new Error('canvas strings');
 process.stdout.write('prelude smoke ok; ' + calls.length + ' binding calls' + String.fromCharCode(10));

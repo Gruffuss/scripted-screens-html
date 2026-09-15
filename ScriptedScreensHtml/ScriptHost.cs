@@ -641,26 +641,70 @@ function __emit(type, json){
   __flushCanvases();
 }
 
-// ---- canvas 2D context recorder (op codes match CanvasElement) ----
+// ---- canvas 2D context recorder (op codes match CanvasElement and VectorEmitter.EmitCanvas) ----
+// Every call is a number list; strings (colours, gradients, text, fonts, image sources) go
+// through a per-frame string table. The frame is flushed to the main thread after each
+// script run; the emitter turns it into vector nodes.
 var __canvases = {};
 function __ctx(id){
   if (__canvases[id]) return __canvases[id];
-  var c = { __id:id, __cmds:[], __cols:[], __colIdx:{}, fillStyle:'#000', strokeStyle:'#000', lineWidth:1, lineCap:'butt', lineJoin:'miter', globalAlpha:1 };
-  function col(s){ s = String(s); var i = c.__colIdx[s]; if (i === undefined) { i = c.__cols.length; c.__cols.push(s); c.__colIdx[s] = i; } return i; }
+  var c = { __id:id, __cmds:[], __cols:[], __colIdx:{}, fillStyle:'#000', strokeStyle:'#000', lineWidth:1, lineCap:'butt', lineJoin:'miter', miterLimit:10, globalAlpha:1,
+            font:'10px sans-serif', textAlign:'start', textBaseline:'alphabetic', shadowColor:'rgba(0,0,0,0)', shadowBlur:0, shadowOffsetX:0, shadowOffsetY:0,
+            globalCompositeOperation:'source-over', lineDashOffset:0, imageSmoothingEnabled:true, direction:'ltr', filter:'none' };
+  c.canvas = { get width(){ return Number(__getAttr(id, 'width')) || 300; }, get height(){ return Number(__getAttr(id, 'height')) || 150; }, id: id,
+               getContext: function(){ return c; }, toDataURL: function(){ return ''; }, get clientWidth(){ return __size(id)[0]; }, get clientHeight(){ return __size(id)[1]; } };
+  function key(s){ s = String(s); var i = c.__colIdx[s]; if (i === undefined) { i = c.__cols.length; c.__cols.push(s); c.__colIdx[s] = i; } return i; }
+  function paint(st){ return key(st && st.__key ? st.__key() : st); }
+  function shadowKey(){ return (c.shadowBlur > 0 || c.shadowOffsetX || c.shadowOffsetY) ? key('SH|' + c.shadowOffsetX + '|' + c.shadowOffsetY + '|' + c.shadowBlur + '|' + c.shadowColor) : -1; }
+  var __dash = [];
   c.beginPath = function(){ c.__cmds.push(0); };
   c.moveTo = function(x,y){ c.__cmds.push(1,x,y); };
   c.lineTo = function(x,y){ c.__cmds.push(2,x,y); };
   c.quadraticCurveTo = function(cx,cy,x,y){ c.__cmds.push(3,cx,cy,x,y); };
   c.bezierCurveTo = function(a,b,d,e,x,y){ c.__cmds.push(4,a,b,d,e,x,y); };
   c.arc = function(x,y,r,a0,a1,ccw){ c.__cmds.push(5,x,y,r,a0,a1,ccw?1:0); };
+  c.closePath = function(){ c.__cmds.push(6); };
+  c.fill = function(rule){ if (typeof rule === 'string') c.__cmds.push(30, key(rule)); c.__cmds.push(29, shadowKey()); c.__cmds.push(7, paint(c.fillStyle), c.globalAlpha); };
+  c.stroke = function(){ c.__cmds.push(29, shadowKey()); c.__cmds.push(8, paint(c.strokeStyle), c.globalAlpha, c.lineWidth, c.lineCap==='round'?2:c.lineCap==='square'?1:0, c.lineJoin==='round'?2:c.lineJoin==='bevel'?1:0); };
+  c.fillRect = function(x,y,w,h){ c.__cmds.push(29, shadowKey()); c.__cmds.push(9,x,y,w,h, paint(c.fillStyle), c.globalAlpha); };
   c.arcTo = function(x1,y1,x2,y2,r){ c.__cmds.push(10,x1,y1,x2,y2,r); };
   c.rect = function(x,y,w,h){ c.__cmds.push(11,x,y,w,h); };
-  c.closePath = function(){ c.__cmds.push(6); };
-  c.fill = function(){ c.__cmds.push(7, col(c.fillStyle), c.globalAlpha); };
-  c.stroke = function(){ c.__cmds.push(8, col(c.strokeStyle), c.globalAlpha, c.lineWidth, c.lineCap==='round'?2:c.lineCap==='square'?1:0, c.lineJoin==='round'?2:c.lineJoin==='bevel'?1:0); };
-  c.fillRect = function(x,y,w,h){ c.__cmds.push(9,x,y,w,h, col(c.fillStyle), c.globalAlpha); };
-  c.clearRect = function(){ c.__cmds.length = 0; c.__cols.length = 0; c.__colIdx = {}; };
-  c.save = function(){}; c.restore = function(){};
+  c.strokeRect = function(x,y,w,h){ c.__cmds.push(12,x,y,w,h, paint(c.strokeStyle), c.globalAlpha, c.lineWidth, c.lineCap==='round'?2:c.lineCap==='square'?1:0, c.lineJoin==='round'?2:c.lineJoin==='bevel'?1:0); };
+  c.fillText = function(t,x,y,mw){ c.__cmds.push(13, key(t), x, y, mw === undefined ? -1 : mw, key(c.font), key(c.textAlign), key(c.textBaseline), paint(c.fillStyle), c.globalAlpha, shadowKey()); };
+  c.strokeText = function(t,x,y,mw){ c.__cmds.push(14, key(t), x, y, mw === undefined ? -1 : mw, key(c.font), key(c.textAlign), key(c.textBaseline), paint(c.strokeStyle), c.globalAlpha, c.lineWidth); };
+  c.translate = function(x,y){ c.__cmds.push(15,x,y); };
+  c.rotate = function(a){ c.__cmds.push(16,a); };
+  c.scale = function(x,y){ c.__cmds.push(17,x,y === undefined ? x : y); };
+  c.setTransform = function(a,b,d,e,f,g){ if (a && typeof a === 'object') { c.__cmds.push(18,a.a,a.b,a.c,a.d,a.e,a.f); } else c.__cmds.push(18,a,b,d,e,f,g); };
+  c.transform = function(a,b,d,e,f,g){ c.__cmds.push(19,a,b,d,e,f,g); };
+  c.resetTransform = function(){ c.__cmds.push(20); };
+  c.getTransform = function(){ return { a:1, b:0, c:0, d:1, e:0, f:0 }; };
+  c.save = function(){ c.__cmds.push(21); };
+  c.restore = function(){ c.__cmds.push(22); };
+  c.clip = function(rule){ c.__cmds.push(23, key(typeof rule === 'string' ? rule : 'nonzero')); };
+  c.ellipse = function(x,y,rx,ry,rot,a0,a1,ccw){ c.__cmds.push(24,x,y,rx,ry,rot||0,a0,a1,ccw?1:0); };
+  c.drawImage = function(img){
+    var src = img && (img.src || (img.getAttribute && img.getAttribute('src')) || (img.id && __getAttr(img.id, 'src'))) || '';
+    var a = arguments;
+    var dx, dy, dw, dh;
+    if (a.length >= 9) { dx = a[5]; dy = a[6]; dw = a[7]; dh = a[8]; } // ponytail: the source crop is ignored
+    else { dx = a[1]; dy = a[2]; dw = a.length > 3 ? a[3] : (img.naturalWidth || img.width || 0); dh = a.length > 4 ? a[4] : (img.naturalHeight || img.height || 0); }
+    c.__cmds.push(25, key(src), dx, dy, dw, dh, c.globalAlpha);
+  };
+  c.setLineDash = function(seg){ __dash = seg ? Array.prototype.slice.call(seg) : []; c.__cmds.push(26, key(__dash.join(','))); };
+  c.getLineDash = function(){ return __dash.slice(); };
+  c.roundRect = function(x,y,w,h,r){ var rr = Array.isArray(r) ? r[0] : (r || 0); c.__cmds.push(27,x,y,w,h,rr); };
+  c.clearRect = function(x,y,w,h){ var cw = c.canvas.width, ch = c.canvas.height; if (x <= 0 && y <= 0 && w >= cw && h >= ch) { c.__cmds.length = 0; c.__cols.length = 0; c.__colIdx = {}; } else c.__cmds.push(28,x,y,w,h); };
+  c.measureText = function(t){ var m = /(\d+(?:\.\d+)?)px/.exec(String(c.font)); var size = m ? parseFloat(m[1]) : 10; var w = String(t).length * size * 0.55;
+    return { width: w, actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2, actualBoundingBoxLeft: 0, actualBoundingBoxRight: w, fontBoundingBoxAscent: size * 0.9, fontBoundingBoxDescent: size * 0.25 }; };
+  c.createLinearGradient = function(x0,y0,x1,y1){ var g = { __stops: [], addColorStop: function(o, col){ g.__stops.push(o + ':' + col); return g; }, __key: function(){ return 'GL|' + x0 + '|' + y0 + '|' + x1 + '|' + y1 + '|' + g.__stops.join(';'); } }; return g; };
+  c.createRadialGradient = function(x0,y0,r0,x1,y1,r1){ var g = { __stops: [], addColorStop: function(o, col){ g.__stops.push(o + ':' + col); return g; }, __key: function(){ return 'GR|' + x0 + '|' + y0 + '|' + r0 + '|' + x1 + '|' + y1 + '|' + r1 + '|' + g.__stops.join(';'); } }; return g; };
+  c.createConicGradient = function(a,x,y){ var g = { __stops: [], addColorStop: function(o, col){ g.__stops.push(o + ':' + col); return g; }, __key: function(){ return 'GC|' + x + '|' + y + '|' + a + '|' + g.__stops.join(';'); } }; return g; };
+  c.createPattern = function(){ return '#808080'; };
+  c.isPointInPath = function(){ return false; }; c.isPointInStroke = function(){ return false; };
+  c.getImageData = function(){ console.warn('canvas: getImageData is not available in a geometry layer'); return { data: new Uint8ClampedArray(0), width: 0, height: 0 }; };
+  c.putImageData = function(){ console.warn('canvas: putImageData is not available in a geometry layer'); };
+  c.createImageData = function(w,h){ return { data: new Uint8ClampedArray(0), width: w, height: h }; };
   c.__flush = function(){ __canvasFrame(id, c.__cmds, c.__cols, c.__cmds.length); c.__cmds = []; c.__cols = []; c.__colIdx = {}; };
   __canvases[id] = c;
   return c;
