@@ -196,5 +196,6 @@ Console.WriteLine("Keyframes, child combinator, !important");
     Check(warnings.Count == 0, $"no warnings for the F4 sheet (got {string.Join("; ", warnings)})");
 }
 
+if (args.Length > 0 && args[0] == "--probe2") { Probe2.Run(); return 0; }
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");
 return failures.Count == 0 ? 0 : 1;

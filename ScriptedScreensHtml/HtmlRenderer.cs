@@ -553,6 +553,13 @@ internal static class HtmlRenderer
             if (mono != null) ve.style.unityFontDefinition = FontDefinition.FromSDFFont(mono);
         }
         ApplyStyles(ve, node, rules, result);
+        if (mixed && result.CssOf(ve).TryGetValue("display", out var dsp) && dsp.Trim().ToLowerInvariant() is "flex" or "inline-flex" or "grid" or "inline-grid")
+        {
+            // a flex or grid container whose children happen to be inline: they are items, not a line box
+            mixed = false;
+            if (!result.CssOf(ve).ContainsKey("flex-wrap")) ve.style.flexWrap = UnityEngine.UIElements.Wrap.NoWrap;
+            if (!result.CssOf(ve).ContainsKey("align-items")) ve.style.alignItems = Align.Stretch;
+        }
         parent.Add(ve);
         if (node.Tag == "dialog" && node.Attr("open") == null)
             ve.style.display = DisplayStyle.None;
@@ -1801,6 +1808,7 @@ internal static class HtmlRenderer
         var s = ve.style;
         switch (tag)
         {
+            case "body": s.fontSize = 16; s.color = Color.white; break; // a browser's defaults, so a page with no font-size still has text
             case "h1": s.fontSize = 28; s.unityFontStyleAndWeight = FontStyle.Bold; s.marginTop = 8; s.marginBottom = 8; break;
             case "h2": s.fontSize = 22; s.unityFontStyleAndWeight = FontStyle.Bold; s.marginTop = 6; s.marginBottom = 6; break;
             case "h3": s.fontSize = 18; s.unityFontStyleAndWeight = FontStyle.Bold; s.marginTop = 4; s.marginBottom = 4; break;

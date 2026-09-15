@@ -23,7 +23,8 @@ for i, g in ipairs(GASES) do
     <div class="tank" id="card_%s">
       <div class="head"><span>%s</span><span class="pct" id="pct_%s">--</span></div>
       <svg viewBox="0 0 60 100" preserveAspectRatio="none">
-        <polygon n="30" x="=i*60/29" y="=100-$%s_level+2*sin(i*0.7+t*2.2+%d)+1.2*sin(i*1.4-t*1.6)" y2="100" fill="%s" fill-opacity="0.85"/>
+        <defs><clipPath id="win"><rect x="2" y="2" width="56" height="96" rx="3"/></clipPath></defs>
+        <polygon clip-path="url(#win)" n="30" x="=i*60/29" y="=100-$%s_level+2*sin(i*0.7+t*2.2+%d)+1.2*sin(i*1.4-t*1.6)" y2="100" fill="%s" fill-opacity="0.85"/>
         <rect x="1" y="1" width="58" height="98" rx="4" fill="none" stroke="#24314A" stroke-width="2"/>
       </svg>
       <div class="kpa" id="kpa_%s">-- kPa</div>
@@ -117,17 +118,12 @@ function tick(dt)
             if #history > 60 then table.remove(history, 1) end
         end
     end
-    -- The graph: a number array spreads across the viewBox width as y values; the fill
-    -- polygon gets the same points closed down to the bottom edge.
-    local pts, fill = {}, { "0,40" }
-    for i, y in ipairs(history) do
-        local x = (i - 1) * 100 / math.max(1, #history - 1)
-        pts[#pts + 1] = string.format("%.1f,%.1f", x, y)
-        fill[#fill + 1] = pts[#pts]
-    end
-    fill[#fill + 1] = "100,40"
-    payload.hist = table.concat(pts, " ")
-    payload.hist_fill = table.concat(fill, " ")
+    -- The graph: a number array on an svg shape spreads across the viewBox width as y
+    -- values. The polyline draws the trace, the polygon the same trace as a band down to the
+    -- bottom edge. The vector mod interpolates the array between ticks, so a rolling window
+    -- scrolls smoothly instead of stepping.
+    payload.hist = history
+    payload.hist_fill = history
     payload.warn = co2high
     local secs = math.floor(t)
     payload.clock = string.format("%02d:%02d", math.floor(secs / 60) % 60, secs % 60)
