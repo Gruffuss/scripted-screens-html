@@ -382,6 +382,14 @@ internal static class HtmlRenderer
 
         AddGenerated(node, rules);
 
+        if (node.Tag == "tr")
+        {
+            // a row on its own (built by a script into a tbody): laid out as a row of cells
+            var n = 0;
+            foreach (var cell in node.Children) if (cell.Tag == "td" || cell.Tag == "th") n += Span(cell);
+            AppendRow(parent, node, Math.Max(1, n), rules, result);
+            return;
+        }
         if (node.Tag == "table")
         {
             AppendTable(parent, node, rules, result);
@@ -564,6 +572,7 @@ internal static class HtmlRenderer
             // box, the way a browser wraps it in an anonymous block: consecutive inline
             // children are gathered into a synthetic span and built as one row. The children
             // keep their real parent so selectors still match.
+            var itemsContainer = result.CssOf(ve).TryGetValue("display", out var disp0) && disp0.Trim().ToLowerInvariant() is "flex" or "inline-flex" or "grid" or "inline-grid";
             HtmlNode? lineRun = null;
             void CloseRun()
             {
@@ -576,7 +585,8 @@ internal static class HtmlRenderer
                 if (list && child.Tag == "li")
                     AddMarker(child, node, result.CssOf(ve), ++ordinal, rules);
                 var inline = child.IsText ? child.Text.Trim().Length > 0 : (Inline.Contains(child.Tag!) && IsInlineOnly(child)) || child.Attr("data-pseudo") != null || child.Attr("data-marker") != null;
-                if (inline && node.Tag is not ("table" or "tr" or "ul" or "ol" or "select" or "svg"))
+                // the children of a flex or grid container are items, never gathered into a line box (CSS blockifies them)
+                if (inline && !itemsContainer && node.Tag is not ("table" or "tr" or "ul" or "ol" or "select" or "svg"))
                 {
                     lineRun ??= new HtmlNode { Tag = "span", Parent = node };
                     lineRun.Attributes["data-run"] = "1";
@@ -631,7 +641,8 @@ internal static class HtmlRenderer
                     if (own.EndsWith(" ", StringComparison.Ordinal)) built.style.marginRight = 4;
                     if (own.StartsWith(" ", StringComparison.Ordinal)) built.style.marginLeft = 4;
                 }
-                afterLetter = child.Attr("data-pseudo") == "first-letter";
+                // the text after a drop letter or a list marker fills the line and wraps beside it
+                afterLetter = child.Attr("data-pseudo") == "first-letter" || child.Attr("data-marker") != null || child.Attr("data-marker-image") != null;
                 continue;
             }
             AppendRich(run, child, rules);

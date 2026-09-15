@@ -2,8 +2,8 @@
 <ModMetadata xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 	<Name>ScriptedScreens Html [StationeersLaunchPad]</Name>
 	<Author>Gruffuss</Author>
-	<Version>0.0.1.0</Version>
-	<Description>Probe: renders a UI Toolkit panel to a texture on an "html" ScriptedScreens element. Client-side only.</Description>
+	<Version>0.1.0.0</Version>
+	<Description>Write a console screen as a web page. Adds an "html" element to ScriptedScreens: give it an HTML document with CSS and, if you like, JavaScript, and the page is drawn on the console by ScriptedScreens Vector as crisp geometry at any distance, in the Fonts mod's typefaces. Flexbox and grid, gradients, shadows, transitions and keyframes, scrolling boxes, inline SVG with client-side animation, canvas, forms and buttons that report to Lua, live values bound by element id. A page that does not change costs nothing per frame. Requires ScriptedScreens, ScriptedScreens Vector and ScriptedScreens Fonts. Client-side. README and examples in the mod folder.</Description>
 	<Tags>
 		<Tag>Mod</Tag>
 		<Tag>BepInEx</Tag>
