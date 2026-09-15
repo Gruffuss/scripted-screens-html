@@ -773,6 +773,7 @@ internal static class HtmlRenderer
                     if (text.Length == 0) break;
                     var shape = new SvgShape { Tag = "text", Owner = svg };
                     foreach (var kv in eff) shape.Attributes[kv.Key] = kv.Value;
+                    foreach (var kv in c.Attributes) if (!shape.Attributes.ContainsKey(kv.Key)) shape.Attributes[kv.Key] = kv.Value; // x, y, dx, dy
                     shape.Attributes["__text"] = text;
                     if (m2 != null) shape.Attributes["__m"] = MatrixText(m2);
                                         svg.Shapes.Add(shape);
@@ -784,6 +785,7 @@ internal static class HtmlRenderer
                     if (inDefs && clipTarget == null) break;
                     var shape = new SvgShape { Tag = "image", Owner = svg };
                     foreach (var kv in eff) shape.Attributes[kv.Key] = kv.Value;
+                    foreach (var kv in c.Attributes) if (!shape.Attributes.ContainsKey(kv.Key)) shape.Attributes[kv.Key] = kv.Value; // x, y, width, height
                     shape.Attributes["href"] = c.Attr("href") ?? c.Attr("xlink:href") ?? string.Empty;
                     if (m2 != null) shape.Attributes["__m"] = MatrixText(m2);
                     svg.Shapes.Add(shape);

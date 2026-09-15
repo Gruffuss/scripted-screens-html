@@ -1192,8 +1192,10 @@ internal static class VectorEmitter
         var inner = indent + "  ";
         // SVG ids are per document, scene def ids are global: sixteen tanks each declare
         // `#fill`, so every reference is prefixed with this svg's id.
+        // clip defs are scene-space whatever the group does: always the baked fit
+        var absolute = new Fit(ox - vb.x * sx, oy - vb.y * sy, sx, sy, group);
         foreach (var shape in svg.Shapes)
-            if (shape.Tag == "clipPath") SvgClipDef(ctx, shape, id + "_", fit);
+            if (shape.Tag == "clipPath") SvgClipDef(ctx, shape, id + "_", absolute);
         foreach (var shape in svg.Shapes)
             EmitShape(ctx, shape, inner, id + "_", fit);
         ctx.Body.Append(indent).Append("}\n");

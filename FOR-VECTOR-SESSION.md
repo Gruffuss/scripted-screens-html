@@ -8,6 +8,10 @@ the vector session: inset text shadow (3), stencil masks on labels (6, 8), IMG d
 rebuild (9), filters and masks on text (10, 12), extra text shadow copies (4), so/sov live (7).
 
 **Items 14-16 (2026-09-15, same 0.11.21.0 build): implemented, tested offline, not seen in game.**
+Item 3 changed route after being seen in game: `UNDERLAY_INNER` is declared by the shipped
+TMP shaders but draws nothing (four arrangements tried, keyword confirmed on in all). Inset text
+is now a stencil mask of the glyphs, a shadow-coloured copy inside it and the face moved by the
+offset on top; confirmed drawing in game, offset not capped by padding.
 14 is the face only: `s=@gradient` on `T` is not done, because text has no outline in the vector
 mod at all and TMP's outline colour is a material property, not per vertex. 15 as specified
 (`fl` keys `f size weight font`, values with spaces quoted '...'). 16 reads `v` from the top.
@@ -148,3 +152,12 @@ mesh edit). If the layout moves the break (a later size change), it repeats once
 `IMG ... uv=[u0,v0,u1,v1]`, fractions of the texture, the part of the picture the box shows
 (default `[0,0,1,1]`). Carries the nine-slice `border-image` (nine `IMG` nodes) and canvas
 `drawImage` with a source rectangle.
+
+## 17. Holes in a clipped fill (seen in game 2026-09-15)
+
+`clipped fills cannot carry holes; holes ignored` fires for every inline svg: the HTML side
+wraps each `<svg>` in `G clip=<its box>` (a browser clips svg content to its viewport by
+default), so a path with a hole (`fill-rule: evenodd`, or two same-wound subpaths under
+`nonzero`) inside an svg draws solid. Additive ask: when every hole lies inside the clip
+region, keep the holes (clip the outer contour, bridge the holes as unclipped); only a hole
+that straddles the clip boundary needs the boolean subtraction that is not there.
