@@ -55,3 +55,53 @@ shapes), run a capture, read the log.
 
 The test page's gradient box being plain blue is the HTML side's doing: the page carries a
 solid until item 1 lands, so its button stays under the cap.
+
+---
+
+# Additive work agreed with the HTML side (2026-09-15)
+
+The HTML emitter will write these forms and treat them as present. Feasibility was checked
+read-only against the vector code and the game's shipped shaders (details per item).
+
+1. **Text-form gradient sample.** `fat==expr` / `sat==expr` in the scene text, honoured when
+   `f`/`s` is `@gradient`, on shapes and on `T`. `SceneText` turns them into the map form
+   `{ grad, at }` that `SceneModel` already parses (SceneModel.cs ~1043); `T` resolves paint
+   the way shapes do.
+
+2. **Inset shadow on text.** TMP's underlay has an inner variant, `UNDERLAY_INNER`, and the
+   shipped `TextMeshPro/Distance Field` shaders (and Mobile ones) compile it alongside
+   `UNDERLAY_ON`: verified in `rocketstation_Data/resources.assets`. Same properties
+   (`_UnderlayColor/OffsetX/OffsetY/Dilate/Softness`), same `TextShadow.Fit` maths. Change:
+   `TextLayer.WriteUnderlay` (~line 314) enables `"UNDERLAY_INNER"` instead (no
+   `ShaderUtilities` constant exists for it; probe `shader.keywordSpace` as the existing guard
+   at ~245 does) and the offset-copy caster path (~274-282, `TextShadow.ShouldCast`) is
+   skipped for inset. Trivial to small.
+
+3. **Inset shadow on shapes.** `Shadow.Emit` with the shape's own outline as the clip
+   (`ClipRegion.FromPolygon`, rounded corners come as arc polygons and stay convex). Invert
+   three things: `Offset(...)` grows outward (sign and spread meaning flip), the solid core is
+   an interior fill (becomes a full-alpha ring next to the edge, `EmitRing` unchanged), and
+   the alpha ramp `Coverage(d, sigma)` becomes `1 - Coverage`. Run after `FillContour` and
+   before `StrokeOutline` (Tessellator ~786-793). Refuse on concave `P`/`SP` with a
+   `scene.Problem`. Parsing: a sixth `inset` field in `sh` (SceneModel ~1383). Small to medium.
+
+4. **More than one text shadow on `T`.** One underlay per label is enforced at emit
+   (Tessellator ~654, "text takes one shadow"); a second entry needs a second label behind,
+   offset and coloured, the way the caster copy already works. Small.
+
+5. **Justified text.** `T align=justified` -> TMP Justified. Trivial.
+
+6. **Rounded text masks.** Today `RectMask2D` on the clip's bounding box, per-label parent
+   object (TextLayer ~479-496). Realistic route: a UGUI `Mask` with a small `MaskableGraphic`
+   drawing the convex clip polygon as a fan on that parent, keeping `RectMask2D` for the
+   axis-aligned case; the shipped UI/TMP shaders carry `_Stencil*`. ~2 draw calls per masked
+   label. Cutting TMP glyph quads was judged large and fragile (the mod never touches TMP
+   meshes; sub-meshes and the caster copy would all need it), and TMP's texture masking
+   variants (`MASK_SOFT/HARD/TEX`) are not compiled in the shipped shaders. Medium.
+
+7. **Forced scroll offset.** `so=<offset> sov=<version>` on `SC`: a changed version applies
+   the offset once, then wheel/drag own it again. Unlocks `scrollTop =` and
+   `scrollIntoView()` from a page.
+
+Not needed from the vector side after all: hover and click coordinates; the HTML side takes
+them from its own layout boxes and the pointer position.
