@@ -1452,8 +1452,9 @@ internal sealed class HtmlSurface : MonoBehaviour
 
             if (string.IsNullOrEmpty(entry.Key) || !_byId.TryGetValue(entry.Key, out var ve))
             {
-                if (!string.IsNullOrEmpty(entry.Key) && !quiet)
-                    ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: data key \"{entry.Key}\" matches no element id");
+                // a key the scene reads as $name (an svg expression) is a legitimate target too
+                if (!string.IsNullOrEmpty(entry.Key) && !quiet && _lastScene.IndexOf("$" + entry.Key, StringComparison.Ordinal) < 0)
+                    ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: data key \"{entry.Key}\" matches no element id and no $ expression");
                 continue;
             }
 
