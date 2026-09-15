@@ -5,13 +5,13 @@ fails is a defect, and "there is no vector node for it" is not a reason to skip 
 faked with what the vector mod has, or the vector mod gains an additive feature. Only three
 things are structurally out and stay listed as such:
 
-1. **Clipping to an arbitrary (concave) shape.** The vector mod clips geometrically to convex
-   regions only. Convex `clip-path` shapes work; a star does not.
-2. **Per-pixel effects on the page**: `filter: blur()`, `backdrop-filter`, `mix-blend-mode`.
-   The page is geometry, there is no offscreen pass. Colour-only filters are faked (below).
-3. **Network from a page** (`fetch`, `WebSocket`): data comes from the chip by design. One
-   exception is planned: `<script src>` and `<link rel=stylesheet>` from a URL, fetched the way
-   ScriptedScreens fetches an image.
+1. **Per-pixel effects on the page**: `filter: blur()`, `backdrop-filter`, `mix-blend-mode`.
+   The page is geometry, there is no offscreen pass.
+2. **Network from a page** (`fetch`, `WebSocket`): data comes from the chip by design.
+   `<script src>` and `<link rel=stylesheet>` from a URL are fetched (done, Batch D).
+
+Concave clipping was on this list and is not any more: a stencil mask takes any mesh, so it is
+vector work (below). A limit that can be named is a feature to ask for, not a note to write.
 
 Everything else is on this list. Each batch is one build and one restart, verified on a test
 page by capture before it moves to `main`. Unverified work lives on `untested`.
@@ -66,35 +66,33 @@ HtmlRenderer's tag handling, the script prelude), not from SUPPORT.md, which is 
 | `<canvas>` | see Batch E |
 | `<iframe> <object> <embed>` | out, stays listed |
 
-## Batch C — paint fakes (things the vector mod does not do natively, done with what it has)
+## Batch C — paint, on the vector work below plus emitter mappings
 
-| Gap | Fake |
+Nothing in this batch is faked. Where the vector mod lacks the primitive, it is on the
+vector list (items 7–12) and the emitter writes the form given there.
+
+| Gap | Plan |
 |---|---|
-| `background-image: url()` | a ScriptedScreens image element **under** the page (z_index page − 1), and the box emits no fill so the image shows through; `background-size: cover/contain/px`, `background-position` by sizing the element's rect (clipped by the page mesh where the box has a border); `no-repeat` only, `repeat` stays listed |
-| `box-shadow: inset` | native on the vector side (inset `sh`, being added); the emitter passes the inset entries through. Multiple shadows layered |
-| second and further `text-shadow` | native on the vector side (`sh` on `T` with more than one entry, being added); the emitter passes them all |
-| `conic-gradient` | fan of wedges (`P` pie slices) with per-wedge flat colour, 36 slices, stops interpolated |
-| `repeating-linear-gradient`, `repeating-radial-gradient` | expanded to an explicit stop list over the box |
-| `border-style: double`, `groove`, `ridge`, `inset`, `outset` | two strokes; the 3D ones as light/dark side colours |
-| `border-image` | out, listed |
-| `filter: drop-shadow()` | `sh` on the subtree's shapes and labels |
-| `filter: brightness() contrast() grayscale() sepia() invert() saturate() hue-rotate() opacity()` | colour math on every flat colour in the subtree (fills, strokes, text); gradients per stop. Exact for flat colours, which is what pages use it on |
-| `filter: blur()`, `backdrop-filter`, `mix-blend-mode` | out, listed (structural) |
-| `clip-path: inset() circle() ellipse() polygon()` | `CP` when convex (inset, circle, ellipse, and a polygon that tests convex); concave polygons warn and clip to the bounding box |
-| `mask-image: linear-gradient(...)` | when the element's ancestor background is flat: a gradient band from transparent to that background over the edge (the scroll-fade idiom); otherwise listed |
-| `transform: skew()`, `matrix()`, `rotate3d/translate3d/scale3d` | decompose to rotate/scale/translate (skew approximated by the closest rotate+scale, or exact for svg by baking); 3D takes the 2D part |
-| `writing-mode: vertical-rl/lr`, `text-orientation` | the label in a `G r=90/-90` |
-| `vertical-align: sub/super/middle/text-top` on inline text | TMP `<sub>`, `<sup>`, `<voffset>` |
-| `text-align: justify` | `T align=justified` (being added on the vector side) |
-| `object-fit: contain/cover` on `<img>` | needs the natural size: read it back from ScriptedScreens' image cache after load, then size the rect; until loaded, stretch |
-| `border-radius` on `<img>` | the image element cannot be rounded; draw the page background as a rounded frame over its corners (works on flat backgrounds, which is the case that matters) |
-| `outline-style: dashed/dotted` | `dash` on the outline stroke |
-| `float: left/right`, `clear` | the parent becomes a wrapping row; a float goes first (left) or last with `margin-left: auto` (right), text after it fills the rest. Not a real float around, but the layouts pages actually write |
-| `display: inline-block`, `inline`, `contents`, `table*` | inline-block is a row item (done); `contents` unwraps; `display: table/table-row/table-cell` goes through table v2 |
+| `background-image: url()`, `background-size`, `background-position` | an `IMG` node (vector 8) behind the box's content, sized and offset from the CSS; `repeat` by tiling `IMG` nodes across the box |
+| `<img>` `border-radius`, `object-fit`, `<img>` inside `overflow`/clip/z-order, remote clients | the `IMG` node carries all of it: radii cut the quad, clips apply, it sits in scene order, the URL travels with the scene |
+| `conic-gradient` | `GC` (vector 10) |
+| `repeating-linear-gradient`, `repeating-radial-gradient` | expanded to an explicit stop list; emitter only |
+| `border-style: double`, `groove`, `ridge`, `inset`, `outset` | two strokes, light/dark side colours; emitter only |
+| `filter: drop-shadow()` | `sh` on the subtree; emitter only |
+| `filter: brightness() contrast() grayscale() sepia() invert() saturate() hue-rotate() opacity()` | colour filters on a group (vector 11) |
+| `filter: blur()`, `backdrop-filter`, `mix-blend-mode` | structural, out |
+| `clip-path: inset() circle() ellipse() polygon()` | `CP`; a concave polygon through the stencil clip (vector 7) |
+| `mask-image: linear-gradient(...)` | gradient mask on a group (vector 9) |
+| `transform: skew()`, `matrix()`, 3D functions | the 2x3 matrix on `G` (vector 12); 3D takes its 2D part |
+| `writing-mode: vertical-rl/lr` | the label in `G r=90/-90`; emitter only |
+| `vertical-align: sub/super/middle` on inline text | TMP `<sub>`, `<sup>`, `<voffset>`; emitter only |
+| `text-align: justify` | `T align=justified` (vector 4) |
+| `float: left/right`, `clear` | layout: the parent becomes a wrapping row, the float first or last with auto margin. Not text flowing around a box; a real float needs an inline formatting context, which UI Toolkit does not have |
+| `display: inline-block`, `contents`, `table*` | layout mapping |
 | `columns` | a wrapping row of equal columns filled in order |
 | `aspect-ratio` | height from width on layout, and the reverse |
 | `position: fixed` | absolute to the page (done, untested) |
-| `z-index` across parents | sibling order only today; a positioned element with z-index above its parent's later siblings needs re-parenting the emitted subtree to the stacking root: do it for `position: absolute/fixed` + z-index |
+| `z-index` across parents | a positioned element with z-index above its parent's later siblings is emitted at the stacking root |
 
 ## Batch D — script DOM completeness
 
@@ -158,6 +156,23 @@ What the vector session implements, with the shape the HTML emitter will write:
 6. **Forced scroll offset.** `so=<offset> sov=<version>` on `SC`: a changed version applies
    the offset once, then the wheel owns it again. Unlocks `scrollTop =` and
    `scrollIntoView()` from a page script.
+7. **Concave clips.** A `CP` whose outline is not convex puts the clipped subtree into its
+   own slice child under a UGUI `Mask` whose graphic is the clip polygon (triangulated as
+   paths already are); labels inside get the same mask. One draw call per such group.
+   The geometric clipper keeps the convex case.
+8. **`IMG` node.** `IMG x= y= w= h= src=url fit=cover|contain|fill rx=` — a textured quad
+   drawn as its own slice with the texture's material; radii and convex clips cut the quad
+   with interpolated UVs, concave clips use 7; it sits in scene order and inside `SC`. The
+   texture from the URL through a UnityWebRequest (or ScriptedScreens' image cache by
+   reflection); natural size from the texture, so `contain`/`cover` are exact.
+9. **Gradient mask on a group.** `G mask=@gradient { ... }`: every vertex's alpha in the
+   subtree multiplied by the gradient's alpha at that vertex, with the fill subdivision so
+   the ramp is smooth; labels take it per glyph through TMP vertex colours.
+10. **Conic gradient.** `GC id cx cy angle stops` in defs, angle-per-vertex.
+11. **Colour filters on a group.** `G bri= con= sat= hue= gray= sep= inv= { ... }`, applied
+    per vertex at emit, so gradients and labels take them too.
+12. **A 2x3 matrix on `G`.** `m=[a,b,c,d,e,f]` alongside `t r s`. Makes `skew()` and
+    `matrix()` exact.
 
 Not vector work after all: `:hover` and click coordinates are done on the HTML side from
 its own layout boxes and the pointer position (Batch A and D).

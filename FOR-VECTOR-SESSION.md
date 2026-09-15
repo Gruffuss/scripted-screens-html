@@ -105,3 +105,26 @@ read-only against the vector code and the game's shipped shaders (details per it
 
 Not needed from the vector side after all: hover and click coordinates; the HTML side takes
 them from its own layout boxes and the pointer position.
+
+## Batch C additions (2026-09-15), all additive
+
+7. **Concave clips via stencil.** The feasibility check for text masks found that a UGUI
+   `Mask` + stencil takes any graphic mesh and the shipped UI/TMP shaders carry `_Stencil*`.
+   The same serves geometry: a `CP` whose polygon is not convex (today refused) puts its
+   clipped subtree into a slice child (as the text-order slices do) under a `Mask` whose
+   graphic is the clip polygon, triangulated by the existing ear clipper. Labels in the
+   subtree parent under the same mask. One draw call per group. Convex stays geometric.
+8. **`IMG` node**: `IMG x= y= w= h= src=url fit=cover|contain|fill rx=[..] o=`. A textured
+   quad as its own slice with a material carrying the texture (the default UI material with
+   `_MainTex`). Radii and convex clips cut the quad polygon with interpolated UVs; concave
+   through 7. Sits in scene order, scrolls inside `SC`. Texture via `UnityWebRequest.Get`
+   on the URL, or ScriptedScreens' `ImageElementController` cache by reflection (it holds
+   `Texture2D` per URL). Natural size from the texture, so `contain`/`cover` are exact.
+9. **`G mask=@gradient`**: vertex alpha in the subtree multiplied by the gradient's alpha
+   sampled at the vertex (with the gradient refinement subdivision). Labels: TMP vertex
+   colour alpha per glyph from the mask at the glyph centre.
+10. **Conic gradient** `GC id=.. cx= cy= a= stops=[[..]]` in defs; parameter is the angle
+    of the vertex around the centre; refine like radial.
+11. **Colour filters on `G`**: `bri con sat hue gray sep inv` (CSS filter semantics),
+    applied to every vertex colour and label colour under the group at emit.
+12. **2x3 matrix on `G`**: `m=[a,b,c,d,e,f]`, composed after `t r s`.
