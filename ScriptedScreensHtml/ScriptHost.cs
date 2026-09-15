@@ -501,19 +501,32 @@ internal sealed class ScriptHost : IDisposable
 
     private void SetHtml(string id, string html)
     {
-        // Parse on the worker (pure managed), assign on main.
-        var rich = HtmlRenderer.FragmentToRichText(html, _findNode(id), _rules);
+        // Parse on the worker (pure managed), assign on main. Inline-only markup becomes the
+        // element's rich text; anything with real elements (blocks, ids, classes) replaces
+        // the element's children as built elements, the way appendChild does.
+        var parsed = HtmlParser.Parse(html, _ => { });
+        var inlineOnly = HtmlRenderer.IsInlineOnly(parsed);
+        var rich = inlineOnly ? HtmlRenderer.FragmentToRichText(html, _findNode(id), _rules) : string.Empty;
         Write(() =>
         {
             var ve = _find(id);
+            var node = _findNode(id);
+            // whatever elements were inside go, with their ids and layout
+            if (node != null)
+                foreach (var c in node.Children.ToArray())
+                    if (!c.IsText && c.Attr("id") is { } cid && cid != id) _remove(cid);
             var label = ve != null ? HtmlSurface.TextTargetFor(ve, id) : null;
             if (label != null)
                 label.text = rich;
-            if (_findNode(id) is { } node && !node.IsText)
+            if (node != null && !node.IsText)
             {
                 node.Children.Clear();
-                foreach (var c in HtmlParser.Parse(html, _ => { }).Children) { c.Parent = node; node.Children.Add(c); }
+                if (inlineOnly && label != null)
+                    foreach (var c in HtmlParser.Parse(html, _ => { }).Children) { c.Parent = node; node.Children.Add(c); }
             }
+            // built elements, or inline text on a container that has no label of its own
+            if (html.Trim().Length > 0 && (!inlineOnly || label == null))
+                _appendHtml(id, html);
         });
     }
 
@@ -747,6 +760,7 @@ var __textCache = {}, __htmlCache = {}, __styleCache = {}, __scrollCache = {};
 // ---- readiness: after the page script, as a browser fires them after parsing ----
 document_readyState = 'loading';
 function __ready(){
+  if (document_readyState === 'complete') return; // a later script (external, module) does not reload the page
   document_readyState = 'interactive';
   __emit('DOMContentLoaded', null);
   document_readyState = 'complete';

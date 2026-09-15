@@ -1574,7 +1574,7 @@ internal static class HtmlRenderer
         return anyId;
     }
 
-    private static bool IsInlineOnly(HtmlNode node)
+    internal static bool IsInlineOnly(HtmlNode node)
     {
         foreach (var c in node.Children)
         {
