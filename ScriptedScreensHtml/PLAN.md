@@ -201,8 +201,15 @@ its own layout boxes and the pointer position (Batch A and D).
 | F4 rescued items | HtmlTest12: all rows; vector 7, 14, 15, 16 seen | ::first-letter only ran with an ::after; the border-image gradient came out flat (def now in scene space) |
 | F5 silent list | n/a | |
 
-Not verifiable by capture: anything a script draws or changes after load, and any animation,
-because a capture rebuilds the page and grabs it before its script ran. Those rows need eyes.
+Captures now run the page script for a few frames before grabbing the page, so script-drawn
+content shows; animation and network fetches still need eyes.
+
+**Docs for publishing (2026-09-15 evening):** `README.md` (the guide), `About/About.xml`,
+`SUPPORT.md` (from what the consoles showed) and `examples/01-06` (each verified on a console
+by capture). The examples found and fixed: list text beside its marker, flex/grid children as
+items, script-built table rows, a canvas laid out at 0x0, an inline element holding a classed
+span folding into text, a page without font-size having none, the unmatched-data-key warning
+firing for `$name` expression keys.
 
 ## Approximations left by Batch F (to finish, not limits)
 
