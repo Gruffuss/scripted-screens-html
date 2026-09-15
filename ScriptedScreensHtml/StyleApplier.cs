@@ -105,6 +105,12 @@ internal static class StyleApplier
                 if (v == "none" || v == "transparent") { s.backgroundColor = Color.clear; s.backgroundImage = StyleKeyword.None; }
                 else if (v.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase)) Gradient(s, v, warn);
                 else if (TryColor(v, out var bg)) s.backgroundColor = bg;
+                else if (v.IndexOf("url(", StringComparison.OrdinalIgnoreCase) >= 0 || v.IndexOf("gradient(", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    // the shorthand: a colour token among the image, position, size and repeat parts; the emitter draws the image
+                    foreach (var part in SplitTopLevel(v))
+                        if (!part.Contains('(') && TryColor(part, out var shc)) { s.backgroundColor = shc; break; }
+                }
                 else Unknown(d, warn);
                 break;
 
@@ -213,6 +219,13 @@ internal static class StyleApplier
             case "transform":
             {
                 if (v == "none") { s.translate = new Translate(0, 0); s.rotate = new Rotate(0); s.scale = new Scale(Vector2.one); break; }
+                if (NeedsMatrix(v))
+                {
+                    // skew(), matrix(), 3D functions: the emitter composes the whole transform
+                    // into a matrix on the group; the layout engine must not apply any of it.
+                    s.translate = new Translate(0, 0); s.rotate = new Rotate(0); s.scale = new Scale(Vector2.one);
+                    break;
+                }
                 foreach (var fn in Functions(v))
                 {
                     var args = fn.args;
@@ -420,6 +433,8 @@ internal static class StyleApplier
         "box-shadow", "text-shadow", "border-style", "text-decoration",
         "outline", "outline-width", "outline-color", "outline-style", "outline-offset",
         "pointer-events", "cursor", "user-select", "content", "appearance", "-webkit-appearance", "-moz-appearance", "accent-color",
+        "filter", "clip-path", "mask-image", "-webkit-mask-image", "mask", "writing-mode", "text-orientation", "vertical-align", "object-fit", "object-position",
+        "background-size", "background-position", "background-repeat", "float", "clear", "column-count", "columns", "column-gap", "aspect-ratio", "mix-blend-mode", "backdrop-filter",
         "list-style", "list-style-type", "list-style-position", "border-collapse", "border-spacing",
     };
 
@@ -723,7 +738,14 @@ internal static class StyleApplier
         return list;
     }
 
-    private static IEnumerable<(string name, string[] args)> Functions(string v)
+    /// <summary>A transform list the layout engine cannot represent (skew, matrix, 3D): the emitter takes it whole.</summary>
+    internal static bool NeedsMatrix(string transform)
+    {
+        var t = transform.ToLowerInvariant();
+        return t.Contains("skew") || t.Contains("matrix") || t.Contains("3d") || t.Contains("rotatex") || t.Contains("rotatey") || t.Contains("rotatez") || t.Contains("perspective");
+    }
+
+    internal static IEnumerable<(string name, string[] args)> Functions(string v)
     {
         var i = 0;
         while (i < v.Length)

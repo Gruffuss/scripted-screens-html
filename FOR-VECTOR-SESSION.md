@@ -1,130 +1,115 @@
-# Notes for the vector mod session, from the HTML mod (2026-09-14, vector mod 0.11.12.0)
+# Requirements for the vector mod, from the HTML layer (2026-09-15)
 
-**Both fixed by 0.11.20.0, confirmed from the HTML side on 2026-09-15:** the 2x2 test page
-with its radial box is 11,403 vertices (was 53,482) and three captures logged no
-`VectorSlice` error. Kept for the record.
+All additive: nothing existing changes meaning. The HTML emitter already writes these forms
+in the scene text and treats them as present; a scene using a form that is not implemented
+yet should degrade (attribute ignored) rather than fail to parse. Where a feasibility check
+was done against the vector code and the game's shipped shaders, the findings are inline.
 
-Two findings, both measured, both reproducible without the HTML mod's help. Nothing here
-asks for a behaviour change to existing scenes; both are additive fixes.
+Resolved and removed from this file: the radial fill vertex count and the `VectorSlice`
+error spam on capture, both fixed in 0.11.20.0 and confirmed from the HTML side.
 
-## 1. Radial fill vertex count
+## 1. Text-form gradient sample
 
-A `GR units=bbox` fill on one 90x50 rounded rect (`rx=8`) with an off-centre focus costs
-about **49,000 vertices** at a 2x2 console's on-screen size (1,010 px wide):
-
-```
-GR id=rad1 units=bbox cx=0.3 cy=0.3 r=0.71 stops=[[0,#7DD3FC],[0.7,#0369A1]]
-R x=10 y=243 w=90 h=50 rx=8 f=@rad1
-```
-
-| page | vertices |
-|---|---|
-| with the radial box | 53,482 |
-| without it | 4,786 |
-
-The whole rest of that page, 47 shapes including a blurred shadow, is 4,786. Your own
-`GradientDemo.lua` costs 16,442 on a 1x1. The ring count follows on-screen radius with no
-cap from the shape's size, so a small box at close range builds rings finer than a pixel.
-The commit "Radial fills cost about half the mesh, and a small many-stop one far less" did
-not reach this case; re-measured after it. Suggested: cap rings by the shape's smaller
-dimension in screen pixels, since a 50-unit box cannot show more distinct rings than half
-its height in pixels. Where it bites: at 60,000 the mesh drops whatever comes last in the
-scene, silently, and on a page that was the click button.
-
-## 2. Unity error spam on screen capture
-
-After `capture_scripted_screen` on any scene whose text forces mesh cuts, the log gets 66
-lines of:
+`fat==expr` and `sat==expr` in the scene text, honoured when `f` / `s` is `@gradient`, on
+shapes and on `T`. `SceneText` turns them into the map form `{ grad, at }` that `SceneModel`
+already parses (~line 1043); `T` resolves paint the way shapes do. What the emitter writes for
+a colour transition:
 
 ```
-[Error : Unity Log] Trying to add VectorSlice (ScriptedScreensVector.VectorSlice) for graphic
-rebuild while we are already inside a graphic rebuild loop. This is not supported.
+DEFS { GL id=tw7 stops=[[0,#B5352C],[1,#2E8B6E]] }
+R x=10 y=10 w=80 h=20 f=@tw7 fat==clamp((t-1.25)/0.3,0,1)
+T x=12 y=12 w=76 h=16 text="ok" f=@tw7 fat==clamp((t-1.25)/0.3,0,1)
 ```
 
-They start immediately after `vector capture: "html:page" built inline, 4258 verts across
-7 mesh(es)`. The capture-time `BuildNow()` runs from `UpdateGeometry`, which Unity calls
-inside its canvas rebuild loop, and it now calls `ApplySlices()`, which creates `VectorSlice`
-graphics there. Before draw-order text a scene this size was one mesh and nothing was
-created in that path; now every text cut is a slice. Suggested: when building inline, defer
-slice creation to the next `Update`, or pre-create the slices the previous build needed.
+A keyframe animation with several colours is a multi-stop ramp sampled over the iteration.
 
-Repro without the HTML mod: push `examples/14-ztext.lua` (or any scene with labels over
-shapes), run a capture, read the log.
+## 2. Inset shadow on shapes
 
-## Not a vector issue, for the record
+`sh` entries take a sixth field, `inset` (or `1`), e.g. `sh=[[0,2,6,0,#000000,inset]]`.
+Ring and feather drawn inward from the outline and clipped to the shape's own outline via
+`ClipRegion.FromPolygon` (rounded corners arrive as arc polygons, still convex). Invert
+three things in `Shadow.Emit`: the offset sign and spread meaning, the solid core (an
+interior fill today; becomes a full-alpha ring next to the edge, `EmitRing` unchanged), and
+the alpha ramp `Coverage(d, sigma)` → `1 - Coverage`. Run after `FillContour`, before
+`StrokeOutline` (Tessellator ~786-793). Refuse on concave `P`/`SP` with a `scene.Problem`.
 
-The test page's gradient box being plain blue is the HTML side's doing: the page carries a
-solid until item 1 lands, so its button stays under the cap.
+## 3. Inset shadow on text
 
----
+TMP's underlay has an inner variant, keyword `UNDERLAY_INNER`, compiled into the shipped
+`TextMeshPro/Distance Field` and Mobile shaders alongside `UNDERLAY_ON` (verified in
+`rocketstation_Data/resources.assets`). Same properties (`_UnderlayColor/OffsetX/OffsetY/
+Dilate/Softness`), same `TextShadow.Fit` maths. `TextLayer.WriteUnderlay` (~314) enables
+`"UNDERLAY_INNER"` instead for an inset entry (no `ShaderUtilities` constant exists; probe
+`shader.keywordSpace` as the guard at ~245 does); skip the offset-copy caster path
+(~274-282, `TextShadow.ShouldCast`) for inset.
 
-# Additive work agreed with the HTML side (2026-09-15)
+## 4. More than one text shadow
 
-The HTML emitter will write these forms and treat them as present. Feasibility was checked
-read-only against the vector code and the game's shipped shaders (details per item).
+`sh` on `T` with several entries (today `Tessellator` ~654 reports "text takes one shadow").
+Each extra entry is a second label behind the first, offset and coloured, the way the caster
+copy already works.
 
-1. **Text-form gradient sample.** `fat==expr` / `sat==expr` in the scene text, honoured when
-   `f`/`s` is `@gradient`, on shapes and on `T`. `SceneText` turns them into the map form
-   `{ grad, at }` that `SceneModel` already parses (SceneModel.cs ~1043); `T` resolves paint
-   the way shapes do.
+## 5. Justified text
 
-2. **Inset shadow on text.** TMP's underlay has an inner variant, `UNDERLAY_INNER`, and the
-   shipped `TextMeshPro/Distance Field` shaders (and Mobile ones) compile it alongside
-   `UNDERLAY_ON`: verified in `rocketstation_Data/resources.assets`. Same properties
-   (`_UnderlayColor/OffsetX/OffsetY/Dilate/Softness`), same `TextShadow.Fit` maths. Change:
-   `TextLayer.WriteUnderlay` (~line 314) enables `"UNDERLAY_INNER"` instead (no
-   `ShaderUtilities` constant exists for it; probe `shader.keywordSpace` as the existing guard
-   at ~245 does) and the offset-copy caster path (~274-282, `TextShadow.ShouldCast`) is
-   skipped for inset. Trivial to small.
+`T align=justified` → TMP `Justified`.
 
-3. **Inset shadow on shapes.** `Shadow.Emit` with the shape's own outline as the clip
-   (`ClipRegion.FromPolygon`, rounded corners come as arc polygons and stay convex). Invert
-   three things: `Offset(...)` grows outward (sign and spread meaning flip), the solid core is
-   an interior fill (becomes a full-alpha ring next to the edge, `EmitRing` unchanged), and
-   the alpha ramp `Coverage(d, sigma)` becomes `1 - Coverage`. Run after `FillContour` and
-   before `StrokeOutline` (Tessellator ~786-793). Refuse on concave `P`/`SP` with a
-   `scene.Problem`. Parsing: a sixth `inset` field in `sh` (SceneModel ~1383). Small to medium.
+## 6. Rounded text masks
 
-4. **More than one text shadow on `T`.** One underlay per label is enforced at emit
-   (Tessellator ~654, "text takes one shadow"); a second entry needs a second label behind,
-   offset and coloured, the way the caster copy already works. Small.
+Today a `RectMask2D` on the clip's bounding box, on the per-label parent (`TextLayer`
+~479-496). Route: a UGUI `Mask` with a small `MaskableGraphic` drawing the convex clip
+polygon as a fan on that parent, keeping `RectMask2D` for the axis-aligned case. The shipped
+UI/TMP shaders carry `_Stencil*`. About two draw calls per masked label. Not: cutting TMP
+glyph quads (the mod never touches TMP meshes; sub-meshes and the caster copy would all need
+it), and not TMP's texture masking (`MASK_SOFT/HARD/TEX` are not compiled in).
 
-5. **Justified text.** `T align=justified` -> TMP Justified. Trivial.
+## 7. Forced scroll offset
 
-6. **Rounded text masks.** Today `RectMask2D` on the clip's bounding box, per-label parent
-   object (TextLayer ~479-496). Realistic route: a UGUI `Mask` with a small `MaskableGraphic`
-   drawing the convex clip polygon as a fan on that parent, keeping `RectMask2D` for the
-   axis-aligned case; the shipped UI/TMP shaders carry `_Stencil*`. ~2 draw calls per masked
-   label. Cutting TMP glyph quads was judged large and fragile (the mod never touches TMP
-   meshes; sub-meshes and the caster copy would all need it), and TMP's texture masking
-   variants (`MASK_SOFT/HARD/TEX`) are not compiled in the shipped shaders. Medium.
+`SC ... so=<offset> sov=<version>`: a changed `sov` applies `so` once, then wheel and drag own
+the offset again. The HTML side writes it when a page script sets `scrollTop` or calls
+`scrollIntoView()`, bumping the version.
 
-7. **Forced scroll offset.** `so=<offset> sov=<version>` on `SC`: a changed version applies
-   the offset once, then wheel/drag own it again. Unlocks `scrollTop =` and
-   `scrollIntoView()` from a page.
+## 8. Concave clips
 
-Not needed from the vector side after all: hover and click coordinates; the HTML side takes
-them from its own layout boxes and the pointer position.
+A `CP` whose polygon is not convex (today refused with a problem) puts its clipped subtree
+into a slice child, as the text-order slices do, under a UGUI `Mask` whose graphic is the
+clip polygon triangulated by the existing ear clipper. Labels in the subtree parent under the
+same mask. One draw call per such group. The geometric clipper keeps the convex case. Same
+stencil mechanism as 6.
 
-## Batch C additions (2026-09-15), all additive
+## 9. `IMG` node
 
-7. **Concave clips via stencil.** The feasibility check for text masks found that a UGUI
-   `Mask` + stencil takes any graphic mesh and the shipped UI/TMP shaders carry `_Stencil*`.
-   The same serves geometry: a `CP` whose polygon is not convex (today refused) puts its
-   clipped subtree into a slice child (as the text-order slices do) under a `Mask` whose
-   graphic is the clip polygon, triangulated by the existing ear clipper. Labels in the
-   subtree parent under the same mask. One draw call per group. Convex stays geometric.
-8. **`IMG` node**: `IMG x= y= w= h= src=url fit=cover|contain|fill rx=[..] o=`. A textured
-   quad as its own slice with a material carrying the texture (the default UI material with
-   `_MainTex`). Radii and convex clips cut the quad polygon with interpolated UVs; concave
-   through 7. Sits in scene order, scrolls inside `SC`. Texture via `UnityWebRequest.Get`
-   on the URL, or ScriptedScreens' `ImageElementController` cache by reflection (it holds
-   `Texture2D` per URL). Natural size from the texture, so `contain`/`cover` are exact.
-9. **`G mask=@gradient`**: vertex alpha in the subtree multiplied by the gradient's alpha
-   sampled at the vertex (with the gradient refinement subdivision). Labels: TMP vertex
-   colour alpha per glyph from the mask at the glyph centre.
-10. **Conic gradient** `GC id=.. cx= cy= a= stops=[[..]]` in defs; parameter is the angle
-    of the vertex around the centre; refine like radial.
-11. **Colour filters on `G`**: `bri con sat hue gray sep inv` (CSS filter semantics),
-    applied to every vertex colour and label colour under the group at emit.
-12. **2x3 matrix on `G`**: `m=[a,b,c,d,e,f]`, composed after `t r s`.
+```
+IMG x=10 y=10 w=120 h=72 src="https://.../thumb.png" fit=cover rx=6 o=1
+```
+
+A textured quad drawn as its own slice with a material carrying the texture (the default UI
+material with `_MainTex`). `fit`: `fill` stretches, `contain` letterboxes, `cover` crops, all
+from the texture's natural size. `rx` (the per-corner form of `R` too) and convex clips cut
+the quad polygon with interpolated UVs; concave clips through 8. Sits in scene order and
+scrolls inside `SC`. Texture via `UnityWebRequest.Get` on the URL, or ScriptedScreens'
+`ImageElementController` cache by reflection (it holds a `Texture2D` per URL). Until the
+texture arrives, nothing is drawn. This carries `<img>`, `background-image`, image radii,
+`object-fit`, images inside scroll and clip groups, and image order against text.
+
+## 10. Gradient mask on a group
+
+`G mask=@gradient { ... }`: every vertex's alpha under the group multiplied by the gradient's
+alpha sampled at that vertex, with the fill subdivision so the ramp is smooth; labels take
+the mask's alpha per glyph through TMP vertex colours. The emitter writes it for
+`mask-image: linear-gradient(...)` and for scroll-edge fades.
+
+## 11. Conic gradient
+
+`GC id=.. cx= cy= a= stops=[[..]]` in defs (`units=bbox` like the others); the parameter is
+the vertex's angle around the centre starting at `a` degrees, clockwise; refine like radial.
+
+## 12. Colour filters on a group
+
+`G bri=1.2 con=1 sat=0 hue=90 gray=1 sep=0 inv=0 { ... }` with CSS `filter()` semantics
+(brightness, contrast, saturate, hue-rotate in degrees, grayscale, sepia, invert), applied to
+every vertex colour and label colour under the group at emit. Only the ones present apply.
+
+## 13. Matrix on a group
+
+`G m=[a,b,c,d,e,f] { ... }`: a 2x3 affine matrix composed after `t r s` (CSS `matrix()`
+order). Makes `skew()` and `matrix()` exact.

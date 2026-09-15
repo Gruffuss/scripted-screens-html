@@ -520,7 +520,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             _externalNodes[ext.Key] = node;
             var url = node.Attr("src") ?? FirstOfSrcset(node.Attr("srcset")) ?? string.Empty;
             var props = new List<SS.UiProp>();
-            if (node.Tag is "img" or "video" or "audio")
+            if (node.Tag is "video" or "audio")
                 props.Add(new SS.UiProp { Key = "url", Value = SS.UiValue.FromString(url) });
             var styleProps = new List<SS.UiProp>();
             string type;

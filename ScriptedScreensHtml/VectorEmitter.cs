@@ -47,6 +47,9 @@ internal static class VectorEmitter
         public float Now;
         /// <summary>Top of the scroll container being emitted, or NaN outside one: what a sticky child pins to.</summary>
         public float ScrollTop = float.NaN;
+        /// <summary>Positioned elements with a z-index, emitted after everything else at the root in z order: a stacking context across parents.</summary>
+        public List<(VisualElement ve, Vector2 parentPos, int z)> Deferred = new();
+        public bool EmittingDeferred;
     }
 
     public static Output Emit(HtmlRenderer.Result built, VisualElement root, float designW, float designH, Tweens? tweens = null, float now = 0f)
@@ -54,6 +57,13 @@ internal static class VectorEmitter
         var ctx = new Ctx { Built = built, RootOrigin = root.worldBound.position, Tw = tweens, Now = now };
         var inv = CultureInfo.InvariantCulture;
         EmitElement(ctx, root, Vector2.zero, 0);
+        if (ctx.Deferred.Count > 0)
+        {
+            ctx.EmittingDeferred = true;
+            ctx.Deferred.Sort((a, b) => a.z.CompareTo(b.z));
+            foreach (var (dve, dpos, _) in ctx.Deferred)
+                EmitElement(ctx, dve, dpos, 1);
+        }
         var sb = new StringBuilder();
         sb.Append("SCENE w=").Append(designW.ToString("0.##", inv)).Append(" h=").Append(designH.ToString("0.##", inv)).Append(" fit=stretch\n");
         if (ctx.Defs.Length > 0)
@@ -87,6 +97,15 @@ internal static class VectorEmitter
             return;
         }
 
+        // A positioned element with a z-index paints above its parent's later siblings: it is
+        // emitted at the root after everything, in z order, unless we are already doing that.
+        if (depth > 0 && !ctx.EmittingDeferred && css.TryGetValue("position", out var posn) && posn.Trim() is "absolute" or "fixed"
+            && css.TryGetValue("z-index", out var zs) && int.TryParse(zs.Trim(), out var zi))
+        {
+            ctx.Deferred.Add((ve, parentPos, zi));
+            return;
+        }
+
         // A transition in flight: numbers below become expressions over t (Tweens.cs).
         var tw = ctx.Tw?.Of(ve, ctx.Now);
         var scrollTop = float.NaN;
@@ -114,6 +133,28 @@ internal static class VectorEmitter
         }
         var xform = Xform.From(ve, tw, x, y, w, h);
         if (xform != null) { ctx.Body.Append(indent).Append(xform.Group()).Append(" {\n"); groups++; }
+        if (css.TryGetValue("transform", out var tcss) && StyleApplier.NeedsMatrix(tcss) && Matrix(tcss, css, x, y, w, h) is { } m)
+        {
+            // skew(), matrix(), 3D: the whole list composed into one matrix about the origin (vector requirement 13)
+            ctx.Body.Append(indent).Append("G m=[").Append(F(m[0])).Append(',').Append(F(m[1])).Append(',').Append(F(m[2])).Append(',').Append(F(m[3])).Append(',').Append(F(m[4])).Append(',').Append(F(m[5])).Append("] {\n");
+            groups++;
+        }
+        if (css.TryGetValue("filter", out var fcss) && Filters(ctx, fcss, out var filterAttrs, out var filterShadow) && filterAttrs.Length > 0)
+        {
+            ctx.Body.Append(indent).Append('G').Append(filterAttrs).Append(" {\n");  // colour filters on the subtree (vector requirement 12)
+            groups++;
+        }
+        else filterShadow = css.TryGetValue("filter", out var fcss2) && Filters(ctx, fcss2, out _, out var fs2) ? fs2 : string.Empty;
+        if ((css.TryGetValue("clip-path", out var cpath) || css.TryGetValue("-webkit-clip-path", out cpath)) && ClipPath(ctx, cpath, x, y, w, h) is { } clipId)
+        {
+            ctx.Body.Append(indent).Append("G clip=").Append(clipId).Append(" {\n");
+            groups++;
+        }
+        if ((css.TryGetValue("mask-image", out var mcss) || css.TryGetValue("-webkit-mask-image", out mcss) || css.TryGetValue("mask", out mcss)) && MaskDef(ctx, mcss, x, y, w, h) is { } maskId)
+        {
+            ctx.Body.Append(indent).Append("G mask=@").Append(maskId).Append(" {\n");  // gradient mask on the subtree (vector requirement 10)
+            groups++;
+        }
         if (rs.opacity < 0.999f || (tw != null && tw.From.Opacity < 0.999f))
         {
             ctx.Body.Append(indent).Append("G o=").Append(tw != null ? tw.Lerp(tw.From.Opacity, rs.opacity) : F(rs.opacity)).Append(" {\n");
@@ -158,10 +199,38 @@ internal static class VectorEmitter
             var bg = rs.backgroundColor;
             css.TryGetValue("background", out var bgCss);
             if (bgCss == null) css.TryGetValue("background-image", out bgCss);
-            var shadow = css.TryGetValue("box-shadow", out var shCss) ? Shadows(shCss) : string.Empty;
-            if (bgCss != null && bgCss.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase))
+            if (bgCss != null && bgCss.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) bgCss = ExpandRepeating(bgCss);
+            var shadow = (css.TryGetValue("box-shadow", out var shCss) ? Shadows(shCss) : string.Empty) + filterShadow;
+            var imageUrl = bgCss != null ? UrlOf(bgCss) : null;
+            if (imageUrl != null)
+            {
+                // background-image: url(): the colour (if any) under an IMG node (vector requirement 9)
+                if (bg.a > 0.002f)
+                {
+                    ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                        .Append(Radius(rs, w, h)).Append(" f=").Append(Hex(bg)).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                    ctx.Out.Nodes++;
+                }
+                EmitImage(ctx, imageUrl, BackgroundFit(css), css, rs, x, y, w, h, indent, bg.a > 0.002f ? string.Empty : NodeId(ctx, ve));
+            }
+            else if (tw != null && !Tweens.Snap.NearColour(tw.From.Bg, bg) && (tw.From.Bg.a > 0.002f || bg.a > 0.002f) && !(bgCss != null && bgCss.Contains("gradient(")))
+            {
+                // A colour transition: a two-stop ramp sampled over the tween's clock (vector requirement 1)
+                var gid = "tw" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+                ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[[0,").Append(Hex(tw.From.Bg)).Append("],[1,").Append(Hex(bg)).Append("]]\n");
+                ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                    .Append(Radius(rs, w, h)).Append(" f=@").Append(gid).Append(" fat==").Append(tw.P).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Out.Nodes++;
+            }
+            else if (bgCss != null && bgCss.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase))
             {
                 GradientBox(ctx, bgCss, x, y, w, h, ws, hs, rs, indent, ve, xform, shadow);
+            }
+            else if (bgCss != null && bgCss.StartsWith("conic-gradient", StringComparison.OrdinalIgnoreCase) && ConicDef(ctx, bgCss) is { } cid)
+            {
+                ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                    .Append(Radius(rs, w, h)).Append(" f=@").Append(cid).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Out.Nodes++;
             }
             else if (bgCss != null && bgCss.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) && RadialDef(ctx, bgCss) is { } rid)
             {
@@ -204,7 +273,30 @@ internal static class VectorEmitter
             var sameWidth = Mathf.Approximately(bw, rs.borderRightWidth) && Mathf.Approximately(bw, rs.borderBottomWidth) && Mathf.Approximately(bw, rs.borderLeftWidth);
             var sameColour = rs.borderTopColor == rs.borderRightColor && rs.borderTopColor == rs.borderBottomColor && rs.borderTopColor == rs.borderLeftColor;
             var rounded = rs.borderTopLeftRadius > 0.01f || rs.borderTopRightRadius > 0.01f || rs.borderBottomRightRadius > 0.01f || rs.borderBottomLeftRadius > 0.01f;
-            if (bw > 0.01f && sameWidth && !sameColour && rounded)
+            var bstyle = BorderStyle(css);
+            if (bw > 0.01f && sameWidth && bstyle == "double")
+            {
+                // double: two strokes a third of the width each, at the outer and inner edges
+                var third = bw / 3f;
+                foreach (var inset in new[] { third * 0.5f, bw - third * 0.5f })
+                {
+                    ctx.Body.Append(indent).Append("R x=").Append(F(x + inset)).Append(" y=").Append(F(y + inset)).Append(" w=").Append(F(w - 2f * inset)).Append(" h=").Append(F(h - 2f * inset))
+                        .Append(Radius(rs, w, h, -inset)).Append(" f=none s=").Append(Hex(rs.borderTopColor)).Append(" sw=").Append(F(third)).Append('\n');
+                    ctx.Out.Nodes++;
+                }
+            }
+            else if (bw > 0.01f && bstyle is "inset" or "outset" or "groove" or "ridge")
+            {
+                // 3D styles: light and dark sides. ponytail: groove = inset, ridge = outset
+                var raised = bstyle is "outset" or "ridge";
+                var light = Color.Lerp(rs.borderTopColor, Color.white, 0.35f);
+                var dark = Color.Lerp(rs.borderTopColor, Color.black, 0.35f);
+                Side(ctx, indent, x, y, w, rs.borderTopWidth, raised ? light : dark);
+                Side(ctx, indent, x + w - rs.borderRightWidth, y, rs.borderRightWidth, h, raised ? dark : light);
+                Side(ctx, indent, x, y + h - rs.borderBottomWidth, w, rs.borderBottomWidth, raised ? dark : light);
+                Side(ctx, indent, x, y, rs.borderLeftWidth, h, raised ? light : dark);
+            }
+            else if (bw > 0.01f && sameWidth && !sameColour && rounded)
             {
                 // A ring with a differently coloured side (the classic spinner): one stroked
                 // arc path per side, each running from the middle of one corner arc to the
@@ -236,9 +328,26 @@ internal static class VectorEmitter
             case not Label when ctx.Built.NodeOf.TryGetValue(ve, out var cnode) && cnode.Attr("data-control") is { } control:
                 EmitCheck(ctx, control, cnode, css, rs, x, y, w, h, indent);
                 break;
+            case not Label when ctx.Built.NodeOf.TryGetValue(ve, out var inode) && inode.Tag == "img":
+            {
+                var src = inode.Attr("src") ?? FirstOfSrcset(inode.Attr("srcset"));
+                if (src != null)
+                    EmitImage(ctx, src, css.TryGetValue("object-fit", out var of) ? of.Trim() : "fill", css, rs, x, y, w, h, indent, NodeId(ctx, ve));
+                break;
+            }
             case Label when ctx.Built.NodeOf.TryGetValue(ve, out var mnode) && mnode.Attr("data-marker") is { } markerShape:
                 EmitMarker(ctx, markerShape, rs.color, x, y, w, h, indent);
                 break;
+            case Label label when css.TryGetValue("writing-mode", out var wm) && wm.Trim().StartsWith("vertical", StringComparison.OrdinalIgnoreCase) || (css.TryGetValue("writing-mode", out wm) && wm.Trim().StartsWith("sideways", StringComparison.OrdinalIgnoreCase)):
+            {
+                // vertical text: the label rotated about the box centre, its box swapped
+                var cx = x + w * 0.5f; var cy = y + h * 0.5f;
+                var angle = string.Equals(wm.Trim(), "sideways-lr", StringComparison.OrdinalIgnoreCase) ? -90f : 90f;
+                ctx.Body.Append(indent).Append("G a=[").Append(F(cx)).Append(',').Append(F(cy)).Append("] r=").Append(F(angle)).Append(" {\n");
+                EmitText(ctx, label, css, cx - h * 0.5f, cy - w * 0.5f, h, w, indent + "  ");
+                ctx.Body.Append(indent).Append("}\n");
+                break;
+            }
             case Label label:
                 EmitText(ctx, label, css, x, y, w, h, indent);
                 break;
@@ -406,11 +515,13 @@ internal static class VectorEmitter
                 if (StyleApplier.IsNumber(p.TrimEnd('x').TrimEnd('p')) || char.IsDigit(p[0]) || p[0] == '-' || p[0] == '.') { nums.Add(StyleApplier.Num(p)); continue; }
                 if (StyleApplier.TryColor(p, out var c)) { colour = c; hasColour = true; }
             }
-            if (inset || nums.Count < 2) continue;
+            if (nums.Count < 2) continue;
             if (!hasColour) colour.a = 1f;
             while (nums.Count < 4) nums.Add(0f);
             if (sb.Length > 0) sb.Append(',');
-            sb.Append('[').Append(F(nums[0])).Append(',').Append(F(nums[1])).Append(',').Append(F(nums[2])).Append(',').Append(F(nums[3])).Append(',').Append(Hex(colour)).Append(']');
+            sb.Append('[').Append(F(nums[0])).Append(',').Append(F(nums[1])).Append(',').Append(F(nums[2])).Append(',').Append(F(nums[3])).Append(',').Append(Hex(colour));
+            if (inset) sb.Append(",inset"); // vector requirement 2 / 3
+            sb.Append(']');
             count++;
         }
         return sb.Length > 0 ? " sh=[" + sb + "]" : string.Empty;
@@ -692,7 +803,15 @@ internal static class VectorEmitter
         sb.Append(indent).Append("T x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h));
         sb.Append(" text=\"").Append(text).Append('"');
         sb.Append(" size=").Append(F(rs.fontSize));
-        sb.Append(" f=").Append(Hex(rs.color));
+        var ttw = ctx.Tw?.Of(label, ctx.Now);
+        if (ttw != null && !Tweens.Snap.NearColour(ttw.From.Fg, rs.color))
+        {
+            var gid = "tw" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+            ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[[0,").Append(Hex(ttw.From.Fg)).Append("],[1,").Append(Hex(rs.color)).Append("]]\n");
+            sb.Append(" f=@").Append(gid).Append(" fat==").Append(ttw.P);
+        }
+        else
+            sb.Append(" f=").Append(Hex(rs.color));
         var first = string.Empty;
         var fs = rs.unityFontStyleAndWeight;
         var wantBold = fs == FontStyle.Bold || fs == FontStyle.BoldAndItalic;
@@ -736,7 +855,8 @@ internal static class VectorEmitter
             var px = ls.EndsWith("em", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(ls) * rs.fontSize : StyleApplier.Num(ls);
             if (px != 0f) sb.Append(" cspace=").Append(F(px / rs.fontSize * 100f));
         }
-        if (centre) sb.Append(" align=center");
+        if (css.TryGetValue("text-align", out var ta) && ta.Trim() == "justify") sb.Append(" align=justified");
+        else if (centre) sb.Append(" align=center");
         else if (right) sb.Append(" align=right");
         sb.Append(" valign=middle");
         if (clipped)
@@ -744,7 +864,9 @@ internal static class VectorEmitter
         if (wraps)
             sb.Append(" wrap=1");
         if (css.TryGetValue("text-shadow", out var tsh))
-            sb.Append(Shadows(tsh, 1)); // one shadow per label: the underlay is a single layer
+            sb.Append(Shadows(tsh)); // every shadow: extra ones are extra labels on the vector side (requirement 4)
+        else if (css.TryGetValue("filter", out var tfl) && Filters(ctx, tfl, out _, out var tShadow) && tShadow.Length > 0)
+            sb.Append(tShadow);
         if (css.TryGetValue("line-height", out var lh) && rs.fontSize > 0f)
         {
             // CSS: a bare number is a multiple of the font size, a length is absolute.
@@ -1223,6 +1345,319 @@ internal static class VectorEmitter
             ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(Mathf.Max(h, w * frac))).Append(" h=").Append(F(h)).Append(" rx=").Append(F(rx)).Append(" f=").Append(Hex(accent)).Append('\n');
             ctx.Out.Nodes++;
         }
+    }
+
+    // ---------------------------------------------------------------- Batch C helpers
+
+    /// <summary>IMG node (vector requirement 9): a picture in scene order with fit and the box's radii.</summary>
+    private static void EmitImage(Ctx ctx, string src, string fit, Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h, string indent, string nodeId)
+    {
+        var f = fit switch { "cover" => "cover", "contain" or "scale-down" => "contain", _ => "fill" };
+        ctx.Body.Append(indent).Append("IMG x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h))
+            .Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=").Append(f).Append(Radius(rs, w, h));
+        if (rs.opacity < 0.999f) ctx.Body.Append(" o=").Append(F(rs.opacity));
+        ctx.Body.Append(nodeId).Append('\n');
+        ctx.Out.Nodes++;
+    }
+
+    /// <summary>url(...) inside a background value, or null.</summary>
+    private static string? UrlOf(string css)
+    {
+        var u = css.IndexOf("url(", StringComparison.OrdinalIgnoreCase);
+        if (u < 0) return null;
+        var close = css.IndexOf(')', u);
+        if (close < 0) return null;
+        var url = css.Substring(u + 4, close - u - 4).Trim().Trim('"', '\'');
+        return url.Length > 0 ? url : null;
+    }
+
+    /// <summary>background-size to an IMG fit: cover, contain, "100% 100%" fills, anything else keeps the picture's proportions.</summary>
+    private static string BackgroundFit(Dictionary<string, string> css)
+    {
+        string? bs = null;
+        if (css.TryGetValue("background-size", out var explicitSize)) bs = explicitSize;
+        else if (css.TryGetValue("background", out var shorthand) && shorthand.IndexOf('/') is var slash && slash >= 0)
+            bs = shorthand.Substring(slash + 1).Trim().Split(' ')[0]; // "center / contain no-repeat"
+        if (bs == null) return "contain";
+        var v = bs.Trim().ToLowerInvariant();
+        if (v == "cover") return "cover";
+        if (v == "contain" || v == "auto") return "contain";
+        return "fill";
+    }
+
+    private static string? FirstOfSrcset(string? srcset)
+    {
+        if (string.IsNullOrEmpty(srcset)) return null;
+        var first = srcset!.Split(',')[0].Trim().Split(' ')[0];
+        return first.Length > 0 ? first : null;
+    }
+
+    /// <summary>conic-gradient([from Adeg] [at x y,] stops) to a GC def (vector requirement 11), bbox units.</summary>
+    private static string? ConicDef(Ctx ctx, string css)
+    {
+        var open = css.IndexOf('(');
+        var close = css.LastIndexOf(')');
+        if (open < 0 || close < open) return null;
+        var args = SplitTopLevelCommas(css.Substring(open + 1, close - open - 1));
+        var from = 0f; var cx = 0.5f; var cy = 0.5f;
+        if (args.Count > 0 && (args[0].TrimStart().StartsWith("from", StringComparison.OrdinalIgnoreCase) || args[0].TrimStart().StartsWith("at", StringComparison.OrdinalIgnoreCase)))
+        {
+            var head = args[0].Trim();
+            var at = head.IndexOf("at ", StringComparison.OrdinalIgnoreCase);
+            if (head.StartsWith("from", StringComparison.OrdinalIgnoreCase))
+                from = StyleApplier.Num((at >= 0 ? head.Substring(4, at - 4) : head.Substring(4)).Trim());
+            if (at >= 0)
+            {
+                var pos = head.Substring(at + 3).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                cx = pos.Length > 0 ? Position(pos[0]) : 0.5f;
+                cy = pos.Length > 1 ? Position(pos[1]) : 0.5f;
+            }
+            args.RemoveAt(0);
+        }
+        var stops = new StringBuilder();
+        var n = 0;
+        var lastAt = 0f;
+        foreach (var raw in args)
+        {
+            var parts = raw.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0 || !StyleApplier.TryColor(parts[0], out var c)) continue;
+            var at = parts.Length > 1 ? (parts[1].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[1]) / 100f : StyleApplier.Num(parts[1]) / 360f) : (n == 0 ? 0f : (n == args.Count - 1 ? 1f : lastAt));
+            if (n > 0 && at < lastAt) at = lastAt;
+            if (stops.Length > 0) stops.Append(',');
+            stops.Append('[').Append(F(at)).Append(',').Append(Hex(c)).Append(']');
+            lastAt = at; n++;
+        }
+        if (n < 2) return null;
+        var id = "conic" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+        ctx.Defs.Append("  GC id=").Append(id).Append(" units=bbox cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" a=").Append(F(from)).Append(" stops=[").Append(stops).Append("]\n");
+        return id;
+    }
+
+    private static float Position(string v)
+    {
+        var t = v.Trim().ToLowerInvariant();
+        return t switch { "left" or "top" => 0f, "center" => 0.5f, "right" or "bottom" => 1f, _ => t.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(t) / 100f : 0.5f };
+    }
+
+    /// <summary>repeating-linear/radial-gradient(...) rewritten as the plain gradient with its stop list repeated to 100%. Stop positions must be percentages.</summary>
+    private static string ExpandRepeating(string css)
+    {
+        var open = css.IndexOf('(');
+        var close = css.LastIndexOf(')');
+        if (open < 0 || close < open) return css;
+        var name = css.Substring(0, open).Trim().Substring("repeating-".Length);
+        var args = SplitTopLevelCommas(css.Substring(open + 1, close - open - 1));
+        var head = new List<string>();
+        var stops = new List<(float at, string colour)>();
+        foreach (var raw in args)
+        {
+            var parts = raw.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length > 0 && StyleApplier.TryColor(parts[0], out _))
+                stops.Add((parts.Length > 1 && parts[1].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[1]) / 100f : float.NaN, parts[0]));
+            else head.Add(raw.Trim());
+        }
+        if (stops.Count < 2 || stops.Exists(s => float.IsNaN(s.at))) return name + css.Substring(open); // px stops: not expanded
+        var period = stops[stops.Count - 1].at - stops[0].at;
+        if (period <= 0.0001f) return name + css.Substring(open);
+        var outStops = new List<string>();
+        for (var k = 0; stops[0].at + k * period < 1f && k < 64; k++)
+            foreach (var (at, colour) in stops)
+                outStops.Add(colour + " " + F(Mathf.Min(1f, at + k * period) * 100f) + "%");
+        head.AddRange(outStops);
+        return name + "(" + string.Join(", ", head) + ")";
+    }
+
+    /// <summary>border-style from the property or the shorthand: solid (default), dashed, dotted, double, groove, ridge, inset, outset, none.</summary>
+    private static string BorderStyle(Dictionary<string, string> css)
+    {
+        if (css.TryGetValue("border-style", out var bs)) return bs.Trim().Split(' ')[0].ToLowerInvariant();
+        if (css.TryGetValue("border", out var b))
+            foreach (var p in b.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                if (p is "solid" or "dashed" or "dotted" or "double" or "groove" or "ridge" or "inset" or "outset" or "none") return p;
+        return "solid";
+    }
+
+    /// <summary>
+    /// CSS filter list: colour functions become group attributes (vector requirement 12),
+    /// drop-shadow() becomes a shadow entry for the box or label, blur() is reported once.
+    /// </summary>
+    private static bool Filters(Ctx ctx, string css, out string attrs, out string shadow)
+    {
+        var sb = new StringBuilder();
+        var sh = new StringBuilder();
+        foreach (var (name, args) in StyleApplier.Functions(css))
+        {
+            var a = args.Length > 0 ? args[0].Trim() : string.Empty;
+            float Amount() => a.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(a) / 100f : StyleApplier.Num(a);
+            switch (name)
+            {
+                case "brightness": sb.Append(" bri=").Append(F(Amount())); break;
+                case "contrast": sb.Append(" con=").Append(F(Amount())); break;
+                case "saturate": sb.Append(" sat=").Append(F(Amount())); break;
+                case "grayscale": sb.Append(" gray=").Append(F(Amount())); break;
+                case "sepia": sb.Append(" sep=").Append(F(Amount())); break;
+                case "invert": sb.Append(" inv=").Append(F(Amount())); break;
+                case "hue-rotate": sb.Append(" hue=").Append(F(StyleApplier.Num(a))); break;
+                case "opacity": sb.Append(" o=").Append(F(Amount())); break;
+                case "drop-shadow":
+                {
+                    var parts = string.Join(" ", args).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    var nums = new List<float>(); var colour = new Color(0, 0, 0, 1);
+                    foreach (var p in parts) { if (StyleApplier.TryColor(p, out var c)) colour = c; else nums.Add(StyleApplier.Num(p)); }
+                    while (nums.Count < 3) nums.Add(0f);
+                    sh.Append('[').Append(F(nums[0])).Append(',').Append(F(nums[1])).Append(',').Append(F(nums[2])).Append(",0,").Append(Hex(colour)).Append(']');
+                    break;
+                }
+                case "blur":
+                    Warn(ctx, "html: filter: blur() has no equivalent in a geometry layer; ignored");
+                    break;
+            }
+        }
+        attrs = sb.ToString();
+        shadow = sh.Length > 0 ? " sh=[" + sh + "]" : string.Empty;
+        return attrs.Length > 0 || shadow.Length > 0;
+    }
+
+    /// <summary>clip-path basic shapes to a CP def in page coordinates: inset(), circle(), ellipse(), polygon(). A concave polygon is passed as is (vector requirement 8).</summary>
+    private static string? ClipPath(Ctx ctx, string css, float x, float y, float w, float h)
+    {
+        var v = css.Trim();
+        var open = v.IndexOf('(');
+        if (open < 0 || !v.EndsWith(")", StringComparison.Ordinal)) return null;
+        var name = v.Substring(0, open).Trim().ToLowerInvariant();
+        var inner = v.Substring(open + 1, v.Length - open - 2).Trim();
+        var id = "cpath" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+        float Along(string s, float size) => s.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(s) / 100f * size : StyleApplier.Num(s);
+        switch (name)
+        {
+            case "inset":
+            {
+                var round = inner.IndexOf(" round ", StringComparison.OrdinalIgnoreCase);
+                var radius = round >= 0 ? StyleApplier.Num(inner.Substring(round + 7).Trim().Split(' ')[0]) : 0f;
+                var sides = (round >= 0 ? inner.Substring(0, round) : inner).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var t = sides.Length > 0 ? Along(sides[0], h) : 0f;
+                var r = sides.Length > 1 ? Along(sides[1], w) : t;
+                var b = sides.Length > 2 ? Along(sides[2], h) : t;
+                var l = sides.Length > 3 ? Along(sides[3], w) : r;
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x + l)).Append(" y=").Append(F(y + t)).Append(" w=").Append(F(Mathf.Max(0f, w - l - r))).Append(" h=").Append(F(Mathf.Max(0f, h - t - b)));
+                if (radius > 0f) ctx.Defs.Append(" rx=").Append(F(radius));
+                ctx.Defs.Append(" }\n");
+                return id;
+            }
+            case "circle":
+            case "ellipse":
+            {
+                var at = inner.IndexOf(" at ", StringComparison.OrdinalIgnoreCase);
+                var size = (at >= 0 ? inner.Substring(0, at) : inner).Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var pos = at >= 0 ? inner.Substring(at + 4).Split(' ', StringSplitOptions.RemoveEmptyEntries) : Array.Empty<string>();
+                var cx = x + (pos.Length > 0 ? Along(pos[0], w) : w * 0.5f);
+                var cy = y + (pos.Length > 1 ? Along(pos[1], h) : h * 0.5f);
+                float rx, ry;
+                if (name == "circle")
+                {
+                    var rr = size.Length > 0 && size[0] != "closest-side" && size[0] != "farthest-side" ? Along(size[0], Mathf.Sqrt(w * w + h * h) / 1.41421f) : Mathf.Min(w, h) * 0.5f;
+                    rx = ry = rr;
+                }
+                else
+                {
+                    rx = size.Length > 0 ? Along(size[0], w) : w * 0.5f;
+                    ry = size.Length > 1 ? Along(size[1], h) : h * 0.5f;
+                }
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(rx)).Append(" ry=").Append(F(ry)).Append(" }\n");
+                return id;
+            }
+            case "polygon":
+            {
+                var pts = new StringBuilder();
+                foreach (var pair in SplitTopLevelCommas(inner))
+                {
+                    var xy = pair.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (xy.Length < 2) continue;
+                    if (pts.Length > 0) pts.Append(',');
+                    pts.Append(F(x + Along(xy[0], w))).Append(',').Append(F(y + Along(xy[1], h)));
+                }
+                if (pts.Length == 0) return null;
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { Y p=[").Append(pts).Append("] }\n");
+                return id;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>mask-image: a linear or radial gradient as a GL/GR def whose alpha masks the subtree (vector requirement 10).</summary>
+    private static string? MaskDef(Ctx ctx, string css, float x, float y, float w, float h)
+    {
+        var v = css.Trim();
+        if (v.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase)) return RadialDef(ctx, v);
+        if (!v.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase)) return null;
+        if (ParseGradient(v) is not { } g) return null;
+        var rad = g.angle * Mathf.Deg2Rad;
+        var len = w * Mathf.Abs(Mathf.Sin(rad)) + h * Mathf.Abs(Mathf.Cos(rad));
+        var dx = Mathf.Sin(rad) * len * 0.5f / w;
+        var dy = -Mathf.Cos(rad) * len * 0.5f / h;
+        var id = "mask" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+        ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").Append(F(0.5f - dx)).Append(" y1=").Append(F(0.5f - dy)).Append(" x2=").Append(F(0.5f + dx)).Append(" y2=").Append(F(0.5f + dy)).Append(" stops=[");
+        for (var i = 0; i < g.stops.Count; i++)
+        {
+            if (i > 0) ctx.Defs.Append(',');
+            ctx.Defs.Append('[').Append(F(g.stops[i].at)).Append(',').Append(Hex(g.stops[i].c)).Append(']');
+        }
+        ctx.Defs.Append("]\n");
+        return id;
+    }
+
+    /// <summary>
+    /// A CSS transform list as one 2x3 matrix about the transform origin, page coordinates
+    /// (vector requirement 13). 3D functions contribute their 2D part.
+    /// </summary>
+    private static float[]? Matrix(string transform, Dictionary<string, string> css, float x, float y, float w, float h)
+    {
+        // origin
+        var ox = x + w * 0.5f; var oy = y + h * 0.5f;
+        if (css.TryGetValue("transform-origin", out var to))
+        {
+            var p = to.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (p.Length > 0) ox = x + (p[0] is "left" ? 0f : p[0] is "right" ? w : p[0] is "center" ? w * 0.5f : p[0].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(p[0]) / 100f * w : StyleApplier.Num(p[0]));
+            if (p.Length > 1) oy = y + (p[1] is "top" ? 0f : p[1] is "bottom" ? h : p[1] is "center" ? h * 0.5f : p[1].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(p[1]) / 100f * h : StyleApplier.Num(p[1]));
+        }
+        // m = [a b c d e f] for x' = a x + c y + e, y' = b x + d y + f
+        var m = new[] { 1f, 0f, 0f, 1f, 0f, 0f };
+        void Mul(float a, float b, float c, float d, float e, float f)
+        {
+            var r = new[]
+            {
+                m[0] * a + m[2] * b, m[1] * a + m[3] * b,
+                m[0] * c + m[2] * d, m[1] * c + m[3] * d,
+                m[0] * e + m[2] * f + m[4], m[1] * e + m[3] * f + m[5],
+            };
+            m = r;
+        }
+        Mul(1, 0, 0, 1, ox, oy);
+        var any = false;
+        foreach (var (name, args) in StyleApplier.Functions(transform))
+        {
+            float A(int i) => args.Length > i ? StyleApplier.Num(args[i].Trim()) : 0f;
+            switch (name)
+            {
+                case "translate": case "translate3d": Mul(1, 0, 0, 1, A(0), A(1)); break;
+                case "translatex": Mul(1, 0, 0, 1, A(0), 0); break;
+                case "translatey": Mul(1, 0, 0, 1, 0, A(0)); break;
+                case "scale": case "scale3d": Mul(A(0), 0, 0, args.Length > 1 ? A(1) : A(0), 0, 0); break;
+                case "scalex": Mul(A(0), 0, 0, 1, 0, 0); break;
+                case "scaley": Mul(1, 0, 0, A(0), 0, 0); break;
+                case "rotate": case "rotatez": { var r = A(0) * Mathf.Deg2Rad; Mul(Mathf.Cos(r), Mathf.Sin(r), -Mathf.Sin(r), Mathf.Cos(r), 0, 0); break; }
+                case "rotate3d": { var r = A(3) * Mathf.Deg2Rad * (A(2) >= 0 ? 1f : -1f); Mul(Mathf.Cos(r), Mathf.Sin(r), -Mathf.Sin(r), Mathf.Cos(r), 0, 0); break; }
+                case "skew": Mul(1, Mathf.Tan(A(1) * Mathf.Deg2Rad), Mathf.Tan(A(0) * Mathf.Deg2Rad), 1, 0, 0); break;
+                case "skewx": Mul(1, 0, Mathf.Tan(A(0) * Mathf.Deg2Rad), 1, 0, 0); break;
+                case "skewy": Mul(1, Mathf.Tan(A(0) * Mathf.Deg2Rad), 0, 1, 0, 0); break;
+                case "matrix": if (args.Length >= 6) Mul(A(0), A(1), A(2), A(3), A(4), A(5)); break;
+                case "matrix3d": if (args.Length >= 16) Mul(A(0), A(1), A(4), A(5), A(12), A(13)); break;
+                // rotateX/rotateY/perspective: no depth here; the 2D part is identity
+            }
+            any = true;
+        }
+        Mul(1, 0, 0, 1, -ox, -oy);
+        return any ? m : null;
     }
 
     /// <summary>A list marker in the text colour: a filled disc, a hollow circle or a filled square.</summary>

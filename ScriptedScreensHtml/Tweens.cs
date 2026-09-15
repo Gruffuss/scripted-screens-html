@@ -29,6 +29,8 @@ internal sealed class Tweens
         public float Rotate;
         public Vector2 Translate;
         public Vector2 Scale;
+        public Color Bg;
+        public Color Fg;
 
         public static Snap Of(VisualElement ve)
         {
@@ -40,13 +42,18 @@ internal sealed class Tweens
                 Rotate = rs.rotate.angle.ToDegrees(),
                 Translate = new Vector2(rs.translate.x, rs.translate.y),
                 Scale = new Vector2(rs.scale.value.x, rs.scale.value.y),
+                Bg = rs.backgroundColor,
+                Fg = rs.color,
             };
         }
+
+        public bool ColourDiffers(in Snap o) => !NearColour(Bg, o.Bg) || !NearColour(Fg, o.Fg);
+        internal static bool NearColour(Color a, Color b) => Mathf.Abs(a.r - b.r) < 0.004f && Mathf.Abs(a.g - b.g) < 0.004f && Mathf.Abs(a.b - b.b) < 0.004f && Mathf.Abs(a.a - b.a) < 0.004f;
 
         public bool LayoutDiffers(in Snap o) => !Near(Rect.x, o.Rect.x) || !Near(Rect.y, o.Rect.y) || !Near(Rect.width, o.Rect.width) || !Near(Rect.height, o.Rect.height);
         public bool OpacityDiffers(in Snap o) => !Near(Opacity, o.Opacity);
         public bool TransformDiffers(in Snap o) => !Near(Rotate, o.Rotate) || !Near(Translate.x, o.Translate.x) || !Near(Translate.y, o.Translate.y) || !Near(Scale.x, o.Scale.x) || !Near(Scale.y, o.Scale.y);
-        public bool Differs(in Snap o) => LayoutDiffers(o) || OpacityDiffers(o) || TransformDiffers(o);
+        public bool Differs(in Snap o) => LayoutDiffers(o) || OpacityDiffers(o) || TransformDiffers(o) || ColourDiffers(o);
 
         private static bool Near(float a, float b) => Mathf.Abs(a - b) < 0.01f;
     }
@@ -271,12 +278,14 @@ internal sealed class Tweens
         var layout = prev.LayoutDiffers(cur);
         var opacity = prev.OpacityDiffers(cur);
         var transform = prev.TransformDiffers(cur);
+        var colour = prev.ColourDiffers(cur);
         foreach (var item in css.Split(','))
         {
             var parts = CssParser.SplitTopLevel(item.Trim(), ' ').FindAll(p => p.Length > 0).ToArray();
             if (parts.Length < 2) continue;
             var prop = parts[0].ToLowerInvariant();
             var matches = prop == "all"
+                          || (colour && (prop == "color" || prop == "background-color" || prop == "background" || prop == "border-color"))
                           || (opacity && prop == "opacity")
                           || (transform && (prop == "transform" || prop == "rotate" || prop == "translate" || prop == "scale"))
                           || (layout && Array.Exists(LayoutProps, p => prop.StartsWith(p, StringComparison.Ordinal)));

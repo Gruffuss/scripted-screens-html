@@ -402,7 +402,23 @@ internal static class HtmlRenderer
             }
         }
 
-        if (node.Tag == "img" || node.Tag == "video" || node.Tag == "audio" || node.Tag == "input" || node.Tag == "select" || node.Tag == "textarea")
+        if (node.Tag == "img")
+        {
+            // Drawn by the scene as an IMG node (vector requirement 9): a box here, the
+            // picture in the mesh order with radii, fit and clips.
+            var pic = new VisualElement();
+            var pw = node.Attr("width");
+            var ph = node.Attr("height");
+            pic.style.width = pw != null ? StyleApplier.Len(pw) : 120;
+            pic.style.height = ph != null ? StyleApplier.Len(ph) : 80;
+            pic.style.flexShrink = 0;
+            Register(pic, node, result);
+            ApplyStyles(pic, node, rules, result);
+            parent.Add(pic);
+            return;
+        }
+
+        if (node.Tag == "video" || node.Tag == "audio" || node.Tag == "input" || node.Tag == "select" || node.Tag == "textarea")
         {
             // A box in the layout; the picture, sound or control itself is a ScriptedScreens
             // element positioned over it by the surface (see HtmlSurface.ApplyExternals).
@@ -509,6 +525,7 @@ internal static class HtmlRenderer
             if (node.Tag == "details")
                 ShowDetails(ve, node, result);
             ApplyGap(ve, result.CssOf(ve));
+            Flow(parent, ve, result);
             return;
         }
 
@@ -875,6 +892,78 @@ internal static class HtmlRenderer
         }
     }
 
+    /// <summary>
+    /// After a container's children are built: floats, `display: contents`, columns and
+    /// aspect-ratio, the flow features the layout engine has no direct notion of.
+    /// - A float makes its parent a wrapping row; `left` goes first, `right` last with an auto
+    ///   left margin, the rest of the content takes the remaining width. Not text flowing
+    ///   round a box (no inline formatting context), but the layouts pages write with floats.
+    /// - `display: contents` unwraps: the children move to the grandparent, the box goes.
+    /// - `column-count: n` splits the children into n equal columns in order.
+    /// - `aspect-ratio` sets the missing dimension from the other on every layout pass.
+    /// </summary>
+    private static void Flow(VisualElement parent, VisualElement ve, Result result)
+    {
+        var css = result.CssOf(ve);
+        var anyFloat = false;
+        foreach (var child in ve.Children())
+        {
+            var ccss = result.CssOf(child);
+            if (!ccss.TryGetValue("float", out var fl)) continue;
+            var f = fl.Trim();
+            if (f == "left") { anyFloat = true; child.style.alignSelf = Align.FlexStart; }
+            else if (f == "right") { anyFloat = true; child.style.alignSelf = Align.FlexStart; child.style.marginLeft = StyleKeyword.Auto; }
+        }
+        if (anyFloat && !css.ContainsKey("display"))
+        {
+            ve.style.flexDirection = FlexDirection.Row;
+            ve.style.flexWrap = UnityEngine.UIElements.Wrap.Wrap;
+            ve.style.alignItems = Align.FlexStart;
+            var order = new List<VisualElement>(ve.Children());
+            order.Sort((a, b) => Rank(result.CssOf(a)).CompareTo(Rank(result.CssOf(b))));
+            foreach (var c in order) c.BringToFront();
+            static int Rank(Dictionary<string, string> c) => c.TryGetValue("float", out var f) ? (f.Trim() == "left" ? 0 : 2) : 1;
+        }
+        if (css.TryGetValue("column-count", out var cc) && int.TryParse(cc.Trim(), out var columns) && columns > 1)
+        {
+            var kids = new List<VisualElement>(ve.Children());
+            var gap = css.TryGetValue("column-gap", out var cg) ? StyleApplier.Num(cg) : 16f;
+            ve.style.flexDirection = FlexDirection.Row;
+            ve.style.alignItems = Align.FlexStart;
+            var per = (kids.Count + columns - 1) / columns;
+            for (var c = 0; c < columns; c++)
+            {
+                var col = new VisualElement { name = ve.name + "__col" + c };
+                col.style.flexGrow = 1; col.style.flexBasis = 0; col.style.flexShrink = 1;
+                if (c > 0) col.style.marginLeft = gap;
+                for (var i = c * per; i < Math.Min(kids.Count, (c + 1) * per); i++) col.Add(kids[i]);
+                ve.Add(col);
+            }
+        }
+        if (css.TryGetValue("aspect-ratio", out var ar))
+        {
+            var parts = ar.Split('/');
+            var ratio = parts.Length == 2 && StyleApplier.IsNumber(parts[0].Trim()) && StyleApplier.IsNumber(parts[1].Trim()) ? StyleApplier.Num(parts[0]) / Mathf.Max(0.001f, StyleApplier.Num(parts[1]))
+                      : StyleApplier.IsNumber(ar.Trim()) ? StyleApplier.Num(ar) : 0f;
+            if (ratio > 0f)
+            {
+                var hasH = css.ContainsKey("height");
+                ve.RegisterCallback<GeometryChangedEvent>(_ =>
+                {
+                    var w = ve.layout.width; var h = ve.layout.height;
+                    if (!hasH && w > 0f && Mathf.Abs(h - w / ratio) > 0.5f) ve.style.height = w / ratio;
+                    else if (hasH && h > 0f && Mathf.Abs(w - h * ratio) > 0.5f) ve.style.width = h * ratio;
+                });
+            }
+        }
+        if (css.TryGetValue("display", out var display) && display.Trim() == "contents")
+        {
+            var kids = new List<VisualElement>(ve.Children());
+            foreach (var k in kids) parent.Add(k);
+            ve.RemoveFromHierarchy();
+        }
+    }
+
     /// <summary>The disclosure triangle at the front of a summary, as a drawn marker; a details without a summary gets one.</summary>
     private static void AddDisclosure(HtmlNode details)
     {
@@ -1098,6 +1187,16 @@ internal static class HtmlRenderer
                 case "color": colour = d.Value; break;
                 case "font-size": size = d.Value; break;
                 case "font-family": face = d.Value.Split(',')[0].Trim().Trim('"', '\''); break;
+                case "vertical-align":
+                {
+                    var va = d.Value.Trim().ToLowerInvariant();
+                    if (va == "sub") { open.Append("<sub>"); close.Insert(0, "</sub>"); }
+                    else if (va == "super") { open.Append("<sup>"); close.Insert(0, "</sup>"); }
+                    else if (va is "middle" or "text-top" or "top") { open.Append("<voffset=0.25em>"); close.Insert(0, "</voffset>"); }
+                    else if (va is "text-bottom" or "bottom") { open.Append("<voffset=-0.15em>"); close.Insert(0, "</voffset>"); }
+                    else if (va != "baseline") { open.Append("<voffset=").Append(va).Append('>'); close.Insert(0, "</voffset>"); }
+                    break;
+                }
                 case "font-weight": bold = d.Value == "bold" || d.Value == "bolder" || (StyleApplier.IsNumber(d.Value) && StyleApplier.Num(d.Value) >= 600); break;
                 case "font-style": italic = d.Value == "italic" || d.Value == "oblique"; break;
                 case "text-decoration": underline = d.Value.Contains("underline"); strike = d.Value.Contains("line-through"); break;
