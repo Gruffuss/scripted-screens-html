@@ -1887,7 +1887,12 @@ internal static class VectorEmitter
             if (align is "center") sb.Append(" align=center"); else if (align is "right" or "end") sb.Append(" align=right");
             sb.Append(" valign=top");
             if (shadow.Length > 0) sb.Append(shadow);
-            ctx.Body.Append(sb).Append('\n');
+            // the transform's rotation turns the label about its anchor, the way a T rotates with its group (translate and scale are already in p and ps)
+            var rot = Mathf.Atan2(m[1], m[0]) * Mathf.Rad2Deg;
+            if (Mathf.Abs(rot) > 0.01f)
+                ctx.Body.Append(Ind()).Append("G a=[").Append(F(p.x)).Append(',').Append(F(p.y)).Append("] r=").Append(F(rot)).Append(" { ").Append(sb.ToString().TrimStart()).Append(" }\n");
+            else
+                ctx.Body.Append(sb).Append('\n');
             ctx.Out.Nodes++;
         }
 
