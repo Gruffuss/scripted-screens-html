@@ -1088,7 +1088,7 @@ internal static class VectorEmitter
     }
 
     /// <summary>A zero-width space after every character outside rich-text tags, so TextMeshPro may break anywhere (word-break: break-all).</summary>
-    private static string BreakAll(string text)
+    internal static string BreakAll(string text)
     {
         var sb = new StringBuilder(text.Length * 2);
         var inTag = false;

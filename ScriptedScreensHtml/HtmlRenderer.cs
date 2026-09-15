@@ -594,7 +594,15 @@ internal static class HtmlRenderer
             if (!child.IsText && KeepsOwnElement(child))
             {
                 FlushRun();
+                var before = ve.childCount;
                 Append(ve, child, rules, result);
+                if (ve.childCount > before)
+                {
+                    var built = ve[ve.childCount - 1];
+                    var own = OwnText(child);
+                    if (own.EndsWith(" ", StringComparison.Ordinal)) built.style.marginRight = 4;
+                    if (own.StartsWith(" ", StringComparison.Ordinal)) built.style.marginLeft = 4;
+                }
                 afterLetter = child.Attr("data-pseudo") == "first-letter";
                 continue;
             }
@@ -1250,7 +1258,7 @@ internal static class HtmlRenderer
             switch (child.Tag)
             {
                 case "caption":
-                    if (CascadedValue(child, rules, "caption-side") == "bottom") bottomCaption = child;
+                    if ((CascadedValue(child, rules, "caption-side") ?? CascadedValue(node, rules, "caption-side")) == "bottom") bottomCaption = child; // inherited from the table
                     else Append(ve, child, rules, result);
                     break;
                 case "thead": case "tbody": case "tfoot":
@@ -1270,6 +1278,13 @@ internal static class HtmlRenderer
         }
         if (bottomCaption != null) Append(ve, bottomCaption, rules, result);
         ApplyGap(ve, result.CssOf(ve));
+    }
+
+    private static string OwnText(HtmlNode n)
+    {
+        var sb = new StringBuilder();
+        foreach (var c in n.Children) sb.Append(c.IsText ? c.Text : OwnText(c));
+        return sb.ToString();
     }
 
     private static bool IsEmptyCell(HtmlNode cell)
@@ -1478,6 +1493,7 @@ internal static class HtmlRenderer
         // item has not been through the cascade yet, so its declarations are read here.
         if (css.TryGetValue("list-style", out var ls)) TakeType("list-style", ls);
         if (css.TryGetValue("list-style-type", out var lst)) TakeType("list-style-type", lst);
+        if (css.TryGetValue("list-style-image", out var lsi)) TakeType("list-style-image", lsi);
         var matched = new List<(int spec, int order, CssRule rule)>();
         foreach (var rule in rules)
         {
@@ -1985,6 +2001,8 @@ internal static class HtmlRenderer
             }
             if (pc != null) node.Attributes["data-placeholder-color"] = pc.IndexOf("var(", StringComparison.Ordinal) >= 0 ? ResolveVars(pc, node) : pc;
         }
+        if (ve is Label breakLabel && record.TryGetValue("word-break", out var wbreak) && wbreak.Trim() == "break-all" && !string.IsNullOrEmpty(breakLabel.text))
+            breakLabel.text = VectorEmitter.BreakAll(breakLabel.text);
         // CSS sizes a box content-box unless told otherwise; the layout engine is border-box.
         // A width the page set therefore grows by its padding and border, unless the page
         // opted into border-box (which most stylesheets do with `* { box-sizing: border-box }`).

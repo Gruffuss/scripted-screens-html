@@ -346,7 +346,7 @@ internal sealed class ScriptHost : IDisposable
             _engine = new Engine(o =>
             {
                 o.LimitRecursion(200);
-                o.TimeoutInterval(TimeSpan.FromSeconds(2)); // a runaway script frame must not wedge the worker
+                o.TimeoutInterval(TimeSpan.FromSeconds(15)); // a runaway script frame must not wedge the worker; generous because a game load stalls every thread for seconds
                 o.Strict(false);
             });
             _engine.SetValue("__log", new Action<string, string>(Log));

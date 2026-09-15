@@ -65,6 +65,9 @@ local page = [[
 </style>
 </head>
 <body>
+  <h2>script</h2>
+  <div class="row"><ul id="frag"></ul><div id="mod">module pending</div></div>
+
   <h2>text</h2>
   <div class="row">
     <div class="indent">indented first line of a paragraph that wraps onto a second line here</div>
@@ -103,8 +106,6 @@ local page = [[
     <div class="lines"><div class="big">2x2</div><div class="sm"></div><div class="sm"></div><div class="sm"></div></div>
   </div>
 
-  <h2>script</h2>
-  <div class="row"><ul id="frag"></ul><div id="mod">module pending</div></div>
   <script>
     var frag = document.createDocumentFragment();
     ['fragment', 'children', 'appended'].forEach(function (t) { var li = document.createElement('li'); li.textContent = t; frag.appendChild(li); });
@@ -119,7 +120,7 @@ local page = [[
 ]]
 
 ui:element({
-    id = "web",
+    id = "f3",
     type = "html",
     rect = { unit = "px", x = 0, y = 0, w = W, h = H },
     props = { src = page },

@@ -13,22 +13,42 @@ namespace ScriptedScreensHtml;
 internal sealed class HtmlPointer : MonoBehaviour, IPointerMoveHandler, IPointerEnterHandler, IPointerExitHandler, IPointerDownHandler, IPointerUpHandler
 {
     internal HtmlSurface? Surface;
-    // OnPointerMove exists only under the new input system's module; the game runs the legacy
-    // one, which sends enter/exit/down/up and nothing between. While the cursor is inside the
-    // page its position is polled each frame instead, so :hover and mousemove follow it.
+    // The game's input module delivers presses and releases to a world console and nothing
+    // else: no moves, no enter, no exit. So the cursor is polled against the page rect every
+    // frame, through the canvas camera, and that is what :hover and mousemove follow. With the
+    // cursor locked to the crosshair this is the crosshair, which is what a player expects.
     private bool _inside;
     private Camera? _cam;
+    private float _camCheckedAt = -10f;
     private Vector2 _last = new(-1f, -1f);
+
+    private Camera? CameraFor()
+    {
+        if (_cam == null || Time.unscaledTime - _camCheckedAt > 2f)
+        {
+            _camCheckedAt = Time.unscaledTime;
+            var canvas = GetComponentInParent<Canvas>();
+            _cam = canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay ? (canvas.worldCamera != null ? canvas.worldCamera : Camera.main) : null;
+        }
+        return _cam;
+    }
 
     private void Update()
     {
-        if (!_inside || Surface == null || transform is not RectTransform rt)
+        if (Surface == null || transform is not RectTransform rt)
             return;
-        if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(rt, Input.mousePosition, _cam, out var local))
-            return;
+        var cam = CameraFor();
         var r = rt.rect;
-        if (r.width <= 0f || r.height <= 0f)
+        var local = Vector2.zero;
+        var inside = r.width > 0f && r.height > 0f
+                     && RectTransformUtility.ScreenPointToLocalPointInRectangle(rt, Input.mousePosition, cam, out local)
+                     && r.Contains(local);
+        if (!inside)
+        {
+            if (_inside) { _inside = false; _last = new Vector2(-1f, -1f); Surface.PointerLeave(); }
             return;
+        }
+        _inside = true;
         var f = new Vector2((local.x - r.xMin) / r.width, (r.yMax - local.y) / r.height);
         if ((f - _last).sqrMagnitude < 1e-6f)
             return;
@@ -52,8 +72,8 @@ internal sealed class HtmlPointer : MonoBehaviour, IPointerMoveHandler, IPointer
     }
 
     public void OnPointerMove(PointerEventData e) { if (Surface != null && Local(e, out var f)) Surface.PointerMove(f); }
-    public void OnPointerEnter(PointerEventData e) { _inside = true; _cam = e.enterEventCamera != null ? e.enterEventCamera : e.pressEventCamera; if (Surface != null && Local(e, out var f)) { _last = f; Surface.PointerMove(f); } }
-    public void OnPointerExit(PointerEventData e) { _inside = false; _last = new Vector2(-1f, -1f); Surface?.PointerLeave(); }
+    public void OnPointerEnter(PointerEventData e) { if (Surface != null && Local(e, out var f)) { _last = f; Surface.PointerMove(f); } }
+    public void OnPointerExit(PointerEventData e) { }
     public void OnPointerDown(PointerEventData e) { if (Surface != null && Local(e, out var f)) Surface.PointerDown(f); }
     public void OnPointerUp(PointerEventData e) { Surface?.PointerUp(); }
 }
