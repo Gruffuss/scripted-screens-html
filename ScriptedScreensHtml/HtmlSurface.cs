@@ -486,6 +486,12 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// </summary>
     internal void EmitNow()
     {
+        // A capture builds and copies the page in one call. The script gets a few frames
+        // first (its load work, a short timer, an animation frame), each waited for, so the
+        // capture shows what the script drew rather than the bare markup.
+        if (_script != null)
+            for (var k = 0; k < 4; k++)
+                _script.RunSynchronously(Time.time + k * 0.1f, _byId, 300);
         _dirty = false;
         EmitToVector();
     }
