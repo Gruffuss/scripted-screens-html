@@ -7,6 +7,11 @@ checked against the 0.11.21 reference and parser and match. Pending in-game conf
 the vector session: inset text shadow (3), stencil masks on labels (6, 8), IMG download and
 rebuild (9), filters and masks on text (10, 12), extra text shadow copies (4), so/sov live (7).
 
+**Items 14-16 (2026-09-15, same 0.11.21.0 build): implemented, tested offline, not seen in game.**
+14 is the face only: `s=@gradient` on `T` is not done, because text has no outline in the vector
+mod at all and TMP's outline colour is a material property, not per vertex. 15 as specified
+(`fl` keys `f size weight font`, values with spaces quoted '...'). 16 reads `v` from the top.
+
 Two behaviours to know: an inset shadow costs about 3x the vertices of an outset one; a
 concave clip draws its contents once per convex piece. Filters do not reach IMG (reported).
 A nested clip with an empty intersection now draws nothing, as CSS does.
