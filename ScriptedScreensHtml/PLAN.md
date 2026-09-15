@@ -33,7 +33,7 @@ HtmlRenderer's tag handling, the script prelude), not from SUPPORT.md, which is 
 | units `vmin`, `vmax`, `ch`, `ex`, `%` on `font-size`, `line-height` unitless | partly | add; `ch` from the face's `0` width |
 | CSS nesting (`.a { .b { } &:hover { } }`) | the parser reads a nested block as garbage | parse nesting, expand to flat rules with `&` substitution |
 | pseudo-classes `:nth-of-type()`, `:first/last/only-of-type`, `:only-child`, `:empty`, `:is()`, `:where()`, `:has()` (child-only), `:not()` with a list | rule skipped | implement on the node tree, all cheap |
-| `:hover`, `:active`, `:focus` | never match | **needs the vector mod**: pointer enter/leave on click regions (see Vector asks). Then a hover is one re-cascade and re-emit, as a click is now |
+| `:hover`, `:active`, `:focus` | never match | HTML side: a pointer-move handler on the page's host (UGUI passes moves up from the child under the pointer) converts the pointer to page coordinates and hit-tests the layout boxes; enter/leave is a re-cascade and one emit, as a checkbox click is now. `:active` while the button is down, `:focus` for the last clicked control |
 | `@font-face { src: url(x.ttf) }` | skipped | resolve the url against the mod's `Assets/fonts` and the Fonts mod's folder; register under the declared `font-family` |
 | generic families `monospace`, `serif`, `sans-serif`, `system-ui` | not mapped, legacy face | map: `monospace` → the game's `code`, `sans-serif`/`system-ui` → Barlow, `serif` → RBBook, unless the page named a real face first |
 | numeric `font-weight` | bold ≥ 600, else regular | map to the family's real faces (Barlow has Thin..Black); synthetic bold only when the family has no such face |
@@ -41,7 +41,7 @@ HtmlRenderer's tag handling, the script prelude), not from SUPPORT.md, which is 
 | easing `steps(n)`, `cubic-bezier()` | steps missing; bezier partial | `steps` as a floor over the tween clock; bezier approximated by a few linear pieces |
 | `animation-fill-mode`, `animation-play-state`, `animation-direction` | forwards only, paused missing | implement in KeyframeRunner |
 | `transition` on `padding`, `margin`, `border-width`, `border-radius`, `letter-spacing`, `font-size` | rect changes tween, the rest snap | radius and border width as tweened numbers on the `R`; font size snaps (text is TMP) and says so |
-| **colour transitions and colour keyframes** | snap | **needs the vector mod's text-form gradient sample** (`fat=`/`sat=`, see asks). Until then: fake with a stepped tween (re-emit the colour at ~10 steps over the duration, from Lua-side clock) so a 300 ms fade is 3 re-emits, not a snap |
+| **colour transitions and colour keyframes** | snap | on the vector mod's text-form gradient sample (`fat=`/`sat=`, being added, see Vector work). The emitter declares a two-stop (or per-keyframe multi-stop) `GL` per tweened colour and samples it over the tween clock, through the same tween code width and opacity use |
 
 ## Batch B — HTML coverage
 
@@ -71,8 +71,8 @@ HtmlRenderer's tag handling, the script prelude), not from SUPPORT.md, which is 
 | Gap | Fake |
 |---|---|
 | `background-image: url()` | a ScriptedScreens image element **under** the page (z_index page − 1), and the box emits no fill so the image shows through; `background-size: cover/contain/px`, `background-position` by sizing the element's rect (clipped by the page mesh where the box has a border); `no-repeat` only, `repeat` stays listed |
-| `box-shadow: inset` | four linear-gradient bands inside the edges, clipped to the box (convex, so fine), plus corner blend; multiple shadows layered |
-| second and further `text-shadow` | extra `T` labels behind the text, offset and coloured (TMP underlay stays for the first, with blur) |
+| `box-shadow: inset` | native on the vector side (inset `sh`, being added); the emitter passes the inset entries through. Multiple shadows layered |
+| second and further `text-shadow` | native on the vector side (`sh` on `T` with more than one entry, being added); the emitter passes them all |
 | `conic-gradient` | fan of wedges (`P` pie slices) with per-wedge flat colour, 36 slices, stops interpolated |
 | `repeating-linear-gradient`, `repeating-radial-gradient` | expanded to an explicit stop list over the box |
 | `border-style: double`, `groove`, `ridge`, `inset`, `outset` | two strokes; the 3D ones as light/dark side colours |
@@ -85,7 +85,7 @@ HtmlRenderer's tag handling, the script prelude), not from SUPPORT.md, which is 
 | `transform: skew()`, `matrix()`, `rotate3d/translate3d/scale3d` | decompose to rotate/scale/translate (skew approximated by the closest rotate+scale, or exact for svg by baking); 3D takes the 2D part |
 | `writing-mode: vertical-rl/lr`, `text-orientation` | the label in a `G r=90/-90` |
 | `vertical-align: sub/super/middle/text-top` on inline text | TMP `<sub>`, `<sup>`, `<voffset>` |
-| `text-align: justify` | TMP `align=justified` if the vector `T` passes it; else left, listed |
+| `text-align: justify` | `T align=justified` (being added on the vector side) |
 | `object-fit: contain/cover` on `<img>` | needs the natural size: read it back from ScriptedScreens' image cache after load, then size the rect; until loaded, stretch |
 | `border-radius` on `<img>` | the image element cannot be rounded; draw the page background as a rounded frame over its corners (works on flat backgrounds, which is the case that matters) |
 | `outline-style: dashed/dotted` | `dash` on the outline stroke |
@@ -108,12 +108,12 @@ HtmlRenderer's tag handling, the script prelude), not from SUPPORT.md, which is 
 | `DOMContentLoaded`, `load`, `readyState` | fire after the page script runs; `readyState` = complete |
 | `window.innerWidth/innerHeight`, `screen`, `devicePixelRatio`, `matchMedia()` | from the design size; matchMedia uses the same evaluator as `@media` |
 | `getComputedStyle(el)` | the cascade record with resolved colours and the layout sizes; `getPropertyValue` |
-| `scrollWidth/scrollHeight`, `scrollTop` read | from layout and the scroll box's content height; **setting `scrollTop` and `scrollIntoView()`** need the vector mod to accept a scroll offset (see asks) |
+| `scrollWidth/scrollHeight`, `scrollTop` read | from layout and the scroll box's content height; **setting `scrollTop` and `scrollIntoView()`** through the vector mod's forced scroll offset (`so=`/`sov=` on `SC`, see Vector work) |
 | `Element.animate(keyframes, options)` | compile to the keyframe runner; returns an object with `cancel()`/`finish()` |
 | `crypto.randomUUID/getRandomValues`, `URL`, `URLSearchParams`, `TextEncoder/Decoder`, `structuredClone`, `queueMicrotask`, `console.table/group/time` | small shims |
 | `new Image()` with `onload`, `new Audio(url).play()` | Image resolves after the image element reports; Audio maps to a sound element |
 | `<script src="url">`, `<link rel=stylesheet href="url">`, `type="module"` | fetch text through UnityWebRequest like images (raw GitHub works), then run/apply; modules: strip `import`/`export` of local names, no real module graph |
-| keyboard events, `event.clientX/Y` on click | keyboard: out until the vector mod has it; click coordinates: needs the vector mod to pass them (see asks) |
+| `event.clientX/Y`, `offsetX/Y`, `pageX/Y` on click; `mousemove`, `mouseover/out`, `mouseenter/leave` | HTML side: the click reaches the input prefix in the frame it happened, so the pointer position is read there and converted to page coordinates; moves come from the same host handler as `:hover`. Keyboard events stay out |
 | `requestAnimationFrame` per-frame DOM writes | works at 30 Hz; the cost note stays. A page that animates a `transform` via rAF re-emits 30 scenes a second; that is the one browser habit that is honestly expensive here, and SUPPORT says so |
 
 ## Batch E — `<canvas>`
@@ -136,19 +136,31 @@ rAF DOM writes. `getImageData`/`putImageData` stay out.
 
 ---
 
-## Vector asks (relayed to the vector session, all additive)
+## Vector work (agreed 2026-09-15, all additive; the HTML side treats them as present)
 
-1. **Text-form gradient sample**: `fat==expr` / `sat==expr` when `f`/`s` is `@gradient`, on
-   shapes and on `T`. Unlocks colour transitions and colour keyframes directly.
-2. **Pointer enter/leave on click regions** (`hover=1`, events `enter`/`leave` with the node id
-   through the same forwarder as clicks). Unlocks `:hover`, `:active`, `mouseover/mouseout`.
-3. **Click position**: the click event carrying the pointer's scene coordinates. Unlocks
-   `event.offsetX/Y`, `clientX/Y`, and click-to-position widgets (sliders drawn by the page).
-4. **Scroll offset from the outside**: a way to set an `SC`'s offset (a prop on the element, or
-   a data key). Unlocks `scrollTop =`, `scrollIntoView()`, "scroll to bottom" logs.
-5. **Rounded text masks**: labels clipped by the rounded clip, not its rectangle. Cosmetic.
-6. Optional, since they are faked meanwhile: inset shadow, a second text shadow, `justified`
-   text alignment on `T`.
+What the vector session implements, with the shape the HTML emitter will write:
+
+1. **Text-form gradient sample.** `fat==expr` and `sat==expr` in the scene text, honoured when
+   `f`/`s` is `@gradient`, on shapes and on `T`. The reader turns them into the map form
+   `{ grad, at }` that `SceneModel` already parses; `T` resolves paint the way shapes do.
+   Unlocks colour transitions and colour keyframes.
+2. **Inset shadow on shapes.** An inset entry in `sh` (a flag or an `shi=` list): the ring and
+   feather drawn inward from the outline and clipped to the shape's own outline. Every CSS box
+   is convex, so the existing clip serves.
+3. **More than one text shadow.** `sh` on `T` with several entries: a second label behind the
+   first per extra entry, offset and coloured.
+4. **Justified text.** `T align=justified` → TMP `Justified`.
+5. **Rounded text masks.** Labels clipped to the rounded clip rather than its rectangle,
+   by cutting the TMP glyph quads against the rounded outline after the mesh update.
+   Cosmetic; only visible within one corner radius of a rounded edge. Feasibility of this
+   and of an inset shadow on text itself is being checked separately (glyph outlines are
+   concave, so anything that must clip to letters is suspect).
+6. **Forced scroll offset.** `so=<offset> sov=<version>` on `SC`: a changed version applies
+   the offset once, then the wheel owns it again. Unlocks `scrollTop =` and
+   `scrollIntoView()` from a page script.
+
+Not vector work after all: `:hover` and click coordinates are done on the HTML side from
+its own layout boxes and the pointer position (Batch A and D).
 
 ## Order
 
