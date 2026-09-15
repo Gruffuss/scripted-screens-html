@@ -1020,17 +1020,24 @@ function __detached(tag){
   o.append = function(){ for (var i = 0; i < arguments.length; i++) { var c = arguments[i]; o.appendChild(typeof c === 'string' ? { textContent: c } : c); } };
   o.removeChild = function(c){ if (o.__live) __remove(c.id); else o.__children = o.__children.filter(function(x){ return x !== c; }); return c; };
   o.remove = function(){ if (o.__live) __remove(o.id); };
-  o.addEventListener = function(){ };
+  o.__listeners = [];
+  o.addEventListener = function(type, fn){ if (o.__live) __el(o.id).addEventListener(type, fn); else o.__listeners.push([type, fn]); };
+  o.removeEventListener = function(type, fn){ if (o.__live) __el(o.id).removeEventListener(type, fn); else o.__listeners = o.__listeners.filter(function(l){ return l[0] !== type || l[1] !== fn; }); };
   o.style = new Proxy({}, { set: function(t, p, v){ if (o.__live) __setStyle(o.id, String(p), String(v)); else o.__style[p] = String(v); return true; }, get: function(t, p){ return o.__style[p] || ''; } });
-  Object.defineProperty(o, 'innerHTML', { set: function(v){ if (o.__live) __setHtml(o.id, String(v)); else { o.__html = String(v); o.__text = null; } }, get: function(){ return o.__html || ''; } });
-  Object.defineProperty(o, 'textContent', { set: function(v){ if (o.__live) __setText(o.id, String(v)); else { o.__text = String(v); o.__html = null; } }, get: function(){ return o.__text || ''; } });
+  Object.defineProperty(o, 'innerHTML', { set: function(v){ if (o.__live) __setHtml(o.id, String(v)); else { o.__html = String(v); o.__text = null; } }, get: function(){ return o.__live ? __el(o.id).innerHTML : (o.__html || ''); } });
+  Object.defineProperty(o, 'textContent', { set: function(v){ if (o.__live) __setText(o.id, String(v)); else { o.__text = String(v); o.__html = null; } }, get: function(){ return o.__live ? __el(o.id).textContent : (o.__text || ''); } });
   Object.defineProperty(o, 'innerText', { set: function(v){ o.textContent = v; }, get: function(){ return o.__text || ''; } });
-  o.__adopt = function(){ o.__children.forEach(function(c){ if (c.__adopt) c.__adopt(); }); if (o.__frag) { o.__children = []; o.__html = null; return; } o.__live = true; };
-  Object.defineProperty(o, 'childNodes', { get: function(){ return o.__children.slice(); } });
-  Object.defineProperty(o, 'children', { get: function(){ return o.__children.filter(function(c){ return !!c.__tag; }); } });
-  Object.defineProperty(o, 'firstChild', { get: function(){ return o.__children[0] || null; } });
+  o.__adopt = function(){ o.__children.forEach(function(c){ if (c.__adopt) c.__adopt(); }); if (o.__frag) { o.__children = []; o.__html = null; return; } o.__live = true; o.__listeners.forEach(function(l){ __el(o.id).addEventListener(l[0], l[1]); }); o.__listeners = []; };
+  Object.defineProperty(o, 'childNodes', { get: function(){ return o.__live ? __el(o.id).childNodes : o.__children.slice(); } });
+  Object.defineProperty(o, 'children', { get: function(){ return o.__live ? __el(o.id).children : o.__children.filter(function(c){ return !!c.__tag; }); } });
+  Object.defineProperty(o, 'firstChild', { get: function(){ return o.__live ? __el(o.id).firstChild : (o.__children[0] || null); } });
   Object.defineProperty(o, 'hasChildNodes', { value: function(){ return o.__children.length > 0; } });
-  return o;
+  // once adopted, anything the shim does not define itself is the live element's (replaceWith, before, classList, rects, siblings...)
+  return new Proxy(o, {
+    get: function(t, p){ if (t.__live && (p === 'className' || !(p in t))) { var live = __el(t.id); var v = live[p]; return typeof v === 'function' ? v.bind(live) : v; } return t[p]; },
+    set: function(t, p, v){ if (t.__live && (p === 'className' || !(p in t))) { __el(t.id)[p] = v; return true; } t[p] = v; return true; },
+    has: function(t, p){ return (p in t) || (t.__live && (p in __el(t.id))); }
+  });
 }
 var document = {
   getElementById: function(id){ return __has(id) ? __el(id) : null; },

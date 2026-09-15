@@ -775,7 +775,7 @@ internal static class StyleApplier
         var parts = SplitTopLevel(v);
         foreach (var part in parts)
         {
-            if (part == "solid" || part == "dashed" || part == "dotted" || part == "double") continue;
+            if (part is "solid" or "dashed" or "dotted" or "double" or "inset" or "outset" or "groove" or "ridge" or "none" or "hidden") continue; // the style keyword is read by the emitter
             if (IsNumber(part) || part.EndsWith("px", StringComparison.OrdinalIgnoreCase)) width = Num(part);
             else if (TryColor(part, out var c)) color = c;
             else warn?.Invoke($"css: border value \"{part}\" not understood");

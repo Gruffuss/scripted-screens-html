@@ -102,4 +102,14 @@ a.appendChild(frag);
 const last = calls[calls.length - 1];
 if (last.indexOf('append:a:<li') !== 0 || last.indexOf('<div') >= 0 || last.indexOf('class="two"') < 0 || last.indexOf('one') < 0) throw new Error('fragment append ' + last);
 if (frag.childNodes.length !== 0 || !li1.__live) throw new Error('fragment not emptied/adopted');
+// an adopted script-made element answers with the live element's API (replaceWith, before, siblings)
+const mid = document.createElement('span'); mid.id = 'mid'; mid.textContent = 'mid';
+let fired = false; mid.addEventListener('ping', () => { fired = true; });
+a.appendChild(mid);
+if (typeof mid.replaceWith !== 'function' || typeof mid.before !== 'function') throw new Error('adopted element lacks live API');
+attrs.mid = {}; parents.mid = 'a';
+mid.dispatchEvent(new CustomEvent('ping'));
+if (!fired) throw new Error('listener added before adoption did not carry over');
+mid.replaceWith(document.createElement('b'));
+if (calls[calls.length - 1] !== 'remove:mid') throw new Error('replaceWith on adopted element ' + calls[calls.length - 1]);
 process.stdout.write('prelude smoke ok; ' + calls.length + ' binding calls' + String.fromCharCode(10));
