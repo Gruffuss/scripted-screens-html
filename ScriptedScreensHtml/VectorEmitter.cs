@@ -45,8 +45,6 @@ internal static class VectorEmitter
         public HashSet<string> Reported = new(StringComparer.Ordinal);
         public Tweens? Tw;
         public float Now;
-        /// <summary>Top of the scroll container being emitted, or NaN outside one: what a sticky child pins to.</summary>
-        public float ScrollTop = float.NaN;
     }
 
     public static Output Emit(HtmlRenderer.Result built, VisualElement root, float designW, float designH, Tweens? tweens = null, float now = 0f)
@@ -89,21 +87,11 @@ internal static class VectorEmitter
 
         // A transition in flight: numbers below become expressions over t (Tweens.cs).
         var tw = ctx.Tw?.Of(ve, ctx.Now);
-        var scrollTop = float.NaN;
         var ws = tw != null ? tw.Lerp(tw.From.Rect.width, w) : F(w);
         var hs = tw != null ? tw.Lerp(tw.From.Rect.height, h) : F(h);
 
         // Wrappers: position, transform, opacity, clip. Each opens a G that is closed after children.
         var groups = 0;
-        if (!float.IsNaN(ctx.ScrollTop) && css.TryGetValue("position", out var pos) && pos.Trim() == "sticky")
-        {
-            // position: sticky inside a scrolling box: the element scrolls with the content
-            // until it would leave the viewport top, then pins `top` below it. sy is the
-            // container's scroll offset, so the lift is max(0, (viewportTop + top + sy) - y).
-            var top = css.TryGetValue("top", out var t) ? StyleApplier.Num(t) : 0f;
-            ctx.Body.Append(indent).Append("G t=[0,\"=max(0,").Append(F(ctx.ScrollTop + top - y)).Append("+sy)\"] {\n");
-            groups++;
-        }
         if (tw != null && (Mathf.Abs(tw.From.Rect.x - tw.To.Rect.x) > 0.01f || Mathf.Abs(tw.From.Rect.y - tw.To.Rect.y) > 0.01f))
         {
             // The subtree is emitted at its final place; this group carries it there from
@@ -140,7 +128,6 @@ internal static class VectorEmitter
                     .Append(" ch=").Append(F(Mathf.Max(ch, h))).Append(Radius(rs, w, h)).Append(" {\n");
                 ctx.Out.Nodes++;
                 groups++;
-                scrollTop = y;
             }
             else
             {
@@ -249,14 +236,9 @@ internal static class VectorEmitter
                 Warn(ctx, "html: <canvas> is not drawn in vector mode; use <svg> with expressions");
                 break;
             default:
-            {
-                var outer = ctx.ScrollTop;
-                if (!float.IsNaN(scrollTop)) ctx.ScrollTop = scrollTop;
                 foreach (var child in ByZIndex(ctx, ve))
                     EmitElement(ctx, child, new Vector2(x, y), depth + groups);
-                ctx.ScrollTop = outer;
                 break;
-            }
         }
 
         for (var i = 0; i < groups; i++)
