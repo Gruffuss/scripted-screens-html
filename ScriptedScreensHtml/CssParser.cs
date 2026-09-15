@@ -136,6 +136,44 @@ internal sealed class CssSelector
     }
 }
 
+/// <summary>An @counter-style: how a counter value becomes text.</summary>
+internal sealed class CounterStyle
+{
+    public string System = "symbolic";
+    public List<string> Symbols = new();
+    public string Suffix = ". ";
+    public string Prefix = string.Empty;
+
+    /// <summary>The text for value n, without prefix/suffix; null when the system cannot represent it (falls back to decimal).</summary>
+    public string? Text(int n)
+    {
+        var k = Symbols.Count;
+        if (k == 0) return null;
+        switch (System)
+        {
+            case "cyclic": return Symbols[((n - 1) % k + k) % k];
+            case "fixed": return n >= 1 && n <= k ? Symbols[n - 1] : null;
+            case "symbolic": { if (n < 1) return null; var reps = (n - 1) / k + 1; var sym = Symbols[(n - 1) % k]; var sb = new StringBuilder(); for (var i = 0; i < reps; i++) sb.Append(sym); return sb.ToString(); }
+            case "alphabetic":
+            {
+                if (n < 1 || k < 2) return null;
+                var sb = new StringBuilder();
+                while (n > 0) { n--; sb.Insert(0, Symbols[n % k]); n /= k; }
+                return sb.ToString();
+            }
+            case "numeric":
+            {
+                if (n < 0 || k < 2) return null;
+                if (n == 0) return Symbols[0];
+                var sb = new StringBuilder();
+                while (n > 0) { sb.Insert(0, Symbols[n % k]); n /= k; }
+                return sb.ToString();
+            }
+            default: return null;
+        }
+    }
+}
+
 internal sealed class CssKeyframe
 {
     public float Percent;
@@ -297,6 +335,24 @@ internal static class CssParser
                         }
                     }
                 }
+                else if (header.StartsWith("counter-style", StringComparison.OrdinalIgnoreCase))
+                {
+                    // @counter-style name { system; symbols; suffix; prefix }: used by list-style-type and counter()
+                    var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
+                    var cname = header.Substring(13).Trim();
+                    var style = new CounterStyle();
+                    foreach (var d in ParseDeclarations(inner))
+                    {
+                        switch (d.Name)
+                        {
+                            case "system": style.System = d.Value.Trim().Split(' ')[0].ToLowerInvariant(); break;
+                            case "symbols": style.Symbols = Symbols(d.Value); break;
+                            case "suffix": style.Suffix = Unquote(d.Value); break;
+                            case "prefix": style.Prefix = Unquote(d.Value); break;
+                        }
+                    }
+                    if (cname.Length > 0 && style.Symbols.Count > 0) CounterStyles[cname] = style;
+                }
                 else if (header.StartsWith("property", StringComparison.OrdinalIgnoreCase))
                 {
                     // @property --name { initial-value }: the value a var() falls back to
@@ -441,6 +497,40 @@ internal static class CssParser
 
     /// <summary>@property initial values, what an undefined var() of that name resolves to.</summary>
     public static readonly Dictionary<string, string> PropertyInitials = new(StringComparer.Ordinal);
+
+    /// <summary>@counter-style rules by name.</summary>
+    public static readonly Dictionary<string, CounterStyle> CounterStyles = new(StringComparer.Ordinal);
+
+    private static string Unquote(string v)
+    {
+        v = v.Trim();
+        return v.Length >= 2 && (v[0] == '"' || v[0] == '\'') && v[v.Length - 1] == v[0] ? v.Substring(1, v.Length - 2) : v;
+    }
+
+    /// <summary>The symbols list of @counter-style: quoted strings or bare tokens.</summary>
+    private static List<string> Symbols(string v)
+    {
+        var list = new List<string>();
+        var i = 0;
+        while (i < v.Length)
+        {
+            var ch = v[i];
+            if (char.IsWhiteSpace(ch)) { i++; continue; }
+            if (ch == '"' || ch == '\'')
+            {
+                var end = v.IndexOf(ch, i + 1);
+                if (end < 0) end = v.Length;
+                list.Add(v.Substring(i + 1, end - i - 1));
+                i = end + 1;
+                continue;
+            }
+            var j = i;
+            while (j < v.Length && !char.IsWhiteSpace(v[j])) j++;
+            list.Add(v.Substring(i, j - i));
+            i = j;
+        }
+        return list;
+    }
 
     /// <summary>The url of an @import prelude: url(...) or a quoted string; the media/layer conditions after it are ignored.</summary>
     private static string? ImportUrl(string prelude)
@@ -820,7 +910,7 @@ internal static class CssParser
                 // marker span), ::placeholder (the field's placeholder, colour only); other
                 // pseudo-elements skip the rule.
                 if (name is "-webkit-input-placeholder" or "-moz-placeholder" or "-ms-input-placeholder") name = "placeholder";
-                if (name is not ("before" or "after" or "marker" or "placeholder")) return false;
+                if (name is not ("before" or "after" or "marker" or "placeholder" or "first-letter" or "first-line" or "-webkit-scrollbar" or "-webkit-scrollbar-thumb" or "-webkit-scrollbar-track")) return false;
                 compound.PseudoElement = name;
                 continue;
             }

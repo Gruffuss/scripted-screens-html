@@ -47,6 +47,8 @@ internal static class VectorEmitter
         public float Now;
         /// <summary>Top of the scroll container being emitted, or NaN outside one: what a sticky child pins to.</summary>
         public float ScrollTop = float.NaN;
+        /// <summary>Viewport height and scrollable range (content minus viewport) of that container.</summary>
+        public float ScrollH, ScrollRange;
         /// <summary>Scroll offsets a script set, by box id (HtmlSurface.ScrollSet).</summary>
         public Dictionary<string, (float offset, int version)>? ScrollSet;
         /// <summary>Positioned elements with a z-index, emitted after everything else at the root in z order: a stacking context across parents.</summary>
@@ -111,6 +113,10 @@ internal static class VectorEmitter
         // A transition in flight: numbers below become expressions over t (Tweens.cs).
         var tw = ctx.Tw?.Of(ve, ctx.Now);
         var scrollTop = float.NaN;
+        var scrollCh = 0f;
+        // backface-visibility: hidden with a rotateX/rotateY past 90 degrees: the back of the card, not drawn
+        if (css.TryGetValue("backface-visibility", out var bfv) && bfv.Trim() == "hidden" && css.TryGetValue("transform", out var bft) && BackfaceTurned(bft))
+            return;
         var ws = tw != null ? tw.Lerp(tw.From.Rect.width, w) : F(w);
         var hs = tw != null ? tw.Lerp(tw.From.Rect.height, h) : F(h);
 
@@ -162,6 +168,11 @@ internal static class VectorEmitter
             ctx.Body.Append(indent).Append("G o=").Append(tw != null ? tw.Lerp(tw.From.Opacity, rs.opacity) : F(rs.opacity)).Append(" {\n");
             groups++;
         }
+        if (!float.IsNaN(ctx.ScrollTop) && css.TryGetValue("animation-timeline", out var tlc) && tlc.Trim() != "auto" && ScrollTimeline(ctx, ve, css, tlc, x, y, w, h) is { } tlg)
+        {
+            ctx.Body.Append(indent).Append(tlg).Append(" {\n");  // keyframes as expressions over the scroll offset
+            groups++;
+        }
         if (ve.style.overflow.value == Overflow.Hidden && w > 0f && h > 0f)
         {
             if (Scrolls(css))
@@ -187,6 +198,7 @@ internal static class VectorEmitter
                 ctx.Out.Nodes++;
                 groups++;
                 scrollTop = y;
+                scrollCh = Mathf.Max(ch, h);
             }
             else
             {
@@ -199,11 +211,20 @@ internal static class VectorEmitter
         }
 
         // Background and border of the box itself.
-        if (w > 0f && h > 0f)
+        var clipText = (css.TryGetValue("background-clip", out var bclip) || css.TryGetValue("-webkit-background-clip", out bclip)) && bclip.Trim() == "text";
+        var cornerPath = CornerPath(css, rs, x, y, w, h);
+        if (w > 0f && h > 0f && !clipText)
         {
             var bg = rs.backgroundColor;
             css.TryGetValue("background", out var bgCss);
             if (bgCss == null) css.TryGetValue("background-image", out bgCss);
+            if (cornerPath != null && tw == null && bg.a > 0.002f && (bgCss == null || !bgCss.Contains("gradient(")) && UrlOf(bgCss ?? string.Empty) == null)
+            {
+                // corner-shape: the box outline as a path with bevelled, scooped or notched corners
+                ctx.Body.Append(indent).Append(cornerPath).Append(" f=").Append(Hex(bg)).Append(shadowOf(css, filterShadow)).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Out.Nodes++;
+                bg = Color.clear;
+            }
             if (bgCss != null && bgCss.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) bgCss = ExpandRepeating(bgCss);
             var shadow = (css.TryGetValue("box-shadow", out var shCss) ? Shadows(shCss) : string.Empty) + filterShadow;
             var imageUrl = bgCss != null ? UrlOf(bgCss) : null;
@@ -281,9 +302,18 @@ internal static class VectorEmitter
             var styles = new[] { SideStyle(css, "top", 0), SideStyle(css, "right", 1), SideStyle(css, "bottom", 2), SideStyle(css, "left", 3) };
             var bstyle = styles[0];
             var mixed = styles[0] != styles[1] || styles[0] != styles[2] || styles[0] != styles[3];
-            if (!mixed && bstyle is "none" or "hidden")
+            if (BorderImage(ctx, css, rs, x, y, w, h, indent))
+            {
+                // border-image replaces the border: a gradient stroke, or nine image slices
+            }
+            else if (!mixed && bstyle is "none" or "hidden")
             {
                 // border-style: none with a width: no border, as CSS computes it
+            }
+            else if (cornerPath != null && tw == null && bw > 0.01f && sameWidth && sameColour && bstyle == "solid")
+            {
+                ctx.Body.Append(indent).Append(CornerPath(css, rs, x + bw * 0.5f, y + bw * 0.5f, w - bw, h - bw)).Append(" f=none s=").Append(Hex(rs.borderTopColor)).Append(" sw=").Append(F(bw)).Append('\n');
+                ctx.Out.Nodes++;
             }
             else if (mixed && (bw > 0.01f || rs.borderRightWidth > 0.01f || rs.borderBottomWidth > 0.01f || rs.borderLeftWidth > 0.01f))
             {
@@ -378,11 +408,12 @@ internal static class VectorEmitter
                 break;
             default:
             {
-                var outer = ctx.ScrollTop;
-                if (!float.IsNaN(scrollTop)) ctx.ScrollTop = scrollTop;
+                var outer = (ctx.ScrollTop, ctx.ScrollH, ctx.ScrollRange);
+                if (!float.IsNaN(scrollTop)) { ctx.ScrollTop = scrollTop; ctx.ScrollH = h; ctx.ScrollRange = Mathf.Max(0f, scrollCh - h); }
                 foreach (var child in ByZIndex(ctx, ve))
                     EmitElement(ctx, child, new Vector2(x, y), depth + groups);
-                ctx.ScrollTop = outer;
+                if (!float.IsNaN(scrollTop)) EmitScrollbar(ctx, ve, css, x, y, w, h, scrollCh, indent + "  ");
+                (ctx.ScrollTop, ctx.ScrollH, ctx.ScrollRange) = outer;
                 break;
             }
         }
@@ -826,7 +857,19 @@ internal static class VectorEmitter
         sb.Append(" text=\"").Append(text).Append('"');
         sb.Append(" size=").Append(F(rs.fontSize));
         var ttw = ctx.Tw?.Of(label, ctx.Now);
-        if (ttw != null && !Tweens.Snap.NearColour(ttw.From.Fg, rs.color))
+        var textClip = (css.TryGetValue("background-clip", out var tbc) || css.TryGetValue("-webkit-background-clip", out tbc)) && tbc.Trim() == "text";
+        var textGrad = textClip && (css.TryGetValue("background", out var tbg) || css.TryGetValue("background-image", out tbg)) && tbg.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase) ? ParseGradient(tbg) : null;
+        if (textGrad != null)
+        {
+            // background-clip: text with a gradient: the glyphs take the gradient (vector requirement 14)
+            var (angle, stops) = textGrad.Value;
+            var rad = angle * Mathf.Deg2Rad;
+            var len = w * Mathf.Abs(Mathf.Sin(rad)) + h * Mathf.Abs(Mathf.Cos(rad));
+            var gid = "tg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+            GradientDefLine(ctx, gid, Mathf.Sin(rad) * len * 0.5f / Mathf.Max(1f, w), -Mathf.Cos(rad) * len * 0.5f / Mathf.Max(1f, h), 0f, 1f, stops);
+            sb.Append(" f=@").Append(gid);
+        }
+        else if (ttw != null && !Tweens.Snap.NearColour(ttw.From.Fg, rs.color))
         {
             var gid = "tw" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
             ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[[0,").Append(Hex(ttw.From.Fg)).Append("],[1,").Append(Hex(rs.color)).Append("]]\n");
@@ -894,6 +937,32 @@ internal static class VectorEmitter
             sb.Append(Shadows(tsh)); // every shadow: extra ones are extra labels on the vector side (requirement 4)
         else if (css.TryGetValue("filter", out var tfl) && Filters(ctx, tfl, out _, out var tShadow) && tShadow.Length > 0)
             sb.Append(tShadow);
+        // ::first-line: on a wrapped label the vector mod restyles the first line (vector
+        // requirement 15); on a single line the whole text is the first line.
+        var fl = PseudoCss(ctx, label, "first-line");
+        if (fl.Count > 0)
+        {
+            var attrs = new StringBuilder();
+            if (fl.TryGetValue("color", out var flc) && StyleApplier.TryColor(flc, out var flcol)) attrs.Append(" f=").Append(Hex(flcol));
+            if (fl.TryGetValue("font-size", out var fls)) attrs.Append(" size=").Append(F(fls.EndsWith("em", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(fls) * rs.fontSize : fls.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(fls) / 100f * rs.fontSize : StyleApplier.Num(fls)));
+            if (fl.TryGetValue("font-weight", out var flw) && (flw == "bold" || flw == "bolder" || (StyleApplier.IsNumber(flw) && StyleApplier.Num(flw) >= 600))) attrs.Append(" weight=bold");
+            if (fl.TryGetValue("font-family", out var flf) && flf.Split(',')[0].Trim().Trim('"', '\'') is { Length: > 0 } flFace && flFace.IndexOf(' ') < 0) attrs.Append(" font=").Append(FontLibrary.ResolveFace(flFace));
+            if (attrs.Length > 0)
+            {
+                if (wraps) sb.Append(" fl=\"").Append(attrs.ToString().Trim()).Append('"');
+                else
+                {
+                    // rewrite the text attribute: rich tags around the whole (single) line
+                    var open = new StringBuilder(); var close = new StringBuilder();
+                    if (fl.TryGetValue("color", out var c1) && StyleApplier.TryColor(c1, out var col1)) { open.Append("<color=").Append(Hex(col1)).Append('>'); close.Insert(0, "</color>"); }
+                    if (fl.TryGetValue("font-size", out var s1)) { open.Append("<size=").Append(s1.Trim()).Append('>'); close.Insert(0, "</size>"); }
+                    if (attrs.ToString().Contains("weight=bold")) { open.Append("<b>"); close.Insert(0, "</b>"); }
+                    var marker = " text=\"";
+                    var at = sb.ToString().IndexOf(marker, StringComparison.Ordinal);
+                    if (at >= 0) sb.Insert(at + marker.Length, open.ToString()).Insert(sb.ToString().IndexOf('"', at + marker.Length + open.Length), close.ToString());
+                }
+            }
+        }
         if (css.TryGetValue("line-height", out var lh) && rs.fontSize > 0f)
         {
             // CSS: a bare number is a multiple of the font size, a length is absolute.
@@ -2104,6 +2173,325 @@ internal static class VectorEmitter
     }
 
     /// <summary>border-style from the property or the shorthand: solid (default), dashed, dotted, double, groove, ridge, inset, outset, none.</summary>
+    private static string shadowOf(Dictionary<string, string> css, string filterShadow) => (css.TryGetValue("box-shadow", out var s) ? Shadows(s) : string.Empty) + filterShadow;
+
+    /// <summary>corner-shape: the box outline as a P with bevel, scoop or notch corners at the border radii; null for round/square.</summary>
+    private static string? CornerPath(Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h)
+    {
+        if (!css.TryGetValue("corner-shape", out var cs)) return null;
+        var shape = cs.Trim().ToLowerInvariant();
+        if (shape is not ("bevel" or "scoop" or "notch" or "squircle")) return null;
+        if (shape == "squircle") return null; // close enough to round; the R keeps its rx
+        var tl = Mathf.Min(rs.borderTopLeftRadius, Mathf.Min(w, h) * 0.5f);
+        var tr = Mathf.Min(rs.borderTopRightRadius, Mathf.Min(w, h) * 0.5f);
+        var br = Mathf.Min(rs.borderBottomRightRadius, Mathf.Min(w, h) * 0.5f);
+        var bl = Mathf.Min(rs.borderBottomLeftRadius, Mathf.Min(w, h) * 0.5f);
+        if (tl + tr + br + bl < 0.01f) return null;
+        var sb = new StringBuilder("P d=\"");
+        void Corner(float cx, float cy, float r, float dx, float dy, bool first, bool alongTop)
+        {
+            // corner at (cx,cy); dx,dy point from the corner into the box. Clockwise, the
+            // outline reaches a left-hand corner along the vertical side and a right-hand
+            // corner along the horizontal one: (ax,ay) is where it arrives, (bx,by) where it leaves.
+            var ax = alongTop ? cx + dx * r : cx; var ay = alongTop ? cy : cy + dy * r;
+            var bx = alongTop ? cx : cx + dx * r; var by = alongTop ? cy + dy * r : cy;
+            if (r <= 0.01f) { sb.Append(first ? "M" : " L").Append(F(cx)).Append(' ').Append(F(cy)); return; }
+            switch (shape)
+            {
+                case "bevel": sb.Append(first ? "M" : " L").Append(F(ax)).Append(' ').Append(F(ay)).Append(" L").Append(F(bx)).Append(' ').Append(F(by)); break;
+                case "notch": sb.Append(first ? "M" : " L").Append(F(ax)).Append(' ').Append(F(ay)).Append(" L").Append(F(cx + dx * r)).Append(' ').Append(F(cy + dy * r)).Append(" L").Append(F(bx)).Append(' ').Append(F(by)); break;
+                default: sb.Append(first ? "M" : " L").Append(F(ax)).Append(' ').Append(F(ay)).Append(" A").Append(F(r)).Append(' ').Append(F(r)).Append(" 0 0 0 ").Append(F(bx)).Append(' ').Append(F(by)); break; // scoop: concave arc
+            }
+        }
+        // clockwise from the top-left corner: TL arrives from the left side going up, leaves along the top
+        Corner(x, y, tl, 1f, 1f, true, false);
+        Corner(x + w, y, tr, -1f, 1f, false, true);
+        Corner(x + w, y + h, br, -1f, -1f, false, false);
+        Corner(x, y + h, bl, 1f, -1f, false, true);
+        sb.Append(" Z\"");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// border-image: a gradient source becomes a gradient stroke over the border box; an
+    /// image source becomes nine IMG slices with source crops (vector requirement 16).
+    /// Slices in percent are exact; a number/px slice needs the image size, which is not
+    /// known here, so it is read as thirds (the common nine-slice layout) and reported.
+    /// </summary>
+    private static bool BorderImage(Ctx ctx, Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h, string indent)
+    {
+        string? source = null;
+        var sliceText = "100%";
+        string? widthText = null;
+        var fill = false;
+        if (css.TryGetValue("border-image", out var shorthand))
+        {
+            var s = shorthand.Trim();
+            if (s.StartsWith("url(", StringComparison.OrdinalIgnoreCase) || s.Contains("gradient("))
+            {
+                var depth = 0; var end = -1;
+                for (var i = 0; i < s.Length; i++) { if (s[i] == '(') depth++; else if (s[i] == ')' && --depth == 0) { end = i; break; } }
+                if (end > 0) { source = s.Substring(0, end + 1); s = s.Substring(end + 1).Trim(); }
+            }
+            else if (s != "none") { var sp = s.IndexOf(' '); source = sp > 0 ? s.Substring(0, sp) : s; s = sp > 0 ? s.Substring(sp + 1) : string.Empty; }
+            var slash = s.IndexOf('/');
+            var slicePart = slash >= 0 ? s.Substring(0, slash) : s;
+            if (slash >= 0) widthText = s.Substring(slash + 1).Split('/')[0].Trim();
+            slicePart = slicePart.Replace("round", string.Empty).Replace("repeat", string.Empty).Replace("stretch", string.Empty).Replace("space", string.Empty);
+            if (slicePart.Contains("fill")) { fill = true; slicePart = slicePart.Replace("fill", string.Empty); }
+            if (slicePart.Trim().Length > 0) sliceText = slicePart.Trim();
+        }
+        if (css.TryGetValue("border-image-source", out var bis)) source = bis.Trim();
+        if (css.TryGetValue("border-image-slice", out var bisl)) { sliceText = bisl.Replace("fill", string.Empty).Trim(); fill |= bisl.Contains("fill"); }
+        if (css.TryGetValue("border-image-width", out var biw)) widthText = biw.Trim();
+        if (source == null || source == "none") return false;
+
+        var bw = new[] { rs.borderTopWidth, rs.borderRightWidth, rs.borderBottomWidth, rs.borderLeftWidth };
+        if (widthText != null)
+        {
+            var wp = widthText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (wp.Length > 0)
+                for (var i = 0; i < 4; i++)
+                {
+                    var t = StyleApplier.SideOf(wp, i);
+                    if (t == "auto") continue;
+                    bw[i] = t.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(t) / 100f * (i % 2 == 0 ? h : w) : StyleApplier.IsNumber(t) ? StyleApplier.Num(t) * bw[i] : StyleApplier.Num(t);
+                }
+        }
+        if (bw[0] + bw[1] + bw[2] + bw[3] < 0.01f) return false;
+
+        if (source.Contains("gradient("))
+        {
+            var parsed = ParseGradient(source);
+            if (parsed == null) return false;
+            var (angle, stops) = parsed.Value;
+            var rad = angle * Mathf.Deg2Rad;
+            var len = w * Mathf.Abs(Mathf.Sin(rad)) + h * Mathf.Abs(Mathf.Cos(rad));
+            var gid = "bimg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+            GradientDefLine(ctx, gid, Mathf.Sin(rad) * len * 0.5f / w, -Mathf.Cos(rad) * len * 0.5f / h, 0f, 1f, stops);
+            // one stroke when the widths agree, four gradient-filled sides otherwise
+            if (Mathf.Approximately(bw[0], bw[1]) && Mathf.Approximately(bw[0], bw[2]) && Mathf.Approximately(bw[0], bw[3]))
+            {
+                var half = bw[0] * 0.5f;
+                ctx.Body.Append(indent).Append("R x=").Append(F(x + half)).Append(" y=").Append(F(y + half)).Append(" w=").Append(F(w - bw[0])).Append(" h=").Append(F(h - bw[0]))
+                    .Append(" f=none s=@").Append(gid).Append(" sw=").Append(F(bw[0])).Append('\n');
+                ctx.Out.Nodes++;
+            }
+            else
+            {
+                var sides = new[] { (x, y, w, bw[0]), (x + w - bw[1], y, bw[1], h), (x, y + h - bw[2], w, bw[2]), (x, y, bw[3], h) };
+                foreach (var (sx, sy, sw, sh) in sides)
+                {
+                    if (sw <= 0.01f || sh <= 0.01f) continue;
+                    ctx.Body.Append(indent).Append("R x=").Append(F(sx)).Append(" y=").Append(F(sy)).Append(" w=").Append(F(sw)).Append(" h=").Append(F(sh)).Append(" f=@").Append(gid).Append('\n');
+                    ctx.Out.Nodes++;
+                }
+            }
+            return true;
+        }
+
+        var url = UrlOf(source);
+        if (url == null) return false;
+        // slices as fractions of the image: top right bottom left
+        var sl = new float[4];
+        var sp2 = sliceText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var thirds = false;
+        for (var i = 0; i < 4; i++)
+        {
+            var t = sp2.Length > 0 ? StyleApplier.SideOf(sp2, i) : "100%";
+            if (t.EndsWith("%", StringComparison.Ordinal)) sl[i] = Mathf.Clamp01(StyleApplier.Num(t) / 100f);
+            else { sl[i] = 1f / 3f; thirds = true; }
+        }
+        if (thirds && ctx.Reported.Add("border-image px slices")) ctx.Out.Warnings.Add("html: border-image slice in px needs the image size; read as thirds (use % for an exact cut)");
+        var u0 = sl[3]; var u1 = 1f - sl[1]; var v0 = sl[0]; var v1 = 1f - sl[2];
+        void Img(float ix, float iy, float iw, float ih, float ua, float va, float ub, float vb)
+        {
+            if (iw <= 0.01f || ih <= 0.01f || ub <= ua || vb <= va) return;
+            ctx.Body.Append(indent).Append("IMG x=").Append(F(ix)).Append(" y=").Append(F(iy)).Append(" w=").Append(F(iw)).Append(" h=").Append(F(ih))
+                .Append(" src=\"").Append(url.Replace("\"", string.Empty)).Append("\" fit=fill uv=[").Append(F(ua)).Append(',').Append(F(va)).Append(',').Append(F(ub)).Append(',').Append(F(vb)).Append("]\n");
+            ctx.Out.Nodes++;
+        }
+        var t0 = bw[0]; var r0 = bw[1]; var b0 = bw[2]; var l0 = bw[3];
+        Img(x, y, l0, t0, 0f, 0f, u0, v0);                                   // top-left
+        Img(x + l0, y, w - l0 - r0, t0, u0, 0f, u1, v0);                      // top
+        Img(x + w - r0, y, r0, t0, u1, 0f, 1f, v0);                           // top-right
+        Img(x, y + t0, l0, h - t0 - b0, 0f, v0, u0, v1);                      // left
+        if (fill) Img(x + l0, y + t0, w - l0 - r0, h - t0 - b0, u0, v0, u1, v1); // centre
+        Img(x + w - r0, y + t0, r0, h - t0 - b0, u1, v0, 1f, v1);             // right
+        Img(x, y + h - b0, l0, b0, 0f, v1, u0, 1f);                           // bottom-left
+        Img(x + l0, y + h - b0, w - l0 - r0, b0, u0, v1, u1, 1f);             // bottom
+        Img(x + w - r0, y + h - b0, r0, b0, u1, v1, 1f, 1f);                  // bottom-right
+        return true;
+    }
+
+    /// <summary>True when the transform's rotateX/rotateY turn the element past 90 degrees, showing its back.</summary>
+    private static bool BackfaceTurned(string transform)
+    {
+        var sign = 1f;
+        foreach (var (name, args) in StyleApplier.Functions(transform))
+        {
+            if (name is not ("rotatex" or "rotatey") || args.Length == 0) continue;
+            var c = Mathf.Cos(StyleApplier.Num(args[0].Trim()) * Mathf.Deg2Rad);
+            sign *= c < 0f ? -1f : 1f;
+        }
+        return sign < 0f;
+    }
+
+    /// <summary>The cascaded declarations of a pseudo-element of an element, for the ones with no generated node (scrollbars, first-line).</summary>
+    private static Dictionary<string, string> PseudoCss(Ctx ctx, VisualElement ve, string pseudo)
+    {
+        var css = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (!ctx.Built.NodeOf.TryGetValue(ve, out var node)) return css;
+        var probe = new HtmlNode { Tag = "span", Parent = node };
+        probe.Attributes["data-pseudo"] = pseudo;
+        var matched = new List<(int spec, int order, CssRule rule)>();
+        foreach (var rule in ctx.Built.Rules)
+        {
+            var best = -1;
+            foreach (var sel in rule.Selectors)
+                if (sel.Chain[sel.Chain.Count - 1].PseudoElement == pseudo && sel.Matches(probe)) best = Math.Max(best, sel.Specificity);
+            if (best >= 0) matched.Add((best, rule.Order, rule));
+        }
+        matched.Sort((a, b) => a.spec != b.spec ? a.spec.CompareTo(b.spec) : a.order.CompareTo(b.order));
+        foreach (var m in matched)
+            foreach (var d in m.rule.Declarations)
+                css[d.Name] = d.Value.IndexOf("var(", StringComparison.Ordinal) >= 0 ? HtmlRenderer.ResolveVars(d.Value, node) : d.Value.Trim();
+        return css;
+    }
+
+    /// <summary>
+    /// A scrollbar drawn over the right edge of a scroll box, inside it so it reads `sy`:
+    /// a track and a thumb whose position follows the offset. scrollbar-width and
+    /// scrollbar-color, or the ::-webkit-scrollbar family, set its look; none hides it.
+    /// </summary>
+    private static void EmitScrollbar(Ctx ctx, VisualElement ve, Dictionary<string, string> css, float x, float y, float w, float h, float ch, string indent)
+    {
+        var range = ch - h;
+        if (range <= 0.5f) return;
+        var width = 8f;
+        if (css.TryGetValue("scrollbar-width", out var swv))
+        {
+            var v = swv.Trim();
+            if (v == "none") return;
+            if (v == "thin") width = 5f;
+        }
+        var thumb = new Color(1f, 1f, 1f, 0.35f);
+        var track = Color.clear;
+        var radius = width * 0.5f;
+        if (css.TryGetValue("scrollbar-color", out var scv))
+        {
+            var parts = CssParser.SplitTopLevel(scv.Trim(), ' ');
+            if (parts.Count > 0 && StyleApplier.TryColor(parts[0], out var tc)) thumb = tc;
+            if (parts.Count > 1 && StyleApplier.TryColor(parts[1], out var kc)) track = kc;
+        }
+        var bar = PseudoCss(ctx, ve, "-webkit-scrollbar");
+        if (bar.TryGetValue("display", out var bd) && bd == "none") return;
+        if (bar.TryGetValue("width", out var bwv)) width = StyleApplier.Num(bwv);
+        if (bar.TryGetValue("background", out var bb) || bar.TryGetValue("background-color", out bb)) { if (StyleApplier.TryColor(bb, out var c)) track = c; }
+        var tr = PseudoCss(ctx, ve, "-webkit-scrollbar-track");
+        if (tr.TryGetValue("background", out var tb) || tr.TryGetValue("background-color", out tb)) { if (StyleApplier.TryColor(tb, out var c)) track = c; }
+        var th = PseudoCss(ctx, ve, "-webkit-scrollbar-thumb");
+        if (th.TryGetValue("background", out var hb) || th.TryGetValue("background-color", out hb)) { if (StyleApplier.TryColor(hb, out var c)) thumb = c; }
+        if (th.TryGetValue("border-radius", out var hr)) radius = StyleApplier.Num(hr);
+        if (width <= 0.01f) return;
+        var thumbH = Mathf.Max(16f, h * h / ch);
+        var k = 1f + (h - thumbH) / range;
+        if (track.a > 0.002f)
+        {
+            ctx.Body.Append(indent).Append("R x=").Append(F(x + w - width)).Append(" y==").Append(F(y)).Append("+sy w=").Append(F(width)).Append(" h=").Append(F(h)).Append(" f=").Append(Hex(track)).Append('\n');
+            ctx.Out.Nodes++;
+        }
+        ctx.Body.Append(indent).Append("R x=").Append(F(x + w - width + 1f)).Append(" y==").Append(F(y)).Append("+sy*").Append(F(k)).Append(" w=").Append(F(width - 2f)).Append(" h=").Append(F(thumbH))
+            .Append(" rx=").Append(F(Mathf.Min(radius, (width - 2f) * 0.5f))).Append(" f=").Append(Hex(thumb)).Append('\n');
+        ctx.Out.Nodes++;
+    }
+
+    /// <summary>
+    /// animation-timeline: scroll() / view(): the element's @keyframes written as one G whose
+    /// opacity and transform are piecewise expressions over the scroll progress p (0..1),
+    /// eased per segment; scroll() runs over the box's whole range, view() while the
+    /// element crosses the viewport. No clock, no rebuilds: the vector mod evaluates sy.
+    /// </summary>
+    private static string? ScrollTimeline(Ctx ctx, VisualElement ve, Dictionary<string, string> css, string timeline, float x, float y, float w, float h)
+    {
+        AnimationSpec? spec = null;
+        foreach (var (element, s) in ctx.Built.Animations) if (element == ve) spec = s;
+        if (spec == null || !ctx.Built.Keyframes.TryGetValue(spec.Name, out var frames) || frames.Frames.Count == 0) return null;
+        string p;
+        var tl = timeline.Trim().ToLowerInvariant();
+        if (tl.StartsWith("view", StringComparison.Ordinal))
+        {
+            // enters at the viewport bottom (sy = y - top - H), leaves at its top (sy = y - top + h)
+            var enter = y - ctx.ScrollTop - ctx.ScrollH;
+            p = "clamp((sy-(" + F(enter) + "))/" + F(Mathf.Max(1f, h + ctx.ScrollH)) + ",0,1)";
+        }
+        else
+            p = "clamp(sy/" + F(Mathf.Max(1f, ctx.ScrollRange)) + ",0,1)";
+        if (spec.Reverse) p = "(1-" + p + ")";
+
+        var keys = new List<(float at, float o, float tx, float ty, float sx, float sy, float r)>();
+        foreach (var f in frames.Frames)
+        {
+            var o = 1f; var tx = 0f; var ty = 0f; var sx = 1f; var sy = 1f; var r = 0f;
+            var seen = false;
+            foreach (var d in f.Declarations)
+            {
+                if (d.Name == "opacity") { o = StyleApplier.Num(d.Value); seen = true; }
+                else if (d.Name == "transform")
+                {
+                    seen = true;
+                    foreach (var (name, args) in StyleApplier.Functions(d.Value))
+                    {
+                        float A(int i) => args.Length > i ? StyleApplier.Num(args[i].Trim()) : 0f;
+                        switch (name)
+                        {
+                            case "translate": tx = A(0); ty = args.Length > 1 ? A(1) : 0f; break;
+                            case "translatex": tx = A(0); break;
+                            case "translatey": ty = A(0); break;
+                            case "scale": sx = A(0); sy = args.Length > 1 ? A(1) : A(0); break;
+                            case "scalex": sx = A(0); break;
+                            case "scaley": sy = A(0); break;
+                            case "rotate": r = A(0); break;
+                        }
+                    }
+                }
+            }
+            if (!seen && keys.Count > 0) { var prev = keys[keys.Count - 1]; o = prev.o; tx = prev.tx; ty = prev.ty; sx = prev.sx; sy = prev.sy; r = prev.r; }
+            keys.Add((f.Percent / 100f, o, tx, ty, sx, sy, r));
+        }
+        if (keys.Count == 1) keys.Insert(0, (0f, 1f, 0f, 0f, 1f, 1f, 0f));
+
+        // piecewise: nested if() over the segments, each eased on its own progress
+        string Piece(Func<(float at, float o, float tx, float ty, float sx, float sy, float r), float> pick)
+        {
+            var all = true;
+            for (var i = 1; i < keys.Count; i++) if (Mathf.Abs(pick(keys[i]) - pick(keys[0])) > 0.0001f) all = false;
+            if (all) return F(pick(keys[0]));
+            var expr = F(pick(keys[keys.Count - 1]));
+            for (var i = keys.Count - 2; i >= 0; i--)
+            {
+                var a = keys[i]; var b = keys[i + 1];
+                var span = Mathf.Max(0.0001f, b.at - a.at);
+                var local = spec.Easing.Expr("clamp((" + p + "-" + F(a.at) + ")/" + F(span) + ",0,1)");
+                var seg = F(pick(a)) + "+(" + F(pick(b) - pick(a)) + ")*" + local;
+                expr = "if(lt(" + p + "," + F(b.at) + ")," + seg + "," + expr + ")";
+            }
+            return "=" + expr;
+        }
+        var sb = new StringBuilder("G a=[").Append(F(x + w * 0.5f)).Append(',').Append(F(y + h * 0.5f)).Append(']');
+        var op = Piece(k => k.o);
+        if (op != "1") sb.Append(" o=").Append(Quote(op));
+        var txe = Piece(k => k.tx); var tye = Piece(k => k.ty);
+        if (txe != "0" || tye != "0") sb.Append(" t=[").Append(Quote(txe)).Append(',').Append(Quote(tye)).Append(']');
+        var re = Piece(k => k.r);
+        if (re != "0") sb.Append(" r=").Append(Quote(re));
+        var sxe = Piece(k => k.sx); var sye = Piece(k => k.sy);
+        if (sxe != "1" || sye != "1") sb.Append(" s=[").Append(Quote(sxe)).Append(',').Append(Quote(sye)).Append(']');
+        return sb.ToString();
+    }
+
+    private static string Quote(string v) => v.StartsWith("=", StringComparison.Ordinal) ? "\"" + v + "\"" : v;
+
     private static string BorderStyle(Dictionary<string, string> css) => SideStyle(css, "top", 0);
 
     private static bool IsBorderStyle(string p) => p is "solid" or "dashed" or "dotted" or "double" or "groove" or "ridge" or "inset" or "outset" or "none" or "hidden";
@@ -2320,7 +2708,10 @@ internal static class VectorEmitter
                 case "skewy": Mul(1, Mathf.Tan(A(0) * Mathf.Deg2Rad), 0, 1, 0, 0); break;
                 case "matrix": if (args.Length >= 6) Mul(A(0), A(1), A(2), A(3), A(4), A(5)); break;
                 case "matrix3d": if (args.Length >= 16) Mul(A(0), A(1), A(4), A(5), A(12), A(13)); break;
-                // rotateX/rotateY/perspective: no depth here; the 2D part is identity
+                // rotateX/rotateY: the flat projection of the turn, a foreshortening (a card flip reads as its width closing and reopening)
+                case "rotatex": Mul(1, 0, 0, Mathf.Cos(A(0) * Mathf.Deg2Rad), 0, 0); break;
+                case "rotatey": Mul(Mathf.Cos(A(0) * Mathf.Deg2Rad), 0, 0, 1, 0, 0); break;
+                // perspective: no depth here
             }
             any = true;
         }

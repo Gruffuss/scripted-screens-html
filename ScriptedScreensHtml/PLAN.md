@@ -198,6 +198,8 @@ its own layout boxes and the pointer position (Batch A and D).
 | F1 SVG and numbers | see git | yes | parser tests | not yet (HtmlTest9); `<image>` needs vector 9, the concave clip vector 8 |
 | F2 cascade | see git | yes | parser tests (at-rules, form pseudo-classes, pseudo-elements) | not yet (HtmlTest10) |
 | F3 text, lists, tables, layout, script | see git | yes | parser tests, prelude smoke test (fragments) | not yet (HtmlTest11) |
+| F4 rescued items | see git | yes | parser tests (@counter-style, pseudo-elements) | not yet (HtmlTest12); first-line needs vector 15, nine-slice vector 16, gradient text vector 14 |
+| F5 silent list | see git | yes | (no behaviour) | n/a |
 
 SUPPORT.md is rewritten from this file once the pages have been seen on a console.
 
@@ -207,3 +209,21 @@ A, then B, then D, then C, then E. A first because a real stylesheet hits `box-s
 `currentColor`, `hsl()` and nesting on its first screen; B because pages use the tags; D because
 scripts written from habit use `insertAdjacentHTML` and `dispatchEvent` before they use any
 paint effect; C and E are visual polish and can run while the vector asks are in flight.
+
+## Approximations left by Batch F (to finish, not limits)
+
+- `@container` size queries are decided against the design size like `@media`; a real one
+  needs the container's laid-out size and a re-cascade after layout.
+- `::after` content is generated before the element's children, so a `counter()` in it does
+  not include increments by descendants.
+- `::first-letter`: the rest of the paragraph wraps below the letter as one label, not
+  around it (no inline flow around a float in the layout engine).
+- `ruby`: the annotation is small and raised after its base, in the sentence; a browser
+  stacks it above the base.
+- `border-image` with a `px`/number slice: the image size is unknown here, read as thirds
+  (percent slices are exact). Vector 16 carries the crop.
+- `text-decoration` longhands (colour, thickness, offset, style) are drawn as geometry
+  under single-line labels only; a wrapped label keeps TextMeshPro's plain underline.
+- `rotateX`/`rotateY` are the flat foreshortening (`cos`), no perspective.
+- `animation-timeline: scroll()/view()` covers opacity and the 2D transform functions
+  in the keyframes; `animation-range` is ignored.

@@ -461,7 +461,11 @@ internal sealed class HtmlSurface : MonoBehaviour
 
         _animations.Clear();
         foreach (var (element, spec) in built.Animations)
+        {
+            // animation-timeline: scroll()/view(): the emitter writes the frames as expressions over the scroll offset; no clock runs it
+            if (built.CssOf(element).TryGetValue("animation-timeline", out var timeline) && timeline.Trim() != "auto") continue;
             _animations.Add(new KeyframeRunner(element, built.Keyframes[spec.Name], spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m)));
+        }
 
         _dirty = true;
         Wake();

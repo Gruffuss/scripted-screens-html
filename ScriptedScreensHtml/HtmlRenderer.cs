@@ -19,6 +19,7 @@ internal static class HtmlRenderer
     {
         "b", "strong", "i", "em", "u", "s", "span", "br", "small", "big", "font", "code", "sub", "sup", "mark", "a",
         "abbr", "cite", "q", "kbd", "samp", "var", "time", "dfn", "del", "ins", "bdi", "wbr", "data", "strike", "tt",
+        "ruby", "rt", "rp", "rb",
     };
 
     private static readonly HashSet<string> Skipped = new(StringComparer.OrdinalIgnoreCase)
@@ -117,6 +118,7 @@ internal static class HtmlRenderer
         CssParser.ViewportWidth = result.ViewportWidth > 0f ? result.ViewportWidth : 460f;
         CssParser.ViewportHeight = CssParser.ViewportWidth * SurfaceAspect;
         Counters.Clear();
+        CssParser.CounterStyles.Clear();
         CssParser.FontFaces.Clear();
         CssParser.Imports.Clear();
         CssParser.PropertyInitials.Clear();
@@ -1036,7 +1038,7 @@ internal static class HtmlRenderer
         if (!all) values = new List<int> { values[values.Count - 1] };
         var parts = new List<string>();
         foreach (var v in values)
-            parts.Add(style switch
+            parts.Add(CssParser.CounterStyles.TryGetValue(style, out var custom) && custom.Text(v) is { } customText ? customText : style switch
             {
                 "lower-alpha" or "lower-latin" => v >= 1 ? ((char)('a' + (v - 1) % 26)).ToString() : v.ToString(CultureInfo.InvariantCulture),
                 "upper-alpha" or "upper-latin" => v >= 1 ? ((char)('A' + (v - 1) % 26)).ToString() : v.ToString(CultureInfo.InvariantCulture),
@@ -1080,10 +1082,47 @@ internal static class HtmlRenderer
             }
             if (content == null) continue;
             ApplyCounters(probe, node, pseudoDecls);
+            if (which == "after") FirstLetter(node, rules);
             var text = GeneratedText(content, node);
             if (text == null) continue;
             probe.Children.Add(new HtmlNode { Text = text, Parent = probe });
             if (which == "before") node.Children.Insert(0, probe); else node.Children.Add(probe);
+        }
+    }
+
+    /// <summary>
+    /// ::first-letter: when a rule names it, the first letter (with any punctuation before
+    /// it) of the element's first text becomes a generated span the cascade styles; the
+    /// parent then lays its text out as a wrapping row of labels.
+    /// ponytail: the rest of the text wraps below the letter as one label, not around it
+    /// </summary>
+    private static void FirstLetter(HtmlNode node, List<CssRule> rules)
+    {
+        var probe = new HtmlNode { Tag = "span", Parent = node };
+        probe.Attributes["data-pseudo"] = "first-letter";
+        var any = false;
+        foreach (var rule in rules)
+        {
+            foreach (var sel in rule.Selectors)
+                if (sel.Chain[sel.Chain.Count - 1].PseudoElement == "first-letter" && sel.Matches(probe)) { any = true; break; }
+            if (any) break;
+        }
+        if (!any) return;
+        for (var i = 0; i < node.Children.Count; i++)
+        {
+            var c = node.Children[i];
+            if (!c.IsText) { if (c.Attr("data-pseudo") == "before") continue; return; }
+            var t = c.Text;
+            var start = 0;
+            while (start < t.Length && char.IsWhiteSpace(t[start])) start++;
+            if (start >= t.Length) continue;
+            var end = start;
+            while (end < t.Length && char.IsPunctuation(t[end])) end++;
+            if (end < t.Length) end++;
+            probe.Children.Add(new HtmlNode { Text = t.Substring(start, end - start), Parent = probe });
+            c.Text = t.Substring(end);
+            node.Children.Insert(i, probe);
+            return;
         }
     }
 
@@ -1440,6 +1479,12 @@ internal static class HtmlRenderer
             return;
         }
         if (type == "none") return;
+        if (CssParser.CounterStyles.TryGetValue(type, out var counterStyle))
+        {
+            var t = counterStyle.Text(ordinal) ?? ordinal.ToString(CultureInfo.InvariantCulture);
+            li.Children.Insert(0, new HtmlNode { Text = counterStyle.Prefix + t + counterStyle.Suffix, Parent = li });
+            return;
+        }
         string? text = type switch
         {
             "decimal" => ordinal + ". ",
@@ -1555,6 +1600,10 @@ internal static class HtmlRenderer
             case "wbr": return;
             case "sub": open.Append("<sub>"); close.Insert(0, "</sub>"); break;
             case "sup": open.Append("<sup>"); close.Insert(0, "</sup>"); break;
+            // ruby: the annotation small and raised right after its base. ponytail: a browser
+            // stacks it above the base; inline keeps the sentence flowing in one label
+            case "rt": open.Append("<size=55%><voffset=0.55em>"); close.Insert(0, "</voffset></size>"); break;
+            case "rp": return;
             case "small": size = "80%"; break;
             case "big": size = "120%"; break;
             case "mark": colour = "#FFD54F"; break;

@@ -480,6 +480,19 @@ internal static class StyleApplier
 
     private static readonly HashSet<string> Elsewhere = new(StringComparer.Ordinal)
     {
+        // Batch F5: accepted silently. Each has no visible effect here (no printing, no pointer
+        // physics, no font hinting, no snap physics) or is a hint the layout does not need.
+        "scroll-snap-type", "scroll-snap-align", "scroll-snap-stop", "scroll-margin", "scroll-margin-top", "scroll-margin-right", "scroll-margin-bottom", "scroll-margin-left",
+        "scroll-padding", "scroll-padding-top", "scroll-padding-right", "scroll-padding-bottom", "scroll-padding-left", "scroll-behavior", "overscroll-behavior", "overscroll-behavior-x", "overscroll-behavior-y",
+        "will-change", "contain", "content-visibility", "isolation", "touch-action", "-webkit-font-smoothing", "-moz-osx-font-smoothing", "font-smooth", "text-rendering", "image-rendering",
+        "color-scheme", "zoom", "all", "text-wrap", "text-size-adjust", "-webkit-text-size-adjust", "-webkit-tap-highlight-color", "-webkit-overflow-scrolling", "print-color-adjust", "-webkit-print-color-adjust", "forced-color-adjust",
+        "resize", "caret-color", "tab-size", "orphans", "widows", "page-break-before", "page-break-after", "page-break-inside", "break-before", "break-after", "break-inside",
+        "unicode-bidi", "direction", "font-kerning", "font-feature-settings", "font-optical-sizing", "font-synthesis", "font-stretch", "font-variant", "font-variant-ligatures", "font-variant-caps", "quotes", "hanging-punctuation",
+        "background-attachment", "animation-timeline", "animation-range", "animation-range-start", "animation-range-end",
+        "scroll-timeline", "scroll-timeline-name", "scroll-timeline-axis", "view-timeline", "view-timeline-name", "view-timeline-axis", "timeline-scope",
+        "corner-shape", "border-image", "border-image-source", "border-image-slice", "border-image-width", "border-image-repeat", "border-image-outset",
+        "backface-visibility", "perspective", "perspective-origin", "transform-style", "scrollbar-width", "scrollbar-color", "scrollbar-gutter",
+        "background-clip", "-webkit-background-clip", "-webkit-text-fill-color", "ruby-position", "ruby-align",
         "justify-items", "justify-self", "table-layout", "caption-side", "empty-cells", "grid-area", "grid-template", "grid-template-areas",
         "counter-reset", "counter-increment", "counter-set", "list-style-image", "text-indent", "word-break", "overflow-wrap", "word-wrap", "hyphens", "text-align-last", "order", "-webkit-box-orient",
         "container", "container-type", "container-name",

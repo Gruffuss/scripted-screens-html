@@ -172,5 +172,29 @@ Console.WriteLine("Keyframes, child combinator, !important");
     Check(warnings.Count == 0, $"no warnings for the F2 sheet (got {string.Join("; ", warnings)})");
 }
 
+// Batch F4: @counter-style systems, the rescued pseudo-elements
+{
+    CssParser.CounterStyles.Clear();
+    var warnings = new List<string>();
+    CssParser.ParseStylesheet(
+        "@counter-style stars { system: cyclic; symbols: \"*\" \"+\"; suffix: \" \"; }" +
+        "@counter-style abc { system: alphabetic; symbols: a b c; }" +
+        "@counter-style bin { system: numeric; symbols: \"0\" \"1\"; }" +
+        "@counter-style dots { system: symbolic; symbols: \"•\"; }" +
+        "p::first-letter { a: 1 } p::first-line { a: 2 } div::-webkit-scrollbar { width: 6px } div::-webkit-scrollbar-thumb { a: 3 }",
+        m => warnings.Add(m), new Dictionary<string, CssKeyframes>());
+    var stars = CssParser.CounterStyles["stars"];
+    Check(stars.Text(1) == "*" && stars.Text(2) == "+" && stars.Text(3) == "*" && stars.Suffix == " ", "@counter-style cyclic wraps its symbols");
+    Check(CssParser.CounterStyles["abc"].Text(4) == "aa" && CssParser.CounterStyles["abc"].Text(3) == "c", "@counter-style alphabetic counts like spreadsheet columns");
+    Check(CssParser.CounterStyles["bin"].Text(5) == "101" && CssParser.CounterStyles["bin"].Text(0) == "0", "@counter-style numeric is a positional system");
+    Check(CssParser.CounterStyles["dots"].Text(3) == "•••", "@counter-style symbolic repeats");
+    var p = HtmlParser.Parse("<p></p>").Children[0];
+    var fl = new HtmlNode { Tag = "span", Parent = p }; fl.Attributes["data-pseudo"] = "first-letter";
+    var sb = new HtmlNode { Tag = "span", Parent = HtmlParser.Parse("<div></div>").Children[0] }; sb.Attributes["data-pseudo"] = "-webkit-scrollbar";
+    Check(CssParser.ParseSelector("p::first-letter", null)!.Matches(fl) && !CssParser.ParseSelector("p::first-line", null)!.Matches(fl), "::first-letter and ::first-line are distinct pseudo-elements");
+    Check(CssParser.ParseSelector("div::-webkit-scrollbar", null)!.Matches(sb), "::-webkit-scrollbar parses and matches");
+    Check(warnings.Count == 0, $"no warnings for the F4 sheet (got {string.Join("; ", warnings)})");
+}
+
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");
 return failures.Count == 0 ? 0 : 1;
