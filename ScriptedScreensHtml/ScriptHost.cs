@@ -999,6 +999,7 @@ function __escape(s){ return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt
 function __kebab(p){ return String(p).replace(/[A-Z]/g, function(m){ return '-' + m.toLowerCase(); }); }
 function __serialize(c){
   if (!c.__tag) return __escape(String(c.textContent || ''));
+  if (c.__frag) return c.__html !== null ? c.__html : c.__children.map(__serialize).join('');
   if (!c.id) c.id = '__js' + (++__jsSeq);
   var a = ' id=""' + c.id + '""';
   if (c.className) a += ' class=""' + __escape(c.className) + '""';
@@ -1023,7 +1024,11 @@ function __detached(tag){
   Object.defineProperty(o, 'innerHTML', { set: function(v){ if (o.__live) __setHtml(o.id, String(v)); else { o.__html = String(v); o.__text = null; } }, get: function(){ return o.__html || ''; } });
   Object.defineProperty(o, 'textContent', { set: function(v){ if (o.__live) __setText(o.id, String(v)); else { o.__text = String(v); o.__html = null; } }, get: function(){ return o.__text || ''; } });
   Object.defineProperty(o, 'innerText', { set: function(v){ o.textContent = v; }, get: function(){ return o.__text || ''; } });
-  o.__adopt = function(){ o.__live = true; o.__children.forEach(function(c){ if (c.__adopt) c.__adopt(); }); };
+  o.__adopt = function(){ o.__children.forEach(function(c){ if (c.__adopt) c.__adopt(); }); if (o.__frag) { o.__children = []; o.__html = null; return; } o.__live = true; };
+  Object.defineProperty(o, 'childNodes', { get: function(){ return o.__children.slice(); } });
+  Object.defineProperty(o, 'children', { get: function(){ return o.__children.filter(function(c){ return !!c.__tag; }); } });
+  Object.defineProperty(o, 'firstChild', { get: function(){ return o.__children[0] || null; } });
+  Object.defineProperty(o, 'hasChildNodes', { value: function(){ return o.__children.length > 0; } });
   return o;
 }
 var document = {
@@ -1048,7 +1053,7 @@ var document = {
   fonts: { ready: Promise.resolve(), load: function(){ return Promise.resolve([]); }, check: function(){ return true; } },
   get head(){ return __has('head') ? __el('head') : __el('body'); },
   get forms(){ return __query('form').map(__el); }, get images(){ return __query('img').map(__el); }, get links(){ return __query('a').map(__el); }, get scripts(){ return []; },
-  createDocumentFragment: function(){ return __detached('div'); },
+  createDocumentFragment: function(){ var f = __detached('#fragment'); f.__frag = true; f.nodeType = 11; return f; },
   get documentElement(){ return __el('body'); },
   get title(){ return ''; }, set title(v){},
   contains: function(o){ return !!o && __has(o.id); },

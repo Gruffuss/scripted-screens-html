@@ -197,6 +197,7 @@ its own layout boxes and the pointer position (Batch A and D).
 | E canvas | see git | yes | prelude smoke test records a frame | not yet (HtmlTest8) |
 | F1 SVG and numbers | see git | yes | parser tests | not yet (HtmlTest9); `<image>` needs vector 9, the concave clip vector 8 |
 | F2 cascade | see git | yes | parser tests (at-rules, form pseudo-classes, pseudo-elements) | not yet (HtmlTest10) |
+| F3 text, lists, tables, layout, script | see git | yes | parser tests, prelude smoke test (fragments) | not yet (HtmlTest11) |
 
 SUPPORT.md is rewritten from this file once the pages have been seen on a console.
 

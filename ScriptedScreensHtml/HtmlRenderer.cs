@@ -41,6 +41,8 @@ internal static class HtmlRenderer
         public readonly List<string> ExternalStyles = new();
         /// <summary>@import urls; the surface fetches each and inlines it in place of the statement.</summary>
         public readonly List<string> ExternalImports = new();
+        /// <summary>Module scripts that import from URLs: the surface fetches and runs the imports in order, then the body.</summary>
+        public readonly List<(List<string> urls, string code)> Modules = new();
         /// <summary>Design width from meta viewport, or 0 to use the element's own width.</summary>
         public float ViewportWidth;
         /// <summary>Stylesheet rules and the node each element came from, for className changes at runtime.</summary>
@@ -114,6 +116,7 @@ internal static class HtmlRenderer
         result.ViewportWidth = ReadViewport(doc);
         CssParser.ViewportWidth = result.ViewportWidth > 0f ? result.ViewportWidth : 460f;
         CssParser.ViewportHeight = CssParser.ViewportWidth * SurfaceAspect;
+        Counters.Clear();
         CssParser.FontFaces.Clear();
         CssParser.Imports.Clear();
         CssParser.PropertyInitials.Clear();
@@ -173,6 +176,18 @@ internal static class HtmlRenderer
                 result?.ExternalScripts.Add(src);
                 return;
             }
+            if (type == "module" && result != null)
+            {
+                var text = new StringBuilder();
+                foreach (var c in node.Children) text.Append(c.Text).Append('\n');
+                var urls = ImportUrls(text.ToString(), out var defaults);
+                if (urls.Count > 0)
+                {
+                    // `import x from url`: the module's `export default` lands in __default; bind it to the name
+                    result.Modules.Add((urls, defaults + StripModuleSyntax(text.ToString())));
+                    return;
+                }
+            }
             foreach (var c in node.Children)
                 script.Append(type == "module" ? StripModuleSyntax(c.Text) : c.Text).Append('\n');
             return;
@@ -186,6 +201,22 @@ internal static class HtmlRenderer
     /// resolve, so they would only throw) and `export` is dropped from declarations.
     /// ponytail: real modules need a loader; pages that import from a URL will not work.
     /// </summary>
+    /// <summary>The http(s) urls a module imports, in order; relative specifiers have no base here and are skipped.</summary>
+    private static List<string> ImportUrls(string js, out string defaults)
+    {
+        var urls = new List<string>();
+        var sb = new StringBuilder();
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(js, @"^\s*import\s+(?:([A-Za-z_$][\w$]*)\s*(?:,\s*\{[^}]*\})?\s+from\s+|\{[^}]*\}\s+from\s+|\*\s+as\s+\w+\s+from\s+)?[""']([^""']+)[""']", System.Text.RegularExpressions.RegexOptions.Multiline))
+        {
+            var url = m.Groups[2].Value;
+            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) continue;
+            urls.Add(url);
+            if (m.Groups[1].Success) sb.Append("var ").Append(m.Groups[1].Value).Append(" = typeof __default !== 'undefined' ? __default : undefined;\n");
+        }
+        defaults = sb.ToString();
+        return urls;
+    }
+
     internal static string StripModuleSyntax(string js)
     {
         var lines = js.Split('\n');
@@ -530,6 +561,7 @@ internal static class HtmlRenderer
             if (node.Tag == "details")
                 ShowDetails(ve, node, result);
             ApplyGap(ve, result.CssOf(ve));
+            OrderChildren(ve, result);
             Flow(parent, ve, result);
             return;
         }
@@ -935,10 +967,95 @@ internal static class HtmlRenderer
     /// cascade can address it (CssSelector.Matches) and the layout treats it like a classed
     /// inline element. `content` takes quoted strings, attr(name) and none; counters do not exist.
     /// </summary>
+    /// <summary>
+    /// CSS counters, walked in document order: an entry per counter-reset, scoped to the
+    /// element that reset it (valid for its subtree and following siblings), innermost last.
+    /// </summary>
+    private static readonly List<(string name, HtmlNode scope, int value)> Counters = new();
+
+    private static bool AncestorOrSelf(HtmlNode? a, HtmlNode n)
+    {
+        if (a == null) return true;
+        for (var p = n; p != null; p = p.Parent) if (p == a) return true;
+        return false;
+    }
+
+    /// <summary>The counter declarations of an element or pseudo-element, applied: reset creates, increment/set change the innermost live one (creating it on the element when none is live).</summary>
+    private static void ApplyCounters(HtmlNode scope, HtmlNode at, IEnumerable<CssDeclaration> decls)
+    {
+        Counters.RemoveAll(e => !AncestorOrSelf(e.scope.Parent, at));
+        foreach (var d in decls)
+        {
+            if (d.Name is not ("counter-reset" or "counter-increment" or "counter-set")) continue;
+            var parts = d.Value.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0 || parts[0] == "none") continue;
+            for (var i = 0; i < parts.Length; i++)
+            {
+                var name = parts[i];
+                if (int.TryParse(name, out _)) continue;
+                var n = i + 1 < parts.Length && int.TryParse(parts[i + 1], out var v) ? v : (d.Name == "counter-increment" ? 1 : 0);
+                if (d.Name == "counter-reset") { Counters.Add((name, scope, n)); continue; }
+                var idx = Counters.FindLastIndex(e => e.name == name);
+                if (idx < 0) { Counters.Add((name, scope, n)); continue; }
+                var e = Counters[idx];
+                Counters[idx] = (e.name, e.scope, d.Name == "counter-set" ? n : e.value + n);
+            }
+        }
+    }
+
+    /// <summary>The element's own cascaded declarations (rules by specificity, then inline), for reads before the element is built.</summary>
+    private static List<CssDeclaration> Cascaded(HtmlNode node, List<CssRule> rules)
+    {
+        var matched = new List<(int spec, int order, CssRule rule)>();
+        foreach (var rule in rules)
+        {
+            var best = -1;
+            foreach (var sel in rule.Selectors)
+                if (sel.Matches(node)) best = Math.Max(best, sel.Specificity);
+            if (best >= 0) matched.Add((best, rule.Order, rule));
+        }
+        matched.Sort((x, y) => x.spec != y.spec ? x.spec.CompareTo(y.spec) : x.order.CompareTo(y.order));
+        var list = new List<CssDeclaration>();
+        foreach (var m in matched) list.AddRange(m.rule.Declarations);
+        if (node.Attr("style") is { } inline) list.AddRange(CssParser.ParseDeclarations(inline));
+        return list;
+    }
+
+    private static string? CascadedValue(HtmlNode node, List<CssRule> rules, string name)
+    {
+        string? v = null;
+        foreach (var d in Cascaded(node, rules)) if (d.Name == name) v = d.Value.Trim();
+        return v;
+    }
+
+    private static string CounterText(string name, string style, string separator, bool all)
+    {
+        var values = new List<int>();
+        foreach (var e in Counters) if (e.name == name) values.Add(e.value);
+        if (values.Count == 0) values.Add(0);
+        if (!all) values = new List<int> { values[values.Count - 1] };
+        var parts = new List<string>();
+        foreach (var v in values)
+            parts.Add(style switch
+            {
+                "lower-alpha" or "lower-latin" => v >= 1 ? ((char)('a' + (v - 1) % 26)).ToString() : v.ToString(CultureInfo.InvariantCulture),
+                "upper-alpha" or "upper-latin" => v >= 1 ? ((char)('A' + (v - 1) % 26)).ToString() : v.ToString(CultureInfo.InvariantCulture),
+                "lower-roman" => v >= 1 ? Roman(v).ToLowerInvariant() : "0",
+                "upper-roman" => v >= 1 ? Roman(v) : "0",
+                "decimal-leading-zero" => v.ToString("00", CultureInfo.InvariantCulture),
+                _ => v.ToString(CultureInfo.InvariantCulture),
+            });
+        return string.Join(separator, parts);
+    }
+
     private static void AddGenerated(HtmlNode node, List<CssRule> rules)
     {
         if (node.IsText || node.Tag == "svg" || node.Attr("data-pseudo") != null)
             return;
+        // the element's own counters first, then each pseudo-element's, in order.
+        // ponytail: ::after is generated here, before the children, so a counter it
+        // shows does not include increments by descendants; move it after the subtree if a page needs that
+        ApplyCounters(node, node, Cascaded(node, rules));
         foreach (var which in new[] { "before", "after" })
         {
             var probe = new HtmlNode { Tag = "span", Parent = node };
@@ -946,6 +1063,7 @@ internal static class HtmlRenderer
             string? content = null;
             var bestSpec = -1;
             var bestOrder = -1;
+            var pseudoDecls = new List<CssDeclaration>();
             foreach (var rule in rules)
             {
                 var spec = -1;
@@ -955,11 +1073,13 @@ internal static class HtmlRenderer
                 if (spec < 0) continue;
                 foreach (var d in rule.Declarations)
                 {
+                    if (d.Name is "counter-reset" or "counter-increment" or "counter-set") pseudoDecls.Add(d);
                     if (d.Name != "content") continue;
                     if (spec > bestSpec || (spec == bestSpec && rule.Order > bestOrder)) { content = d.Value; bestSpec = spec; bestOrder = rule.Order; }
                 }
             }
             if (content == null) continue;
+            ApplyCounters(probe, node, pseudoDecls);
             var text = GeneratedText(content, node);
             if (text == null) continue;
             probe.Children.Add(new HtmlNode { Text = text, Parent = probe });
@@ -977,6 +1097,20 @@ internal static class HtmlRenderer
         while (i < v.Length)
         {
             var ch = v[i];
+            if ((v.Length - i > 8 && string.CompareOrdinal(v, i, "counter(", 0, 8) == 0) || (v.Length - i > 9 && string.CompareOrdinal(v, i, "counters(", 0, 9) == 0))
+            {
+                var all = v[i + 7] == 's';
+                var open = v.IndexOf('(', i);
+                var closeParen = v.IndexOf(')', open);
+                if (closeParen < 0) break;
+                var args = CssParser.SplitTopLevel(v.Substring(open + 1, closeParen - open - 1), ',');
+                var name = args.Count > 0 ? args[0].Trim() : string.Empty;
+                var sep = all && args.Count > 1 ? args[1].Trim().Trim('"', '\'') : ".";
+                var style = args.Count > (all ? 2 : 1) ? args[all ? 2 : 1].Trim() : "decimal";
+                sb.Append(CounterText(name, style, sep, all));
+                i = closeParen + 1;
+                continue;
+            }
             if (ch == '"' || ch == '\'')
             {
                 i++;
@@ -1041,13 +1175,17 @@ internal static class HtmlRenderer
         TagDefaults(ve, node.Tag!);
         ApplyStyles(ve, node, rules, result);
         parent.Add(ve);
+        HtmlNode? bottomCaption = null;
+        var hideEmpty = CascadedValue(node, rules, "empty-cells") == "hide";
+        if (hideEmpty) node.Attributes["data-empty-cells"] = "hide";
         foreach (var child in node.Children)
         {
             if (child.IsText) continue;
             switch (child.Tag)
             {
                 case "caption":
-                    Append(ve, child, rules, result);
+                    if (CascadedValue(child, rules, "caption-side") == "bottom") bottomCaption = child;
+                    else Append(ve, child, rules, result);
                     break;
                 case "thead": case "tbody": case "tfoot":
                 {
@@ -1064,7 +1202,21 @@ internal static class HtmlRenderer
                     break;
             }
         }
+        if (bottomCaption != null) Append(ve, bottomCaption, rules, result);
         ApplyGap(ve, result.CssOf(ve));
+    }
+
+    private static bool IsEmptyCell(HtmlNode cell)
+    {
+        foreach (var c in cell.Children)
+            if (!c.IsText || c.Text.Trim().Length > 0) return false;
+        return true;
+    }
+
+    private static HtmlNode? TableOf(HtmlNode n)
+    {
+        for (var p = n.Parent; p != null; p = p.Parent) if (p.Tag == "table") return p;
+        return null;
     }
 
     private static void AppendRow(VisualElement table, HtmlNode tr, int columns, List<CssRule> rules, Result result)
@@ -1078,6 +1230,9 @@ internal static class HtmlRenderer
         foreach (var cell in tr.Children)
         {
             if (cell.Tag != "td" && cell.Tag != "th") continue;
+            // empty-cells: hide on the table: an empty cell keeps its place and paints nothing
+            if (IsEmptyCell(cell) && TableOf(tr)?.Attr("data-empty-cells") == "hide")
+                cell.Attributes["style"] = "visibility: hidden;" + (cell.Attr("style") ?? string.Empty);
             var w = cell.Attr("width");
             if (w != null && cell.Attr("style")?.Contains("width") != true)
                 cell.Attributes["style"] = "width:" + (w.EndsWith("%", StringComparison.Ordinal) ? w : w + "px") + ";" + (cell.Attr("style") ?? string.Empty);
@@ -1103,6 +1258,21 @@ internal static class HtmlRenderer
     /// - `column-count: n` splits the children into n equal columns in order.
     /// - `aspect-ratio` sets the missing dimension from the other on every layout pass.
     /// </summary>
+    /// <summary>The flex `order` property: children re-sequenced by it, stable, only when one names it.</summary>
+    private static void OrderChildren(VisualElement ve, Result result)
+    {
+        var any = false;
+        foreach (var child in ve.Children())
+            if (result.CssOf(child).ContainsKey("order")) { any = true; break; }
+        if (!any) return;
+        var kids = new List<VisualElement>(ve.Children());
+        var keyed = new List<(int order, int index, VisualElement ve)>();
+        for (var i = 0; i < kids.Count; i++)
+            keyed.Add((result.CssOf(kids[i]).TryGetValue("order", out var o) && int.TryParse(o.Trim(), out var n) ? n : 0, i, kids[i]));
+        keyed.Sort((a, b) => a.order != b.order ? a.order.CompareTo(b.order) : a.index.CompareTo(b.index));
+        foreach (var k in keyed) k.ve.BringToFront();
+    }
+
     private static void Flow(VisualElement parent, VisualElement ve, Result result)
     {
         var css = result.CssOf(ve);
@@ -1226,12 +1396,17 @@ internal static class HtmlRenderer
         if (li.Attr("data-listed") != null) return;
         li.Attributes["data-listed"] = "1";
         var type = list.Tag == "ol" ? "decimal" : "disc";
+        string? image = null;
         void TakeType(string name, string value)
         {
             if (name == "list-style-type") { type = value.Trim(); return; }
+            if (name == "list-style-image") { image = value.Trim() == "none" ? null : value.Trim(); return; }
             if (name != "list-style") return;
             foreach (var part in value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
                 if (part is "none" or "disc" or "circle" or "square" or "decimal" or "lower-alpha" or "upper-alpha" or "lower-roman" or "upper-roman") type = part;
+                else if (part.StartsWith("url(", StringComparison.OrdinalIgnoreCase)) image = part;
+            }
         }
         // The list's own value, then rules on the item, then the item's inline style: the
         // item has not been through the cascade yet, so its declarations are read here.
@@ -1252,6 +1427,18 @@ internal static class HtmlRenderer
         if (li.Attr("style") is { } inline)
             foreach (var d in CssParser.ParseDeclarations(inline))
                 TakeType(d.Name, d.Value);
+        if (image != null)
+        {
+            // list-style-image: the marker is a small image box the emitter draws as IMG
+            var u = image.IndexOf('(');
+            var src = u >= 0 ? image.Substring(u + 1, Math.Max(0, image.LastIndexOf(')') - u - 1)).Trim().Trim('"', '\'') : image;
+            var img = new HtmlNode { Tag = "img", Parent = li };
+            img.Attributes["src"] = src;
+            img.Attributes["data-marker-image"] = "1";
+            img.Attributes["style"] = "width: 0.9em; height: 0.9em; margin-right: 0.4em; align-self: center; flex-shrink: 0";
+            li.Children.Insert(0, img);
+            return;
+        }
         if (type == "none") return;
         string? text = type switch
         {

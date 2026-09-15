@@ -92,4 +92,14 @@ if (cx.measureText('abc').width <= 0) throw new Error('measureText');
 __flushCanvases();
 if (!frame || frame.cmds.length < 40 || frame.cols.indexOf('#ff0000') < 0 || !frame.cols.some(c => c.indexOf('GL|0|0|10|0|0:red;1:blue') === 0)) throw new Error('canvas frame ' + JSON.stringify(frame));
 if (frame.cols.indexOf('bold 14px Barlow') < 0 || frame.cols.indexOf('hi') < 0) throw new Error('canvas strings');
+// DocumentFragment: appended as its children, no wrapper; emptied afterwards, reusable
+const frag = document.createDocumentFragment();
+const li1 = document.createElement('li'); li1.textContent = 'one';
+const li2 = document.createElement('li'); li2.className = 'two';
+frag.appendChild(li1); frag.appendChild(li2);
+if (frag.childNodes.length !== 2 || frag.firstChild !== li1) throw new Error('fragment children');
+a.appendChild(frag);
+const last = calls[calls.length - 1];
+if (last.indexOf('append:a:<li') !== 0 || last.indexOf('<div') >= 0 || last.indexOf('class="two"') < 0 || last.indexOf('one') < 0) throw new Error('fragment append ' + last);
+if (frag.childNodes.length !== 0 || !li1.__live) throw new Error('fragment not emptied/adopted');
 process.stdout.write('prelude smoke ok; ' + calls.length + ' binding calls' + String.fromCharCode(10));

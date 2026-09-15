@@ -448,6 +448,8 @@ internal sealed class HtmlSurface : MonoBehaviour
             if (_fetched.Add("css:" + href)) StartCoroutine(Fetch(href, css => { _source = InlineStylesheet(_source, href, css); Build(); }));
         foreach (var href in built.ExternalImports)
             if (_fetched.Add("css:" + href)) StartCoroutine(Fetch(href, css => { _source = InlineImport(_source, href, css); Build(); }));
+        foreach (var (urls, code) in built.Modules)
+            StartCoroutine(RunModule(urls, code));
         foreach (var src in built.ExternalScripts)
             if (_fetched.Add("js:" + src)) StartCoroutine(Fetch(src, js => _script?.Run(src.EndsWith(".mjs", StringComparison.OrdinalIgnoreCase) ? HtmlRenderer.StripModuleSyntax(js) : js)));
         _svgs.Clear();
@@ -981,6 +983,14 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         var rx = new System.Text.RegularExpressions.Regex(@"@import\s+(?:url\()?[""']?" + System.Text.RegularExpressions.Regex.Escape(href) + @"[""']?\)?[^;]*;", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         return rx.Replace(source, css.Replace("</style>", string.Empty), 1);
+    }
+
+    /// <summary>A module script: its URL imports fetched and run in order (exports become globals), then its body.</summary>
+    private System.Collections.IEnumerator RunModule(List<string> urls, string code)
+    {
+        foreach (var url in urls)
+            yield return Fetch(url, js => _script?.Run(HtmlRenderer.StripModuleSyntax(js)));
+        _script?.Run(code);
     }
 
     private static string InlineStylesheet(string source, string href, string css)

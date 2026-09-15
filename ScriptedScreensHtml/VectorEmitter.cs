@@ -774,6 +774,16 @@ internal static class VectorEmitter
             return;
         if (css.TryGetValue("text-transform", out var tt))
             text = Transform(text, tt.Trim().ToLowerInvariant());
+        // text-indent: TextMeshPro's line-indent is the first line of each paragraph, which
+        // is the block's first line for a label. word-break: break-all lets a line break
+        // between any two characters: a zero-width space after each one outside tags.
+        if (css.TryGetValue("text-indent", out var ti) && rs.fontSize > 0f)
+        {
+            var px = ti.Trim().EndsWith("em", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(ti) * rs.fontSize : ti.Trim().EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(ti) / 100f * w : StyleApplier.Num(ti);
+            if (px != 0f) text = "<line-indent=" + F(px) + "px>" + text;
+        }
+        if (css.TryGetValue("word-break", out var wb) && wb.Trim() == "break-all")
+            text = BreakAll(text);
         var deco = Decoration(css);
         var ox = x; var ow = w;
         var drawDeco = deco.line != 0 && !(rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && text.IndexOf(' ') >= 0) && (deco.colour != null || deco.style != "solid" || deco.thickness > 0f || !float.IsNaN(deco.offset) || (deco.line & 4) != 0);
@@ -867,7 +877,12 @@ internal static class VectorEmitter
             var px = ls.EndsWith("em", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(ls) * rs.fontSize : StyleApplier.Num(ls);
             if (px != 0f) sb.Append(" cspace=").Append(F(px / rs.fontSize * 100f));
         }
-        if (css.TryGetValue("text-align", out var ta) && ta.Trim() == "justify") sb.Append(" align=justified");
+        // text-align-last: the last line's alignment, which for a single-line label is the line
+        var lastAlign = !wraps && css.TryGetValue("text-align-last", out var tal) ? tal.Trim().ToLowerInvariant() : null;
+        if (lastAlign is "center") sb.Append(" align=center");
+        else if (lastAlign is "right" or "end") sb.Append(" align=right");
+        else if (lastAlign is "left" or "start") { }
+        else if (css.TryGetValue("text-align", out var ta) && ta.Trim() == "justify") sb.Append(" align=justified");
         else if (centre) sb.Append(" align=center");
         else if (right) sb.Append(" align=right");
         sb.Append(" valign=middle");
@@ -995,6 +1010,21 @@ internal static class VectorEmitter
     {
         ctx.Body.Append(indent).Append("L p=[").Append(F(x1)).Append(',').Append(F(y1)).Append(',').Append(F(x2)).Append(',').Append(F(y2)).Append("] s=").Append(Hex(c)).Append(" sw=").Append(F(width)).Append(extra).Append('\n');
         ctx.Out.Nodes++;
+    }
+
+    /// <summary>A zero-width space after every character outside rich-text tags, so TextMeshPro may break anywhere (word-break: break-all).</summary>
+    private static string BreakAll(string text)
+    {
+        var sb = new StringBuilder(text.Length * 2);
+        var inTag = false;
+        foreach (var ch in text)
+        {
+            if (ch == '<') inTag = true;
+            sb.Append(ch);
+            if (inTag) { if (ch == '>') inTag = false; continue; }
+            if (!char.IsWhiteSpace(ch)) sb.Append('\u200B');
+        }
+        return sb.ToString();
     }
 
     /// <summary>text-transform over the text outside rich-text tags.</summary>

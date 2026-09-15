@@ -64,6 +64,28 @@ internal static class StyleApplier
                 s.flexDirection = v switch { "row" => FlexDirection.Row, "row-reverse" => FlexDirection.RowReverse, "column-reverse" => FlexDirection.ColumnReverse, _ => FlexDirection.Column };
                 break;
             case "flex-wrap": s.flexWrap = v == "wrap" ? Wrap.Wrap : v == "wrap-reverse" ? Wrap.WrapReverse : Wrap.NoWrap; break;
+            case "flex-flow":
+                foreach (var part in v.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                    Apply(ve, new CssDeclaration(part.StartsWith("wrap", StringComparison.Ordinal) || part == "nowrap" ? "flex-wrap" : "flex-direction", part), warn);
+                break;
+            case "place-items": case "place-content": case "place-self":
+            {
+                // align-* first, justify-* second (or the same value for both)
+                var parts = v.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 0) break;
+                var suffix = d.Name.Substring(6);
+                Apply(ve, new CssDeclaration("align-" + suffix, parts[0]), warn);
+                if (suffix == "content") Apply(ve, new CssDeclaration("justify-content", parts.Length > 1 ? parts[1] : parts[0]), warn);
+                break;
+            }
+            case "-webkit-line-clamp": case "line-clamp":
+            {
+                // the box ends after n lines and the emitter ellipsises the last: max-height in line heights
+                if (v == "none") break;
+                var n = Num(v);
+                if (n > 0f) { s.maxHeight = n * EmSize * 1.25f; s.overflow = Overflow.Hidden; }
+                break;
+            }
             case "flex-grow": s.flexGrow = Num(v); break;
             case "flex-shrink": s.flexShrink = Num(v); break;
             case "flex-basis": s.flexBasis = Len(v); break;
@@ -458,6 +480,8 @@ internal static class StyleApplier
 
     private static readonly HashSet<string> Elsewhere = new(StringComparer.Ordinal)
     {
+        "justify-items", "justify-self", "table-layout", "caption-side", "empty-cells", "grid-area", "grid-template", "grid-template-areas",
+        "counter-reset", "counter-increment", "counter-set", "list-style-image", "text-indent", "word-break", "overflow-wrap", "word-wrap", "hyphens", "text-align-last", "order", "-webkit-box-orient",
         "container", "container-type", "container-name",
         "text-decoration-line", "text-decoration-color", "text-decoration-style", "text-decoration-thickness", "text-underline-offset", "text-underline-position", "text-decoration-skip-ink",
         "gap", "row-gap", "column-gap", "grid-gap", "grid-row-gap", "grid-column-gap",
