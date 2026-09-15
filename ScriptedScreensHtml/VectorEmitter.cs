@@ -1133,6 +1133,11 @@ internal static class VectorEmitter
     /// </summary>
     private static void EmitCheck(Ctx ctx, string control, HtmlNode node, Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h, string indent)
     {
+        if (control is "progress" or "meter")
+        {
+            EmitBar(ctx, control, node, css, rs, x, y, w, h, indent);
+            return;
+        }
         // appearance: none, the browser way to restyle a control: the page's own
         // background, border and :checked rules draw it, and nothing is added here.
         if ((css.TryGetValue("appearance", out var ap) || css.TryGetValue("-webkit-appearance", out ap)) && ap.Trim() == "none")
@@ -1183,6 +1188,43 @@ internal static class VectorEmitter
         return (css.TryGetValue("overflow", out var o) || css.TryGetValue("overflow-y", out o)) && o.Trim() is "auto" or "scroll";
     }
 
+    /// <summary>progress and meter: a rounded track in the box's background (else a dim grey) and a fill in the accent, or the meter's low/high colour.</summary>
+    private static void EmitBar(Ctx ctx, string control, HtmlNode node, Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h, string indent)
+    {
+        float Attr(string name, float fallback) => node.Attr(name) is { } v && float.TryParse(v.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f : fallback;
+        var min = control == "meter" ? Attr("min", 0f) : 0f;
+        var max = Attr("max", control == "meter" ? 1f : 1f);
+        var value = Attr("value", float.NaN);
+        var frac = float.IsNaN(value) || max <= min ? 0f : Mathf.Clamp01((value - min) / (max - min));
+        var accent = css.TryGetValue("accent-color", out var ac) && StyleApplier.TryColor(ac.Trim(), out var a) ? a : new Color(0.31f, 0.63f, 1f);
+        if (control == "meter" && !float.IsNaN(value))
+        {
+            // green in the optimum region, amber between, red past low/high; the browser's three colours
+            var low = Attr("low", min);
+            var high = Attr("high", max);
+            var optimum = Attr("optimum", (min + max) * 0.5f);
+            var inOpt = optimum <= low ? value <= low : optimum >= high ? value >= high : value >= low && value <= high;
+            var far = optimum <= low ? value > high : optimum >= high ? value < low : false;
+            accent = inOpt ? new Color(0.18f, 0.55f, 0.43f) : far ? new Color(0.71f, 0.21f, 0.17f) : new Color(0.89f, 0.66f, 0.31f);
+        }
+        var track = rs.backgroundColor.a > 0.002f ? rs.backgroundColor : new Color(0.14f, 0.19f, 0.29f);
+        var rx = rs.borderTopLeftRadius > 0.01f ? rs.borderTopLeftRadius : h * 0.5f;
+        ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h)).Append(Radius(rs, w, h)).Append(rs.borderTopLeftRadius > 0.01f ? string.Empty : " rx=" + F(rx)).Append(" f=").Append(Hex(track)).Append('\n');
+        ctx.Out.Nodes++;
+        if (float.IsNaN(value) && control == "progress")
+        {
+            // indeterminate: a third of the bar sliding back and forth
+            ctx.Body.Append(indent).Append("R x==").Append(F(x)).Append('+').Append(F(w * 0.67f)).Append("*(0.5-0.5*cos(t*3)) y=").Append(F(y)).Append(" w=").Append(F(w * 0.33f)).Append(" h=").Append(F(h)).Append(" rx=").Append(F(rx)).Append(" f=").Append(Hex(accent)).Append('\n');
+            ctx.Out.Nodes++;
+            return;
+        }
+        if (frac > 0.001f)
+        {
+            ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(Mathf.Max(h, w * frac))).Append(" h=").Append(F(h)).Append(" rx=").Append(F(rx)).Append(" f=").Append(Hex(accent)).Append('\n');
+            ctx.Out.Nodes++;
+        }
+    }
+
     /// <summary>A list marker in the text colour: a filled disc, a hollow circle or a filled square.</summary>
     private static void EmitMarker(Ctx ctx, string shape, Color colour, float x, float y, float w, float h, string indent)
     {
@@ -1191,6 +1233,12 @@ internal static class VectorEmitter
         var cy = y + h * 0.5f;
         switch (shape)
         {
+            case "tri-right":
+                ctx.Body.Append(indent).Append("P d=\"M").Append(F(cx - r * 0.6f)).Append(' ').Append(F(cy - r)).Append(" L").Append(F(cx + r * 0.8f)).Append(' ').Append(F(cy)).Append(" L").Append(F(cx - r * 0.6f)).Append(' ').Append(F(cy + r)).Append(" Z\" f=").Append(Hex(colour)).Append('\n');
+                break;
+            case "tri-down":
+                ctx.Body.Append(indent).Append("P d=\"M").Append(F(cx - r)).Append(' ').Append(F(cy - r * 0.6f)).Append(" L").Append(F(cx + r)).Append(' ').Append(F(cy - r * 0.6f)).Append(" L").Append(F(cx)).Append(' ').Append(F(cy + r * 0.8f)).Append(" Z\" f=").Append(Hex(colour)).Append('\n');
+                break;
             case "square":
                 ctx.Body.Append(indent).Append("R x=").Append(F(cx - r)).Append(" y=").Append(F(cy - r)).Append(" w=").Append(F(2f * r)).Append(" h=").Append(F(2f * r)).Append(" f=").Append(Hex(colour)).Append('\n');
                 break;

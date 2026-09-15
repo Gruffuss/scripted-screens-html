@@ -51,11 +51,24 @@ internal static class HtmlParser
         {
             if (text.Length == 0)
                 return;
-            var collapsed = CollapseWhitespace(text.ToString());
+            // Inside <pre> and <textarea> whitespace is content; HTML drops one newline
+            // straight after the opening tag.
+            var raw = text.ToString();
             text.Clear();
-            if (collapsed.Length == 0)
+            var preformatted = false;
+            for (var n = current; n != null; n = n.Parent)
+                if (n.Tag is "pre" or "textarea") { preformatted = true; break; }
+            string kept;
+            if (preformatted)
+            {
+                kept = DecodeEntities(raw.Replace("\r\n", "\n"));
+                if (current.Children.Count == 0 && kept.StartsWith("\n", StringComparison.Ordinal)) kept = kept.Substring(1);
+            }
+            else
+                kept = CollapseWhitespace(raw);
+            if (kept.Length == 0)
                 return;
-            current.Children.Add(new HtmlNode { Text = collapsed, Parent = current });
+            current.Children.Add(new HtmlNode { Text = kept, Parent = current });
         }
 
         while (i < html.Length)
@@ -261,7 +274,7 @@ internal static class HtmlParser
                 "hellip" => "…",
                 "ndash" => "–",
                 "mdash" => "—",
-                _ => null,
+                _ => NamedEntities.TryGetValue(name, out var known) ? known : null,
             };
             if (rep == null && name.Length > 1 && name[0] == '#')
             {
@@ -280,6 +293,40 @@ internal static class HtmlParser
             i = semi;
         }
         return sb.ToString();
+    }
+
+    /// <summary>The named entities pages use: Latin-1, Greek, punctuation, arrows, maths, shapes. Codepoints, so this file's encoding does not matter.</summary>
+    private static readonly Dictionary<string, string> NamedEntities = BuildEntities();
+
+    private static Dictionary<string, string> BuildEntities()
+    {
+        var d = new Dictionary<string, string>(StringComparer.Ordinal);
+        void Run(string names, int first)
+        {
+            var i = first;
+            foreach (var n in names.Split(' ', StringSplitOptions.RemoveEmptyEntries)) { if (n != "-") d[n] = char.ConvertFromUtf32(i); i++; }
+        }
+        Run("nbsp iexcl cent pound curren yen brvbar sect uml copy ordf laquo not shy reg macr deg plusmn sup2 sup3 acute micro para middot cedil sup1 ordm raquo frac14 frac12 frac34 iquest", 160);
+        Run("Agrave Aacute Acirc Atilde Auml Aring AElig Ccedil Egrave Eacute Ecirc Euml Igrave Iacute Icirc Iuml ETH Ntilde Ograve Oacute Ocirc Otilde Ouml times Oslash Ugrave Uacute Ucirc Uuml Yacute THORN szlig", 192);
+        Run("agrave aacute acirc atilde auml aring aelig ccedil egrave eacute ecirc euml igrave iacute icirc iuml eth ntilde ograve oacute ocirc otilde ouml divide oslash ugrave uacute ucirc uuml yacute thorn yuml", 224);
+        Run("Alpha Beta Gamma Delta Epsilon Zeta Eta Theta Iota Kappa Lambda Mu Nu Xi Omicron Pi Rho - Sigma Tau Upsilon Phi Chi Psi Omega", 913);
+        Run("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigmaf sigma tau upsilon phi chi psi omega", 945);
+        void One(string name, int cp) => d[name] = char.ConvertFromUtf32(cp);
+        One("OElig", 338); One("oelig", 339); One("Scaron", 352); One("scaron", 353); One("Yuml", 376); One("fnof", 402); One("circ", 710); One("tilde", 732);
+        One("thetasym", 977); One("upsih", 978); One("piv", 982);
+        One("ensp", 8194); One("emsp", 8195); One("thinsp", 8201); One("zwnj", 8204); One("zwj", 8205); One("lrm", 8206); One("rlm", 8207);
+        One("lsquo", 8216); One("rsquo", 8217); One("sbquo", 8218); One("ldquo", 8220); One("rdquo", 8221); One("bdquo", 8222);
+        One("dagger", 8224); One("Dagger", 8225); One("permil", 8240); One("lsaquo", 8249); One("rsaquo", 8250); One("euro", 8364);
+        One("prime", 8242); One("Prime", 8243); One("oline", 8254); One("frasl", 8260); One("weierp", 8472); One("image", 8465); One("real", 8476); One("trade", 8482); One("alefsym", 8501);
+        One("harr", 8596); One("crarr", 8629); One("lArr", 8656); One("uArr", 8657); One("rArr", 8658); One("dArr", 8659); One("hArr", 8660);
+        One("forall", 8704); One("part", 8706); One("exist", 8707); One("empty", 8709); One("nabla", 8711); One("isin", 8712); One("notin", 8713); One("ni", 8715);
+        One("prod", 8719); One("sum", 8721); One("minus", 8722); One("lowast", 8727); One("radic", 8730); One("prop", 8733); One("infin", 8734); One("ang", 8736);
+        One("and", 8743); One("or", 8744); One("cap", 8745); One("cup", 8746); One("int", 8747); One("there4", 8756); One("sim", 8764); One("cong", 8773); One("asymp", 8776);
+        One("ne", 8800); One("equiv", 8801); One("le", 8804); One("ge", 8805); One("sub", 8834); One("sup", 8835); One("nsub", 8836); One("sube", 8838); One("supe", 8839);
+        One("oplus", 8853); One("otimes", 8855); One("perp", 8869); One("sdot", 8901); One("lceil", 8968); One("rceil", 8969); One("lfloor", 8970); One("rfloor", 8971);
+        One("lang", 9001); One("rang", 9002); One("loz", 9674); One("spades", 9824); One("clubs", 9827); One("hearts", 9829); One("diams", 9830);
+        One("check", 10003); One("cross", 10007); One("star", 9734); One("starf", 9733); One("laquo", 171); One("raquo", 187); One("hyphen", 8208); One("times", 215);
+        return d;
     }
 
     private static bool StartsWith(string s, int at, string prefix)

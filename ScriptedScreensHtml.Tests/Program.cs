@@ -40,6 +40,12 @@ Console.WriteLine("HtmlParser");
 
     var soup = HtmlParser.Parse("<div><span>a</div></span>", warnings.Add);
     Check(soup.Children[0].Tag == "div" && soup.Children[0].Children[0].Tag == "span" && warnings.Count == 1, "stray close tag warns once and does not break the tree");
+
+    var pre = HtmlParser.Parse("<pre>\n  two  spaces\nnext line</pre><p>  a   b  </p>");
+    Check(pre.Children[0].Children[0].Text == "  two  spaces\nnext line", $"pre keeps spaces and newlines, drops the first newline (got \"{pre.Children[0].Children[0].Text.Replace("\n", "|")}\")");
+    Check(pre.Children[1].Children[0].Text == " a b ", "outside pre whitespace collapses");
+    var ent = HtmlParser.Parse("<p>&copy; &eacute; &alpha; &ne; &hearts; &#x2713; &nosuch;</p>");
+    Check(ent.Children[0].Children[0].Text == "\u00A9 \u00E9 \u03B1 \u2260 \u2665 \u2713 &nosuch;", $"named entities from the table, unknown left alone (got \"{ent.Children[0].Children[0].Text}\")");
 }
 
 Console.WriteLine("CssParser");

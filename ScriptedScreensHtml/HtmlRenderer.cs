@@ -18,6 +18,7 @@ internal static class HtmlRenderer
     private static readonly HashSet<string> Inline = new(StringComparer.OrdinalIgnoreCase)
     {
         "b", "strong", "i", "em", "u", "s", "span", "br", "small", "big", "font", "code", "sub", "sup", "mark", "a",
+        "abbr", "cite", "q", "kbd", "samp", "var", "time", "dfn", "del", "ins", "bdi", "wbr", "data", "strike", "tt",
     };
 
     private static readonly HashSet<string> Skipped = new(StringComparer.OrdinalIgnoreCase)
@@ -310,6 +311,24 @@ internal static class HtmlRenderer
             return;
         }
 
+        if (node.Tag is "progress" or "meter")
+        {
+            // Drawn by the emitter from the attributes: a track and a fill.
+            node.Attributes["data-control"] = node.Tag;
+            var bar = new VisualElement();
+            bar.style.width = 160;
+            bar.style.height = node.Tag == "progress" ? 10 : 12;
+            Register(bar, node, result);
+            ApplyStyles(bar, node, rules, result);
+            parent.Add(bar);
+            return;
+        }
+
+        if (node.Tag == "summary")
+            node.Attributes["data-click"] = "1";
+        if (node.Tag == "label" && node.Attr("for") != null)
+            node.Attributes["data-click"] = "1";
+
         if (node.Tag == "svg")
         {
             var svg = BuildSvg(node, result);
@@ -367,7 +386,10 @@ internal static class HtmlRenderer
                     break;
                 }
                 case "select": box.style.width = 160; box.style.height = 26; break;
-                case "textarea": box.style.width = 160; box.style.height = 60; break;
+                case "textarea":
+                    box.style.width = node.Attr("cols") is { } cols && int.TryParse(cols, out var nc) ? nc * 7 + 16 : 160;
+                    box.style.height = node.Attr("rows") is { } rows && int.TryParse(rows, out var nr) ? nr * 17 + 10 : 60;
+                    break;
             }
             box.style.flexShrink = 0;
             Register(box, node, result);
@@ -417,8 +439,20 @@ internal static class HtmlRenderer
 
         Register(ve, node, result);
         TagDefaults(ve, node.Tag!);
+        if (node.Tag is "pre" or "code" or "kbd" or "samp")
+        {
+            // A monospace default that a page rule can still override: it is written into the
+            // cascade record before the rules, and the layout face follows.
+            result.CssOf(ve)["font-family"] = "monospace";
+            var mono = FontLibrary.Get("code");
+            if (mono != null) ve.style.unityFontDefinition = FontDefinition.FromSDFFont(mono);
+        }
         ApplyStyles(ve, node, rules, result);
         parent.Add(ve);
+        if (node.Tag == "dialog" && node.Attr("open") == null)
+            ve.style.display = DisplayStyle.None;
+        if (node.Attr("hidden") != null)
+            ve.style.display = DisplayStyle.None;
 
         if (ve is Label)
             return;
@@ -427,12 +461,16 @@ internal static class HtmlRenderer
         {
             var list = node.Tag == "ul" || node.Tag == "ol";
             var ordinal = 0;
+            if (node.Tag == "details")
+                AddDisclosure(node);
             foreach (var child in node.Children)
             {
                 if (list && child.Tag == "li")
                     AddMarker(child, node, result.CssOf(ve), ++ordinal, rules);
                 Append(ve, child, rules, result);
             }
+            if (node.Tag == "details")
+                ShowDetails(ve, node, result);
             ApplyGap(ve, result.CssOf(ve));
             return;
         }
@@ -739,30 +777,101 @@ internal static class HtmlRenderer
                 if (cell.Tag == "td" || cell.Tag == "th") n += Span(cell);
             columns = Math.Max(columns, n);
         }
-        node.Attributes["style"] = $"display:grid;grid-template-columns:repeat({columns},auto);" + (node.Attr("style") ?? string.Empty);
+        // Rows are real elements, so tr takes background, :nth-child and :hover; sections
+        // (thead/tbody/tfoot) too. Cells share the row equally unless a cell names a width,
+        // and a colspan takes that many shares. ponytail: no rowspan, no content-sized columns;
+        // measure cells in a second pass if a real page needs them.
         var ve = new VisualElement();
         Register(ve, node, result);
         TagDefaults(ve, node.Tag!);
         ApplyStyles(ve, node, rules, result);
         parent.Add(ve);
-        foreach (var caption in node.Children)
+        foreach (var child in node.Children)
         {
-            if (caption.Tag != "caption") continue;
-            caption.Attributes["style"] = $"grid-column:1 / -1;" + (caption.Attr("style") ?? string.Empty);
-            Append(ve, caption, rules, result);
-        }
-        foreach (var row in rows)
-        {
-            foreach (var cell in row.Children)
+            if (child.IsText) continue;
+            switch (child.Tag)
             {
-                if (cell.Tag != "td" && cell.Tag != "th") continue;
-                var span = Span(cell);
-                if (span > 1)
-                    cell.Attributes["style"] = $"grid-column:span {span};" + (cell.Attr("style") ?? string.Empty);
-                Append(ve, cell, rules, result);
+                case "caption":
+                    Append(ve, child, rules, result);
+                    break;
+                case "thead": case "tbody": case "tfoot":
+                {
+                    var section = new VisualElement();
+                    Register(section, child, result);
+                    ApplyStyles(section, child, rules, result);
+                    ve.Add(section);
+                    foreach (var tr in child.Children)
+                        if (tr.Tag == "tr") AppendRow(section, tr, columns, rules, result);
+                    break;
+                }
+                case "tr":
+                    AppendRow(ve, child, columns, rules, result);
+                    break;
             }
         }
         ApplyGap(ve, result.CssOf(ve));
+    }
+
+    private static void AppendRow(VisualElement table, HtmlNode tr, int columns, List<CssRule> rules, Result result)
+    {
+        var row = new VisualElement();
+        row.style.flexDirection = FlexDirection.Row;
+        row.style.alignItems = Align.Stretch;
+        Register(row, tr, result);
+        ApplyStyles(row, tr, rules, result);
+        table.Add(row);
+        foreach (var cell in tr.Children)
+        {
+            if (cell.Tag != "td" && cell.Tag != "th") continue;
+            var w = cell.Attr("width");
+            if (w != null && cell.Attr("style")?.Contains("width") != true)
+                cell.Attributes["style"] = "width:" + (w.EndsWith("%", StringComparison.Ordinal) ? w : w + "px") + ";" + (cell.Attr("style") ?? string.Empty);
+            Append(row, cell, rules, result);
+            var id = cell.Attr("id");
+            if (id == null || !result.ById.TryGetValue(id, out var cve)) continue;
+            if (!result.CssOf(cve).ContainsKey("width"))
+            {
+                cve.style.flexGrow = Span(cell);
+                cve.style.flexBasis = 0;
+            }
+            cve.style.flexShrink = 1;
+        }
+    }
+
+    /// <summary>The disclosure triangle at the front of a summary, as a drawn marker; a details without a summary gets one.</summary>
+    private static void AddDisclosure(HtmlNode details)
+    {
+        HtmlNode? summary = null;
+        foreach (var c in details.Children) if (c.Tag == "summary") { summary = c; break; }
+        if (summary == null)
+        {
+            summary = new HtmlNode { Tag = "summary", Parent = details };
+            summary.Children.Add(new HtmlNode { Text = "Details", Parent = summary });
+            summary.Attributes["data-click"] = "1";
+            details.Children.Insert(0, summary);
+        }
+        foreach (var c in summary.Children) if (c.Attr("data-marker") != null) return;
+        var tri = new HtmlNode { Tag = "span", Parent = summary };
+        tri.Attributes["data-marker"] = details.Attr("open") != null ? "tri-down" : "tri-right";
+        tri.Attributes["style"] = "width: 0.6em; height: 0.6em; margin-right: 0.4em; align-self: center; flex-shrink: 0";
+        summary.Children.Insert(0, tri);
+    }
+
+    /// <summary>Everything in a details but its summary shows only while `open` is set.</summary>
+    internal static void ShowDetails(VisualElement ve, HtmlNode node, Result result)
+    {
+        var open = node.Attr("open") != null;
+        foreach (var child in ve.Children())
+        {
+            if (result.NodeOf.TryGetValue(child, out var cn) && cn.Tag == "summary") continue;
+            child.style.display = open ? DisplayStyle.Flex : DisplayStyle.None;
+        }
+        foreach (var c in node.Children)
+        {
+            if (c.Tag != "summary") continue;
+            foreach (var m in c.Children)
+                if (m.Attr("data-marker") is "tri-down" or "tri-right") m.Attributes["data-marker"] = open ? "tri-down" : "tri-right";
+        }
     }
 
     private static void CollectRows(HtmlNode node, List<HtmlNode> rows)
@@ -921,12 +1030,15 @@ internal static class HtmlRenderer
         string? size = null;
         string? face = null;
         var bold = node.Tag == "b" || node.Tag == "strong";
-        var italic = node.Tag == "i" || node.Tag == "em";
-        var underline = node.Tag == "u" || node.Tag == "a";
-        var strike = node.Tag == "s";
+        var italic = node.Tag is "i" or "em" or "cite" or "var" or "dfn" or "address";
+        var underline = node.Tag is "u" or "a" or "ins";
+        var strike = node.Tag is "s" or "del" or "strike";
         switch (node.Tag)
         {
             case "a": colour = "#4EA1FF"; break;
+            case "code": case "kbd": case "samp": case "tt": face = "code"; break;
+            case "q": open.Append('\u201C'); close.Insert(0, "\u201D"); break;
+            case "wbr": return;
             case "sub": open.Append("<sub>"); close.Insert(0, "</sub>"); break;
             case "sup": open.Append("<sup>"); close.Insert(0, "</sup>"); break;
             case "small": size = "80%"; break;
@@ -1047,7 +1159,24 @@ internal static class HtmlRenderer
             case "th": s.unityFontStyleAndWeight = FontStyle.Bold; s.paddingTop = 2; s.paddingBottom = 2; s.paddingLeft = 4; s.paddingRight = 4; break;
             case "td": s.paddingTop = 2; s.paddingBottom = 2; s.paddingLeft = 4; s.paddingRight = 4; break;
             case "caption": s.unityTextAlign = TextAnchor.MiddleCenter; s.marginBottom = 2; break;
-            case "pre": case "code": s.whiteSpace = WhiteSpace.NoWrap; break;
+            case "pre": case "code": case "kbd": case "samp": s.whiteSpace = WhiteSpace.NoWrap; break;
+            case "blockquote": s.marginLeft = 20; s.marginTop = 6; s.marginBottom = 6; s.paddingLeft = 8; s.borderLeftWidth = 2; s.borderLeftColor = new Color(1, 1, 1, 0.3f); break;
+            case "address": case "cite": case "var": case "dfn": s.unityFontStyleAndWeight = FontStyle.Italic; break;
+            case "figure": s.marginTop = 8; s.marginBottom = 8; break;
+            case "figcaption": s.fontSize = 12; s.color = new Color(1, 1, 1, 0.6f); s.marginTop = 2; break;
+            case "dt": s.unityFontStyleAndWeight = FontStyle.Bold; s.marginTop = 4; break;
+            case "dd": s.marginLeft = 20; break;
+            case "fieldset": s.borderTopWidth = 1; s.borderRightWidth = 1; s.borderBottomWidth = 1; s.borderLeftWidth = 1; s.borderTopColor = s.borderRightColor = s.borderBottomColor = s.borderLeftColor = new Color(1, 1, 1, 0.3f); s.paddingTop = 8; s.paddingRight = 10; s.paddingBottom = 8; s.paddingLeft = 10; s.marginTop = 6; s.marginBottom = 6; s.borderTopLeftRadius = s.borderTopRightRadius = s.borderBottomLeftRadius = s.borderBottomRightRadius = 4; break;
+            case "legend": s.unityFontStyleAndWeight = FontStyle.Bold; s.fontSize = 12; s.color = new Color(1, 1, 1, 0.6f); s.marginBottom = 4; s.alignSelf = Align.FlexStart; break; // ponytail: sits inside the box, not cut into its border
+            case "summary": s.unityFontStyleAndWeight = FontStyle.Bold; s.flexDirection = FlexDirection.Row; s.alignItems = Align.Center; break;
+            case "details": s.marginTop = 4; s.marginBottom = 4; break;
+            case "dialog":
+                s.position = Position.Absolute; s.left = new Length(50, LengthUnit.Percent); s.top = new Length(50, LengthUnit.Percent);
+                s.translate = new Translate(new Length(-50, LengthUnit.Percent), new Length(-50, LengthUnit.Percent));
+                s.backgroundColor = new Color(0.12f, 0.16f, 0.23f); s.paddingTop = s.paddingBottom = 12; s.paddingLeft = s.paddingRight = 16;
+                s.borderTopLeftRadius = s.borderTopRightRadius = s.borderBottomLeftRadius = s.borderBottomRightRadius = 8;
+                break;
+            case "label": s.flexDirection = FlexDirection.Row; s.alignItems = Align.Center; break;
             case "center": s.alignItems = Align.Center; s.unityTextAlign = TextAnchor.MiddleCenter; break;
             case "button":
                 s.paddingTop = 4; s.paddingBottom = 4; s.paddingLeft = 10; s.paddingRight = 10;

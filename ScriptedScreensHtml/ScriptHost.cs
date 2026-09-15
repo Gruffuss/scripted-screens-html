@@ -61,6 +61,10 @@ internal sealed class ScriptHost : IDisposable
     private readonly Action<string, string> _setValue;
     private readonly Action<string> _wantClicks;
     private readonly Action<string, string, string> _insertHtml;
+    /// <summary>The page's built result and a re-emit hook, for attribute writes that change layout (dialog/details `open`).</summary>
+    private HtmlRenderer.Result? _built;
+    private Action? _onLayoutAttr;
+    public void Attach(HtmlRenderer.Result built, Action onLayoutAttr) { _built = built; _onLayoutAttr = onLayoutAttr; }
     /// <summary>Layout rects per id, relative to the page, refreshed every frame for getBoundingClientRect.</summary>
     private readonly ConcurrentDictionary<string, (float x, float y, float w, float h)> _rects = new(StringComparer.Ordinal);
 
@@ -129,6 +133,17 @@ internal sealed class ScriptHost : IDisposable
     }
 
     private readonly HashSet<string> _pointerTypes = new(StringComparer.Ordinal);
+
+    /// <summary>A plain event on an element: `submit` on a form, `toggle` on a details.</summary>
+    public void EmitEvent(string id, string type)
+    {
+        _toEngine.Enqueue(() =>
+        {
+            _engine!.Invoke("__fire", id, type, null);
+            AfterRun();
+        });
+        _wake.Set();
+    }
 
     /// <summary>A control changed (user or ScriptedScreens): the element gets `input` and `change` events and its value.</summary>
     public void EmitInput(string id, string value)
@@ -295,7 +310,7 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__contains", new Func<string, string, bool>(Contains));
             _engine.SetValue("__rect", new Func<string, double[]>(RectOf));
             _engine.SetValue("__insertHtml", new Action<string, string, string>((parent, html, before) => _toMain.Enqueue(() => _insertHtml(parent, html, before))));
-            _engine.SetValue("__removeAttr", new Action<string, string>((id, name) => { _attrCache.TryRemove(id + "\n" + name, out _); _toMain.Enqueue(() => _findNode(id)?.Attributes.Remove(name)); }));
+            _engine.SetValue("__removeAttr", new Action<string, string>((id, name) => { _attrCache.TryRemove(id + "\n" + name, out _); _toMain.Enqueue(() => { var n = _findNode(id); if (n != null && n.Attributes.Remove(name)) AfterAttribute(id, n, name); }); }));
             _engine.SetValue("__size", new Func<string, double[]>(Size));
             _engine.SetValue("__canvasFrame", new Action<string, double[], string[], int>(CanvasFrame));
             _engine.SetValue("__now", new Func<double>(() => _frameNow * 1000.0));
@@ -457,8 +472,24 @@ internal sealed class ScriptHost : IDisposable
             }
             var node = _findNode(id);
             if (node != null)
+            {
                 node.Attributes[name] = value;
+                AfterAttribute(id, node, name);
+            }
         });
+    }
+
+    /// <summary>Attributes whose presence is layout: `open` shows a dialog or a details' content.</summary>
+    private void AfterAttribute(string id, HtmlNode node, string name)
+    {
+        if (name != "open") return;
+        var ve = _find(id);
+        if (ve == null) return;
+        if (node.Tag == "dialog")
+            ve.style.display = node.Attr("open") != null ? DisplayStyle.Flex : DisplayStyle.None;
+        else if (node.Tag == "details" && _built != null)
+            HtmlRenderer.ShowDetails(ve, node, _built);
+        _onLayoutAttr?.Invoke();
     }
 
     private double[] Size(string id)
@@ -665,6 +696,17 @@ function __el(id){
     replaceChild: function(n, old){ el.insertBefore(n, old); __remove(old.id); return old; },
     cloneNode: function(deep){ var c = __detached(el.tagName); var a = __attrs(id); for (var i = 0; i < a.length; i += 2) { if (a[i] === 'class') c.className = a[i + 1]; else c.__attrs[a[i]] = a[i + 1]; } if (deep) c.__html = __htmlOf(id, false); return c; },
     focus: function(){}, blur: function(){},
+    get open(){ return __getAttr(id, 'open') !== null; }, set open(v){ if (v) __setAttr(id, 'open', ''); else __removeAttr(id, 'open'); },
+    show: function(){ __setAttr(id, 'open', ''); }, showModal: function(){ __setAttr(id, 'open', ''); }, close: function(){ __removeAttr(id, 'open'); },
+    submit: function(){ __fire(id, 'submit', null); }, reset: function(){},
+    get disabled(){ return __getAttr(id, 'disabled') !== null; }, set disabled(v){ if (v) __setAttr(id, 'disabled', ''); else __removeAttr(id, 'disabled'); },
+    get hidden(){ return __getAttr(id, 'hidden') !== null; }, set hidden(v){ if (v) { __setAttr(id, 'hidden', ''); __setStyle(id, 'display', 'none'); } else { __removeAttr(id, 'hidden'); __setStyle(id, 'display', ''); } },
+    get title(){ return __getAttr(id, 'title') || ''; }, set title(v){ __setAttr(id, 'title', String(v)); },
+    get name(){ return __getAttr(id, 'name') || ''; }, get type(){ return __getAttr(id, 'type') || ''; },
+    get href(){ return __getAttr(id, 'href') || ''; }, set href(v){ __setAttr(id, 'href', String(v)); },
+    get src(){ return __getAttr(id, 'src') || ''; }, set src(v){ __setAttr(id, 'src', String(v)); },
+    get max(){ return __getAttr(id, 'max'); }, set max(v){ __setAttr(id, 'max', String(v)); },
+    get min(){ return __getAttr(id, 'min'); }, set min(v){ __setAttr(id, 'min', String(v)); },
     set className(v){ __setClass(id, String(v)); },
     classList: { add: function(){ }, remove: function(){ } },
     get clientWidth(){ return __size(id)[0]; }, get clientHeight(){ return __size(id)[1]; },

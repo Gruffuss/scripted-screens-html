@@ -438,6 +438,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                     }
                 });
         }
+        _script?.Attach(built, () => { _dirty = true; Wake(); });
         _svgs.Clear();
         foreach (var shape in _shapes.Values)
         {
@@ -509,7 +510,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             seen.Add(id);
             var node = ext.Node;
             _externalNodes[ext.Key] = node;
-            var url = node.Attr("src") ?? string.Empty;
+            var url = node.Attr("src") ?? FirstOfSrcset(node.Attr("srcset")) ?? string.Empty;
             var props = new List<SS.UiProp>();
             if (node.Tag is "img" or "video" or "audio")
                 props.Add(new SS.UiProp { Key = "url", Value = SS.UiValue.FromString(url) });
@@ -750,9 +751,8 @@ internal sealed class HtmlSurface : MonoBehaviour
                 var options = new List<SS.UiValue>();
                 var selected = 0;
                 var i = 0;
-                foreach (var opt in node.Children)
+                foreach (var opt in Options(node))
                 {
-                    if (opt.Tag != "option") continue;
                     options.Add(SS.UiValue.FromString(OptionText(opt)));
                     if (opt.Attr("selected") != null) selected = i;
                     i++;
@@ -803,17 +803,34 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     private static string OptionText(HtmlNode opt) => TextOf(opt);
 
+    /// <summary>The selectable options, through optgroups, skipping disabled ones.</summary>
+    private static IEnumerable<HtmlNode> Options(HtmlNode select)
+    {
+        foreach (var c in select.Children)
+        {
+            if (c.Tag == "option" && c.Attr("disabled") == null) yield return c;
+            else if (c.Tag == "optgroup" && c.Attr("disabled") == null)
+                foreach (var o in c.Children) if (o.Tag == "option" && o.Attr("disabled") == null) yield return o;
+        }
+    }
+
     /// <summary>What a select option reports: its value attribute, else its text.</summary>
     private static string OptionValue(HtmlNode select, int index)
     {
         var i = 0;
-        foreach (var opt in select.Children)
+        foreach (var opt in Options(select))
         {
-            if (opt.Tag != "option") continue;
             if (i == index) return opt.Attr("value") ?? OptionText(opt);
             i++;
         }
         return string.Empty;
+    }
+
+    private static string? FirstOfSrcset(string? srcset)
+    {
+        if (string.IsNullOrEmpty(srcset)) return null;
+        var first = srcset!.Split(',')[0].Trim().Split(' ')[0];
+        return first.Length > 0 ? first : null;
     }
 
     /// <summary>
@@ -844,6 +861,16 @@ internal sealed class HtmlSurface : MonoBehaviour
             {
                 if (!string.Equals(evt, "change", StringComparison.OrdinalIgnoreCase)) return false;
                 stored = value ?? string.Empty;
+                if (kind == "number" && float.TryParse(stored.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var num))
+                {
+                    // min/max/step as a browser applies them on change
+                    var min = Num(node.Attr("min"), float.NegativeInfinity);
+                    var max = Num(node.Attr("max"), float.PositiveInfinity);
+                    var step = Num(node.Attr("step"), 0f);
+                    if (step > 0f) num = (float.IsInfinity(min) ? 0f : min) + Mathf.Round((num - (float.IsInfinity(min) ? 0f : min)) / step) * step;
+                    num = Mathf.Clamp(num, min, max);
+                    stored = num.ToString(CultureInfo.InvariantCulture);
+                }
                 delivered = stored;
                 break;
             }
@@ -867,8 +894,26 @@ internal sealed class HtmlSurface : MonoBehaviour
         delivered = string.Empty;
         if (_built == null || !_byId.TryGetValue(key, out var ve) || !_built.NodeOf.TryGetValue(ve, out var node))
             return false;
+        // <label for=x>: the click goes to the control it names.
+        if (node.Tag == "label" && node.Attr("for") is { } target && target != key)
+        {
+            if (OnControlClick(target, out name, out delivered)) return true;
+            SetFocus(target);
+            return false;
+        }
+        // <summary>: toggles its details.
+        if (node.Tag == "summary" && node.Parent is { Tag: "details" } details && details.Attr("id") is { } detailsId && _byId.TryGetValue(detailsId, out var dve))
+        {
+            if (details.Attr("open") != null) details.Attributes.Remove("open"); else details.Attributes["open"] = string.Empty;
+            HtmlRenderer.ShowDetails(dve, details, _built);
+            Recascade(details);
+            _dirty = true;
+            Wake();
+            _script?.EmitEvent(detailsId, "toggle");
+            return false;
+        }
         var control = node.Attr("data-control");
-        if (control == null)
+        if (control == null || control is "progress" or "meter")
             return false;
         name = node.Attr("name") ?? key;
         var on = control == "radio" || node.Attr("checked") == null;
@@ -896,11 +941,17 @@ internal sealed class HtmlSurface : MonoBehaviour
                 if (kv.Value == node) { _built.Reclass(kv.Key, node.Attr("class") ?? string.Empty); break; }
     }
 
-    /// <summary>A click on a page click region: the script gets a `click` event on the element, with the pointer's page coordinates.</summary>
+    /// <summary>A click on a page click region: the script gets a `click` event on the element, with the pointer's page coordinates. A submit button also fires `submit` on its form.</summary>
     internal void OnPageClick(string key)
     {
         SetFocus(key);
         _script?.EmitClick(key, _pointerPage.x, _pointerPage.y);
+        if (_built != null && _byId.TryGetValue(key, out var ve) && _built.NodeOf.TryGetValue(ve, out var node)
+            && node.Tag == "button" && string.Equals(node.Attr("type") ?? "submit", "submit", StringComparison.OrdinalIgnoreCase))
+        {
+            for (var f = node.Parent; f != null; f = f.Parent)
+                if (f.Tag == "form" && f.Attr("id") is { } formId) { _script?.EmitEvent(formId, "submit"); break; }
+        }
     }
 
     // ---- pointer state: :hover / :active / :focus and mouse events, from the page's own boxes ----
@@ -1045,9 +1096,10 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>The page script set a control's value or checked state.</summary>
     private void SetInputValue(string key, string value)
     {
-        if (_built != null && _byId.TryGetValue(key, out var ve) && _built.NodeOf.TryGetValue(ve, out var node) && node.Attr("data-control") != null)
+        if (_built != null && _byId.TryGetValue(key, out var ve) && _built.NodeOf.TryGetValue(ve, out var node) && node.Attr("data-control") is { } control)
         {
-            SetChecked(node, value == "true");
+            if (control is "progress" or "meter") node.Attributes["value"] = value;
+            else SetChecked(node, value == "true");
             _dirty = true;
             Wake();
             return;
