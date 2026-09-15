@@ -2130,7 +2130,7 @@ internal static class VectorEmitter
         {
             var parts = raw.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length == 0 || !StyleApplier.TryColor(parts[0], out var c)) continue;
-            var at = parts.Length > 1 ? (parts[1].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[1]) / 100f : StyleApplier.Num(parts[1]) / 360f) : (n == 0 ? 0f : (n == args.Count - 1 ? 1f : lastAt));
+            var at = parts.Length > 1 ? (parts[1].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[1]) / 100f : StyleApplier.Num(parts[1]) / 360f) : (args.Count <= 1 ? 0f : (float)n / (args.Count - 1)); // unpositioned stops spread evenly, as CSS does
             if (n > 0 && at < lastAt) at = lastAt;
             if (stops.Length > 0) stops.Append(',');
             stops.Append('[').Append(F(at)).Append(',').Append(Hex(c)).Append(']');

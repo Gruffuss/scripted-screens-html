@@ -593,6 +593,9 @@ internal static class HtmlRenderer
             AppendRich(run, child, rules);
         }
         FlushRun();
+        // a floated inline box in a sentence (float: right on a span) still floats
+        OrderChildren(ve, result);
+        Flow(parent, ve, result);
     }
 
     /// <summary>

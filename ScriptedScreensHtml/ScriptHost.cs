@@ -618,6 +618,7 @@ var navigator = { userAgent: 'ScriptedScreensHtml', language: 'en', languages: [
 var history = { length: 1, pushState: function(){}, replaceState: function(){}, back: function(){}, forward: function(){} };
 
 // ---- timers and animation frames ----
+function __errText(e){ if (!e) return String(e); var head = e.message !== undefined ? (e.name || 'Error') + ': ' + e.message : String(e); return e.stack ? head + String.fromCharCode(10) + e.stack : head; }
 var __timers = [], __rafs = [], __nextId = 1, __now_ms = 0;
 function setTimeout(fn, ms){ var id = __nextId++; __timers.push({id:id, fn:fn, at:__now_ms + (ms||0), every:0, args:Array.prototype.slice.call(arguments,2)}); return id; }
 function setInterval(fn, ms){ var id = __nextId++; __timers.push({id:id, fn:fn, at:__now_ms + (ms||0), every:Math.max(1, ms||1), args:Array.prototype.slice.call(arguments,2)}); return id; }
@@ -629,12 +630,12 @@ function __hasPending(){ return __rafs.length > 0 || __timers.length > 0; }
 function __tick(now){
   __now_ms = now;
   var rafs = __rafs; __rafs = [];
-  for (var i = 0; i < rafs.length; i++) { try { rafs[i].fn(now); } catch (e) { console.error(String(e && e.stack || e)); } }
+  for (var i = 0; i < rafs.length; i++) { try { rafs[i].fn(now); } catch (e) { console.error(__errText(e)); } }
   var due = __timers.filter(function(t){ return t.at <= now; });
   for (var j = 0; j < due.length; j++) {
     var t = due[j];
     if (t.every) t.at = now + t.every; else __timers = __timers.filter(function(x){ return x !== t; });
-    try { t.fn.apply(null, t.args); } catch (e) { console.error(String(e && e.stack || e)); }
+    try { t.fn.apply(null, t.args); } catch (e) { console.error(__errText(e)); }
   }
   __flushCanvases();
   return __hasPending();
@@ -648,9 +649,9 @@ function __hasDataHandler(){ return !!(window.ondata) || !!(__listeners['data'] 
 function __emit(type, json){
   var detail = json ? JSON.parse(json) : null;
   var ev = { type: type, detail: detail };
-  if (type === 'data' && typeof window.ondata === 'function') { try { window.ondata(detail, ev); } catch (e) { console.error(String(e && e.stack || e)); } }
+  if (type === 'data' && typeof window.ondata === 'function') { try { window.ondata(detail, ev); } catch (e) { console.error(__errText(e)); } }
   var ls = __listeners[type] || [];
-  for (var i = 0; i < ls.length; i++) { try { ls[i](ev); } catch (e) { console.error(String(e && e.stack || e)); } }
+  for (var i = 0; i < ls.length; i++) { try { ls[i](ev); } catch (e) { console.error(__errText(e)); } }
   __flushCanvases();
 }
 
@@ -732,7 +733,7 @@ function __ready(){
   __emit('DOMContentLoaded', null);
   document_readyState = 'complete';
   __emit('load', null);
-  if (typeof window.onload === 'function') { try { window.onload({ type: 'load' }); } catch (e) { console.error(String(e && e.stack || e)); } }
+  if (typeof window.onload === 'function') { try { window.onload({ type: 'load' }); } catch (e) { console.error(__errText(e)); } }
 }
 // ---- Event constructors and dispatch ----
 function Event(type, init){ this.type = type; init = init || {}; this.bubbles = !!init.bubbles; this.cancelable = !!init.cancelable; this.defaultPrevented = false; this.detail = init.detail === undefined ? null : init.detail; }
@@ -749,16 +750,16 @@ function __dispatchOn(id, ev){
   while (cur) {
     ev.currentTarget = __el(cur);
     var fns = (__elListeners[cur] || {})[ev.type] || [];
-    for (var i = 0; i < fns.length; i++) { try { fns[i].call(ev.currentTarget, ev); } catch (e) { console.error(String(e && e.stack || e)); } if (ev.__stop) return ev; }
+    for (var i = 0; i < fns.length; i++) { try { fns[i].call(ev.currentTarget, ev); } catch (e) { console.error(__errText(e)); } if (ev.__stop) return ev; }
     var h = (__elHandlers[cur] || {})['on' + ev.type];
-    if (typeof h === 'function') { try { h.call(ev.currentTarget, ev); } catch (e) { console.error(String(e && e.stack || e)); } if (ev.__stop) return ev; }
+    if (typeof h === 'function') { try { h.call(ev.currentTarget, ev); } catch (e) { console.error(__errText(e)); } if (ev.__stop) return ev; }
     var code = __getAttr(cur, 'on' + ev.type);
-    if (code) { try { (new Function('event', code)).call(ev.currentTarget, ev); } catch (e) { console.error('on' + ev.type + ' of #' + cur + ': ' + String(e && e.stack || e)); } if (ev.__stop) return ev; }
+    if (code) { try { (new Function('event', code)).call(ev.currentTarget, ev); } catch (e) { console.error('on' + ev.type + ' of #' + cur + ': ' + __errText(e)); } if (ev.__stop) return ev; }
     if (ev.bubbles === false && cur === id) break;
     cur = __parent(cur);
   }
   var gl = __listeners[ev.type] || [];
-  for (var j = 0; j < gl.length; j++) { try { gl[j](ev); } catch (e) { console.error(String(e && e.stack || e)); } if (ev.__stop) break; }
+  for (var j = 0; j < gl.length; j++) { try { gl[j](ev); } catch (e) { console.error(__errText(e)); } if (ev.__stop) break; }
   return ev;
 }
 function URLSearchParams(init){
