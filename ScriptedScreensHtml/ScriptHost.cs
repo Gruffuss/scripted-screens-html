@@ -37,6 +37,20 @@ internal sealed class ScriptHost : IDisposable
     private readonly AutoResetEvent _wake = new(false);
     private readonly ConcurrentQueue<Action> _toEngine = new();
     private readonly ConcurrentQueue<Action> _toMain = new();
+    /// <summary>Set while the main thread has drained every queued write; a tree read on the worker waits for it (DOM writes read back synchronously, as in a browser).</summary>
+    private readonly ManualResetEventSlim _drained = new(true);
+
+    private void Write(Action a)
+    {
+        _drained.Reset();
+        _toMain.Enqueue(a);
+    }
+
+    /// <summary>Before a tree read on the worker: wait (up to a frame or two) for pending writes to land on the main thread.</summary>
+    private void Sync()
+    {
+        if (!_toMain.IsEmpty) _drained.Wait(250);
+    }
     private readonly ConcurrentDictionary<string, (float w, float h)> _sizes = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _attrCache = new(StringComparer.Ordinal);
     private volatile bool _stop;
@@ -105,7 +119,7 @@ internal sealed class ScriptHost : IDisposable
         var ve = _find(id);
         if (ve == null || _animate == null) return 0;
         using var doneEvent = new System.Threading.ManualResetEventSlim(false);
-        _toMain.Enqueue(() => { handle = _animate(ve, kf, spec); doneEvent.Set(); });
+        Write(() => { handle = _animate(ve, kf, spec); doneEvent.Set(); });
         return doneEvent.Wait(50) ? handle : -1; // ponytail: the handle is needed synchronously; the main thread answers within a frame
     }
     /// <summary>Layout rects per id, relative to the page, refreshed every frame for getBoundingClientRect.</summary>
@@ -240,6 +254,7 @@ internal sealed class ScriptHost : IDisposable
             try { a(); }
             catch (Exception ex) { Report("js: apply: " + ex.Message); }
         }
+        if (_toMain.IsEmpty) _drained.Set();
         return any;
     }
 
@@ -256,7 +271,8 @@ internal sealed class ScriptHost : IDisposable
             done.Set();
         });
         _wake.Set();
-        done.Wait(timeoutMs);
+        var until = Environment.TickCount + timeoutMs;
+        while (!done.Wait(5) && Environment.TickCount < until) Pump();
         Pump();
     }
 
@@ -334,21 +350,21 @@ internal sealed class ScriptHost : IDisposable
                 o.Strict(false);
             });
             _engine.SetValue("__log", new Action<string, string>(Log));
-            _engine.SetValue("__has", new Func<string, bool>(id => _find(id) != null || _findShape(id) != null));
-            _engine.SetValue("__query", new Func<string, string[]>(sel => _query(sel).ToArray()));
+            _engine.SetValue("__has", new Func<string, bool>(id => { Sync(); return _find(id) != null || _findShape(id) != null; }));
+            _engine.SetValue("__query", new Func<string, string[]>(sel => { Sync(); return _query(sel).ToArray(); }));
             _engine.SetValue("__setStyle", new Action<string, string, string>(SetStyle));
             _engine.SetValue("__setText", new Action<string, string>(SetText));
             _engine.SetValue("__setHtml", new Action<string, string>(SetHtml));
             _engine.SetValue("__setClass", new Action<string, string>(SetClass));
             _engine.SetValue("__getAttr", new Func<string, string, string?>(GetAttr));
             _engine.SetValue("__setAttr", new Action<string, string, string>(SetAttr));
-            _engine.SetValue("__appendHtml", new Action<string, string>((parent, html) => _toMain.Enqueue(() => _appendHtml(parent, html))));
-            _engine.SetValue("__remove", new Action<string>(id => _toMain.Enqueue(() => _remove(id))));
-            _engine.SetValue("__setValue", new Action<string, string>((id, v) => _toMain.Enqueue(() => _setValue(id, v))));
-            _engine.SetValue("__wantClicks", new Action<string>(id => _toMain.Enqueue(() => _wantClicks(id))));
+            _engine.SetValue("__appendHtml", new Action<string, string>((parent, html) => Write(() => _appendHtml(parent, html))));
+            _engine.SetValue("__remove", new Action<string>(id => Write(() => _remove(id))));
+            _engine.SetValue("__setValue", new Action<string, string>((id, v) => Write(() => _setValue(id, v))));
+            _engine.SetValue("__wantClicks", new Action<string>(id => Write(() => _wantClicks(id))));
             _engine.SetValue("__wantPointer", new Action<string>(type => _pointerTypes.Add(type)));
             _engine.SetValue("__cssOf", new Func<string, string, string>(CssOf));
-            _engine.SetValue("__setScroll", new Action<string, double>((id, off) => _toMain.Enqueue(() => _setScroll(id, (float)off))));
+            _engine.SetValue("__setScroll", new Action<string, double>((id, off) => Write(() => _setScroll(id, (float)off))));
             _engine.SetValue("__scrollBox", new Func<string, string?>(id =>
             {
                 // the nearest ancestor (or the element itself) that scrolls: overflow auto/scroll
@@ -362,7 +378,7 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__viewport", new Func<double[]>(() => new[] { (double)_viewport.x, (double)_viewport.y }));
             _engine.SetValue("__media", new Func<string, bool>(CssParser.MediaMatches));
             _engine.SetValue("__animate", new Func<string, string[], string, int>(Animate));
-            _engine.SetValue("__cancelAnimation", new Action<int>(h => _toMain.Enqueue(() => _cancelAnimation?.Invoke(h))));
+            _engine.SetValue("__cancelAnimation", new Action<int>(h => Write(() => _cancelAnimation?.Invoke(h))));
             _engine.SetValue("__children_rects", new Func<string, double[]>(id =>
             {
                 // the content extent below and right of an element's own top-left: scrollWidth / scrollHeight
@@ -371,15 +387,15 @@ internal sealed class ScriptHost : IDisposable
                 foreach (var c in ChildrenOf(id)) { var r = RectOf(c); right = Math.Max(right, r[0] + r[2] - own[0]); bottom = Math.Max(bottom, r[1] + r[3] - own[1]); }
                 return new[] { Math.Max(right, own[2]), Math.Max(bottom, own[3]) };
             }));
-            _engine.SetValue("__textOf", new Func<string, string>(TextOf));
-            _engine.SetValue("__htmlOf", new Func<string, bool, string>(HtmlOf));
-            _engine.SetValue("__children", new Func<string, string[]>(ChildrenOf));
-            _engine.SetValue("__parent", new Func<string, string?>(ParentOf));
-            _engine.SetValue("__attrs", new Func<string, string[]>(AttrsOf));
-            _engine.SetValue("__contains", new Func<string, string, bool>(Contains));
+            _engine.SetValue("__textOf", new Func<string, string>(id => { Sync(); return TextOf(id); }));
+            _engine.SetValue("__htmlOf", new Func<string, bool, string>((id, outer) => { Sync(); return HtmlOf(id, outer); }));
+            _engine.SetValue("__children", new Func<string, string[]>(id => { Sync(); return ChildrenOf(id); }));
+            _engine.SetValue("__parent", new Func<string, string?>(id => { Sync(); return ParentOf(id); }));
+            _engine.SetValue("__attrs", new Func<string, string[]>(id => { Sync(); return AttrsOf(id); }));
+            _engine.SetValue("__contains", new Func<string, string, bool>((a, b) => { Sync(); return Contains(a, b); }));
             _engine.SetValue("__rect", new Func<string, double[]>(RectOf));
-            _engine.SetValue("__insertHtml", new Action<string, string, string>((parent, html, before) => _toMain.Enqueue(() => _insertHtml(parent, html, before))));
-            _engine.SetValue("__removeAttr", new Action<string, string>((id, name) => { _attrCache.TryRemove(id + "\n" + name, out _); _toMain.Enqueue(() => { var n = _findNode(id); if (n != null && n.Attributes.Remove(name)) AfterAttribute(id, n, name); }); }));
+            _engine.SetValue("__insertHtml", new Action<string, string, string>((parent, html, before) => Write(() => _insertHtml(parent, html, before))));
+            _engine.SetValue("__removeAttr", new Action<string, string>((id, name) => { _attrCache.TryRemove(id + "\n" + name, out _); Write(() => { var n = _findNode(id); if (n != null && n.Attributes.Remove(name)) AfterAttribute(id, n, name); }); }));
             _engine.SetValue("__size", new Func<string, double[]>(Size));
             _engine.SetValue("__canvasFrame", new Action<string, double[], string[], int>(CanvasFrame));
             _engine.SetValue("__now", new Func<double>(() => _frameNow * 1000.0));
@@ -459,7 +475,7 @@ internal sealed class ScriptHost : IDisposable
             else sb.Append(ch);
         }
         var css = sb.ToString();
-        _toMain.Enqueue(() =>
+        Write(() =>
         {
             var ve = _find(id);
             if (ve != null)
@@ -469,7 +485,7 @@ internal sealed class ScriptHost : IDisposable
 
     private void SetText(string id, string text)
     {
-        _toMain.Enqueue(() =>
+        Write(() =>
         {
             var ve = _find(id);
             var label = ve != null ? HtmlSurface.TextTargetFor(ve, id) : null;
@@ -487,7 +503,7 @@ internal sealed class ScriptHost : IDisposable
     {
         // Parse on the worker (pure managed), assign on main.
         var rich = HtmlRenderer.FragmentToRichText(html, _findNode(id), _rules);
-        _toMain.Enqueue(() =>
+        Write(() =>
         {
             var ve = _find(id);
             var label = ve != null ? HtmlSurface.TextTargetFor(ve, id) : null;
@@ -503,7 +519,8 @@ internal sealed class ScriptHost : IDisposable
 
     private void SetClass(string id, string cls)
     {
-        _toMain.Enqueue(() =>
+        _attrCache[id + "\n" + "class"] = cls;
+        Write(() =>
         {
             var ve = _find(id);
             if (ve != null)
@@ -515,6 +532,7 @@ internal sealed class ScriptHost : IDisposable
     {
         if (_attrCache.TryGetValue(id + "\n" + name, out var cached))
             return cached;
+        Sync();
         var shape = _findShape(id);
         if (shape != null)
             return shape.Attr(name);
@@ -524,7 +542,7 @@ internal sealed class ScriptHost : IDisposable
     private void SetAttr(string id, string name, string value)
     {
         _attrCache[id + "\n" + name] = value;
-        _toMain.Enqueue(() =>
+        Write(() =>
         {
             var shape = _findShape(id);
             if (shape != null)
@@ -572,7 +590,7 @@ internal sealed class ScriptHost : IDisposable
         for (var i = 0; i < count; i++)
             f[i] = (float)cmds[i];
         var cols = new List<string>(colours);
-        _toMain.Enqueue(() =>
+        Write(() =>
         {
             if (_find(id) is CanvasElement cv)
                 cv.SetFrame(f, count, cols);
