@@ -44,7 +44,7 @@ internal static class StyleApplier
             case "padding-left": s.paddingLeft = Len(v); break;
 
             // Position
-            case "position": s.position = v == "absolute" ? Position.Absolute : Position.Relative; break;
+            case "position": s.position = v == "absolute" || v == "fixed" ? Position.Absolute : Position.Relative; break;
             case "left": s.left = Len(v); break;
             case "top": s.top = Len(v); break;
             case "right": s.right = Len(v); break;

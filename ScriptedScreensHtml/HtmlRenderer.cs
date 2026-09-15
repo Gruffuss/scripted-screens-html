@@ -570,6 +570,10 @@ internal static class HtmlRenderer
             node.Attributes["id"] = id;
         }
         ve.name = id;
+        // A browser never shrinks a block below its content (min-height: auto); the layout
+        // engine's default is to shrink flex children to fit a fixed parent. A page's own
+        // flex-shrink / flex declaration still wins, since the cascade runs after this.
+        ve.style.flexShrink = 0;
         var cls = node.Attr("class");
         if (cls != null)
         {
@@ -1199,6 +1203,12 @@ internal static class HtmlRenderer
         }
         if (record.TryGetValue("display", out var display) && display.Trim() == "grid")
             result.Grids.Add(ve);
+        if (record.TryGetValue("position", out var position) && position.Trim() == "sticky")
+        {
+            // Sticky stays in flow; its top/left are the pin, not an offset. The emitter pins it.
+            ve.style.top = StyleKeyword.Auto;
+            ve.style.left = StyleKeyword.Auto;
+        }
 
         if (anim != null && anim.Name.Length > 0 && anim.Name != "none")
         {
