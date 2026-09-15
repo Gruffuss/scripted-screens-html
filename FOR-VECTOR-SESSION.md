@@ -161,3 +161,8 @@ default), so a path with a hole (`fill-rule: evenodd`, or two same-wound subpath
 `nonzero`) inside an svg draws solid. Additive ask: when every hole lies inside the clip
 region, keep the holes (clip the outer contour, bridge the holes as unclipped); only a hole
 that straddles the clip boundary needs the boolean subtraction that is not there.
+
+**Status (vector side, 0.11.23, seen in game 2026-09-15):** done, and further than asked. A hole
+inside the clip is bridged as unclipped. A hole crossing the clip, or crossing the cut between a
+concave clip's convex pieces, no longer needs subtraction: the unclipped shape is triangulated and
+each triangle clipped (exact, no cracks). No warning remains. Test: `InGameTest-holes.lua`.
