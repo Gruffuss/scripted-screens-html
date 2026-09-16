@@ -153,6 +153,9 @@ internal sealed class ScriptHost : IDisposable
     /// <summary>Queue the page script. Runs after any earlier work, before later data.</summary>
     public void Run(string script)
     {
+        // the clock the page script sees: a timer it sets must be measured from now, not from
+        // zero (the first frame then fired every load-time setTimeout at once)
+        if (_frameNow <= 0f) _frameNow = UnityEngine.Time.time;
         _toEngine.Enqueue(() =>
         {
             if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: running page script ({script.Length} chars)");
@@ -494,8 +497,14 @@ internal sealed class ScriptHost : IDisposable
         Write(() =>
         {
             var ve = _find(id);
-            if (ve != null)
-                StyleApplier.Apply(ve, new CssDeclaration(css, value), Report);
+            if (ve == null) return;
+            StyleApplier.Apply(ve, new CssDeclaration(css, value), Report);
+            if (_built != null && css.StartsWith("offset-", StringComparison.Ordinal))
+            {
+                // the emitter reads the motion-path properties from the record, so a script write lands there too
+                var record = _built.CssOf(ve);
+                if (value.Trim().Length == 0) record.Remove(css); else record[css] = value.Trim();
+            }
         });
     }
 
@@ -667,8 +676,8 @@ var history = { length: 1, pushState: function(){}, replaceState: function(){}, 
 // ---- timers and animation frames ----
 function __errText(e){ if (!e) return String(e); var head = e.message !== undefined ? (e.name || 'Error') + ': ' + e.message : String(e); return e.stack ? head + String.fromCharCode(10) + e.stack : head; }
 var __timers = [], __rafs = [], __nextId = 1, __now_ms = 0;
-function setTimeout(fn, ms){ var id = __nextId++; __timers.push({id:id, fn:fn, at:__now_ms + (ms||0), every:0, args:Array.prototype.slice.call(arguments,2)}); return id; }
-function setInterval(fn, ms){ var id = __nextId++; __timers.push({id:id, fn:fn, at:__now_ms + (ms||0), every:Math.max(1, ms||1), args:Array.prototype.slice.call(arguments,2)}); return id; }
+function setTimeout(fn, ms){ var id = __nextId++; __timers.push({id:id, fn:fn, at:__now() + (ms||0), every:0, args:Array.prototype.slice.call(arguments,2)}); return id; }
+function setInterval(fn, ms){ var id = __nextId++; __timers.push({id:id, fn:fn, at:__now() + (ms||0), every:Math.max(1, ms||1), args:Array.prototype.slice.call(arguments,2)}); return id; }
 function clearTimeout(id){ __timers = __timers.filter(function(t){ return t.id !== id; }); }
 var clearInterval = clearTimeout;
 function requestAnimationFrame(fn){ var id = __nextId++; __rafs.push({id:id, fn:fn}); return id; }

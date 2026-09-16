@@ -97,8 +97,12 @@ internal sealed class KeyframeRunner
     private float _pausedAt = float.NaN;
     private float _pauseShift;
 
-    public KeyframeRunner(VisualElement ve, CssKeyframes frames, AnimationSpec spec, float now, Action<string>? warn)
+    /// <summary>The element's cascade record: the emitter reads offset-* from it, so keyframes write them there.</summary>
+    private readonly Dictionary<string, string>? _record;
+
+    public KeyframeRunner(VisualElement ve, CssKeyframes frames, AnimationSpec spec, float now, Action<string>? warn, Dictionary<string, string>? record = null)
     {
+        _record = record;
         _ve = ve;
         _frames = frames;
         _spec = spec;
@@ -217,7 +221,11 @@ internal sealed class KeyframeRunner
     private void ApplyFrame(CssKeyframe frame)
     {
         foreach (var d in frame.Declarations)
+        {
             StyleApplier.Apply(_ve, d, _warn);
+            // ponytail: only the motion-path properties, which the emitter reads from the record rather than the resolved style
+            if (_record != null && d.Name.StartsWith("offset-", StringComparison.Ordinal)) _record[d.Name] = d.Value.Trim();
+        }
         Wrote = true;
     }
 }

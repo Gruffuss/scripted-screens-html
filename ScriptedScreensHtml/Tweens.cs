@@ -31,12 +31,18 @@ internal sealed class Tweens
         public Vector2 Scale;
         public Color Bg;
         public Color Fg;
+        /// <summary>offset-distance in px along the element's offset-path (0 without one).</summary>
+        public float Offset;
 
-        public static Snap Of(VisualElement ve)
+        public static Snap Of(VisualElement ve, Dictionary<string, string>? css = null)
         {
             var rs = ve.resolvedStyle;
+            var offset = 0f;
+            if (css != null && css.TryGetValue("offset-path", out var path) && css.TryGetValue("offset-distance", out var od))
+                offset = OffsetPx(od, path);
             return new Snap
             {
+                Offset = offset,
                 Rect = ve.layout,
                 Opacity = rs.opacity,
                 Rotate = rs.rotate.angle.ToDegrees(),
@@ -53,7 +59,14 @@ internal sealed class Tweens
         public bool LayoutDiffers(in Snap o) => !Near(Rect.x, o.Rect.x) || !Near(Rect.y, o.Rect.y) || !Near(Rect.width, o.Rect.width) || !Near(Rect.height, o.Rect.height);
         public bool OpacityDiffers(in Snap o) => !Near(Opacity, o.Opacity);
         public bool TransformDiffers(in Snap o) => !Near(Rotate, o.Rotate) || !Near(Translate.x, o.Translate.x) || !Near(Translate.y, o.Translate.y) || !Near(Scale.x, o.Scale.x) || !Near(Scale.y, o.Scale.y);
-        public bool Differs(in Snap o) => LayoutDiffers(o) || OpacityDiffers(o) || TransformDiffers(o) || ColourDiffers(o);
+        public bool OffsetDiffers(in Snap o) => !Near(Offset, o.Offset);
+        public bool Differs(in Snap o) => LayoutDiffers(o) || OpacityDiffers(o) || TransformDiffers(o) || ColourDiffers(o) || OffsetDiffers(o);
+
+        internal static float OffsetPx(string distance, string path)
+        {
+            distance = distance.Trim();
+            return distance.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(distance) / 100f * VectorEmitter.PathLength(path) : StyleApplier.Num(distance);
+        }
 
         private static bool Near(float a, float b) => Mathf.Abs(a - b) < 0.01f;
     }
@@ -173,6 +186,8 @@ internal sealed class Tweens
                 Rotate = Mathf.Lerp(From.Rotate, To.Rotate, k),
                 Translate = Vector2.Lerp(From.Translate, To.Translate, k),
                 Scale = Vector2.Lerp(From.Scale, To.Scale, k),
+                Offset = Mathf.Lerp(From.Offset, To.Offset, k),
+                Bg = To.Bg, Fg = To.Fg,
             };
         }
 
@@ -220,7 +235,7 @@ internal sealed class Tweens
 
     private void Walk(VisualElement ve, HtmlRenderer.Result built, float now)
     {
-        var cur = Snap.Of(ve);
+        var cur = Snap.Of(ve, built.CssOf(ve));
         var isNew = !_shown.TryGetValue(ve, out var prev);
         if (isNew && built.StartingRules.Count > 0 && StartingSnap(ve, built, cur) is { } starting) { prev = starting; isNew = false; }
         if (!isNew && prev.Differs(cur))
@@ -292,6 +307,7 @@ internal sealed class Tweens
                 case "translate": { var p = v.Split(' ', StringSplitOptions.RemoveEmptyEntries); s.Translate = new Vector2(StyleApplier.Num(p[0]), p.Length > 1 ? StyleApplier.Num(p[1]) : 0f); any = true; break; }
                 case "scale": { var p = v.Split(' ', StringSplitOptions.RemoveEmptyEntries); s.Scale = new Vector2(StyleApplier.Num(p[0]), StyleApplier.Num(p.Length > 1 ? p[1] : p[0])); any = true; break; }
                 case "rotate": s.Rotate = Degrees(v); any = true; break;
+                case "offset-distance": if (built.CssOf(ve).TryGetValue("offset-path", out var sp)) { s.Offset = Snap.OffsetPx(v, sp); any = true; } break;
                 case "transform":
                     if (v == "none") { s.Translate = Vector2.zero; s.Scale = Vector2.one; s.Rotate = 0f; any = true; break; }
                     foreach (var (name, a) in StyleApplier.Functions(v))
@@ -337,6 +353,7 @@ internal sealed class Tweens
         var opacity = prev.OpacityDiffers(cur);
         var transform = prev.TransformDiffers(cur);
         var colour = prev.ColourDiffers(cur);
+        var offset = prev.OffsetDiffers(cur);
         foreach (var item in css.Split(','))
         {
             var parts = CssParser.SplitTopLevel(item.Trim(), ' ').FindAll(p => p.Length > 0).ToArray();
@@ -345,6 +362,7 @@ internal sealed class Tweens
             var matches = prop == "all"
                           || (colour && (prop == "color" || prop == "background-color" || prop == "background" || prop == "border-color"))
                           || (opacity && prop == "opacity")
+                          || (offset && (prop == "offset-distance" || prop == "offset"))
                           || (transform && (prop == "transform" || prop == "rotate" || prop == "translate" || prop == "scale"))
                           || (layout && Array.Exists(LayoutProps, p => prop.StartsWith(p, StringComparison.Ordinal)));
             if (!matches) continue;

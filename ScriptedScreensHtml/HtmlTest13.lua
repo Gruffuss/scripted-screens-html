@@ -5,6 +5,8 @@
 --   trig       widths from calc() with sin/cos/hypot/pow/round: four bars of 50, 87, 100 and 60 px
 --   col-rule   two columns of text with a dashed amber column-rule between them
 --   offset     three dots placed along one path("...") at 0%, 50% and 100%, the arrow turned along the tangent
+--   motion     the green dot glides to the end of the path over 2 s after load (transition: offset-distance);
+--              the amber arrow loops along it every 4 s (@keyframes on offset-distance, offset-rotate auto)
 --   col        <colgroup><col width> gives the first table column 60% of the width
 --   picture    <picture> with a <source media="(min-width: 600px)"> picks the wide image
 --   uinvalid   the empty required input turns red only after it is touched (:user-invalid)
@@ -52,6 +54,10 @@ local page = [[
   .dot { position: absolute; width: 10px; height: 10px; border-radius: 5px; background: #4af; offset-path: path("M 20 50 C 100 -20, 200 120, 280 30"); }
   .arrow { position: absolute; width: 18px; height: 8px; background: #f5a623; clip-path: polygon(0 0, 100% 50%, 0 100%); offset-path: path("M 20 50 C 100 -20, 200 120, 280 30"); offset-distance: 50%; offset-rotate: auto; }
 
+  .mover { position: absolute; width: 10px; height: 10px; border-radius: 5px; background: #3c7; offset-path: path("M 20 50 C 100 -20, 200 120, 280 30"); offset-distance: 0%; transition: offset-distance 2s ease-in-out; }
+  @keyframes travel { from { offset-distance: 0%; } to { offset-distance: 100%; } }
+  .orbit { position: absolute; width: 18px; height: 8px; background: #f5a623; clip-path: polygon(0 0, 100% 50%, 0 100%); offset-path: path("M 20 50 C 100 -20, 200 120, 280 30"); offset-rotate: auto; animation: travel 4s linear infinite; }
+
   table { border-collapse: collapse; width: 300px; } td { border: 1px solid #456; padding: 2px 4px; }
 
   input { background: #223; color: #eee; border: 2px solid #567; padding: 3px; width: 120px; }
@@ -87,6 +93,7 @@ local page = [[
     <div class="dot" style="offset-distance: 0%"></div><div class="dot" style="offset-distance: 100%"></div>
     <div class="arrow"></div>
   </div>
+  <div class="track"><div id="mover" class="mover"></div><div class="orbit"></div></div>
 
   <h2>&lt;col&gt; widths</h2>
   <table><colgroup><col width="60%"><col></colgroup><tr><td>sixty percent</td><td>rest</td></tr></table>
@@ -111,6 +118,7 @@ local page = [[
 
 <script>
   document.getElementById('dlg').showModal();
+  setTimeout(() => { document.getElementById('mover').style.offsetDistance = '100%'; }, 800);
   document.getElementById('close').onclick = () => document.getElementById('dlg').close();
   document.getElementById('open').onclick = () => document.getElementById('dlg').showModal();
   document.getElementById('add').onclick = () => { const p = document.createElement('span'); p.className = 'pill'; p.textContent = 'new'; document.getElementById('pills').appendChild(p); };

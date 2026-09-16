@@ -95,7 +95,7 @@ vector node.
 | Position | `static relative absolute fixed sticky` (sticky inside a scrolling box), `top right bottom left inset`, `z-index` (across parents) |
 | Overflow | `hidden`, `clip`, `auto`/`scroll` (a real scroll box: wheel and drag, `scrollTop` from script, `scrollIntoView`), drawn scrollbars styled by `scrollbar-width`, `scrollbar-color` or `::-webkit-scrollbar*` |
 | Float, columns | `float: left/right` with text flowing beside, `clear`, `column-count` (block children, or the words of a text block), `column-gap`, `column-rule` |
-| Motion path | `offset-path: path()` with `offset-distance` (px or %) and `offset-rotate` (`auto`, an angle, `auto` plus an angle): a static place on the path; animating the distance is still to do |
+| Motion path | `offset-path: path()` with `offset-distance` (px or %) and `offset-rotate` (`auto`, an angle, `auto` plus an angle); the distance animates through `transition` and `@keyframes` (the path between the two distances sampled 16 times into one expression over the tween's progress, the turn following the tangent) |
 | Other | `aspect-ratio`, `-webkit-line-clamp`/`line-clamp` (ellipsis on the last line) |
 
 ### Paint

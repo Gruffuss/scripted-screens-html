@@ -213,7 +213,7 @@ Handled: document 34 of 35, element 96 of 100, window 65 of 80, canvas 60 of 60.
 
 | What | Why | What closes it |
 |---|---|---|
-| `offset-path` is a static position on the path; `offset-distance` does not animate | the tween system interpolates snapshots of box, opacity and transform, not a path distance | a tween on the distance written as an expression that samples the flattened path |
+| An animated `offset-distance` follows the path as 16 straight pieces between the two distances | the position is a piecewise-linear expression over the tween's progress; the vector expression language has no path lookup | more pieces when a long path shows corners (the count is a constant in the emitter) |
 | `offset-path` reads `path()` only; `ray()`, `circle()` and `url()` are ignored, arcs flatten to their chord | one flattener for M L H V C S Q T Z | the arc flattening the vector mod already has, exposed or copied |
 | `column-rule` is `solid` or dashed/dotted only; `column-span` and `column-fill` are ignored | the rule is a column's left border | column-span needs the columns rebuilt around the spanning element |
 | Inline flow: text wraps beside a float, a drop cap or a list marker only as one shrinkable label; it does not flow around a shape or continue under the letter at the left margin | the layout engine (UI Toolkit) has no inline formatting context: text lives in labels, labels are flex boxes | a real line breaker: measure text, break into line boxes, place runs around floats. Large; would also give `shape-outside`, `::first-line` without the vector, `initial-letter`, mixed inline sizes on one line |

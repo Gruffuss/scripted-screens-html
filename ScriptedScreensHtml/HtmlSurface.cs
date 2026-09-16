@@ -464,7 +464,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             // animation-timeline: scroll()/view(): the emitter writes the frames as expressions over the scroll offset; no clock runs it
             if (built.CssOf(element).TryGetValue("animation-timeline", out var timeline) && timeline.Trim() != "auto") continue;
-            _animations.Add(new KeyframeRunner(element, built.Keyframes[spec.Name], spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m)));
+            _animations.Add(new KeyframeRunner(element, built.Keyframes[spec.Name], spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), built.CssOf(element)));
         }
 
         _dirty = true;
@@ -1021,7 +1021,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>Element.animate(): a keyframe runner made by the script; the handle cancels it.</summary>
     private int StartAnimation(VisualElement ve, CssKeyframes frames, AnimationSpec spec)
     {
-        var runner = new KeyframeRunner(ve, frames, spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m));
+        var runner = new KeyframeRunner(ve, frames, spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), _built?.CssOf(ve));
         _animations.Add(runner);
         _scriptAnimations[++_animationSeq] = runner;
         _awakeFrames = Mathf.Max(_awakeFrames, 2);

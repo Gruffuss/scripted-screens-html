@@ -159,7 +159,7 @@ internal static class VectorEmitter
             groups++;
         }
         // offset-path + offset-distance + offset-rotate: the box moved to its point on the path and turned along it
-        var offset = css.TryGetValue("offset-path", out var opath) ? Offset(css, opath, ve, x, y, w, h) : null;
+        var offset = css.TryGetValue("offset-path", out var opath) ? Offset(css, opath, ve, x, y, w, h, tw) : null;
         var xform = Xform.From(ve, tw, x, y, w, h, offset);
         if (xform != null) { ctx.Body.Append(indent).Append(xform.Group()).Append(" {\n"); groups++; }
         if (css.TryGetValue("transform", out var tcss) && StyleApplier.NeedsMatrix(tcss) && Matrix(tcss, css, x, y, w, h) is { } m)
@@ -514,21 +514,38 @@ internal static class VectorEmitter
     /// offset-rotate (auto = along the tangent, an angle, or auto plus an angle).
     /// ponytail: ray()/shapes as offset-path and offset-anchor are not read; arcs flatten to a chord.
     /// </summary>
-    private static (float dx, float dy, float rot)? Offset(Dictionary<string, string> css, string pathCss, VisualElement ve, float x, float y, float w, float h)
+    /// <summary>Where an offset-path puts the element: a translation and turn, and when its
+    /// offset-distance is tweening, the same as expressions over the tween's progress.</summary>
+    internal sealed class OffsetPlace
     {
+        public float Dx, Dy, Rot;
+        public string? Ex, Ey, Er;
+    }
+
+    private static readonly Dictionary<string, (List<Vector2> pts, float total)> PathCache = new(StringComparer.Ordinal);
+
+    /// <summary>offset-path: path("...") flattened, with its length; null for anything else.</summary>
+    internal static (List<Vector2> pts, float total)? Path(string pathCss)
+    {
+        if (PathCache.TryGetValue(pathCss, out var cached)) return cached;
         var open = pathCss.IndexOf("path(", StringComparison.OrdinalIgnoreCase);
         if (open < 0) return null;
         var close = pathCss.LastIndexOf(')');
         if (close <= open) return null;
-        var d = pathCss.Substring(open + 5, close - open - 5).Trim().Trim('"', '\'');
-        var pts = FlattenPath(d);
+        var pts = FlattenPath(pathCss.Substring(open + 5, close - open - 5).Trim().Trim('"', '\''));
         if (pts.Count < 2) return null;
         var total = 0f;
         for (var i = 1; i < pts.Count; i++) total += Vector2.Distance(pts[i - 1], pts[i]);
-        var dist = 0f;
-        if (css.TryGetValue("offset-distance", out var od))
-            dist = od.Trim().EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(od) / 100f * total : StyleApplier.Num(od);
-        dist = Mathf.Clamp(dist, 0f, total);
+        if (PathCache.Count > 256) PathCache.Clear();
+        PathCache[pathCss] = (pts, total);
+        return (pts, total);
+    }
+
+    internal static float PathLength(string pathCss) => Path(pathCss)?.total ?? 0f;
+
+    /// <summary>The point at a distance along the polyline and the tangent's angle there, in degrees.</summary>
+    private static (Vector2 p, float along) Sample(List<Vector2> pts, float dist)
+    {
         var p = pts[0];
         var tangent = pts[1] - pts[0];
         var run = 0f;
@@ -538,32 +555,65 @@ internal static class VectorEmitter
             if (seg <= 0f) continue;
             if (run + seg >= dist || i == pts.Count - 1)
             {
-                var f = Mathf.Clamp01((dist - run) / seg);
-                p = Vector2.Lerp(pts[i - 1], pts[i], f);
+                p = Vector2.Lerp(pts[i - 1], pts[i], Mathf.Clamp01((dist - run) / seg));
                 tangent = pts[i] - pts[i - 1];
                 break;
             }
             run += seg;
         }
-        var along = Mathf.Atan2(tangent.y, tangent.x) * Mathf.Rad2Deg;
-        var rot = along;
+        return (p, Mathf.Atan2(tangent.y, tangent.x) * Mathf.Rad2Deg);
+    }
+
+    private static OffsetPlace? Offset(Dictionary<string, string> css, string pathCss, VisualElement ve, float x, float y, float w, float h, Tweens.Tween? tw)
+    {
+        if (Path(pathCss) is not { } path) return null;
+        var (pts, total) = path;
+        var dist = css.TryGetValue("offset-distance", out var od) ? Tweens.Snap.OffsetPx(od, pathCss) : 0f;
+        // offset-rotate: auto (along the tangent), reverse, an angle, or auto plus an angle
+        var autoTurn = 1f; var extra = 0f; var anyRotate = false;
         if (css.TryGetValue("offset-rotate", out var orr))
         {
-            var parts = orr.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            rot = 0f;
-            foreach (var part in parts)
+            autoTurn = 0f;
+            foreach (var part in orr.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries))
             {
-                if (part == "auto") rot += along;
-                else if (part == "reverse") rot += along + 180f;
-                else rot += Degrees(part);
+                if (part == "auto") autoTurn = 1f;
+                else if (part == "reverse") { autoTurn = 1f; extra += 180f; }
+                else extra += Degrees(part);
+                anyRotate = true;
             }
         }
         // the path is in the containing block's space: the parent's origin in page coordinates
-        var ox = x - ve.layout.x;
-        var oy = y - ve.layout.y;
-        var cx = x + w * 0.5f;
-        var cy = y + h * 0.5f;
-        return (ox + p.x - cx, oy + p.y - cy, rot);
+        var ox = x - ve.layout.x - (x + w * 0.5f);
+        var oy = y - ve.layout.y - (y + h * 0.5f);
+        var end = Sample(pts, Mathf.Clamp(dist, 0f, total));
+        var place = new OffsetPlace { Dx = ox + end.p.x, Dy = oy + end.p.y, Rot = autoTurn * end.along + extra };
+        if (tw == null || Mathf.Abs(tw.From.Offset - tw.To.Offset) < 0.01f || tw.P.Length == 0) return place;
+
+        // A tween on the distance: the path between the two distances sampled K times and the
+        // position written as a piecewise-linear function of the eased progress P:
+        //   x(P) = x0 + sum_k (x[k+1]-x[k]) * clamp(P*K - k, 0, 1)
+        // The angle is unwrapped so the turn never jumps through 360.
+        const int K = 16;
+        var sx = new StringBuilder(); var sy = new StringBuilder(); var sr = new StringBuilder();
+        var prev = Sample(pts, Mathf.Clamp(tw.From.Offset, 0f, total));
+        var prevAngle = prev.along;
+        sx.Append('=').Append(F(ox + prev.p.x)); sy.Append('=').Append(F(oy + prev.p.y)); sr.Append('=').Append(F(autoTurn * prevAngle + extra));
+        for (var k = 0; k < K; k++)
+        {
+            var dk = Mathf.Lerp(tw.From.Offset, tw.To.Offset, (k + 1f) / K);
+            var cur = Sample(pts, Mathf.Clamp(dk, 0f, total));
+            var angle = cur.along;
+            while (angle - prevAngle > 180f) angle -= 360f;
+            while (angle - prevAngle < -180f) angle += 360f;
+            var step = "clamp(" + tw.P + "*" + K + "-" + k + ",0,1)";
+            if (Mathf.Abs(cur.p.x - prev.p.x) > 0.01f) sx.Append("+(").Append(F(cur.p.x - prev.p.x)).Append(")*").Append(step);
+            if (Mathf.Abs(cur.p.y - prev.p.y) > 0.01f) sy.Append("+(").Append(F(cur.p.y - prev.p.y)).Append(")*").Append(step);
+            if (autoTurn != 0f && Mathf.Abs(angle - prevAngle) > 0.01f) sr.Append("+(").Append(F(angle - prevAngle)).Append(")*").Append(step);
+            prev = cur; prevAngle = angle;
+        }
+        place.Ex = sx.ToString(); place.Ey = sy.ToString();
+        place.Er = autoTurn != 0f || !anyRotate ? sr.ToString() : null;
+        return place;
     }
 
     private static float Degrees(string v)
@@ -646,29 +696,40 @@ internal static class VectorEmitter
         public float Ax, Ay, Tx, Ty, R, Sx = 1f, Sy = 1f;
         /// <summary>offset-path: a translation and turn applied under the transform, both ends of a tween alike.</summary>
         private float _ox, _oy, _or;
+        private OffsetPlace? _offset;
         private Tweens.Tween? _tw;
 
         /// <summary>The element's resolved transform (UI Toolkit has already applied the CSS), tweened if one is running.</summary>
-        public static Xform? From(VisualElement ve, Tweens.Tween? tw, float x, float y, float w, float h, (float dx, float dy, float rot)? offset = null)
+        public static Xform? From(VisualElement ve, Tweens.Tween? tw, float x, float y, float w, float h, OffsetPlace? offset = null)
         {
             var rs = ve.resolvedStyle;
             var xf = new Xform
             {
                 Ax = x + w * 0.5f, Ay = y + h * 0.5f,
-                Tx = rs.translate.x + (offset?.dx ?? 0f), Ty = rs.translate.y + (offset?.dy ?? 0f),
-                R = rs.rotate.angle.ToDegrees() + (offset?.rot ?? 0f),
+                Tx = rs.translate.x + (offset?.Dx ?? 0f), Ty = rs.translate.y + (offset?.Dy ?? 0f),
+                R = rs.rotate.angle.ToDegrees() + (offset?.Rot ?? 0f),
                 Sx = rs.scale.value.x, Sy = rs.scale.value.y,
-                _ox = offset?.dx ?? 0f, _oy = offset?.dy ?? 0f, _or = offset?.rot ?? 0f,
+                _ox = offset?.Dx ?? 0f, _oy = offset?.Dy ?? 0f, _or = offset?.Rot ?? 0f,
+                _offset = offset,
                 _tw = tw != null && tw.From.TransformDiffers(tw.To) ? tw : null,
             };
             var identity = Mathf.Abs(xf.Tx) < 0.01f && Mathf.Abs(xf.Ty) < 0.01f && Mathf.Abs(xf.R) < 0.01f
                            && Mathf.Abs(xf.Sx - 1f) < 0.001f && Mathf.Abs(xf.Sy - 1f) < 0.001f;
-            return identity && xf._tw == null ? null : xf;
+            return identity && xf._tw == null && offset?.Ex == null ? null : xf;
         }
 
         public string Group()
         {
             var sb = new StringBuilder("G a=[").Append(F(Ax)).Append(',').Append(F(Ay)).Append(']');
+            if (_offset?.Ex != null)
+            {
+                // the distance tween: the CSS translate/rotate as numbers plus the path expressions.
+                // ponytail: a transform tween running at the same time is emitted at its end state
+                sb.Append(" t=[\"").Append(_offset.Ex).Append('+').Append(F(Tx - _ox)).Append("\",\"").Append(_offset.Ey).Append('+').Append(F(Ty - _oy)).Append("\"]");
+                sb.Append(" r=").Append(_offset.Er != null ? "\"" + _offset.Er + "+" + F(R - _or) + "\"" : F(R));
+                if (Sx != 1f || Sy != 1f) sb.Append(" s=[").Append(F(Sx)).Append(',').Append(F(Sy)).Append(']');
+                return sb.ToString();
+            }
             if (_tw != null)
             {
                 var f = _tw.From;

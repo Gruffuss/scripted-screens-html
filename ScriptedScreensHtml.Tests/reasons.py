@@ -94,7 +94,7 @@ put("build", "`column-rule` is a left border on every column but the first. `col
 
 # ---------------------------------------------------------------- approximations (drawn, but not as a browser draws it)
 APPROX = [
-    ("`offset-path` is a static position on the path; `offset-distance` does not animate", "the tween system interpolates snapshots of box, opacity and transform, not a path distance", "a tween on the distance written as an expression that samples the flattened path"),
+    ("An animated `offset-distance` follows the path as 16 straight pieces between the two distances", "the position is a piecewise-linear expression over the tween's progress; the vector expression language has no path lookup", "more pieces when a long path shows corners (the count is a constant in the emitter)"),
     ("`offset-path` reads `path()` only; `ray()`, `circle()` and `url()` are ignored, arcs flatten to their chord", "one flattener for M L H V C S Q T Z", "the arc flattening the vector mod already has, exposed or copied"),
     ("`column-rule` is `solid` or dashed/dotted only; `column-span` and `column-fill` are ignored", "the rule is a column's left border", "column-span needs the columns rebuilt around the spanning element"),
     ("Inline flow: text wraps beside a float, a drop cap or a list marker only as one shrinkable label; it does not flow around a shape or continue under the letter at the left margin",
