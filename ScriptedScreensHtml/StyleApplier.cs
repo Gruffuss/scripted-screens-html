@@ -27,8 +27,9 @@ internal static class StyleApplier
         switch (d.Name)
         {
             // Box
-            case "width": s.width = LenFor(ve, "width", v); break;
-            case "height": s.height = LenFor(ve, "height", v); break;
+            // a box thinner than a pixel is painted a pixel wide, as a browser paints a .5px hairline
+            case "width": s.width = Hairline(LenFor(ve, "width", v)); break;
+            case "height": s.height = Hairline(LenFor(ve, "height", v)); break;
             case "min-width": s.minWidth = LenFor(ve, "min-width", v); break;
             case "min-height": s.minHeight = LenFor(ve, "min-height", v); break;
             case "max-width": s.maxWidth = LenFor(ve, "max-width", v); break;
@@ -687,6 +688,9 @@ internal static class StyleApplier
         if (MixedCalc.TryGetValue(ve, out var old)) old.RemoveAll(e => e.prop == prop);
         return Len(v);
     }
+
+    private static StyleLength Hairline(StyleLength l)
+        => l.keyword == StyleKeyword.Undefined && l.value.unit == LengthUnit.Pixel && l.value.value > 0f && l.value.value < 1f ? new Length(1f, LengthUnit.Pixel) : l;
 
     public static StyleLength Len(string v)
     {

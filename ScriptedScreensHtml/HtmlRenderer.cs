@@ -62,6 +62,8 @@ internal static class HtmlRenderer
         internal readonly HashSet<VisualElement> LayoutAttached = new();
         /// <summary>Elements whose keyframe animation has its runner.</summary>
         internal readonly HashSet<VisualElement> AnimationAttached = new();
+        /// <summary>Flex containers with a gap, re-applied when their children or cascade change.</summary>
+        internal readonly HashSet<VisualElement> GapContainers = new();
         public readonly Dictionary<VisualElement, HtmlNode> NodeOf = new();
         public HtmlNode Document = new();
         /// <summary>display: grid containers, laid out by GridLayout once attached.</summary>
@@ -118,6 +120,8 @@ internal static class HtmlRenderer
             Recascade(ve);
             // hooks of elements a script has since removed go (an innerHTML page rebuilds its content every tick)
             AfterRecascade.RemoveAll(a => a.Target is VisualElement gone && gone.panel == null);
+            GapContainers.RemoveWhere(g => g.panel == null);
+            foreach (var g in GapContainers) ApplyGap(g, CssOf(g), this);
             foreach (var after in AfterRecascade) after();
         }
 
@@ -200,7 +204,7 @@ internal static class HtmlRenderer
         ApplyStyles(root, body, rules, result);
         foreach (var child in body.Children)
             Append(root, child, rules, result);
-        ApplyGap(root, result.CssOf(root));
+        ApplyGap(root, result.CssOf(root), result);
 
         return result;
     }
@@ -344,6 +348,7 @@ internal static class HtmlRenderer
             parentNode.Children.Add(child);
             Append(parent, child, result.Rules, result);
         }
+        ApplyGap(parent, result.CssOf(parent), result);
     }
 
     /// <summary>
@@ -371,6 +376,7 @@ internal static class HtmlRenderer
             if (id != null && result.ById.TryGetValue(id, out var made) && made.parent == parent)
                 made.PlaceBehind(beforeVe);
         }
+        ApplyGap(parent, result.CssOf(parent), result);
     }
 
     /// <summary>The node's markup back as HTML: its children (inner) or itself with them (outer). Generated content, markers and synthetic ids are left out.</summary>
@@ -404,6 +410,7 @@ internal static class HtmlRenderer
     /// <summary>Script removal: the element, its node, and every id under it.</summary>
     internal static void Remove(VisualElement ve, Result result)
     {
+        var parent = ve.parent;
         if (result.NodeOf.TryGetValue(ve, out var node))
         {
             node.Parent?.Children.Remove(node);
@@ -411,6 +418,7 @@ internal static class HtmlRenderer
         }
         Forget(ve, result);
         ve.RemoveFromHierarchy();
+        if (parent != null && result.GapContainers.Contains(parent)) ApplyGap(parent, result.CssOf(parent), result);
     }
 
     private static void Forget(VisualElement ve, Result result)
@@ -744,7 +752,7 @@ internal static class HtmlRenderer
             CloseRun();
             if (node.Tag == "details")
                 ShowDetails(ve, node, result);
-            ApplyGap(ve, result.CssOf(ve));
+            ApplyGap(ve, result.CssOf(ve), result);
             OrderChildren(ve, result);
             Flow(parent, ve, result);
             return;
@@ -1559,7 +1567,7 @@ internal static class HtmlRenderer
             }
         }
         if (bottomCaption != null) Append(ve, bottomCaption, rules, result);
-        ApplyGap(ve, result.CssOf(ve));
+        ApplyGap(ve, result.CssOf(ve), result);
     }
 
     private static string OwnText(HtmlNode n)
@@ -2321,7 +2329,7 @@ internal static class HtmlRenderer
     /// Flex `gap` on a layout engine without it: margins on the children along the main
     /// axis, and on the cross axis when the container wraps.
     /// </summary>
-    private static void ApplyGap(VisualElement ve, Dictionary<string, string> css)
+    internal static void ApplyGap(VisualElement ve, Dictionary<string, string> css, Result result)
     {
         if (css.TryGetValue("display", out var display) && display.Trim() == "grid") return;
         var rowGap = 0f; var colGap = 0f;
@@ -2334,6 +2342,8 @@ internal static class HtmlRenderer
         if (css.TryGetValue("row-gap", out var rg)) rowGap = StyleApplier.Num(rg);
         if (css.TryGetValue("column-gap", out var cg)) colGap = StyleApplier.Num(cg);
         if (rowGap <= 0f && colGap <= 0f) return;
+        // remembered: children a script appends later, and a re-cascade that rewrites the margins, get the gap again
+        result.GapContainers.Add(ve);
         var dir = ve.style.flexDirection.value;
         var row = dir == FlexDirection.Row || dir == FlexDirection.RowReverse;
         var wrap = ve.style.flexWrap.value == UnityEngine.UIElements.Wrap.Wrap;
@@ -2342,17 +2352,29 @@ internal static class HtmlRenderer
         {
             var child = ve[i];
             var last = i == count - 1;
-            if (row)
-            {
-                if (!last && colGap > 0f) child.style.marginRight = child.resolvedStyle.marginRight + colGap;
-                if (wrap && rowGap > 0f) child.style.marginBottom = child.resolvedStyle.marginBottom + rowGap;
-            }
-            else
-            {
-                if (!last && rowGap > 0f) child.style.marginBottom = child.resolvedStyle.marginBottom + rowGap;
-                if (wrap && colGap > 0f) child.style.marginRight = child.resolvedStyle.marginRight + colGap;
-            }
+            // the child's own margin from its record, so applying the gap twice adds it once
+            var own = result.CssOf(child);
+            var right = row ? (!last ? colGap : 0f) : (wrap ? colGap : 0f);
+            var bottom = row ? (wrap ? rowGap : 0f) : (!last ? rowGap : 0f);
+            if ((row || wrap) && DeclaredSide(own, "right") is { } mr) child.style.marginRight = mr + right;
+            if ((!row || wrap) && DeclaredSide(own, "bottom") is { } mb) child.style.marginBottom = mb + bottom;
         }
+    }
+
+    /// <summary>A margin side as the element's CSS declares it, in px; null for auto (left alone).</summary>
+    private static float? DeclaredSide(Dictionary<string, string> css, string side)
+    {
+        string? v = null;
+        if (css.TryGetValue("margin-" + side, out var s)) v = s;
+        else if (css.TryGetValue("margin", out var m))
+        {
+            var p = m.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (p.Length > 0) v = side == "right" ? (p.Length > 1 ? p[1] : p[0]) : (p.Length > 2 ? p[2] : p[0]);
+        }
+        if (v == null) return 0f;
+        v = v.Trim();
+        if (v == "auto") return null;
+        return StyleApplier.Num(v);
     }
 
     private static void ApplyStyles(VisualElement ve, HtmlNode node, List<CssRule> rules, Result result)

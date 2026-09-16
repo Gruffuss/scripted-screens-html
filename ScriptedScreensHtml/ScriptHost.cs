@@ -49,8 +49,13 @@ internal sealed class ScriptHost : IDisposable
     /// <summary>Before a tree read on the worker: wait (up to a frame or two) for pending writes to land on the main thread.</summary>
     private void Sync()
     {
-        if (!_toMain.IsEmpty) _drained.Wait(250);
+        if (_toMain.IsEmpty) return;
+        _syncing = true;
+        try { _drained.Wait(250); }
+        finally { _syncing = false; }
     }
+    /// <summary>The worker is inside a read that needs its pending writes applied: the main thread drains them now.</summary>
+    private volatile bool _syncing;
     private readonly ConcurrentDictionary<string, (float w, float h)> _sizes = new(StringComparer.Ordinal);
     /// <summary>Per scroll container, as the vector mod last reported: [offset, scrollHeight, viewport height] in page px.</summary>
     internal readonly ConcurrentDictionary<string, float[]> ScrollState = new(StringComparer.Ordinal);
@@ -250,7 +255,7 @@ internal sealed class ScriptHost : IDisposable
         }
         // A frame's writes land together once the worker is done with it (a browser's task is
         // atomic too); pumping mid-frame made every write its own layout and emit.
-        return _busy ? false : Pump();
+        return _busy && !_syncing ? false : Pump();
     }
 
     /// <summary>Apply queued DOM writes and canvas frames. Main thread. Returns whether anything was applied.</summary>
