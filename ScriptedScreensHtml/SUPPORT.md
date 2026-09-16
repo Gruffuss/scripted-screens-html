@@ -43,6 +43,8 @@ JS          →  Jint on a worker thread; DOM writes land on the main thread and
 | Tables | `table thead tbody tfoot tr td th caption col`, `colspan`, a `width` attribute, `colgroup`/`col` widths (`width` attribute or style, `span`); rows and sections are real elements (`tr:nth-child` striping, hover); `caption-side`, `empty-cells`; cells share a table with a width equally, size to content without one |
 | Forms | `input` (text, number with min/max/step, checkbox, radio, range, email, url, password, search), `textarea` (rows/cols), `select` with `optgroup`, `button`, `label for`, `form` with `submit`, `progress`, `meter` (three colours), `fieldset`/`legend`; values reach Lua as `on_change("name=value")` and the page script as `input`/`change` events |
 | Details, dialog | `<details open>` toggles on the summary click; `dialog.showModal()`/`close()`; `:open`, `:modal` |
+| Popover | the `popover` attribute (hidden until shown), `popovertarget` buttons (`popovertargetaction` show/hide/toggle), `showPopover()`/`hidePopover()`/`togglePopover()`, `:popover-open`, drawn in the top layer with an optional `::backdrop` |
+| Maps, lists, base | `<img usemap>` with `<map>`/`<area>` (rect, circle, poly; the area gets the click event), `<input list>` with `<datalist>` (the options open under the focused field, a click fills the value), `<base href>` for relative `src`, `href`, `url()` and `@import` |
 | Media | `img` (`object-fit`, radius, `alt` ignored), `video`, `audio` (autoplay, loop, controls attributes as the ScriptedScreens elements allow); a `picture` renders its `img` and ignores its `source` candidates (see COVERAGE.md) |
 | Inline SVG | see the SVG section |
 | Canvas | see the JS section |
@@ -58,7 +60,7 @@ vector node.
 |---|---|
 | Shapes | `rect` (rx), `circle`, `ellipse`, `line`, `polyline`, `polygon`, `path` (full `d` syntax incl. arcs and relative commands) |
 | Structure | `g`, `defs`, `symbol`, `use` (href to a shape or a symbol with its own viewBox, x/y/width/height), `clipPath` on shapes and groups (convex and concave), `title`/`desc`/`metadata` skipped |
-| Presentation | attributes, inline `style`, and stylesheet rules on shape nodes (`.bar:nth-child(2) { fill }`, `svg circle { stroke }`); `fill stroke stroke-width fill-opacity stroke-opacity opacity stroke-linecap stroke-linejoin stroke-dasharray stroke-dashoffset stroke-miterlimit fill-rule` inherit through groups as in SVG |
+| Presentation | attributes, inline `style`, and stylesheet rules on shape nodes (`.bar:nth-child(2) { fill }`, `svg circle { stroke }`, geometry too: `r`, `cx`, `x`, `d`...); `marker-start/mid/end` with `<marker>` (orient auto, markerUnits, viewBox, refX/Y); `paint-order: stroke`; `pathLength` (dashes scale to it); `shape-rendering: crispEdges`; `vector-effect: non-scaling-stroke`; `transform-origin` with `transform-box: fill-box`; `fill stroke stroke-width fill-opacity stroke-opacity opacity stroke-linecap stroke-linejoin stroke-dasharray stroke-dashoffset stroke-miterlimit fill-rule` inherit through groups as in SVG |
 | Transforms | `transform` attribute with `translate rotate(a[,cx,cy]) scale skewX skewY matrix`, composed through nested groups |
 | Gradients | `linearGradient`, `radialGradient` with stops (`offset`, `stop-color`, `stop-opacity`, inline style), `gradientUnits`; ids scoped per svg |
 | Text | `text` and `tspan` (own x/y start a line; tspan `fill`/`font-weight`/`font-style` as rich text), `font-size` in viewBox units, `text-anchor`, `dominant-baseline`, `font-family`, `letter-spacing` |
@@ -76,12 +78,12 @@ vector node.
 | Rules | selector lists, specificity, source order, `!important`, inline `style`, tag defaults, CSS nesting with `&`, nested `@media`/`@supports`/`@layer`/`@container` |
 | Combinators | descendant, `>`, `+`, `~` |
 | Simple selectors | tag, `.class`, `#id`, `*`, attribute selectors (`[a]`, `=`, `~=`, `|=`, `^=`, `$=`, `*=`, `i` flag) |
-| Pseudo-classes | `:root :first-child :last-child :only-child :nth-child() :nth-last-child() :nth-of-type() :nth-last-of-type() :first-of-type :last-of-type :only-of-type :empty :not() :is() :where() :has() :hover :active :focus :focus-visible :focus-within :checked :disabled :enabled :required :optional :read-only :read-write :placeholder-shown :default :indeterminate :valid :invalid :user-valid :user-invalid (after the field was changed) :in-range :out-of-range :open :modal :link :any-link :lang() :dir()`; `:visited`/`:target` never match |
-| Pseudo-elements | `::before`/`::after` with `content` (strings, `attr()`, `counter()`, `counters()`), `::marker`, `::placeholder` (colour), `::first-letter`, `::first-line` (colour, size, weight, face), `::backdrop` (background and opacity of the dim layer behind a modal dialog, on top of the page), `::-webkit-scrollbar`, `-thumb`, `-track` |
+| Pseudo-classes | `:root :first-child :last-child :only-child :nth-child() :nth-last-child() :nth-of-type() :nth-last-of-type() :first-of-type :last-of-type :only-of-type :empty :not() :is() :where() :has() :hover :active :focus :focus-visible :focus-within :checked :disabled :enabled :required :optional :read-only :read-write :placeholder-shown :default :indeterminate :valid :invalid :user-valid :user-invalid (after the field was changed) :popover-open :scope :in-range :out-of-range :open :modal :link :any-link :lang() :dir()`; `:visited`/`:target` never match |
+| Pseudo-elements | `::before`/`::after` with `content` (strings, `attr()`, `counter()`, `counters()`), `::marker`, `::placeholder` (colour), `::first-letter`, `::first-line` (colour, size, weight, face), `::backdrop` (background and opacity of the dim layer behind a modal dialog or a styled popover, on top of the page), `::details-content` (the body of a details as one box), `::-webkit-scrollbar`, `-thumb`, `-track` |
 | At-rules | `@media` (width/height/min/max/orientation/`not`/`and`/lists, decided against the design size), `@supports`, `@keyframes`, `@font-face` (a font file the Fonts mod has, by file name), `@import`, `@layer` (source order), `@scope (root)`, `@container` (size queries decided against the design size), `@property` (`initial-value`), `@counter-style`, `@starting-style` (top level and nested: the state a new element transitions from, on load and on insert) |
-| Values | custom properties with `var()` and fallbacks, `inherit`, `initial`, `unset`, `revert`, `currentColor`, `calc()` (nested), `min()`, `max()`, `clamp()`, `sin() cos() tan() asin() acos() atan() atan2()`, `pow() sqrt() hypot() log() exp()`, `abs() sign() mod() rem() round()`, `attr()` in content |
-| Units | `px em rem % vw vh vmin vmax ch ex cm mm in pt pc q fr deg rad turn grad s ms` |
-| Colours | 148 named, `#rgb #rgba #rrggbb #rrggbbaa`, `rgb()/rgba()` (legacy and modern), `hsl()/hsla()`, `transparent`, `color-mix(in srgb, ...)` |
+| Values | custom properties with `var()` and fallbacks, `inherit`, `initial`, `unset`, `revert`, `currentColor`, `calc()` (nested), `min()`, `max()`, `clamp()`, `sin() cos() tan() asin() acos() atan() atan2()`, `pow() sqrt() hypot() log() exp()`, `abs() sign() mod() rem() round()`, `attr()` in content, `env()` (safe-area insets are 0), `image-set()` (first candidate) |
+| Units | `px em rem % vw vh vmin vmax ch ex cap ic cm mm in pt pc Q fr deg rad turn grad s ms` (`cap` 0.7em, `ic` 1em) |
+| Colours | 148 named, `#rgb #rgba #rrggbb #rrggbbaa`, `rgb()/rgba()` (legacy and modern), `hsl()/hsla()`, `transparent`, `color-mix(in srgb, ...)`, `hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, the relative colour syntax (`rgb(from red r g b / 50%)`, `hsl(from x calc(h + 120) s l)`, any of the functions), `light-dark()` by the cascade's `color-scheme` |
 | Logical properties | `inline-size block-size min/max-*-size`, `margin/padding/border/inset-inline|block(-start|-end)`, `border-start-start-radius` and siblings, `overflow-inline/block`, `text-align: start/end`, `float: inline-start/end` (a horizontal, left-to-right page) |
 
 ### Layout
@@ -94,8 +96,8 @@ vector node.
 | Grid | `grid-template-columns/rows` (px % fr auto minmax repeat), `grid-template-areas`, `grid-template`, `grid-area` (name or lines), `grid-column/row(-start/-end)` incl. negative lines and `span`, `gap`, `grid-auto-rows/columns/flow`, auto placement, content-sized auto tracks |
 | Position | `static relative absolute fixed sticky` (sticky inside a scrolling box), `top right bottom left inset`, `z-index` (across parents) |
 | Overflow | `hidden`, `clip`, `auto`/`scroll` (a real scroll box: wheel and drag, `scrollTop` from script, `scrollIntoView`), drawn scrollbars styled by `scrollbar-width`, `scrollbar-color` or `::-webkit-scrollbar*` |
-| Float, columns | `float: left/right` with text flowing beside, `clear`, `column-count` (block children, or the words of a text block), `column-gap`, `column-rule` |
-| Motion path | `offset-path: path()` with `offset-distance` (px or %) and `offset-rotate` (`auto`, an angle, `auto` plus an angle); the distance animates through `transition` and `@keyframes` (the path between the two distances sampled 16 times into one expression over the tween's progress, the turn following the tangent) |
+| Float, columns | `float: left/right` with text flowing beside, `clear`, `column-count` or `column-width` (block children, or the words of a text block), `columns`, `column-gap`, `column-rule`, `column-span: all`, `column-fill` (accepted: fills like balance) |
+| Motion path | `offset-path: path()` or `ray(angle size)` (from `offset-position`), the `offset` shorthand, `offset-anchor`, with `offset-distance` (px or %) and `offset-rotate` (`auto`, an angle, `auto` plus an angle); the distance animates through `transition` and `@keyframes` (the path between the two distances sampled 16 times into one expression over the tween's progress, the turn following the tangent) |
 | Other | `aspect-ratio`, `-webkit-line-clamp`/`line-clamp` (ellipsis on the last line) |
 
 ### Paint
@@ -103,6 +105,9 @@ vector node.
 | Area | What works |
 |---|---|
 | Background | `background-color`, `background` shorthand, `background-image: url()` (`background-size` contain/cover/percent/px, `background-position`, `background-repeat` no-repeat), `linear-gradient` (angles, `to` keywords, positioned stops, hard stops), `radial-gradient` (shape, size keywords, position), `conic-gradient` (`from`, `at`), `repeating-linear-gradient`, `background-clip: text` with a gradient |
+| Backgrounds | `background-origin` (padding-box, content-box, border-box), `background-position-x/y` names |
+| Corners | `corner-shape` with one to four values (bevel, scoop, notch, square, round), `corner-top-left-shape` and the other corner and side names, the logical `corner-start-start-shape` family |
+| Masks | `mask-image` gradients with `mask-size`, `mask-position`, `mask-origin`, `mask-clip` (`mask-repeat` accepted) |
 | Borders | `border` and every per-side longhand (`width`, `color`, `style` incl. per side), `solid dashed dotted double inset outset groove ridge none hidden`, `border-radius` per corner incl. elliptical, `corner-shape: bevel/scoop/notch`, `border-image` (gradient source as a gradient frame, image source as nine slices in percent), `outline` (`width style color offset`) |
 | Shadows | `box-shadow` (offset, blur, spread, colour, `inset`, several), `text-shadow` (several), `filter: drop-shadow()` |
 | Effects | `opacity`, `filter: brightness contrast saturate hue-rotate grayscale sepia invert drop-shadow` (on the subtree), `clip-path: inset() circle() ellipse() polygon()` (also concave), `mask-image: linear-gradient(...)`, `mix-blend-mode` and `backdrop-filter` accepted without effect (per-pixel) |
@@ -121,7 +126,7 @@ vector node.
 
 | Area | What works |
 |---|---|
-| Transitions | `transition` on size, position, opacity, transform and colours (`transition-property/duration/delay/timing-function`, `steps()`, `cubic-bezier()`); compiled to expressions, no per-frame work |
+| Transitions | `transition` on size, position, opacity, transform, colours and `offset-distance`, `transition-behavior: allow-discrete` (a `display: none` waits for the transition), `@starting-style` (`transition-property/duration/delay/timing-function`, `steps()`, `cubic-bezier()`); compiled to expressions, no per-frame work |
 | Keyframes | `@keyframes` with `animation-name/duration/delay/iteration-count/direction/fill-mode/play-state/timing-function`, `Element.animate()` |
 | Scroll-driven | `animation-timeline: scroll()` and `view()` over opacity and 2D transforms, evaluated from the scroll offset |
 | Pointer | `:hover` (follows the cursor, or the crosshair), `:active` (while pressed), `:focus`/`:focus-within` (after a click), `pointer-events: none`, `cursor` accepted |

@@ -51,6 +51,8 @@ internal static class VectorEmitter
         public float ScrollH, ScrollRange;
         /// <summary>The page's design size, for full-page overlays (::backdrop).</summary>
         public float PageW, PageH;
+        /// <summary>The scale of the svg group being emitted (1 when the fit is baked), for vector-effect: non-scaling-stroke.</summary>
+        public float SvgScale = 1f;
         /// <summary>Scroll offsets a script set, by box id (HtmlSurface.ScrollSet).</summary>
         public Dictionary<string, (float offset, int version)>? ScrollSet;
         /// <summary>Positioned elements with a z-index, emitted after everything else at the root in z order: a stacking context across parents.</summary>
@@ -96,15 +98,18 @@ internal static class VectorEmitter
         var h = layout.height;
         var css = ctx.Built.CssOf(ve);
         var indent = new string(' ', depth * 2);
-        var modal = ctx.Built.NodeOf.TryGetValue(ve, out var dialogNode) && dialogNode.Tag == "dialog" && dialogNode.Attr("data-modal") != null;
-        if (modal && !ctx.EmittingDeferred)
+        var topNode = ctx.Built.NodeOf.TryGetValue(ve, out var dialogNode) ? dialogNode : null;
+        var modal = topNode != null && topNode.Tag == "dialog" && topNode.Attr("data-modal") != null;
+        var popoverOpen = topNode != null && topNode.Attr("popover") != null && topNode.Attr("data-popover-open") != null;
+        if ((modal || popoverOpen) && !ctx.EmittingDeferred)
         {
-            // the top layer: a modal dialog paints over everything, whatever its place in the document
-            ctx.Deferred.Add((ve, parentPos, int.MaxValue));
+            // the top layer: a modal dialog or an open popover paints over everything, whatever its place in the document
+            ctx.Deferred.Add((ve, parentPos, modal ? int.MaxValue : int.MaxValue - 1));
             return;
         }
-        // a modal dialog dims the page behind it: the ::backdrop pseudo-element, a full-page box under the dialog
-        if (modal)
+        // a modal dialog dims the page behind it: the ::backdrop pseudo-element, a full-page box under the dialog;
+        // a popover's backdrop is drawn only when a rule gives it a background
+        if (modal || (popoverOpen && (PseudoCss(ctx, ve, "backdrop").ContainsKey("background") || PseudoCss(ctx, ve, "backdrop").ContainsKey("background-color"))))
         {
             var bd = PseudoCss(ctx, ve, "backdrop");
             var backdrop = new Color(0f, 0f, 0f, 0.1f);
@@ -174,12 +179,12 @@ internal static class VectorEmitter
             groups++;
         }
         else filterShadow = css.TryGetValue("filter", out var fcss2) && Filters(ctx, fcss2, out _, out var fs2) ? fs2 : string.Empty;
-        if ((css.TryGetValue("clip-path", out var cpath) || css.TryGetValue("-webkit-clip-path", out cpath)) && ClipPath(ctx, cpath, x, y, w, h, xform) is { } clipId)
+        if ((css.TryGetValue("clip-path", out var cpath) || css.TryGetValue("-webkit-clip-path", out cpath)) && ClipPath(ctx, cpath, x, y, w, h, xform, css.TryGetValue("clip-rule", out var clipRule) && clipRule.Trim() == "evenodd") is { } clipId)
         {
             ctx.Body.Append(indent).Append("G clip=").Append(clipId).Append(" {\n");
             groups++;
         }
-        if ((css.TryGetValue("mask-image", out var mcss) || css.TryGetValue("-webkit-mask-image", out mcss) || css.TryGetValue("mask", out mcss)) && MaskDef(ctx, mcss, x, y, w, h) is { } maskId)
+        if ((css.TryGetValue("mask-image", out var mcss) || css.TryGetValue("-webkit-mask-image", out mcss) || css.TryGetValue("mask", out mcss)) && MaskDef(ctx, mcss, x, y, w, h, css, rs) is { } maskId)
         {
             ctx.Body.Append(indent).Append("G mask=@").Append(maskId).Append(" {\n");  // gradient mask on the subtree (vector requirement 10)
             groups++;
@@ -224,8 +229,9 @@ internal static class VectorEmitter
             else
             {
                 var id = "clip" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x)).Append(" y=").Append(F(y))
-                    .Append(" w=").Append(F(w)).Append(" h=").Append(F(h)).Append(Radius(rs, w, h)).Append(" }\n");
+                var margin = css.TryGetValue("overflow-clip-margin", out var ocm) ? StyleApplier.Num(ocm) : 0f;  // the clip box grown by overflow-clip-margin
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x - margin)).Append(" y=").Append(F(y - margin))
+                    .Append(" w=").Append(F(w + 2f * margin)).Append(" h=").Append(F(h + 2f * margin)).Append(Radius(rs, w + 2f * margin, h + 2f * margin)).Append(" }\n");
                 ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
                 groups++;
             }
@@ -258,7 +264,13 @@ internal static class VectorEmitter
                         .Append(Radius(rs, w, h)).Append(" f=").Append(Hex(bg)).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
                     ctx.Out.Nodes++;
                 }
-                EmitImage(ctx, imageUrl, BackgroundFit(css), css, rs, x, y, w, h, indent, bg.a > 0.002f ? string.Empty : NodeId(ctx, ve));
+                // background-origin: padding-box (the default, inside the border), content-box, or border-box
+                var origin = css.TryGetValue("background-origin", out var bo) ? bo.Trim() : "padding-box";
+                var il = origin == "border-box" ? 0f : rs.borderLeftWidth + (origin == "content-box" ? rs.paddingLeft : 0f);
+                var it = origin == "border-box" ? 0f : rs.borderTopWidth + (origin == "content-box" ? rs.paddingTop : 0f);
+                var ir = origin == "border-box" ? 0f : rs.borderRightWidth + (origin == "content-box" ? rs.paddingRight : 0f);
+                var ib = origin == "border-box" ? 0f : rs.borderBottomWidth + (origin == "content-box" ? rs.paddingBottom : 0f);
+                EmitImage(ctx, imageUrl, BackgroundFit(css), css, rs, x + il, y + it, Mathf.Max(1f, w - il - ir), Mathf.Max(1f, h - it - ib), indent, bg.a > 0.002f ? string.Empty : NodeId(ctx, ve));
             }
             else if (tw != null && !Tweens.Snap.NearColour(tw.From.Bg, bg) && (tw.From.Bg.a > 0.002f || bg.a > 0.002f) && !(bgCss != null && bgCss.Contains("gradient(")))
             {
@@ -520,6 +532,62 @@ internal static class VectorEmitter
     {
         public float Dx, Dy, Rot;
         public string? Ex, Ey, Er;
+        /// <summary>The anchor point on the box that sits on the path (offset-anchor), in page coordinates.</summary>
+        public float Ax, Ay;
+    }
+
+    /// <summary>
+    /// offset-path: ray(angle [size] [contain]): a straight line from offset-position (the
+    /// box's anchor when auto, the containing block's centre for normal) at the angle (0deg
+    /// up, clockwise), as long as the size keyword says. Points in the containing block's space.
+    /// </summary>
+    private static (List<Vector2> pts, float total)? RayPath(Dictionary<string, string> css, string pathCss, VisualElement ve, float x, float y, float ax, float ay)
+    {
+        var open = pathCss.IndexOf("ray(", StringComparison.OrdinalIgnoreCase);
+        if (open < 0) return null;
+        var close = pathCss.LastIndexOf(')');
+        var parts = pathCss.Substring(open + 4, Math.Max(0, close - open - 4)).Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) return null;
+        var angle = Degrees(parts[0]);
+        var size = "closest-side";
+        foreach (var p in parts) if (p is "closest-side" or "farthest-side" or "closest-corner" or "farthest-corner" or "sides") size = p;
+        var parent = ve.parent;
+        var pw = parent != null && !float.IsNaN(parent.layout.width) ? parent.layout.width : StyleApplier.ViewportW;
+        var ph = parent != null && !float.IsNaN(parent.layout.height) ? parent.layout.height : StyleApplier.ViewportH;
+        // the start, in the containing block's space: the anchor's own place (auto), the centre (normal), or a position
+        var start = new Vector2(ve.layout.x + (ax - x), ve.layout.y + (ay - y));
+        if (css.TryGetValue("offset-position", out var op))
+        {
+            var o = op.Trim().ToLowerInvariant();
+            if (o == "normal") start = new Vector2(pw * 0.5f, ph * 0.5f);
+            else if (o != "auto")
+            {
+                var pp = o.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                float Pos(string p, float size1) => p switch { "left" or "top" => 0f, "center" => size1 * 0.5f, "right" or "bottom" => size1, _ => p.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(p) / 100f * size1 : StyleApplier.Num(p) };
+                start = new Vector2(pp.Length > 0 ? Pos(pp[0], pw) : pw * 0.5f, pp.Length > 1 ? Pos(pp[1], ph) : ph * 0.5f);
+            }
+        }
+        var dir = new Vector2(Mathf.Sin(angle * Mathf.Deg2Rad), -Mathf.Cos(angle * Mathf.Deg2Rad));
+        var dl = start.x; var dr = pw - start.x; var dt = start.y; var db = ph - start.y;
+        float len;
+        switch (size)
+        {
+            case "farthest-side": len = Mathf.Max(Mathf.Max(dl, dr), Mathf.Max(dt, db)); break;
+            case "closest-corner": len = Mathf.Sqrt(Mathf.Min(dl, dr) * Mathf.Min(dl, dr) + Mathf.Min(dt, db) * Mathf.Min(dt, db)); break;
+            case "farthest-corner": len = Mathf.Sqrt(Mathf.Max(dl, dr) * Mathf.Max(dl, dr) + Mathf.Max(dt, db) * Mathf.Max(dt, db)); break;
+            case "sides":
+            {
+                // where the ray leaves the containing block
+                len = float.MaxValue;
+                if (dir.x > 0.0001f) len = Mathf.Min(len, dr / dir.x); else if (dir.x < -0.0001f) len = Mathf.Min(len, dl / -dir.x);
+                if (dir.y > 0.0001f) len = Mathf.Min(len, db / dir.y); else if (dir.y < -0.0001f) len = Mathf.Min(len, dt / -dir.y);
+                if (len == float.MaxValue) len = 0f;
+                break;
+            }
+            default: len = Mathf.Min(Mathf.Min(dl, dr), Mathf.Min(dt, db)); break;
+        }
+        len = Mathf.Max(0.001f, len);
+        return (new List<Vector2> { start, start + dir * len }, len);
     }
 
     private static readonly Dictionary<string, (List<Vector2> pts, float total)> PathCache = new(StringComparer.Ordinal);
@@ -566,7 +634,17 @@ internal static class VectorEmitter
 
     private static OffsetPlace? Offset(Dictionary<string, string> css, string pathCss, VisualElement ve, float x, float y, float w, float h, Tweens.Tween? tw)
     {
-        if (Path(pathCss) is not { } path) return null;
+        // offset-anchor: which point of the box rides the path (auto: the centre)
+        var ax = x + w * 0.5f; var ay = y + h * 0.5f;
+        if (css.TryGetValue("offset-anchor", out var oa) && !string.Equals(oa.Trim(), "auto", StringComparison.OrdinalIgnoreCase))
+        {
+            var pp = oa.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            float Pos(string p, float size) => p switch { "left" or "top" => 0f, "center" => size * 0.5f, "right" or "bottom" => size, _ => p.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(p) / 100f * size : StyleApplier.Num(p) };
+            ax = x + (pp.Length > 0 ? Pos(pp[0], w) : w * 0.5f);
+            ay = y + (pp.Length > 1 ? Pos(pp[1], h) : h * 0.5f);
+        }
+        var pathData = Path(pathCss) ?? RayPath(css, pathCss, ve, x, y, ax, ay);
+        if (pathData is not { } path) return null;
         var (pts, total) = path;
         var dist = css.TryGetValue("offset-distance", out var od) ? Tweens.Snap.OffsetPx(od, pathCss) : 0f;
         // offset-rotate: auto (along the tangent), reverse, an angle, or auto plus an angle
@@ -582,11 +660,11 @@ internal static class VectorEmitter
                 anyRotate = true;
             }
         }
-        // the path is in the containing block's space: the parent's origin in page coordinates
-        var ox = x - ve.layout.x - (x + w * 0.5f);
-        var oy = y - ve.layout.y - (y + h * 0.5f);
+        // the path is in the containing block's space: the parent's origin in page coordinates, less the anchor
+        var ox = x - ve.layout.x - ax;
+        var oy = y - ve.layout.y - ay;
         var end = Sample(pts, Mathf.Clamp(dist, 0f, total));
-        var place = new OffsetPlace { Dx = ox + end.p.x, Dy = oy + end.p.y, Rot = autoTurn * end.along + extra };
+        var place = new OffsetPlace { Dx = ox + end.p.x, Dy = oy + end.p.y, Rot = autoTurn * end.along + extra, Ax = ax, Ay = ay };
         if (tw == null || Mathf.Abs(tw.From.Offset - tw.To.Offset) < 0.01f || tw.P.Length == 0) return place;
 
         // A tween on the distance: the path between the two distances sampled K times and the
@@ -705,7 +783,7 @@ internal static class VectorEmitter
             var rs = ve.resolvedStyle;
             var xf = new Xform
             {
-                Ax = x + w * 0.5f, Ay = y + h * 0.5f,
+                Ax = offset?.Ax ?? x + w * 0.5f, Ay = offset?.Ay ?? y + h * 0.5f,
                 Tx = rs.translate.x + (offset?.Dx ?? 0f), Ty = rs.translate.y + (offset?.Dy ?? 0f),
                 R = rs.rotate.angle.ToDegrees() + (offset?.Rot ?? 0f),
                 Sx = rs.scale.value.x, Sy = rs.scale.value.y,
@@ -1197,6 +1275,8 @@ internal static class VectorEmitter
         sb.Append(NodeId(ctx, label)).Append('\n');
         ctx.Body.Append(sb);
         ctx.Out.Nodes++;
+        if (css.TryGetValue("text-emphasis-style", out var emphasis) && emphasis.Trim() != "none")
+            EmitEmphasis(ctx, css, rs, text, emphasis, x, y, w, h, indent);
         if (drawDeco)
             EmitDecoration(ctx, label, deco, rs, ox, y, ow, h, centre, right, indent);
     }
@@ -1406,6 +1486,7 @@ internal static class VectorEmitter
         var group = " t=[" + F(ox - vb.x * sx) + "," + F(oy - vb.y * sy) + "] s=[" + F(sx) + "," + F(sy) + "]";
         var bake = Mathf.Abs(sx - sy) > 0.01f * Mathf.Max(sx, sy);
         var fit = bake ? new Fit(ox - vb.x * sx, oy - vb.y * sy, sx, sy, group) : new Fit(0f, 0f, 1f, 1f, null);
+        ctx.SvgScale = bake ? 1f : sx;
         ctx.Body.Append(indent).Append("G clip=").Append(id).Append(bake ? string.Empty : group).Append(" {\n");
         var inner = indent + "  ";
         // SVG ids are per document, scene def ids are global: sixteen tanks each declare
@@ -1530,7 +1611,7 @@ internal static class VectorEmitter
             return;
         }
 
-        if (shape.Tag == "clipPath")
+        if (shape.Tag == "clipPath" || shape.Tag == "marker")
             return;
         var sb = new StringBuilder(indent);
         var opacity = shape.Attr("opacity");
@@ -1548,7 +1629,7 @@ internal static class VectorEmitter
         }
         if (shape.Tag == "image")
         {
-            var href = shape.Attr("href") ?? string.Empty;
+            var href = HtmlRenderer.ResolveUrl(shape.Attr("href") ?? string.Empty, ctx.Built);
             if (href.Length == 0) return;
             var par = (shape.Attr("preserveAspectRatio") ?? "xMidYMid meet").ToLowerInvariant();
             var ifit = par.Contains("none") ? "fill" : par.Contains("slice") ? "cover" : "contain";
@@ -1636,48 +1717,171 @@ internal static class VectorEmitter
                 return;
         }
 
-        // Paint. SVG defaults: fill black, no stroke; a line/polyline has no fill.
+        // Paint. SVG defaults: fill black, no stroke; a line/polyline has no fill. Fill and
+        // stroke are built apart so paint-order: stroke can draw the stroke under the fill.
         var fill = shape.Attr("fill") ?? (shape.Tag == "line" || shape.Tag == "polyline" ? "none" : "black");
-        sb.Append(" f=").Append(Paint(fill, prefix));
+        var fillSb = new StringBuilder();
+        fillSb.Append(" f=").Append(Paint(fill, prefix));
         var fo = Mul(shape.Attr("fill-opacity"), opacity);
-        if (fo != null) sb.Append(" fo=").Append(fo);
+        if (fo != null) fillSb.Append(" fo=").Append(fo);
+        var strokeSb = new StringBuilder();
         var stroke = shape.Attr("stroke");
+        // pathLength: the author's length for the geometry; dashes and their offset scale by the real length over it
+        var dashScale = 1f;
+        if (shape.Attr("pathLength") is { } plen && StyleApplier.Num(plen) > 0f && GeometryLength(shape) is var real && real > 0f) dashScale = real / StyleApplier.Num(plen);
+        string Dash(string p) => dashScale == 1f ? (pathGroup ? Expr(p) : fit.Len(p)) : F(StyleApplier.Num(p) * dashScale * (pathGroup ? 1f : (fit.Sx + fit.Sy) * 0.5f));
         if (stroke != null && stroke != "none")
         {
-            sb.Append(" s=").Append(Paint(stroke, prefix));
-            // A path under its own scaled group keeps its width in viewBox units.
-            sb.Append(" sw=").Append(pathGroup ? Expr(shape.Attr("stroke-width") ?? "1") : fit.Len(shape.Attr("stroke-width") ?? "1"));
+            strokeSb.Append(" s=").Append(Paint(stroke, prefix));
+            // A path under its own scaled group keeps its width in viewBox units; a non-scaling
+            // stroke is one width on screen whatever the svg's scale.
+            var swRaw = shape.Attr("stroke-width") ?? "1";
+            var nonScaling = shape.Attr("vector-effect") is { } veff && veff.Trim() == "non-scaling-stroke";
+            strokeSb.Append(" sw=").Append(nonScaling ? F(StyleApplier.Num(swRaw) / Mathf.Max(0.001f, fit.Bake ? 1f : ctx.SvgScale)) : pathGroup ? Expr(swRaw) : fit.Len(swRaw));
             var so = Mul(shape.Attr("stroke-opacity"), opacity);
-            if (so != null) sb.Append(" so=").Append(so);
+            if (so != null) strokeSb.Append(" so=").Append(so);
             var cap = shape.Attr("stroke-linecap");
-            if (cap != null) sb.Append(" cap=").Append(cap);
+            if (cap != null) strokeSb.Append(" cap=").Append(cap);
             var join = shape.Attr("stroke-linejoin");
-            if (join != null) sb.Append(" join=").Append(join);
+            if (join != null) strokeSb.Append(" join=").Append(join);
+            // dashes and miter limit in their SVG spellings
+            if (shape.Attr("stroke-dasharray") is { } da && shape.Attr("dash") == null && da.Trim() != "none")
+            {
+                var parts = da.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
+                var list = new StringBuilder();
+                foreach (var p in parts) { if (list.Length > 0) list.Append(','); list.Append(Dash(p)); }
+                if (list.Length > 0) strokeSb.Append(" dash=[").Append(list).Append(']');
+            }
+            if (shape.Attr("stroke-dashoffset") is { } dofs && shape.Attr("dofs") == null) strokeSb.Append(" dofs=").Append(Dash(dofs));
+            if (shape.Attr("stroke-miterlimit") is { } ml && shape.Attr("ml") == null) strokeSb.Append(" ml=").Append(Expr(ml));
         }
+        var common = new StringBuilder();
         foreach (var name in Passthrough)
         {
             if (name == "lod" && repeat != null) continue;
             var v = shape.Attr(name);
-            if (v != null) sb.Append(' ').Append(name).Append('=').Append(Expr(v));
+            if (v != null) common.Append(' ').Append(name).Append('=').Append(Expr(v));
         }
-        // dashes, miter limit and fill rule in their SVG spellings
-        if (shape.Attr("stroke-dasharray") is { } da && shape.Attr("dash") == null && da.Trim() != "none")
-        {
-            var parts = da.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
-            var list = new StringBuilder();
-            foreach (var p in parts) { if (list.Length > 0) list.Append(','); list.Append(pathGroup ? Expr(p) : fit.Len(p)); }
-            if (list.Length > 0) sb.Append(" dash=[").Append(list).Append(']');
-        }
-        if (shape.Attr("stroke-dashoffset") is { } dofs && shape.Attr("dofs") == null) sb.Append(" dofs=").Append(pathGroup ? Expr(dofs) : fit.Len(dofs));
-        if (shape.Attr("stroke-miterlimit") is { } ml && shape.Attr("ml") == null) sb.Append(" ml=").Append(Expr(ml));
-        if (shape.Attr("fill-rule") is { } frule && shape.Attr("fr") == null) sb.Append(" fr=").Append(frule.Trim());
+        if (shape.Attr("fill-rule") is { } frule && shape.Attr("fr") == null) common.Append(" fr=").Append(frule.Trim());
+        if (shape.Attr("shape-rendering") is { } srend && srend.Trim() == "crispEdges" && shape.Attr("fea") == null) common.Append(" fea=0");
         var sid = shape.Attr("id");
-        if (sid != null) sb.Append(" id=").Append(sid);
-        if (pathGroup) sb.Append(" }");
-        if (repeat != null) sb.Append(" }");
-        for (var i = 0; i < wrappers; i++) sb.Append(" }");
-        ctx.Body.Append(sb).Append('\n');
+        var tail = new StringBuilder();
+        if (pathGroup) tail.Append(" }");
+        if (repeat != null) tail.Append(" }");
+        for (var i = 0; i < wrappers; i++) tail.Append(" }");
+        var strokeFirst = strokeSb.Length > 0 && fill != "none" && shape.Attr("paint-order") is { } po && po.Trim().StartsWith("stroke", StringComparison.Ordinal);
+        if (strokeFirst)
+        {
+            // the stroke first, then the fill over it (paint-order: stroke): two nodes of the same geometry
+            ctx.Body.Append(sb).Append(" f=none").Append(strokeSb).Append(common).Append(tail).Append('\n');
+            ctx.Out.Nodes++;
+            ctx.Body.Append(sb).Append(fillSb).Append(common);
+        }
+        else ctx.Body.Append(sb).Append(fillSb).Append(strokeSb).Append(common);
+        if (sid != null) ctx.Body.Append(" id=").Append(sid);
+        ctx.Body.Append(tail).Append('\n');
         ctx.Out.Nodes++;
+        EmitMarkers(ctx, shape, indent, prefix, fit);
+    }
+
+    /// <summary>The length of a shape's outline in viewBox units, for pathLength; 0 when unknown.</summary>
+    private static float GeometryLength(SvgShape shape)
+    {
+        float N(string a) => shape.Attr(a) is { } v ? StyleApplier.Num(v) : 0f;
+        switch (shape.Tag)
+        {
+            case "line": return Vector2.Distance(new Vector2(N("x1"), N("y1")), new Vector2(N("x2"), N("y2")));
+            case "rect": return 2f * (N("width") + N("height"));
+            case "circle": return 2f * Mathf.PI * N("r");
+            case "ellipse": { var a = N("rx"); var b = N("ry"); var hh = (a - b) * (a - b) / Mathf.Max(0.0001f, (a + b) * (a + b)); return Mathf.PI * (a + b) * (1f + 3f * hh / (10f + Mathf.Sqrt(4f - 3f * hh))); }
+            case "polyline": case "polygon": case "path":
+            {
+                var pts = shape.Tag == "path" ? FlattenPath(shape.Attr("d") ?? string.Empty) : Points(shape);
+                var len = 0f;
+                for (var i = 1; i < pts.Count; i++) len += Vector2.Distance(pts[i - 1], pts[i]);
+                if (shape.Tag == "polygon" && pts.Count > 1) len += Vector2.Distance(pts[pts.Count - 1], pts[0]);
+                return len;
+            }
+            default: return 0f;
+        }
+    }
+
+    private static List<Vector2> Points(SvgShape shape)
+    {
+        var raw = (shape.Attr("points") ?? string.Empty).Split(new[] { ' ', ',', '\n', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        var pts = new List<Vector2>();
+        for (var i = 0; i + 1 < raw.Length; i += 2) pts.Add(new Vector2(StyleApplier.Num(raw[i]), StyleApplier.Num(raw[i + 1])));
+        return pts;
+    }
+
+    /// <summary>
+    /// marker-start/mid/end: the marker's shapes at the shape's vertices, turned along the
+    /// line (orient="auto"), scaled by the stroke width (markerUnits default) and the marker's
+    /// viewBox, offset by refX/refY. ponytail: a path gets start and end markers only (its
+    /// vertices are the flattened curve, not the author's points).
+    /// </summary>
+    private static void EmitMarkers(Ctx ctx, SvgShape shape, string indent, string prefix, Fit fit)
+    {
+        if (shape.Owner == null) return;
+        var start = MarkerRef(shape.Attr("marker-start") ?? shape.Attr("marker"));
+        var mid = MarkerRef(shape.Attr("marker-mid") ?? shape.Attr("marker"));
+        var end = MarkerRef(shape.Attr("marker-end") ?? shape.Attr("marker"));
+        if (start == null && mid == null && end == null) return;
+        List<Vector2> pts;
+        switch (shape.Tag)
+        {
+            case "line": pts = new List<Vector2> { new(StyleApplier.Num(shape.Attr("x1") ?? "0"), StyleApplier.Num(shape.Attr("y1") ?? "0")), new(StyleApplier.Num(shape.Attr("x2") ?? "0"), StyleApplier.Num(shape.Attr("y2") ?? "0")) }; break;
+            case "polyline": case "polygon": pts = Points(shape); break;
+            case "path": { var fp = FlattenPath(shape.Attr("d") ?? string.Empty); if (fp.Count < 2) return; pts = new List<Vector2> { fp[0], fp[1], fp[fp.Count - 2], fp[fp.Count - 1] }; mid = null; break; }
+            default: return;
+        }
+        if (pts.Count < 2) return;
+        var strokeW = StyleApplier.Num(shape.Attr("stroke-width") ?? "1");
+        for (var i = 0; i < pts.Count; i++)
+        {
+            var which = i == 0 ? start : i == pts.Count - 1 ? end : mid;
+            if (shape.Tag == "path" && (i == 1 || i == 2)) continue;
+            if (which == null) continue;
+            SvgShape? marker = null;
+            foreach (var s in shape.Owner.Shapes) if (s.Tag == "marker" && s.Attr("id") == which) { marker = s; break; }
+            if (marker?.Children == null || marker.Children.Count == 0) continue;
+            var inDir = i > 0 ? pts[i] - pts[i - 1] : pts[1] - pts[0];
+            var outDir = i + 1 < pts.Count ? pts[i + 1] - pts[i] : pts[i] - pts[i - 1];
+            var angle = Mathf.Atan2(inDir.y + outDir.y, inDir.x + outDir.x) * Mathf.Rad2Deg;
+            var orient = (marker.Attr("orient") ?? "0").Trim().ToLowerInvariant();
+            var rot = orient == "auto" ? angle : orient == "auto-start-reverse" ? (i == 0 ? angle + 180f : angle) : Degrees(orient);
+            var units = (marker.Attr("markerUnits") ?? "strokeWidth").Trim();
+            var k = units == "userSpaceOnUse" ? 1f : strokeW;
+            var mw = StyleApplier.Num(marker.Attr("markerWidth") ?? "3");
+            var mh = StyleApplier.Num(marker.Attr("markerHeight") ?? "3");
+            var vbParts = (marker.Attr("viewBox") ?? string.Empty).Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
+            var refX = StyleApplier.Num(marker.Attr("refX") ?? "0");
+            var refY = StyleApplier.Num(marker.Attr("refY") ?? "0");
+            if (vbParts.Length == 4)
+            {
+                var vbw = Mathf.Max(0.001f, StyleApplier.Num(vbParts[2])); var vbh = Mathf.Max(0.001f, StyleApplier.Num(vbParts[3]));
+                k *= Mathf.Min(mw / vbw, mh / vbh);
+                refX -= StyleApplier.Num(vbParts[0]); refY -= StyleApplier.Num(vbParts[1]);
+            }
+            // vertex in the group's space (uniform fit) or in scene space (baked fit)
+            var vx = fit.Bake ? fit.Px(pts[i].x) : pts[i].x;
+            var vy = fit.Bake ? fit.Py(pts[i].y) : pts[i].y;
+            var scale = k * (fit.Bake ? (fit.Sx + fit.Sy) * 0.5f : 1f);
+            ctx.Body.Append(indent).Append("G a=[0,0] t=[").Append(F(vx)).Append(',').Append(F(vy)).Append("] r=").Append(F(rot)).Append(" s=[").Append(F(scale)).Append(',').Append(F(scale)).Append("] {\n");
+            ctx.Body.Append(indent).Append("  G t=[").Append(F(-refX)).Append(',').Append(F(-refY)).Append("] {\n");
+            foreach (var child in marker.Children)
+                EmitShape(ctx, child, indent + "    ", prefix, new Fit(0f, 0f, 1f, 1f, null));
+            ctx.Body.Append(indent).Append("  }\n").Append(indent).Append("}\n");
+        }
+    }
+
+    private static string? MarkerRef(string? v)
+    {
+        if (v == null) return null;
+        var u = v.IndexOf("#", StringComparison.Ordinal);
+        if (u < 0) return null;
+        var close = v.IndexOf(')', u);
+        return v.Substring(u + 1, (close < 0 ? v.Length : close) - u - 1).Trim();
     }
 
     /// <summary>
@@ -2287,6 +2491,7 @@ internal static class VectorEmitter
     private static void EmitImage(Ctx ctx, string src, string fit, Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h, string indent, string nodeId)
     {
         var f = fit switch { "cover" => "cover", "contain" or "scale-down" => "contain", _ => "fill" };
+        src = HtmlRenderer.ResolveUrl(src, ctx.Built);
         ctx.Body.Append(indent).Append("IMG x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h))
             .Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=").Append(f).Append(Radius(rs, w, h));
         if (rs.opacity < 0.999f) ctx.Body.Append(" o=").Append(F(rs.opacity));
@@ -2294,9 +2499,53 @@ internal static class VectorEmitter
         ctx.Out.Nodes++;
     }
 
+    /// <summary>
+    /// text-emphasis: a mark over (or under) every character, as a second label of marks
+    /// in the same box. ponytail: the marks are spaced by their own advance, not the glyphs'
+    /// under them, so they drift on a proportional face; exact only for monospace text.
+    /// </summary>
+    private static void EmitEmphasis(Ctx ctx, Dictionary<string, string> css, IResolvedStyle rs, string text, string style, float x, float y, float w, float h, string indent)
+    {
+        var s = style.Trim().ToLowerInvariant();
+        var open = s.Contains("open");
+        string mark;
+        var q = style.IndexOf('"');
+        if (q >= 0 && style.LastIndexOf('"') > q) mark = style.Substring(q + 1, style.LastIndexOf('"') - q - 1);
+        else if (s.Contains("double-circle")) mark = open ? "\u25CE" : "\u25C9";
+        else if (s.Contains("circle")) mark = open ? "\u25CB" : "\u25CF";
+        else if (s.Contains("triangle")) mark = open ? "\u25B3" : "\u25B2";
+        else if (s.Contains("sesame")) mark = open ? "\uFE46" : "\uFE45";
+        else mark = open ? "\u25E6" : "\u2022";
+        var plain = System.Text.RegularExpressions.Regex.Replace(text, "<[^>]+>", string.Empty).Replace("\n", " ");
+        if (plain.Trim().Length == 0) return;
+        var marks = new StringBuilder(plain.Length);
+        foreach (var ch in plain) marks.Append(char.IsWhiteSpace(ch) ? ' ' : mark[0]);
+        var under = css.TryGetValue("text-emphasis-position", out var pos) && pos.Contains("under");
+        var colour = css.TryGetValue("text-emphasis-color", out var ec) && StyleApplier.TryColor(ec, out var col) ? col : rs.color;
+        var size = rs.fontSize * 0.5f;
+        var dy = under ? rs.fontSize * 0.6f : -rs.fontSize * 0.6f;
+        var line = new StringBuilder(indent);
+        line.Append("T x=").Append(F(x)).Append(" y=").Append(F(y + dy)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h))
+            .Append(" text=\"").Append(marks).Append("\" size=").Append(F(size)).Append(" f=").Append(Hex(colour)).Append(" valign=middle");
+        if (css.TryGetValue("text-align", out var ta)) { var t = ta.Trim(); if (t == "center") line.Append(" align=center"); else if (t is "right" or "end") line.Append(" align=right"); }
+        ctx.Body.Append(line).Append('\n');
+        ctx.Out.Nodes++;
+    }
+
     /// <summary>url(...) inside a background value, or null.</summary>
     private static string? UrlOf(string css)
     {
+        var set = css.IndexOf("image-set(", StringComparison.OrdinalIgnoreCase);
+        if (set >= 0)
+        {
+            // image-set("a.png" 1x, "b.png" 2x): one resolution here, the first candidate
+            var inner = css.Substring(set + 10);
+            var first = SplitTopLevelCommas(inner.TrimEnd(')'))[0].Trim();
+            if (first.StartsWith("url(", StringComparison.OrdinalIgnoreCase)) return UrlOf(first);
+            var q = first.IndexOfAny(new[] { '"', '\'' });
+            if (q >= 0) { var q2 = first.IndexOf(first[q], q + 1); if (q2 > q) return first.Substring(q + 1, q2 - q - 1); }
+            return first.Split(' ')[0];
+        }
         var u = css.IndexOf("url(", StringComparison.OrdinalIgnoreCase);
         if (u < 0) return null;
         var close = css.IndexOf(')', u);
@@ -2407,24 +2656,33 @@ internal static class VectorEmitter
     /// <summary>corner-shape: the box outline as a P with bevel, scoop or notch corners at the border radii; null for round/square.</summary>
     private static string? CornerPath(Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h)
     {
-        if (!css.TryGetValue("corner-shape", out var cs)) return null;
-        var shape = cs.Trim().ToLowerInvariant();
-        if (shape is not ("bevel" or "scoop" or "notch" or "squircle")) return null;
-        if (shape == "squircle") return null; // close enough to round; the R keeps its rx
+        // corner-shape takes one to four values (top-left, top-right, bottom-right, bottom-left, as
+        // border-radius); corner-<side>-shape and corner-<corner>-shape override per corner
+        var all = css.TryGetValue("corner-shape", out var cs) ? cs.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries) : Array.Empty<string>();
+        string Nth(int i) => all.Length == 0 ? "round" : all.Length == 1 ? all[0] : all.Length == 2 ? all[i % 2] : all.Length == 3 ? (i == 3 ? all[1] : all[i]) : all[i];
+        string ShapeFor(string corner, string sideA, string sideB, int i)
+        {
+            if (css.TryGetValue("corner-" + corner + "-shape", out var v) || css.TryGetValue("corner-" + sideA + "-shape", out v) || css.TryGetValue("corner-" + sideB + "-shape", out v)) return v.Trim().ToLowerInvariant();
+            return Nth(i);
+        }
+        var sTL = ShapeFor("top-left", "top", "left", 0); var sTR = ShapeFor("top-right", "top", "right", 1);
+        var sBR = ShapeFor("bottom-right", "bottom", "right", 2); var sBL = ShapeFor("bottom-left", "bottom", "left", 3);
+        static bool Custom(string s) => s is "bevel" or "scoop" or "notch" or "square";
+        if (!Custom(sTL) && !Custom(sTR) && !Custom(sBR) && !Custom(sBL)) return null; // round and squircle: the R keeps its rx
         var tl = Mathf.Min(rs.borderTopLeftRadius, Mathf.Min(w, h) * 0.5f);
         var tr = Mathf.Min(rs.borderTopRightRadius, Mathf.Min(w, h) * 0.5f);
         var br = Mathf.Min(rs.borderBottomRightRadius, Mathf.Min(w, h) * 0.5f);
         var bl = Mathf.Min(rs.borderBottomLeftRadius, Mathf.Min(w, h) * 0.5f);
         if (tl + tr + br + bl < 0.01f) return null;
         var sb = new StringBuilder("P d=\"");
-        void Corner(float cx, float cy, float r, float dx, float dy, bool first, bool alongTop)
+        void Corner(float cx, float cy, float r, float dx, float dy, bool first, bool alongTop, string shape)
         {
             // corner at (cx,cy); dx,dy point from the corner into the box. Clockwise, the
             // outline reaches a left-hand corner along the vertical side and a right-hand
             // corner along the horizontal one: (ax,ay) is where it arrives, (bx,by) where it leaves.
             var ax = alongTop ? cx + dx * r : cx; var ay = alongTop ? cy : cy + dy * r;
             var bx = alongTop ? cx : cx + dx * r; var by = alongTop ? cy + dy * r : cy;
-            if (r <= 0.01f) { sb.Append(first ? "M" : " L").Append(F(cx)).Append(' ').Append(F(cy)); return; }
+            if (r <= 0.01f || shape == "square") { sb.Append(first ? "M" : " L").Append(F(cx)).Append(' ').Append(F(cy)); return; }
             switch (shape)
             {
                 case "bevel": sb.Append(first ? "M" : " L").Append(F(ax)).Append(' ').Append(F(ay)).Append(" L").Append(F(bx)).Append(' ').Append(F(by)); break;
@@ -2433,10 +2691,10 @@ internal static class VectorEmitter
             }
         }
         // clockwise from the top-left corner: TL arrives from the left side going up, leaves along the top
-        Corner(x, y, tl, 1f, 1f, true, false);
-        Corner(x + w, y, tr, -1f, 1f, false, true);
-        Corner(x + w, y + h, br, -1f, -1f, false, false);
-        Corner(x, y + h, bl, 1f, -1f, false, true);
+        Corner(x, y, tl, 1f, 1f, true, false, sTL);
+        Corner(x + w, y, tr, -1f, 1f, false, true, sTR);
+        Corner(x + w, y + h, br, -1f, -1f, false, false, sBR);
+        Corner(x, y + h, bl, 1f, -1f, false, true, sBL);
         sb.Append(" Z\"");
         return sb.ToString();
     }
@@ -2808,8 +3066,9 @@ internal static class VectorEmitter
     }
 
     /// <summary>clip-path basic shapes to a CP def in page coordinates: inset(), circle(), ellipse(), polygon(). A concave polygon is passed as is (vector requirement 8).</summary>
-    private static string? ClipPath(Ctx ctx, string css, float x, float y, float w, float h, Xform? xform = null)
+    private static string? ClipPath(Ctx ctx, string css, float x, float y, float w, float h, Xform? xform = null, bool evenOdd = false)
     {
+        var rule = evenOdd ? " fr=evenodd" : string.Empty;
         var v = css.Trim();
         var open = v.IndexOf('(');
         if (open < 0 || !v.EndsWith(")", StringComparison.Ordinal)) return null;
@@ -2829,11 +3088,33 @@ internal static class VectorEmitter
                 if (sb.Length > 0) sb.Append(',');
                 sb.Append(F(q.x)).Append(',').Append(F(q.y));
             }
-            ctx.Defs.Append("  CP id=").Append(id).Append(" { Y p=[").Append(sb).Append("] }\n");
+            ctx.Defs.Append("  CP id=").Append(id).Append(" { Y p=[").Append(sb).Append(']').Append(rule).Append(" }\n");
             return id;
         }
         switch (name)
         {
+            case "xywh":
+            case "rect":
+            {
+                // xywh(x y w h [round r]) and rect(top right bottom left [round r]), edges from the box's top-left
+                var round = inner.IndexOf(" round ", StringComparison.OrdinalIgnoreCase);
+                var radius = round >= 0 ? StyleApplier.Num(inner.Substring(round + 7).Trim().Split(' ')[0]) : 0f;
+                var nums = (round >= 0 ? inner.Substring(0, round) : inner).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (nums.Length < 4) return null;
+                float rx0, ry0, rw, rh;
+                if (name == "xywh") { rx0 = x + Along(nums[0], w); ry0 = y + Along(nums[1], h); rw = Along(nums[2], w); rh = Along(nums[3], h); }
+                else
+                {
+                    var t = nums[0] == "auto" ? 0f : Along(nums[0], h); var r = nums[1] == "auto" ? w : Along(nums[1], w);
+                    var b = nums[2] == "auto" ? h : Along(nums[2], h); var l = nums[3] == "auto" ? 0f : Along(nums[3], w);
+                    rx0 = x + l; ry0 = y + t; rw = Mathf.Max(0f, r - l); rh = Mathf.Max(0f, b - t);
+                }
+                if (xform != null) return Through(new List<Vector2> { new(rx0, ry0), new(rx0 + rw, ry0), new(rx0 + rw, ry0 + rh), new(rx0, ry0 + rh) });
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(rx0)).Append(" y=").Append(F(ry0)).Append(" w=").Append(F(rw)).Append(" h=").Append(F(rh));
+                if (radius > 0f) ctx.Defs.Append(" rx=").Append(F(radius));
+                ctx.Defs.Append(" }\n");
+                return id;
+            }
             case "inset":
             {
                 var round = inner.IndexOf(" round ", StringComparison.OrdinalIgnoreCase);
@@ -2891,7 +3172,7 @@ internal static class VectorEmitter
                 }
                 if (pts.Length == 0) return null;
                 if (xform != null) return Through(poly);
-                ctx.Defs.Append("  CP id=").Append(id).Append(" { Y p=[").Append(pts).Append("] }\n");
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { Y p=[").Append(pts).Append(']').Append(rule).Append(" }\n");
                 return id;
             }
         }
@@ -2899,18 +3180,49 @@ internal static class VectorEmitter
     }
 
     /// <summary>mask-image: a linear or radial gradient as a GL/GR def whose alpha masks the subtree (vector requirement 10).</summary>
-    private static string? MaskDef(Ctx ctx, string css, float x, float y, float w, float h)
+    private static string? MaskDef(Ctx ctx, string css, float x, float y, float w, float h, Dictionary<string, string>? all = null, IResolvedStyle? rs = null)
     {
         var v = css.Trim();
         if (v.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase)) return RadialDef(ctx, v);
         if (!v.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase)) return null;
         if (ParseGradient(v) is not { } g) return null;
+        // mask-origin / mask-clip: the box the gradient spans (border box by default here, the
+        // bbox); mask-size and mask-position: a sub-box of it. All in bbox fractions.
+        // ponytail: mask-repeat is accepted; a gradient does not tile, it clamps to its ends
+        var bx = 0f; var by = 0f; var bw = 1f; var bh = 1f;
+        if (all != null && rs != null && w > 0f && h > 0f)
+        {
+            var origin = (all.TryGetValue("mask-origin", out var mo) ? mo : all.TryGetValue("mask-clip", out var mc) ? mc : "border-box").Trim();
+            if (origin is "padding-box" or "content-box")
+            {
+                var l = rs.borderLeftWidth + (origin == "content-box" ? rs.paddingLeft : 0f); var t = rs.borderTopWidth + (origin == "content-box" ? rs.paddingTop : 0f);
+                var r = rs.borderRightWidth + (origin == "content-box" ? rs.paddingRight : 0f); var b = rs.borderBottomWidth + (origin == "content-box" ? rs.paddingBottom : 0f);
+                bx = l / w; by = t / h; bw = Mathf.Max(0.01f, (w - l - r) / w); bh = Mathf.Max(0.01f, (h - t - b) / h);
+            }
+            float Frac(string p, float size) => p.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(p) / 100f : StyleApplier.Num(p) / size;
+            if (all.TryGetValue("mask-size", out var ms) && ms.Trim() is not ("auto" or "cover" or "contain"))
+            {
+                var parts = ms.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var sw = parts.Length > 0 && parts[0] != "auto" ? Frac(parts[0], w) : 1f;
+                var shh = parts.Length > 1 && parts[1] != "auto" ? Frac(parts[1], h) : 1f;
+                var px = 0f; var py = 0f;
+                if (all.TryGetValue("mask-position", out var mp))
+                {
+                    var pp = mp.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    float Pos(string p, float free) => p switch { "left" or "top" => 0f, "center" => 0.5f * free, "right" or "bottom" => free, _ => p.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(p) / 100f * free : StyleApplier.Num(p) / (p == pp[0] ? w : h) };
+                    px = pp.Length > 0 ? Pos(pp[0], bw - sw * bw) : 0f;
+                    py = pp.Length > 1 ? Pos(pp[1], bh - shh * bh) : pp.Length == 1 && pp[0] == "center" ? 0.5f * (bh - shh * bh) : 0f;
+                }
+                bx += px; by += py; bw *= sw; bh *= shh;
+            }
+        }
         var rad = g.angle * Mathf.Deg2Rad;
-        var len = w * Mathf.Abs(Mathf.Sin(rad)) + h * Mathf.Abs(Mathf.Cos(rad));
+        var len = bw * w * Mathf.Abs(Mathf.Sin(rad)) + bh * h * Mathf.Abs(Mathf.Cos(rad));
         var dx = Mathf.Sin(rad) * len * 0.5f / w;
         var dy = -Mathf.Cos(rad) * len * 0.5f / h;
+        var cx = bx + bw * 0.5f; var cy = by + bh * 0.5f;
         var id = "mask" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-        ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").Append(F(0.5f - dx)).Append(" y1=").Append(F(0.5f - dy)).Append(" x2=").Append(F(0.5f + dx)).Append(" y2=").Append(F(0.5f + dy)).Append(" stops=[");
+        ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").Append(F(cx - dx)).Append(" y1=").Append(F(cy - dy)).Append(" x2=").Append(F(cx + dx)).Append(" y2=").Append(F(cy + dy)).Append(" stops=[");
         for (var i = 0; i < g.stops.Count; i++)
         {
             if (i > 0) ctx.Defs.Append(',');

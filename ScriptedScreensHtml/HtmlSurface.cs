@@ -1,3 +1,4 @@
+using System.Text;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -539,7 +540,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             seen.Add(id);
             var node = ext.Node;
             _externalNodes[ext.Key] = node;
-            var url = node.Attr("src") ?? FirstOfSrcset(node.Attr("srcset")) ?? string.Empty;
+            var url = HtmlRenderer.ResolveUrl(node.Attr("src") ?? FirstOfSrcset(node.Attr("srcset")) ?? string.Empty, _built);
             var props = new List<SS.UiProp>();
             if (node.Tag is "video" or "audio")
                 props.Add(new SS.UiProp { Key = "url", Value = SS.UiValue.FromString(url) });
@@ -936,6 +937,46 @@ internal sealed class HtmlSurface : MonoBehaviour
             SetFocus(target);
             return false;
         }
+        // <img usemap>: the area under the pointer gets the click
+        if (node.Tag == "img" && node.Attr("usemap") is { } usemap && _content != null)
+        {
+            var mapName = usemap.TrimStart('#');
+            HtmlNode? map = null;
+            foreach (var n in _built.NodeOf.Values) if (n.Tag == "map" && (n.Attr("name") == mapName || n.Attr("id") == mapName)) { map = n; break; }
+            var box = ve.worldBound; box.position -= _content.worldBound.position;
+            var p = _pointerPage - box.position;
+            // ponytail: area coords are in the image's own pixels; the box's px stand in (exact when width/height match the picture)
+            if (map != null && AreaAt(map, p) is { } area && area.Attr("id") is { } areaId)
+            {
+                _script?.EmitEvent(areaId, "click");
+                name = areaId;
+                return false;
+            }
+        }
+        // a datalist option: the value goes into the input, the list closes
+        if (node.Attr("data-datalist") is { } forInput)
+        {
+            var text = node.Attr("data-value") ?? string.Empty;
+            SetInputValue(forInput, text);
+            if (_byId.TryGetValue(forInput, out var ive) && _built.NodeOf.TryGetValue(ive, out var inode)) { inode.Attributes["value"] = text; Recascade(inode); }
+            _script?.EmitInput(forInput, text);
+            CloseDatalist();
+            return false;
+        }
+        // popovertarget: the button shows, hides or toggles the popover it names
+        if (node.Attr("popovertarget") is { } popTarget && _byId.TryGetValue(popTarget, out var pve) && _built.NodeOf.TryGetValue(pve, out var pnode))
+        {
+            var action = (node.Attr("popovertargetaction") ?? "toggle").ToLowerInvariant();
+            var isOpen = pnode.Attr("data-popover-open") != null;
+            var open = action == "show" || (action == "toggle" && !isOpen);
+            if (open) pnode.Attributes["data-popover-open"] = string.Empty; else pnode.Attributes.Remove("data-popover-open");
+            pve.style.display = open ? DisplayStyle.Flex : DisplayStyle.None;
+            Recascade(pnode);
+            _dirty = true;
+            Wake();
+            _script?.EmitEvent(popTarget, "toggle");
+            return false;
+        }
         // <summary>: toggles its details.
         if (node.Tag == "summary" && node.Parent is { Tag: "details" } details && details.Attr("id") is { } detailsId && _byId.TryGetValue(detailsId, out var dve))
         {
@@ -1133,9 +1174,96 @@ internal sealed class HtmlSurface : MonoBehaviour
     }
 
     /// <summary>The last clicked element or control takes :focus; a click elsewhere moves it.</summary>
+    /// <summary>The innermost area of the map containing the point, in the image's coordinates.</summary>
+    private static HtmlNode? AreaAt(HtmlNode map, Vector2 p)
+    {
+        HtmlNode? hit = null;
+        void Walk(HtmlNode n)
+        {
+            foreach (var c in n.Children)
+            {
+                if (c.Tag == "area" && hit == null)
+                {
+                    var shape = (c.Attr("shape") ?? "rect").Trim().ToLowerInvariant();
+                    var nums = new List<float>();
+                    foreach (var t in (c.Attr("coords") ?? string.Empty).Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries)) nums.Add(StyleApplier.Num(t));
+                    var inside = shape switch
+                    {
+                        "circle" => nums.Count >= 3 && Vector2.Distance(p, new Vector2(nums[0], nums[1])) <= nums[2],
+                        "poly" or "polygon" => nums.Count >= 6 && PointInPolygon(p, nums),
+                        "default" => true,
+                        _ => nums.Count >= 4 && p.x >= Mathf.Min(nums[0], nums[2]) && p.x <= Mathf.Max(nums[0], nums[2]) && p.y >= Mathf.Min(nums[1], nums[3]) && p.y <= Mathf.Max(nums[1], nums[3]),
+                    };
+                    if (inside) hit = c;
+                }
+                Walk(c);
+            }
+        }
+        Walk(map);
+        return hit;
+    }
+
+    private static bool PointInPolygon(Vector2 p, List<float> xy)
+    {
+        var inside = false;
+        var n = xy.Count / 2;
+        for (int i = 0, j = n - 1; i < n; j = i++)
+        {
+            var xi = xy[2 * i]; var yi = xy[2 * i + 1]; var xj = xy[2 * j]; var yj = xy[2 * j + 1];
+            if ((yi > p.y) != (yj > p.y) && p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi) inside = !inside;
+        }
+        return inside;
+    }
+
+    private string? _datalistFor;
+
+    /// <summary>
+    /// input list="id": the datalist's options drawn as a box under the focused field, each a
+    /// click region that sets the value. Closed when the focus moves or an option is picked.
+    /// </summary>
+    private void ShowDatalist(HtmlNode input, VisualElement ive)
+    {
+        if (_built == null || _content == null || input.Attr("list") is not { } listId || !_byId.TryGetValue(listId, out var lve) || !_built.NodeOf.TryGetValue(lve, out var list)) return;
+        CloseDatalist();
+        var key = input.Attr("id") ?? string.Empty;
+        var box = ive.worldBound; box.position -= _content.worldBound.position;
+        var fs = ive.resolvedStyle.fontSize > 0f ? ive.resolvedStyle.fontSize : 13f;
+        var sb = new StringBuilder();
+        sb.Append("<div id=\"__datalist\" style=\"position:absolute;left:").Append(box.x.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture))
+          .Append("px;top:").Append((box.y + box.height).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture))
+          .Append("px;width:").Append(box.width.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture))
+          .Append("px;background:#1c2230;border:1px solid #567;font-size:").Append(fs.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)).Append("px;color:#eee\">");
+        var n = 0;
+        foreach (var opt in list.Children)
+        {
+            if (opt.Tag != "option") continue;
+            var value = opt.Attr("value") ?? string.Concat(opt.Children.ConvertAll(c => c.IsText ? c.Text : string.Empty)).Trim();
+            var label = opt.Attr("label") ?? value;
+            sb.Append("<div id=\"__dl").Append(++n).Append("\" data-click=\"1\" data-datalist=\"").Append(key).Append("\" data-value=\"").Append(value.Replace("\"", "&quot;")).Append("\" style=\"padding:2px 6px\">").Append(label.Replace("<", "&lt;")).Append("</div>");
+        }
+        sb.Append("</div>");
+        if (n == 0) return;
+        if (_built.NodeOf.TryGetValue(_content, out var body))
+        {
+            HtmlRenderer.AppendFragment(_content, body, sb.ToString(), _built);
+            _datalistFor = key;
+            _dirty = true;
+            Wake();
+        }
+    }
+
+    private void CloseDatalist()
+    {
+        if (_datalistFor == null || _built == null) return;
+        _datalistFor = null;
+        if (_byId.TryGetValue("__datalist", out var dl)) { HtmlRenderer.Remove(dl, _built); _dirty = true; Wake(); }
+    }
+
     private void SetFocus(string key)
     {
         if (_built == null || !_byId.TryGetValue(key, out var ve) || !_built.NodeOf.TryGetValue(ve, out var node)) return;
+        if (_datalistFor != null && key != _datalistFor && node.Attr("data-datalist") == null) CloseDatalist();
+        if (node.Tag == "input" && node.Attr("list") != null && _focused != node) ShowDatalist(node, ve);
         if (_focused == node) return;
         var changed = false;
         if (_focused != null) { _focused.Attributes.Remove("data-focus"); Recascade(_focused); changed = true; }

@@ -1,3 +1,4 @@
+using System.Text;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -55,6 +56,9 @@ internal static class StyleApplier
             case "display":
                 // inline / inline-block: the layout has no inline flow, and an element that
                 // reached here is already its own box, so the value is accepted as-is.
+                // transition-behavior: allow-discrete holds display: none until the transition ends (Tweens)
+                if (v == "none" && Tweens.AllowDiscrete.Contains(ve)) { Tweens.PendingHide.Add(ve); break; }
+                Tweens.PendingHide.Remove(ve);
                 s.display = v == "none" ? DisplayStyle.None : DisplayStyle.Flex;
                 // CSS: a flex container lays out in a row unless told otherwise; a block (or
                 // grid, whose children are placed absolutely) stacks. Later declarations win.
@@ -127,7 +131,7 @@ internal static class StyleApplier
                 if (v == "none" || v == "transparent") { s.backgroundColor = Color.clear; s.backgroundImage = StyleKeyword.None; }
                 else if (v.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase)) Gradient(s, v, warn);
                 else if (TryColor(v, out var bg)) s.backgroundColor = bg;
-                else if (v.IndexOf("url(", StringComparison.OrdinalIgnoreCase) >= 0 || v.IndexOf("gradient(", StringComparison.OrdinalIgnoreCase) >= 0)
+                else if (v.IndexOf("url(", StringComparison.OrdinalIgnoreCase) >= 0 || v.IndexOf("gradient(", StringComparison.OrdinalIgnoreCase) >= 0 || v.IndexOf("image-set(", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     // the shorthand: a colour token among the image, position, size and repeat parts; the emitter draws the image
                     foreach (var part in SplitTopLevel(v))
@@ -233,6 +237,16 @@ internal static class StyleApplier
                 s.unityTextAlign = v switch { "center" => TextAnchor.MiddleCenter, "right" or "end" => TextAnchor.MiddleRight, _ => TextAnchor.MiddleLeft };
                 break;
             case "white-space": s.whiteSpace = v == "nowrap" || v == "pre" ? WhiteSpace.NoWrap : WhiteSpace.Normal; break;
+            case "text-wrap-mode": s.whiteSpace = v == "nowrap" ? WhiteSpace.NoWrap : WhiteSpace.Normal; break;
+            case "white-space-collapse": if (v.StartsWith("preserve", StringComparison.Ordinal)) s.whiteSpace = WhiteSpace.NoWrap; break;
+            case "color-scheme": ColorSchemeDark = v.Contains("dark") && !v.Contains("light"); break;
+            case "initial-letter":
+            {
+                // initial-letter: <lines> [<sink>]: the drop cap spans that many lines of the paragraph (line height taken as 1.2em)
+                var first = v.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
+                if (first != "normal" && IsNumber(first) && Num(first) > 0f) s.fontSize = Num(first) * EmSize * 1.2f;
+                break;
+            }
             case "letter-spacing": s.letterSpacing = Len(v); break;
             case "word-spacing": s.wordSpacing = Len(v); break;
             case "text-overflow": s.textOverflow = v == "ellipsis" ? TextOverflow.Ellipsis : TextOverflow.Clip; break;
@@ -509,6 +523,12 @@ internal static class StyleApplier
         "background-size", "background-position", "background-repeat", "float", "clear", "column-count", "columns", "column-gap", "aspect-ratio", "mix-blend-mode", "backdrop-filter",
         "list-style", "list-style-type", "list-style-position", "border-collapse", "border-spacing",
         "column-rule", "column-rule-width", "column-rule-style", "column-rule-color", "offset-path", "offset-distance", "offset-rotate",
+        "offset-anchor", "offset-position", "background-position-x", "background-position-y", "background-origin", "overflow-clip-margin", "clip-rule",
+        "corner-top-left-shape", "corner-top-right-shape", "corner-bottom-right-shape", "corner-bottom-left-shape", "corner-top-shape", "corner-bottom-shape", "corner-left-shape", "corner-right-shape",
+        "column-width", "column-span", "column-fill", "transform-box", "transition-behavior", "grid",
+        "text-emphasis-style", "text-emphasis-color", "text-emphasis-position", "baseline-shift", "alignment-baseline",
+        "mask-position", "mask-size", "mask-origin", "mask-clip", "mask-repeat", "paint-order", "vector-effect", "shape-rendering", "marker-start", "marker-mid", "marker-end", "marker",
+        "cx", "cy", "r", "rx", "ry", "x", "y", "d", "path-length", // svg geometry as CSS: every declaration on a shape becomes its attribute in the collector
     };
 
     private static void Unknown(CssDeclaration d, Action<string>? warn)
@@ -526,6 +546,8 @@ internal static class StyleApplier
     /// <summary>Unit context for em, rem, vw and vh: set per element by the cascade, per page by the renderer.</summary>
     internal static float EmSize = 16f;
     internal static float RootFontSize = 16f;
+    /// <summary>color-scheme: dark seen in the cascade; light-dark() picks its second value then.</summary>
+    internal static bool ColorSchemeDark;
     internal static float ViewportW = 460f;
     internal static float ViewportH = 460f;
 
@@ -558,6 +580,9 @@ internal static class StyleApplier
         else if (v.EndsWith("cm", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f / 2.54f; }
         else if (v.EndsWith("mm", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f / 25.4f; }
         else if (v.EndsWith("in", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f; }
+        else if (v.EndsWith("cap", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 3); scale = EmSize * 0.7f; }  // ponytail: a typical cap height; the font's own is not exposed
+        else if (v.EndsWith("ic", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize; }          // ponytail: the ideographic advance is one em in CJK faces
+        else if (v.EndsWith("q", StringComparison.OrdinalIgnoreCase) && !v.EndsWith("sq", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 1); scale = 96f / 25.4f / 4f; }
         else if (v.EndsWith("ch", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize * 0.5f; }   // the "0" of a text face is about half an em
         else if (v.EndsWith("ex", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize * 0.5f; }
         else if (v.EndsWith("q", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 1); scale = 96f / 25.4f / 4f; }
@@ -949,6 +974,59 @@ internal static class StyleApplier
     /// inline is x, block is y, start is left/top. A two-value pair (margin-inline: a b)
     /// splits; a shorthand (border-inline: 1px solid) applies whole to both sides.
     /// </summary>
+    /// <summary>offset, columns and text-emphasis as their longhands.</summary>
+    private static IEnumerable<CssDeclaration> SplitShorthand(CssDeclaration d)
+    {
+        var v = d.Value.Trim();
+        switch (d.Name)
+        {
+            case "offset":
+            {
+                // [offset-position]? [offset-path [offset-distance || offset-rotate]?]? [/ offset-anchor]?
+                var slash = v.IndexOf('/');
+                if (slash >= 0) { yield return new CssDeclaration("offset-anchor", v.Substring(slash + 1).Trim(), d.Important); v = v.Substring(0, slash).Trim(); }
+                var tokens = CssParser.SplitTopLevel(v, ' ');
+                var position = new List<string>();
+                var seenPath = false;
+                foreach (var raw in tokens)
+                {
+                    var t = raw.Trim();
+                    if (t.Length == 0) continue;
+                    var lower = t.ToLowerInvariant();
+                    if (lower.StartsWith("path(", StringComparison.Ordinal) || lower.StartsWith("ray(", StringComparison.Ordinal) || lower.StartsWith("url(", StringComparison.Ordinal) || lower == "none")
+                    { yield return new CssDeclaration("offset-path", t, d.Important); seenPath = true; continue; }
+                    if (!seenPath) { position.Add(t); continue; }
+                    if (lower == "auto" || lower == "reverse" || lower.EndsWith("deg", StringComparison.Ordinal) || lower.EndsWith("turn", StringComparison.Ordinal) || lower.EndsWith("rad", StringComparison.Ordinal))
+                        yield return new CssDeclaration("offset-rotate", t, d.Important);
+                    else yield return new CssDeclaration("offset-distance", t, d.Important);
+                }
+                if (position.Count > 0) yield return new CssDeclaration("offset-position", string.Join(" ", position), d.Important);
+                break;
+            }
+            case "columns":
+                foreach (var raw in v.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (raw == "auto") continue;
+                    if (IsNumber(raw) && !raw.Contains('.')) yield return new CssDeclaration("column-count", raw, d.Important);
+                    else yield return new CssDeclaration("column-width", raw, d.Important);
+                }
+                break;
+            default: // text-emphasis: <style> || <color>
+            {
+                var style = new List<string>();
+                foreach (var raw in CssParser.SplitTopLevel(v, ' '))
+                {
+                    var t = raw.Trim();
+                    if (t.Length == 0) continue;
+                    if (TryColor(t, out _) && !(t is "none")) yield return new CssDeclaration("text-emphasis-color", t, d.Important);
+                    else style.Add(t);
+                }
+                if (style.Count > 0) yield return new CssDeclaration("text-emphasis-style", string.Join(" ", style), d.Important);
+                break;
+            }
+        }
+    }
+
     internal static List<CssDeclaration> Expand(List<CssDeclaration> list)
     {
         List<CssDeclaration>? outp = null;
@@ -960,6 +1038,14 @@ internal static class StyleApplier
             var pair = false;
             switch (n)
             {
+                case "offset": case "columns": case "text-emphasis":
+                    outp ??= new List<CssDeclaration>(list.GetRange(0, i));
+                    outp.AddRange(SplitShorthand(d));
+                    continue;
+                case "corner-start-start-shape": a = "corner-top-left-shape"; break;
+                case "corner-start-end-shape": a = "corner-top-right-shape"; break;
+                case "corner-end-start-shape": a = "corner-bottom-left-shape"; break;
+                case "corner-end-end-shape": a = "corner-bottom-right-shape"; break;
                 case "inline-size": a = "width"; break;
                 case "block-size": a = "height"; break;
                 case "min-inline-size": a = "min-width"; break;
@@ -1056,6 +1142,12 @@ internal static class StyleApplier
         }
 
         var lower = v.ToLowerInvariant();
+        if (lower.StartsWith("light-dark(", StringComparison.Ordinal))
+        {
+            var ld = CssParser.SplitTopLevel(v.Substring(11, Math.Max(0, v.Length - 12)), ',');
+            return ld.Count >= 2 && TryColor(ColorSchemeDark ? ld[1] : ld[0], out color);
+        }
+        if (ColorSpaces.TryParse(lower, v, out color)) return true;
         if (lower.StartsWith("rgb", StringComparison.Ordinal) || lower.StartsWith("hsl", StringComparison.Ordinal))
         {
             var open = v.IndexOf('(');
@@ -1084,5 +1176,209 @@ internal static class StyleApplier
             return true;
         }
         return false;
+    }
+}
+
+
+/// <summary>
+/// The CSS colour spaces beyond sRGB and HSL, converted to sRGB: hwb(), lab(), lch(),
+/// oklab(), oklch(); and the relative colour syntax (`rgb(from red r g b / 50%)`,
+/// any of the functions) with the base colour's channels substituted into calc().
+/// </summary>
+internal static class ColorSpaces
+{
+    public static bool TryParse(string lower, string v, out Color color)
+    {
+        color = Color.white;
+        var open = lower.IndexOf('(');
+        if (open <= 0 || !lower.EndsWith(")", StringComparison.Ordinal)) return false;
+        var fn = lower.Substring(0, open).Trim();
+        if (fn is not ("rgb" or "rgba" or "hsl" or "hsla" or "hwb" or "lab" or "lch" or "oklab" or "oklch")) return false;
+        var inner = v.Substring(open + 1, v.Length - open - 2).Trim();
+        var relative = inner.StartsWith("from ", StringComparison.OrdinalIgnoreCase);
+        if (!relative && fn is "rgb" or "rgba" or "hsl" or "hsla") return false; // the plain forms are parsed by TryColor itself
+        var tokens = Tokens(inner);
+        Color baseColor = Color.black;
+        if (relative)
+        {
+            if (tokens.Count < 2 || !StyleApplier.TryColor(tokens[1], out baseColor)) return false;
+            tokens.RemoveRange(0, 2);
+        }
+        // channels: up to three, then an optional "/ alpha"
+        var ch = new List<string>();
+        string? alphaText = null;
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            if (tokens[i] == "/") { if (i + 1 < tokens.Count) alphaText = tokens[i + 1]; break; }
+            ch.Add(tokens[i]);
+        }
+        if (ch.Count < 3) return false;
+        var space = fn.TrimEnd('a') == "rgb" ? "rgb" : fn.TrimEnd('a') == "hsl" ? "hsl" : fn;
+        // the base colour's channels in this space, for the relative keywords
+        var baseCh = relative ? ChannelsOf(baseColor, space) : new float[3];
+        float Chan(string t, int idx, float percentScale)
+        {
+            if (relative)
+            {
+                var names = Names(space);
+                t = SubstituteKeywords(t, names, baseCh, baseColor.a);
+            }
+            if (t == "none") return 0f;
+            if (t.EndsWith("%", StringComparison.Ordinal)) return StyleApplier.Num(t) / 100f * percentScale;
+            return StyleApplier.Num(t);
+        }
+        float c0, c1, c2;
+        switch (space)
+        {
+            case "rgb": c0 = Chan(ch[0], 0, 255f); c1 = Chan(ch[1], 1, 255f); c2 = Chan(ch[2], 2, 255f); color = new Color(c0 / 255f, c1 / 255f, c2 / 255f); break;
+            case "hsl": c0 = Chan(ch[0], 0, 360f); c1 = Chan(ch[1], 1, 100f); c2 = Chan(ch[2], 2, 100f); color = HslToRgb(c0, c1 / 100f, c2 / 100f); break;
+            case "hwb": c0 = Chan(ch[0], 0, 360f); c1 = Chan(ch[1], 1, 100f); c2 = Chan(ch[2], 2, 100f); color = HwbToRgb(c0, c1 / 100f, c2 / 100f); break;
+            case "lab": c0 = Chan(ch[0], 0, 100f); c1 = Chan(ch[1], 1, 125f); c2 = Chan(ch[2], 2, 125f); color = LabToRgb(c0, c1, c2); break;
+            case "lch": c0 = Chan(ch[0], 0, 100f); c1 = Chan(ch[1], 1, 150f); c2 = Chan(ch[2], 2, 360f); color = LabToRgb(c0, c1 * Mathf.Cos(c2 * Mathf.Deg2Rad), c1 * Mathf.Sin(c2 * Mathf.Deg2Rad)); break;
+            case "oklab": c0 = Chan(ch[0], 0, 1f); c1 = Chan(ch[1], 1, 0.4f); c2 = Chan(ch[2], 2, 0.4f); color = OklabToRgb(c0, c1, c2); break;
+            default: c0 = Chan(ch[0], 0, 1f); c1 = Chan(ch[1], 1, 0.4f); c2 = Chan(ch[2], 2, 360f); color = OklabToRgb(c0, c1 * Mathf.Cos(c2 * Mathf.Deg2Rad), c1 * Mathf.Sin(c2 * Mathf.Deg2Rad)); break;
+        }
+        var alpha = relative ? baseColor.a : 1f;
+        if (alphaText != null)
+        {
+            var at = relative ? SubstituteKeywords(alphaText, Names(space), baseCh, baseColor.a) : alphaText;
+            alpha = at.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(at) / 100f : StyleApplier.Num(at);
+        }
+        color.a = Mathf.Clamp01(alpha);
+        color.r = Mathf.Clamp01(color.r); color.g = Mathf.Clamp01(color.g); color.b = Mathf.Clamp01(color.b);
+        return true;
+    }
+
+    /// <summary>Space-separated tokens at parenthesis depth 0; "/" is its own token.</summary>
+    private static List<string> Tokens(string s)
+    {
+        var list = new List<string>();
+        var depth = 0; var start = 0;
+        for (var i = 0; i <= s.Length; i++)
+        {
+            var end = i == s.Length;
+            var c = end ? ' ' : s[i];
+            if (c == '(') depth++;
+            else if (c == ')') depth--;
+            if ((c == ' ' || c == '/' || end) && depth == 0)
+            {
+                if (i > start) list.Add(s.Substring(start, i - start));
+                if (c == '/') list.Add("/");
+                start = i + 1;
+            }
+        }
+        return list;
+    }
+
+    private static string[] Names(string space) => space switch
+    {
+        "rgb" => new[] { "r", "g", "b" },
+        "hsl" => new[] { "h", "s", "l" },
+        "hwb" => new[] { "h", "w", "b" },
+        "lab" or "oklab" => new[] { "l", "a", "b" },
+        _ => new[] { "l", "c", "h" },
+    };
+
+    private static string SubstituteKeywords(string t, string[] names, float[] baseCh, float alpha)
+    {
+        // whole-word replacement of the channel keywords and "alpha" with the base colour's numbers
+        var sb = new StringBuilder();
+        var i = 0;
+        while (i < t.Length)
+        {
+            if (char.IsLetter(t[i]))
+            {
+                var j = i;
+                while (j < t.Length && (char.IsLetterOrDigit(t[j]) || t[j] == '-')) j++;
+                var word = t.Substring(i, j - i);
+                var idx = Array.IndexOf(names, word);
+                if (idx >= 0) sb.Append(baseCh[idx].ToString("0.####", CultureInfo.InvariantCulture));
+                else if (word == "alpha") sb.Append(alpha.ToString("0.####", CultureInfo.InvariantCulture));
+                else sb.Append(word);
+                i = j;
+                continue;
+            }
+            sb.Append(t[i]); i++;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>An sRGB colour's channels in the named space (rgb 0..255, hsl/hwb degrees and 0..100, lab/lch, oklab/oklch).</summary>
+    private static float[] ChannelsOf(Color c, string space)
+    {
+        switch (space)
+        {
+            case "rgb": return new[] { c.r * 255f, c.g * 255f, c.b * 255f };
+            case "hsl": { Color.RGBToHSV(c, out var h, out var sv, out var val); var l = val * (1f - sv * 0.5f); var s = l <= 0f || l >= 1f ? 0f : (val - l) / Mathf.Min(l, 1f - l); return new[] { h * 360f, s * 100f, l * 100f }; }
+            case "hwb": { Color.RGBToHSV(c, out var h, out var sv, out var val); return new[] { h * 360f, (1f - sv) * val * 100f, (1f - val) * 100f }; }
+            case "lab": return RgbToLab(c);
+            case "lch": { var lab = RgbToLab(c); return new[] { lab[0], Mathf.Sqrt(lab[1] * lab[1] + lab[2] * lab[2]), Mathf.Repeat(Mathf.Atan2(lab[2], lab[1]) * Mathf.Rad2Deg, 360f) }; }
+            case "oklab": return RgbToOklab(c);
+            default: { var ok = RgbToOklab(c); return new[] { ok[0], Mathf.Sqrt(ok[1] * ok[1] + ok[2] * ok[2]), Mathf.Repeat(Mathf.Atan2(ok[2], ok[1]) * Mathf.Rad2Deg, 360f) }; }
+        }
+    }
+
+    private static Color HslToRgb(float hDeg, float s, float l)
+    {
+        var val = l + s * Mathf.Min(l, 1f - l);
+        var sv = val <= 0f ? 0f : 2f * (1f - l / val);
+        return Color.HSVToRGB(Mathf.Repeat(hDeg / 360f, 1f), sv, val);
+    }
+
+    private static Color HwbToRgb(float hDeg, float w, float b)
+    {
+        if (w + b >= 1f) { var g = w / (w + b); return new Color(g, g, g); }
+        var rgb = Color.HSVToRGB(Mathf.Repeat(hDeg / 360f, 1f), 1f, 1f);
+        return new Color(rgb.r * (1f - w - b) + w, rgb.g * (1f - w - b) + w, rgb.b * (1f - w - b) + w);
+    }
+
+    // sRGB <-> linear
+    private static float ToLinear(float c) => c <= 0.04045f ? c / 12.92f : Mathf.Pow((c + 0.055f) / 1.055f, 2.4f);
+    private static float ToSrgb(float c) => c <= 0.0031308f ? c * 12.92f : 1.055f * Mathf.Pow(Mathf.Max(0f, c), 1f / 2.4f) - 0.055f;
+
+    // CIELAB with the D50 white the CSS spec uses, through XYZ with the Bradford-adapted sRGB matrices
+    private static Color LabToRgb(float l, float a, float b)
+    {
+        var fy = (l + 16f) / 116f; var fx = fy + a / 500f; var fz = fy - b / 200f;
+        const float k = 24389f / 27f, e = 216f / 24389f;
+        float Inv(float f) { var f3 = f * f * f; return f3 > e ? f3 : (116f * f - 16f) / k; }
+        var x = Inv(fx) * 0.96422f; var y = l > k * e ? fy * fy * fy : l / k; var z = Inv(fz) * 0.82521f;
+        var r = 3.1338561f * x - 1.6168667f * y - 0.4906146f * z;
+        var g = -0.9787684f * x + 1.9161415f * y + 0.0334540f * z;
+        var bb = 0.0719453f * x - 0.2289914f * y + 1.4052427f * z;
+        return new Color(ToSrgb(r), ToSrgb(g), ToSrgb(bb));
+    }
+
+    private static float[] RgbToLab(Color c)
+    {
+        var r = ToLinear(c.r); var g = ToLinear(c.g); var b = ToLinear(c.b);
+        var x = (0.4360747f * r + 0.3850649f * g + 0.1430804f * b) / 0.96422f;
+        var y = 0.2225045f * r + 0.7168786f * g + 0.0606169f * b;
+        var z = (0.0139322f * r + 0.0971045f * g + 0.7141733f * b) / 0.82521f;
+        const float k = 24389f / 27f, e = 216f / 24389f;
+        float F(float t) => t > e ? Mathf.Pow(t, 1f / 3f) : (k * t + 16f) / 116f;
+        var fx = F(x); var fy = F(y); var fz = F(z);
+        return new[] { 116f * fy - 16f, 500f * (fx - fy), 200f * (fy - fz) };
+    }
+
+    private static Color OklabToRgb(float l, float a, float b)
+    {
+        var l_ = l + 0.3963377774f * a + 0.2158037573f * b;
+        var m_ = l - 0.1055613458f * a - 0.0638541728f * b;
+        var s_ = l - 0.0894841775f * a - 1.2914855480f * b;
+        var l3 = l_ * l_ * l_; var m3 = m_ * m_ * m_; var s3 = s_ * s_ * s_;
+        var r = 4.0767416621f * l3 - 3.3077115913f * m3 + 0.2309699292f * s3;
+        var g = -1.2684380046f * l3 + 2.6097574011f * m3 - 0.3413193965f * s3;
+        var bb = -0.0041960863f * l3 - 0.7034186147f * m3 + 1.7076147010f * s3;
+        return new Color(ToSrgb(r), ToSrgb(g), ToSrgb(bb));
+    }
+
+    private static float[] RgbToOklab(Color c)
+    {
+        var r = ToLinear(c.r); var g = ToLinear(c.g); var b = ToLinear(c.b);
+        var l = Mathf.Pow(0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b, 1f / 3f);
+        var m = Mathf.Pow(0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b, 1f / 3f);
+        var s = Mathf.Pow(0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b, 1f / 3f);
+        return new[] { 0.2104542553f * l + 0.7936177850f * m - 0.0040720468f * s, 1.9779984951f * l - 2.4285922050f * m + 0.4505937099f * s, 0.0259040371f * l + 0.7827717662f * m - 0.8086757660f * s };
     }
 }

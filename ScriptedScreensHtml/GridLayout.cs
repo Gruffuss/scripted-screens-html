@@ -86,7 +86,30 @@ internal sealed class GridLayout
         var colsText = Get(css, "grid-template-columns");
         var rowsText = Get(css, "grid-template-rows");
         var areasText = Get(css, "grid-template-areas");
-        if (Get(css, "grid-template") is { } template && template.Trim() != "none")
+        // grid: the grid-template forms, or "auto-flow [dense] [size] / cols" (row flow) and "rows / auto-flow [dense] [size]"
+        string? autoRowsFromGrid = null;
+        var template = Get(css, "grid-template");
+        if (template == null && Get(css, "grid") is { } gridShort && gridShort != "none")
+        {
+            var slash = gridShort.IndexOf('/');
+            var left = slash >= 0 ? gridShort.Substring(0, slash).Trim() : gridShort;
+            var right = slash >= 0 ? gridShort.Substring(slash + 1).Trim() : string.Empty;
+            if (left.StartsWith("auto-flow", StringComparison.Ordinal))
+            {
+                var size = left.Substring(9).Replace("dense", string.Empty).Trim();
+                if (size.Length > 0) autoRowsFromGrid = size;
+                colsText ??= right;
+            }
+            else if (right.StartsWith("auto-flow", StringComparison.Ordinal))
+            {
+                // ponytail: column flow is laid out as row flow; the rows keep their sizes
+                rowsText ??= left;
+                var size = right.Substring(9).Replace("dense", string.Empty).Trim();
+                if (size.Length > 0) colsText ??= size;
+            }
+            else template = gridShort;
+        }
+        if (template != null && template.Trim() != "none")
         {
             var slash = template.LastIndexOf('/');
             var rowsPart = slash >= 0 ? template.Substring(0, slash) : template;
@@ -103,7 +126,7 @@ internal sealed class GridLayout
         var cols = ParseTracks(colsText ?? "auto");
         if (cols.Count == 0) cols.Add(new Track { Auto = true });
         var rowsSpec = ParseTracks(rowsText ?? string.Empty);
-        var autoRow = ParseTracks(Get(css, "grid-auto-rows") ?? "auto");
+        var autoRow = ParseTracks(Get(css, "grid-auto-rows") ?? autoRowsFromGrid ?? "auto");
         var autoRowTrack = autoRow.Count > 0 ? autoRow[0] : new Track { Auto = true };
 
         // Items and placement.

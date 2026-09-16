@@ -15,6 +15,7 @@
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />
         <Compile Include="Probe2.cs" />
+        <Compile Include="Probe3.cs" />
         <Compile Include="JsBench.cs" />
     </ItemGroup>
     <ItemGroup>

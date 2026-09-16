@@ -33,6 +33,8 @@ internal sealed class Tweens
         public Color Fg;
         /// <summary>offset-distance in px along the element's offset-path (0 without one).</summary>
         public float Offset;
+        /// <summary>display: none at the snapshot; a hidden element neither tweens nor is drawn.</summary>
+        public bool Hidden;
 
         public static Snap Of(VisualElement ve, Dictionary<string, string>? css = null)
         {
@@ -43,6 +45,7 @@ internal sealed class Tweens
             return new Snap
             {
                 Offset = offset,
+                Hidden = rs.display == DisplayStyle.None,
                 Rect = ve.layout,
                 Opacity = rs.opacity,
                 Rotate = rs.rotate.angle.ToDegrees(),
@@ -228,16 +231,28 @@ internal sealed class Tweens
     public int Count => _live.Count;
 
     /// <summary>After layout, before emitting: start a tween for every element that changed and has a transition.</summary>
+    /// <summary>transition-behavior: allow-discrete on these: a display: none write waits for the element's transition to end.</summary>
+    internal static readonly HashSet<VisualElement> AllowDiscrete = new();
+    /// <summary>Elements whose display: none is held back until their running tween ends.</summary>
+    internal static readonly HashSet<VisualElement> PendingHide = new();
+
     public void Diff(VisualElement root, HtmlRenderer.Result built, float now)
     {
         Walk(root, built, now);
+        if (PendingHide.Count == 0) return;
+        // nothing tweens for it after all: hide now rather than never
+        _scratch.Clear();
+        foreach (var ve in PendingHide) if (!_live.TryGetValue(ve, out var t) || !t.Active(now)) _scratch.Add(ve);
+        foreach (var ve in _scratch) { ve.style.display = DisplayStyle.None; PendingHide.Remove(ve); }
     }
 
     private void Walk(VisualElement ve, HtmlRenderer.Result built, float now)
     {
         var cur = Snap.Of(ve, built.CssOf(ve));
         var isNew = !_shown.TryGetValue(ve, out var prev);
+        if (!isNew && prev.Hidden && !cur.Hidden) isNew = true; // shown again after display: none: as new, so @starting-style applies
         if (isNew && built.StartingRules.Count > 0 && StartingSnap(ve, built, cur) is { } starting) { prev = starting; isNew = false; }
+        if (cur.Hidden) { _live.Remove(ve); isNew = true; }
         if (!isNew && prev.Differs(cur))
         {
             var timing = Timing(ve, built, prev, cur);
@@ -280,7 +295,10 @@ internal sealed class Tweens
             if (!kv.Value.Active(now))
                 _scratch.Add(kv.Key);
         foreach (var ve in _scratch)
+        {
             _live.Remove(ve);
+            if (PendingHide.Remove(ve)) ve.style.display = DisplayStyle.None; // the held-back display: none lands now
+        }
         return _scratch.Count > 0;
     }
 

@@ -50,6 +50,8 @@ internal static class HtmlRenderer
         public float ViewportWidth;
         /// <summary>Stylesheet rules and the node each element came from, for className changes at runtime.</summary>
         public List<CssRule> Rules = new();
+        /// <summary>&lt;base href&gt;: relative urls in the page resolve against it.</summary>
+        public string? BaseUrl;
         /// <summary>@starting-style rules: the state a newly shown element transitions from.</summary>
         public readonly List<CssRule> StartingRules = new();
         public readonly Dictionary<VisualElement, HtmlNode> NodeOf = new();
@@ -123,6 +125,8 @@ internal static class HtmlRenderer
         CssParser.ViewportHeight = CssParser.ViewportWidth * SurfaceAspect;
         Counters.Clear();
         AfterDecls.Clear();
+        Tweens.AllowDiscrete.Clear();
+        Tweens.PendingHide.Clear();
         CssParser.CounterStyles.Clear();
         CssParser.FontFaces.Clear();
         CssParser.Imports.Clear();
@@ -137,6 +141,8 @@ internal static class HtmlRenderer
     {
         Collect(doc, rules, script, result.Keyframes, Warn, result);
         result.StartingRules.AddRange(CssParser.StartingRules);
+        for (var i = 0; i < result.ExternalStyles.Count; i++) result.ExternalStyles[i] = ResolveUrl(result.ExternalStyles[i], result);
+        for (var i = 0; i < result.ExternalScripts.Count; i++) result.ExternalScripts[i] = ResolveUrl(result.ExternalScripts[i], result);
         result.ExternalImports.AddRange(CssParser.Imports);
         foreach (var (family, src, weight, style) in CssParser.FontFaces)
             FontLibrary.Alias(family, src, weight, style);
@@ -176,6 +182,11 @@ internal static class HtmlRenderer
         {
             foreach (var c in node.Children)
                 rules.AddRange(CssParser.ParseStylesheet(c.Text, warn, keyframes));
+            return;
+        }
+        if (node.Tag == "base" && node.Attr("href") is { } baseHref && result != null)
+        {
+            result.BaseUrl ??= baseHref.Trim();
             return;
         }
         if (node.Tag == "link" && string.Equals(node.Attr("rel"), "stylesheet", StringComparison.OrdinalIgnoreCase) && node.Attr("href") is { } href)
@@ -491,6 +502,8 @@ internal static class HtmlRenderer
             }
             return;
         }
+        if (node.Tag == "img" && node.Attr("usemap") != null)
+            node.Attributes["data-click"] = "1"; // an image map: the click lands on the image, the surface finds the area
         if (node.Tag == "img")
         {
             // Drawn by the scene as an IMG node (vector requirement 9): a box here, the
@@ -560,7 +573,7 @@ internal static class HtmlRenderer
 
         VisualElement ve;
         var mixed = false;
-        if (IsTextLike(node) && node.Children.TrueForAll(c => c.IsText) && CascadedValue(node, rules, "column-count") is { } ccv && int.TryParse(ccv, out var textColumns) && textColumns > 1)
+        if (IsTextLike(node) && node.Children.TrueForAll(c => c.IsText) && TextColumns(node, rules) is var textColumns && textColumns > 1)
         {
             // column-count on plain text: the words shared out over the columns as block children.
             // ponytail: an equal word count per column, not balanced by height; inline tags inside keep one column
@@ -608,6 +621,11 @@ internal static class HtmlRenderer
             if (mono != null) ve.style.unityFontDefinition = FontDefinition.FromSDFFont(mono);
         }
         ApplyStyles(ve, node, rules, result);
+        {
+            var tcss = result.CssOf(ve);
+            if ((tcss.TryGetValue("transition-behavior", out var tb) && tb.Contains("allow-discrete")) || (tcss.TryGetValue("transition", out var tr0) && tr0.Contains("allow-discrete")))
+                Tweens.AllowDiscrete.Add(ve);
+        }
         if (node.Tag == "dialog")
         {
             // the tag default centres it (left/top 50% + translate -50%); a page that places it keeps its own numbers
@@ -628,6 +646,8 @@ internal static class HtmlRenderer
             ve.style.display = DisplayStyle.None;
         if (node.Attr("hidden") != null)
             ve.style.display = DisplayStyle.None;
+        if (node.Attr("popover") != null && node.Attr("data-popover-open") == null)
+            ve.style.display = DisplayStyle.None;
 
         if (ve is Label)
             return;
@@ -637,7 +657,7 @@ internal static class HtmlRenderer
             var list = node.Tag == "ul" || node.Tag == "ol";
             var ordinal = 0;
             if (node.Tag == "details")
-                AddDisclosure(node);
+                AddDisclosure(node, rules);
             // Inline content between blocks (text, <b>, a ::before, a span) flows as one line
             // box, the way a browser wraps it in an anonymous block: consecutive inline
             // children are gathered into a synthetic span and built as one row. The children
@@ -654,7 +674,7 @@ internal static class HtmlRenderer
             {
                 if (list && child.Tag == "li")
                     AddMarker(child, node, result.CssOf(ve), ++ordinal, rules);
-                var inline = child.IsText ? child.Text.Trim().Length > 0 : (Inline.Contains(child.Tag!) && IsInlineOnly(child)) || child.Attr("data-pseudo") != null || child.Attr("data-marker") != null;
+                var inline = child.IsText ? child.Text.Trim().Length > 0 : (Inline.Contains(child.Tag!) && IsInlineOnly(child)) || (child.Attr("data-pseudo") is { } dp && dp != "details-content") || child.Attr("data-marker") != null;
                 // the children of a flex or grid container are items, never gathered into a line box (CSS blockifies them)
                 if (inline && !itemsContainer && node.Tag is not ("table" or "tr" or "ul" or "ol" or "select" or "svg"))
                 {
@@ -765,6 +785,35 @@ internal static class HtmlRenderer
         "font-family", "font-size", "font-weight", "font-style", "text-anchor", "dominant-baseline", "letter-spacing", "color",
     };
 
+    /// <summary>A shape's own bounding box in viewBox units, for transform-box: fill-box.</summary>
+    private static Rect ShapeBox(HtmlNode c)
+    {
+        float N(string a, float d = 0f) => c.Attr(a) is { } v ? StyleApplier.Num(v) : d;
+        switch (c.Tag)
+        {
+            case "rect": case "image": case "use": return new Rect(N("x"), N("y"), N("width"), N("height"));
+            case "circle": return new Rect(N("cx") - N("r"), N("cy") - N("r"), 2f * N("r"), 2f * N("r"));
+            case "ellipse": return new Rect(N("cx") - N("rx"), N("cy") - N("ry"), 2f * N("rx"), 2f * N("ry"));
+            case "line": return Rect.MinMaxRect(Mathf.Min(N("x1"), N("x2")), Mathf.Min(N("y1"), N("y2")), Mathf.Max(N("x1"), N("x2")), Mathf.Max(N("y1"), N("y2")));
+            case "polyline": case "polygon":
+            {
+                var pts = (c.Attr("points") ?? string.Empty).Split(new[] { ' ', ',', '\n', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
+                for (var i = 0; i + 1 < pts.Length; i += 2) { var px = StyleApplier.Num(pts[i]); var py = StyleApplier.Num(pts[i + 1]); x0 = Mathf.Min(x0, px); y0 = Mathf.Min(y0, py); x1 = Mathf.Max(x1, px); y1 = Mathf.Max(y1, py); }
+                return pts.Length >= 2 ? Rect.MinMaxRect(x0, y0, x1, y1) : default;
+            }
+            case "path":
+            {
+                var pts = VectorEmitter.FlattenPath(c.Attr("d") ?? string.Empty);
+                if (pts.Count == 0) return default;
+                float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
+                foreach (var p in pts) { x0 = Mathf.Min(x0, p.x); y0 = Mathf.Min(y0, p.y); x1 = Mathf.Max(x1, p.x); y1 = Mathf.Max(y1, p.y); }
+                return Rect.MinMaxRect(x0, y0, x1, y1);
+            }
+            default: return default;
+        }
+    }
+
     /// <summary>
     /// Walks the svg subtree the way a browser resolves it: presentation attributes, then CSS
     /// rules matching the node, then inline style; inherited properties flow down through
@@ -829,7 +878,7 @@ internal static class HtmlRenderer
             matched.Sort((a, b) => a.spec != b.spec ? a.spec.CompareTo(b.spec) : a.order.CompareTo(b.order));
             foreach (var m in matched)
                 foreach (var d in m.rule.Declarations)
-                    own[d.Name] = d.Value.IndexOf("var(", StringComparison.Ordinal) >= 0 ? ResolveVars(d.Value, c) : d.Value;
+                    own[d.Name] = HasFn(d.Value) ? ResolveVars(d.Value, c) : d.Value;
             if (c.Attr("style") is { } inlineStyle)
                 foreach (var d in CssParser.ParseDeclarations(inlineStyle))
                     own[d.Name] = d.Value;
@@ -849,7 +898,24 @@ internal static class HtmlRenderer
             }
             var m2 = matrix;
             if (own.TryGetValue("transform", out var tr) && SvgTransform(tr) is { } tm)
+            {
+                // transform-origin (CSS): about a point of the view box, or of the shape's own box with transform-box: fill-box
+                if (own.TryGetValue("transform-origin", out var torigin))
+                {
+                    var fillBox = own.TryGetValue("transform-box", out var tbox) && tbox.Trim() == "fill-box";
+                    var box = fillBox ? ShapeBox(c) : svg.ViewBox;
+                    var parts = torigin.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    float Along(string p, float start, float size) => p switch
+                    {
+                        "left" or "top" => start, "center" => start + size * 0.5f, "right" or "bottom" => start + size,
+                        _ => p.EndsWith("%", StringComparison.Ordinal) ? start + StyleApplier.Num(p) / 100f * size : start + StyleApplier.Num(p),
+                    };
+                    var oxp = parts.Length > 0 ? Along(parts[0], box.x, box.width) : box.x + box.width * 0.5f;
+                    var oyp = parts.Length > 1 ? Along(parts[1], box.y, box.height) : box.y + box.height * 0.5f;
+                    tm = MulMatrix(MulMatrix(new[] { 1f, 0f, 0f, 1f, oxp, oyp }, tm), new[] { 1f, 0f, 0f, 1f, -oxp, -oyp });
+                }
                 m2 = matrix == null ? tm : MulMatrix(matrix, tm);
+            }
 
             switch (tag)
             {
@@ -862,6 +928,16 @@ internal static class HtmlRenderer
                 case "symbol":
                     if (!inDefs && depth > 0) CollectShapes(c, svg, result, rules, eff, m2, byId, depth + 1, inDefs, clipTarget);
                     break; // a symbol draws only through use
+                case "marker":
+                {
+                    // a marker draws only at the vertices of the shapes that reference it (marker-start/mid/end)
+                    var mk = new SvgShape { Tag = "marker", Owner = svg, Children = new List<SvgShape>() };
+                    foreach (var kv in c.Attributes) mk.Attributes[kv.Key] = kv.Value;
+                    var beforeMk = svg.Shapes.Count;
+                    CollectShapes(c, svg, result, rules, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), null, byId, depth + 1, false, mk);
+                    svg.Shapes.Insert(beforeMk, mk);
+                    break;
+                }
                 case "clippath":
                 {
                     var cp = new SvgShape { Tag = "clipPath", Owner = svg, Children = new List<SvgShape>() };
@@ -901,7 +977,12 @@ internal static class HtmlRenderer
                     if (text.Length == 0) break;
                     var shape = new SvgShape { Tag = "text", Owner = svg };
                     foreach (var kv in eff) shape.Attributes[kv.Key] = kv.Value;
-                    foreach (var kv in c.Attributes) if (!shape.Attributes.ContainsKey(kv.Key)) shape.Attributes[kv.Key] = kv.Value; // x, y, dx, dy
+                    foreach (var kv in c.Attributes) if (!shape.Attributes.ContainsKey(kv.Key)) shape.Attributes[kv.Key] = kv.Value;
+                    // the non-inherited presentation from CSS rules and inline style (geometry, paint-order,
+                    // markers, vector-effect...), over the attribute of the same name, as the cascade says
+                    foreach (var kv in own)
+                        if (Array.IndexOf(SvgInherited, kv.Key.ToLowerInvariant()) < 0 && kv.Key.ToLowerInvariant() is not ("opacity" or "transform" or "transform-origin" or "transform-box" or "style" or "display" or "visibility" or "clip-path" or "class" or "id"))
+                            shape.Attributes[kv.Key] = kv.Value; // x, y, dx, dy
                     shape.Attributes["__text"] = text;
                     if (m2 != null) shape.Attributes["__m"] = MatrixText(m2);
                                         svg.Shapes.Add(shape);
@@ -925,6 +1006,10 @@ internal static class HtmlRenderer
                     var shape = new SvgShape { Tag = tag, Owner = svg };
                     foreach (var kv in eff) shape.Attributes[kv.Key] = kv.Value;
                     foreach (var kv in c.Attributes) if (!shape.Attributes.ContainsKey(kv.Key)) shape.Attributes[kv.Key] = kv.Value;
+                    // CSS rules and inline style over the attribute of the same name (geometry, paint-order, markers...), as the cascade says
+                    foreach (var kv in own)
+                        if (Array.IndexOf(SvgInherited, kv.Key.ToLowerInvariant()) < 0 && kv.Key.ToLowerInvariant() is not ("opacity" or "transform" or "transform-origin" or "transform-box" or "style" or "display" or "visibility" or "clip-path" or "class" or "id"))
+                            shape.Attributes[kv.Key] = kv.Value;
                     if (m2 != null) shape.Attributes["__m"] = MatrixText(m2);
                                         if (clipTarget != null) clipTarget.Children!.Add(shape);
                     else svg.Shapes.Add(shape);
@@ -1522,7 +1607,16 @@ internal static class HtmlRenderer
             foreach (var c in order) c.BringToFront();
             static int Rank(Dictionary<string, string> c) => c.TryGetValue("float", out var f) ? (f.Trim() == "left" ? 0 : 2) : 1;
         }
-        if (css.TryGetValue("column-count", out var cc) && int.TryParse(cc.Trim(), out var columns) && columns > 1)
+        var columns = 0;
+        if (css.TryGetValue("column-count", out var cc) && int.TryParse(cc.Trim(), out var ccn)) columns = ccn;
+        else if (css.TryGetValue("column-width", out var cwv) && cwv.Trim() != "auto" && StyleApplier.Num(cwv) > 0f)
+        {
+            // column-width: as many columns of that width as fit the box (its own width, or the page's)
+            var gapW = css.TryGetValue("column-gap", out var cg0) ? StyleApplier.Num(cg0) : 16f;
+            var boxW = css.TryGetValue("width", out var cwidth) && !cwidth.Trim().EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(cwidth) : StyleApplier.ViewportW;
+            columns = Mathf.Max(1, Mathf.FloorToInt((boxW + gapW) / (StyleApplier.Num(cwv) + gapW)));
+        }
+        if (columns > 1)
         {
             var kids = new List<VisualElement>(ve.Children());
             var gap = css.TryGetValue("column-gap", out var cg) ? StyleApplier.Num(cg) : 16f;
@@ -1544,21 +1638,50 @@ internal static class HtmlRenderer
             if (css.TryGetValue("column-rule-color", out var crc) && StyleApplier.TryColor(crc, out var crcol)) ruleColor = crcol;
             if (ruleW > 0f && ruleColor.a <= 0.002f) ruleColor = ve.resolvedStyle.color;
             var hasRule = ruleW > 0f && ruleStyle is not ("none" or "hidden");
-            for (var c = 0; c < columns; c++)
+            void Distribute(VisualElement host, List<VisualElement> items)
             {
-                var col = new VisualElement { name = ve.name + "__col" + c };
-                col.style.flexGrow = 1; col.style.flexBasis = 0; col.style.flexShrink = 1;
-                if (c > 0 && hasRule)
+                var perCol = (items.Count + columns - 1) / columns;
+                for (var c = 0; c < columns; c++)
                 {
-                    col.style.marginLeft = gap * 0.5f - ruleW * 0.5f;
-                    col.style.paddingLeft = gap * 0.5f - ruleW * 0.5f;
-                    col.style.borderLeftWidth = ruleW;
-                    col.style.borderLeftColor = ruleColor;
-                    result.CssOf(col)["border-left-style"] = ruleStyle;
+                    var col = new VisualElement { name = ve.name + "__col" + c };
+                    col.style.flexGrow = 1; col.style.flexBasis = 0; col.style.flexShrink = 1;
+                    if (c > 0 && hasRule)
+                    {
+                        col.style.marginLeft = gap * 0.5f - ruleW * 0.5f;
+                        col.style.paddingLeft = gap * 0.5f - ruleW * 0.5f;
+                        col.style.borderLeftWidth = ruleW;
+                        col.style.borderLeftColor = ruleColor;
+                        result.CssOf(col)["border-left-style"] = ruleStyle;
+                    }
+                    else if (c > 0) col.style.marginLeft = gap;
+                    for (var i = c * perCol; i < Math.Min(items.Count, (c + 1) * perCol); i++) col.Add(items[i]);
+                    host.Add(col);
                 }
-                else if (c > 0) col.style.marginLeft = gap;
-                for (var i = c * per; i < Math.Min(kids.Count, (c + 1) * per); i++) col.Add(kids[i]);
-                ve.Add(col);
+            }
+            // column-span: all: the element takes the full width and the columns restart under it.
+            // ponytail: column-fill: auto is accepted and fills like balance (the heights are not known before layout)
+            var spanning = kids.FindAll(k => result.CssOf(k).TryGetValue("column-span", out var sp) && sp.Trim() == "all");
+            if (spanning.Count == 0) Distribute(ve, kids);
+            else
+            {
+                ve.style.flexDirection = FlexDirection.Column;
+                ve.style.alignItems = Align.Stretch;
+                var segment = new List<VisualElement>();
+                void Flush()
+                {
+                    if (segment.Count == 0) return;
+                    var row = new VisualElement { name = ve.name + "__cols" };
+                    row.style.flexDirection = FlexDirection.Row; row.style.alignItems = Align.FlexStart;
+                    Distribute(row, new List<VisualElement>(segment));
+                    ve.Add(row);
+                    segment.Clear();
+                }
+                foreach (var k in kids)
+                {
+                    if (spanning.Contains(k)) { Flush(); ve.Add(k); }
+                    else segment.Add(k);
+                }
+                Flush();
             }
         }
         if (css.TryGetValue("aspect-ratio", out var ar))
@@ -1586,10 +1709,27 @@ internal static class HtmlRenderer
     }
 
     /// <summary>The disclosure triangle at the front of a summary, as a drawn marker; a details without a summary gets one.</summary>
-    private static void AddDisclosure(HtmlNode details)
+    private static void AddDisclosure(HtmlNode details, List<CssRule> rules)
     {
         HtmlNode? summary = null;
         foreach (var c in details.Children) if (c.Tag == "summary") { summary = c; break; }
+        // ::details-content: the body of the details as one box, only when a rule names it (the wrapper changes what "details > p" means)
+        var contentProbe = new HtmlNode { Tag = "div", Parent = details };
+        contentProbe.Attributes["data-pseudo"] = "details-content";
+        var wantContent = false;
+        foreach (var rule in rules)
+        {
+            foreach (var sel in rule.Selectors)
+                if (sel.Chain[sel.Chain.Count - 1].PseudoElement == "details-content" && sel.Matches(contentProbe)) { wantContent = true; break; }
+            if (wantContent) break;
+        }
+        if (wantContent && !details.Children.Exists(c => c.Attr("data-pseudo") == "details-content"))
+        {
+            var body = details.Children.FindAll(c => c.Tag != "summary");
+            details.Children.RemoveAll(c => c.Tag != "summary");
+            foreach (var c in body) { c.Parent = contentProbe; contentProbe.Children.Add(c); }
+            details.Children.Add(contentProbe);
+        }
         if (summary == null)
         {
             summary = new HtmlNode { Tag = "summary", Parent = details };
@@ -1782,6 +1922,19 @@ internal static class HtmlRenderer
         return true;
     }
 
+    /// <summary>column-count, or the count column-width gives for the block's width; 0 when neither.</summary>
+    private static int TextColumns(HtmlNode node, List<CssRule> rules)
+    {
+        if (CascadedValue(node, rules, "column-count") is { } ccv && int.TryParse(ccv, out var n)) return n;
+        if (CascadedValue(node, rules, "column-width") is { } cw && cw != "auto" && StyleApplier.Num(cw) > 0f)
+        {
+            var gap = CascadedValue(node, rules, "column-gap") is { } g ? StyleApplier.Num(g) : 16f;
+            var w = CascadedValue(node, rules, "width") is { } wv && !wv.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(wv) : StyleApplier.ViewportW;
+            return Mathf.Max(1, Mathf.FloorToInt((w + gap) / (StyleApplier.Num(cw) + gap)));
+        }
+        return 0;
+    }
+
     /// <summary>Flatten inline children to Unity rich text.</summary>
     private static string RichText(HtmlNode node, List<CssRule>? rules = null)
     {
@@ -1853,7 +2006,7 @@ internal static class HtmlRenderer
                 (node.Vars ??= new Dictionary<string, string>(StringComparer.Ordinal))[raw.Name] = raw.Value.Trim();
                 return;
             }
-            var d = raw.Value.IndexOf("var(", StringComparison.Ordinal) >= 0
+            var d = HasFn(raw.Value)
                 ? new CssDeclaration(raw.Name, ResolveVars(raw.Value, node), raw.Important)
                 : raw;
             switch (d.Name)
@@ -1862,6 +2015,8 @@ internal static class HtmlRenderer
                 case "font-size": size = d.Value; break;
                 case "font-family": face = d.Value.Split(',')[0].Trim().Trim('"', '\''); break;
                 case "vertical-align":
+                case "alignment-baseline":
+                case "baseline-shift":
                 {
                     var va = d.Value.Trim().ToLowerInvariant();
                     if (va == "sub") { open.Append("<sub>"); close.Insert(0, "</sub>"); }
@@ -1981,6 +2136,7 @@ internal static class HtmlRenderer
             case "legend": s.unityFontStyleAndWeight = FontStyle.Bold; s.fontSize = 12; s.color = new Color(1, 1, 1, 0.6f); s.marginBottom = 4; s.alignSelf = Align.FlexStart; break; // ponytail: sits inside the box, not cut into its border
             case "summary": s.unityFontStyleAndWeight = FontStyle.Bold; s.flexDirection = FlexDirection.Row; s.alignItems = Align.Center; break;
             case "details": s.marginTop = 4; s.marginBottom = 4; break;
+            case "datalist": case "map": case "area": s.display = DisplayStyle.None; break; // built (ids, events) but never drawn
             case "dialog":
                 s.position = Position.Absolute; s.left = new Length(50, LengthUnit.Percent); s.top = new Length(50, LengthUnit.Percent);
                 s.translate = new Translate(new Length(-50, LengthUnit.Percent), new Length(-50, LengthUnit.Percent));
@@ -2020,8 +2176,48 @@ internal static class HtmlRenderer
     }
 
     /// <summary>Substitute var(--name[, fallback]) from this node's chain of custom properties.</summary>
+    /// <summary>A url against the page's &lt;base href&gt;; absolute and data urls, and pages without a base, pass through.</summary>
+    internal static string ResolveUrl(string url, Result? result)
+    {
+        var u = url.Trim();
+        if (result?.BaseUrl == null || u.Length == 0 || u.Contains("://") || u.StartsWith("data:", StringComparison.OrdinalIgnoreCase) || u.StartsWith("#", StringComparison.Ordinal)) return u;
+        try { return new Uri(new Uri(result.BaseUrl), u).ToString(); }
+        catch (UriFormatException) { return u; }
+    }
+
+    /// <summary>True when a value needs resolving before use: var(), env() or light-dark() in it.</summary>
+    internal static bool HasFn(string v) => v.IndexOf("var(", StringComparison.Ordinal) >= 0 || v.IndexOf("env(", StringComparison.Ordinal) >= 0 || v.IndexOf("light-dark(", StringComparison.Ordinal) >= 0;
+
+    /// <summary>env(name[, fallback]): the safe-area and titlebar insets are 0 on a console; other names take the fallback.
+    /// light-dark(a, b): a, or b when the cascade said color-scheme: dark.</summary>
+    private static string ResolveEnvAndScheme(string value)
+    {
+        foreach (var fn in new[] { "env(", "light-dark(" })
+        {
+            while (true)
+            {
+                var at = value.IndexOf(fn, StringComparison.Ordinal);
+                if (at < 0) break;
+                var depth = 0; var j = at + fn.Length - 1;
+                while (j < value.Length) { if (value[j] == '(') depth++; else if (value[j] == ')' && --depth == 0) break; j++; }
+                var inner = value.Substring(at + fn.Length, Math.Max(0, j - at - fn.Length));
+                var parts = CssParser.SplitTopLevel(inner, ',');
+                string replacement;
+                if (fn == "env(")
+                {
+                    var name = parts.Count > 0 ? parts[0].Trim() : string.Empty;
+                    replacement = name.StartsWith("safe-area-inset", StringComparison.Ordinal) || name.StartsWith("titlebar-area", StringComparison.Ordinal) ? "0px" : parts.Count > 1 ? parts[1].Trim() : "0";
+                }
+                else replacement = parts.Count >= 2 ? (StyleApplier.ColorSchemeDark ? parts[1] : parts[0]).Trim() : inner;
+                value = value.Substring(0, at) + replacement + (j + 1 < value.Length ? value.Substring(j + 1) : string.Empty);
+            }
+        }
+        return value;
+    }
+
     internal static string ResolveVars(string value, HtmlNode node)
     {
+        value = ResolveEnvAndScheme(value);
         var sb = new StringBuilder();
         var i = 0;
         while (i < value.Length)
@@ -2141,7 +2337,7 @@ internal static class HtmlRenderer
             // included) sees the substituted value.
             if (raw.Name.StartsWith("--", StringComparison.Ordinal))
                 continue;
-            var d = raw.Value.IndexOf("var(", StringComparison.Ordinal) >= 0
+            var d = HasFn(raw.Value)
                 ? new CssDeclaration(raw.Name, ResolveVars(raw.Value, node), raw.Important)
                 : raw;
             // Keywords: inherit takes the parent's cascaded value (the layout inherits text
@@ -2194,7 +2390,7 @@ internal static class HtmlRenderer
                 if (!hit) continue;
                 foreach (var d in rule.Declarations) if (d.Name == "color") pc = d.Value;
             }
-            if (pc != null) node.Attributes["data-placeholder-color"] = pc.IndexOf("var(", StringComparison.Ordinal) >= 0 ? ResolveVars(pc, node) : pc;
+            if (pc != null) node.Attributes["data-placeholder-color"] = HasFn(pc) ? ResolveVars(pc, node) : pc;
         }
         if (ve is Label breakLabel && record.TryGetValue("word-break", out var wbreak) && wbreak.Trim() == "break-all" && !string.IsNullOrEmpty(breakLabel.text))
         {

@@ -921,15 +921,17 @@ internal static class CssParser
                 // marker span), ::placeholder (the field's placeholder, colour only); other
                 // pseudo-elements skip the rule.
                 if (name is "-webkit-input-placeholder" or "-moz-placeholder" or "-ms-input-placeholder") name = "placeholder";
-                if (name is not ("before" or "after" or "marker" or "placeholder" or "first-letter" or "first-line" or "backdrop" or "-webkit-scrollbar" or "-webkit-scrollbar-thumb" or "-webkit-scrollbar-track")) return false;
+                if (name is not ("before" or "after" or "marker" or "placeholder" or "first-letter" or "first-line" or "backdrop" or "details-content" or "-webkit-scrollbar" or "-webkit-scrollbar-thumb" or "-webkit-scrollbar-track")) return false;
                 compound.PseudoElement = name;
                 continue;
             }
             switch (name)
             {
                 case "root":
+                case "scope": // bare :scope (outside querySelector and @scope, which have their own root) is the document root
                     compound.Pseudos.Add(n => n.Tag == "html" || n.Tag == "body");
                     break;
+                case "popover-open": compound.Pseudos.Add(n => n.Attr("popover") != null && n.Attr("data-popover-open") != null); break;
                 case "first-child":
                     compound.Pseudos.Add(n => ElementIndex(n) == 0);
                     break;

@@ -13,18 +13,10 @@ def put(kind, text, *keys):
         R[k] = (kind, text)
 
 # ---------------------------------------------------------------- CSS property groups
-put("build", "`background-position-x/-y` are longhands the shorthand already covers: add the two names. `background-origin` moves the image box to the padding or content edge: an offset in the image emit. The per-corner `corner-*-shape` and `border-shape` need the 1-to-4 expansion `border-radius` has; `corner-shape` for all four corners is done.", "group:CSS Backgrounds and Borders")
-put("build", "gradient masks are done (vector item 10). An image mask (`mask-image: url()`) needs a vector mask from a texture's alpha, not asked for yet. The geometry longhands (`mask-position/size/repeat/origin/clip`) are the same offsets `background-*` uses. `clip-rule` is `fill-rule` for clip paths: pass `fr` on the CP def. `mask-border-*` is nine-slice for masks, on top of `border-image`.", "group:CSS Masking")
-put("build", "`fill`/`stroke` as CSS are done; the geometry properties (`cx cy r rx ry x y d`) need the same treatment in the svg collector. `marker-start/mid/end` (arrowheads) need `<marker>`: the marker's shapes emitted at each vertex, turned by the segment's angle. `vector-effect: non-scaling-stroke` is what a baked fit already does; needs the flag read.", "group:Scalable Vector Graphics")
 put("out", "`animation-trigger` and the `timeline-trigger-*` family are a 2025 draft no browser ships.", "group:CSS Animations")
 put("out", "the Fonts mod builds static atlases: no variable axes (`font-variation-settings`), no OpenType features (`font-variant-*`), no colour palettes. `font-variant-numeric: tabular-nums` was the one that mattered and is faked with a monospaced digit span.", "group:CSS Fonts")
-put("build", "`column-width` (column count from a width) is arithmetic on top of `column-count`. `contain-intrinsic-*` only matters with `content-visibility`, which is a no-op here; `frame-sizing` is a 2025 draft.", "group:CSS Box Sizing")
-put("build", "`white-space-collapse` and `text-wrap-mode` are the new longhands of `white-space`: map them. `hyphens: auto` needs a dictionary: out. `text-justify` variants: the text engine has one justification. `text-wrap-style: balance/pretty`: no control over the line breaker.", "group:CSS Text")
-put("build", "`initial-letter` is the drop cap with a line count: the `::first-letter` machinery exists, the size is lines times line-height. `baseline-shift` and `alignment-baseline` are `vertical-align` spellings. `text-box-*` (leading trim) needs font metrics the text engine does not expose.", "group:CSS Inline")
 put("out", "no caret (typing happens in ScriptedScreens' own control); `interactivity` and `interest-delay-*` are 2025 drafts.", "group:CSS Basic User Interface")
-put("build", "`text-emphasis-*` are small marks above each character: a second label of dots; low value. `text-decoration-inset` is new and rarely used.", "group:CSS Text Decoration")
 put("out", "SVG filter primitives (`<filter>`, feGaussianBlur, flood, lighting) are per-pixel; out with `filter: blur()`: the page is geometry, not pixels.", "group:Filter Effects")
-put("build", "`overflow-clip-margin` is a larger clip rect: small. Scroll markers and `scroll-axis-lock` are 2025 drafts (carousel dots).", "group:CSS Overflow")
 put("out", "text flowing around a float's outline needs an inline formatting context that breaks lines around shapes. The layout engine has none: text lives in labels, labels are boxes. This is the structural limit behind every inline approximation in this file.", "group:CSS Shapes")
 put("out", "no document navigation, so no view transitions.", "group:CSS View Transitions")
 put("out", "no user for MathML.", "group:MathML")
@@ -34,14 +26,11 @@ put("out", "`background-blend-mode` is per-pixel compositing.", "group:Compositi
 put("out", "`box-decoration-break` only matters when a box fragments across lines or pages; inline boxes here do not fragment.", "group:CSS Fragmentation")
 put("out", "`dynamic-range-limit` is an HDR display hint.", "group:CSS Color")
 put("out", "`flex-line-count` is a 2025 draft.", "group:CSS Flexible Box Layout")
-put("build", "`grid` is the shorthand of `grid-template` plus the auto-flow parts: parse and split it.", "group:CSS Grid Layout")
 put("out", "`image-orientation: from-image` reads EXIF; the image element has no EXIF access.", "group:CSS Images")
 put("out", "scroll anchoring is a browser scrolling heuristic; the scroll box here keeps its offset.", "group:CSS Scroll Anchoring")
 put("out", "print.", "group:CSS Paged Media")
 put("out", "`ruby-overhang` tunes ruby stacking, and ruby is not stacked here (see approximations).", "group:CSS Ruby")
 put("out", "`text-combine-upright` packs characters in vertical text; vertical text here is a rotated label.", "group:CSS Writing Modes")
-put("build", "`transform-box: fill-box` changes the transform origin box for svg content: small.", "group:CSS Transforms")
-put("build", "`transition-behavior: allow-discrete` lets `display` transition; the tween system could hold `display` until the tween ends.", "group:CSS Transitions")
 
 # ---------------------------------------------------------------- at-rules
 put("out", "OpenType features and palettes: see fonts.", "at:@font-feature-values", "at:@font-palette-values")
@@ -51,33 +40,22 @@ put("out", "no document navigation.", "at:@view-transition")
 
 # ---------------------------------------------------------------- selectors
 put("out", "no text selection, so nothing to style.", "sel:::selection", "sel:::highlight", "sel:::spelling-error", "sel:::grammar-error", "sel:::target-text")
-put("build", "`::details-content` styles the body of a details element, which is an element already: match it.", "sel:::details-content")
 put("out", "parts of browser-native widgets. The select's arrow and the checkbox's mark are drawn here and could take colours from these rules later.", "sel:::file-selector-button", "sel:::picker", "sel:::picker-icon", "sel:::checkmark")
 put("out", "web components and shadow DOM: the renderer has one tree, no custom elements.", "sel:::part", "sel:::slotted", "sel::host", "sel::host-context", "sel::has-slotted", "sel::defined", "sel::state")
 put("out", "media state of ScriptedScreens' media element is not readable from the page.", "sel:::cue", "sel::playing", "sel::paused", "sel::muted", "sel::buffering", "sel::seeking", "sel::stalled", "sel::volume-locked", "sel::picture-in-picture")
 put("out", "no fullscreen, no autofill, no paged media, no time-based media cues, no view transitions.", "sel::fullscreen", "sel::autofill", "sel::first", "sel::left", "sel::right", "sel::past", "sel::future", "sel::active-view-transition", "sel::active-view-transition-type")
-put("build", "`popover` attribute support would make `:popover-open` the same as `:open`.", "sel::popover-open")
-put("build", "inside `querySelector` and `@scope` it is the root (done there); as a bare selector it is `:root`. One case.", "sel::scope")
 put("out", "view transitions.", "sel:::view-transition", "sel:::view-transition-group", "sel:::view-transition-image-pair", "sel:::view-transition-new", "sel:::view-transition-old")
 
 # ---------------------------------------------------------------- functions
-put("build", "safe-area insets: return 0.", "fn:env")
-put("build", "pick the light value, or by `color-scheme`.", "fn:light-dark")
-put("build", "colour spaces: the conversion maths into sRGB; `color-mix(in oklch)` then becomes exact instead of sRGB.", "fn:hwb", "fn:lab", "fn:lch", "fn:oklab", "fn:oklch")
-put("build", "`image-set` picks a URL by resolution: take the first. `xywh()` is a `clip-path` rect form. `ray()` belongs to motion paths. `alpha` is the relative-colour syntax (`rgb(from ...)`).", "fn:image-set", "fn:xywh", "fn:ray", "fn:alpha")
 put("out", "`paint()` is the Houdini paint API; `cross-fade()` blends two images per pixel; `palette-mix()` is a font palette; `param()` is a draft.", "fn:paint", "fn:cross-fade", "fn:palette-mix", "fn:param")
 put("approximation", "3D spellings take their flat projection: `rotateX/Y` as foreshortening, Z ignored. A true perspective projection needs depth the vector layer does not have.", "fn:rotate3d", "fn:scale3d", "fn:translate3d", "fn:scaleZ", "fn:translateZ", "fn:matrix3d")
 
 # ---------------------------------------------------------------- units
-put("build", "`Q` is a quarter millimetre; `cap` and `ic` need the font's cap height and ideographic advance: approximate as 0.7em and 1em.", "unit:Q", "unit:cap", "unit:ic")
 put("out", "resolution and frequency units only appear in media queries this layer does not need.", "unit:dpi", "unit:dpcm", "unit:dppx", "unit:Hz", "unit:kHz")
 
 # ---------------------------------------------------------------- HTML
 put("out", "no second document, no plugins; a console page is one document.", "html:iframe", "html:embed", "html:object")
-put("build", "image maps: a click on an `img` inside a `map` must hit-test the `area` shapes and fire the area's id. The click plumbing exists, the shape test does not.", "html:area", "html:map")
-put("build", "suggestions for an input: the control is ScriptedScreens', with no suggestion UI; could be drawn by the page as a list under the field on focus.", "html:datalist")
 put("out", "subtitles on a video: the ScriptedScreens media element has no text track.", "html:track")
-put("build", "base URL for relative `href`/`src`; relative URLs are not resolved at all today.", "html:base")
 put("out", "bidirectional override; the text engine is left-to-right only.", "html:bdo")
 put("fine", "renders as a plain block, as a browser's default; nothing names it in the code, which is why the tool counts it.", "html:dl", "html:hgroup", "html:menu", "html:search", "html:output", "html:slot")
 
@@ -85,15 +63,31 @@ put("fine", "renders as a plain block, as a browser's default; nothing names it 
 put("out", "a page has no network of its own by decision: data comes from Lua, so a console cannot become a general web client, and the game's fetch path (used for images and scripts) is a one-shot download without headers or bodies.", "js:fetch", "js:XMLHttpRequest", "js:WebSocket", "js:Request", "js:Response", "js:Headers", "js:AbortController")
 put("out", "one script thread per page is the design; a worker would be a second engine per page.", "js:Worker", "js:postMessage")
 put("out", "no file system, no uploads. `FormData` over a form's fields could be built from the DOM if asked.", "js:Blob", "js:File", "js:FileReader", "js:FormData")
-put("build", "parse a string into a detached tree: the detached shim holds `innerHTML`; `querySelector` over a detached tree is the missing half.", "js:DOMParser", "js:XMLSerializer")
 put("out", "replaced by `innerHTML` decades ago; ignored.", "js:write")
 put("out", "no use in a console page.", "js:compareDocumentPosition", "js:requestFullscreen", "js:setPointerCapture", "js:releasePointerCapture")
 
-put("build", "`offset-path` places the box at `offset-distance` along a `path()`, turned by `offset-rotate`. `offset` is their shorthand: split it. `offset-anchor` moves which point of the box sits on the path (the centre today); `offset-position` is the start for `ray()`, not read.", "group:Motion Path")
-put("build", "`column-rule` is a left border on every column but the first. `column-span: all` breaks an element out of the columns: rebuild the columns around it. `column-fill: balance` is what exists; `auto` fills the first column first.", "group:CSS Multi-column Layout")
+
+# ---- reclassified after Batch H (2026-09-16): what stays out, and why
+put("out", "`border-shape` is a 2025 draft (arbitrary border shapes) no browser ships; `corner-shape` and the per-corner/side `corner-*-shape` names are done.", "group:CSS Backgrounds and Borders")
+put("out", "an image mask (`mask-image: url()`, `mask-border-*`) needs an alpha mask from a texture on the vector side, not asked for; `mask-mode: luminance`, `mask-composite` (several masks) and `mask-type` (svg <mask>) are the same vector work. The gradient mask's geometry longhands (`mask-position/size/origin/clip/repeat`) are done.", "group:CSS Masking")
+put("out", "`column-height` and `column-wrap` are 2025 drafts; `contain-intrinsic-*` only matters with `content-visibility`, a no-op here; `frame-sizing` is a draft. `column-width` is done.", "group:CSS Box Sizing")
+put("out", "`hyphens: auto` and its `hyphenate-*` need a dictionary; `line-break` and `text-autospace` are CJK rules the text engine has no hooks for; `text-justify` variants: the engine has one justification; `text-wrap-style: balance/pretty`: no control over the line breaker; `text-fit` is a draft. `white-space-collapse` and `text-wrap-mode` are done.", "group:CSS Text")
+put("out", "`text-box-*` (leading trim) and `baseline-source` need font metrics the text engine does not expose. `initial-letter`, `baseline-shift` and `alignment-baseline` are done.", "group:CSS Inline")
+put("out", "`text-decoration-inset` is a 2025 draft. `text-emphasis` is done (see approximations).", "group:CSS Text Decoration")
+put("out", "scroll markers (`scroll-marker-group`, `scroll-target-group`) and `scroll-axis-lock` are 2025 drafts (carousel dots). `overflow-clip-margin` is done.", "group:CSS Overflow")
+put("out", "`alpha` is not a function: MDN lists the relative-colour channel keyword; `rgb(from ...)` and the other relative forms are done.", "fn:alpha")
 
 # ---------------------------------------------------------------- approximations (drawn, but not as a browser draws it)
 APPROX = [
+    ("`text-emphasis` marks are a second label of marks spaced by their own advance, not by the glyphs under them", "the glyph positions of a label are not known here", "exact only for monospace text; a per-glyph layout from the text engine would place them"),
+    ("`column-fill: auto` fills like `balance`", "the columns are made before layout, when the heights are unknown", "a post-layout pass moving children down the first column until it is full"),
+    ("`marker-mid` is skipped on a `path` (start and end markers draw)", "the path's vertices here are the flattened curve, not the author's command points", "keep the command endpoints when flattening"),
+    ("`mask-repeat` is accepted; a gradient mask does not tile", "a gradient clamps to its end stops outside its box", "vector: a repeating gradient"),
+    ("image map `coords` are read in the box's own px", "the picture's pixel size is unknown to the page (ScriptedScreens loads it)", "exact when the img's width/height attributes match the picture; vector: expose the natural size"),
+    ("`image-set()` takes its first candidate", "one resolution here", "fine: a console has one pixel density"),
+    ("`light-dark()` follows the last `color-scheme` seen in the cascade, page-wide", "no per-subtree scheme", "resolve per element from its ancestors' color-scheme"),
+    ("`DOMParser` parses with the page's tag-soup parser whatever the MIME type", "one parser", "fine for HTML and svg fragments; XML namespaces are not a thing here"),
+    ("`transition-behavior: allow-discrete` holds `display: none` until the element's other transition ends; without one it hides at once", "display is not a number to tween", "as a browser"),
     ("An animated `offset-distance` follows the path as 16 straight pieces between the two distances", "the position is a piecewise-linear expression over the tween's progress; the vector expression language has no path lookup", "more pieces when a long path shows corners (the count is a constant in the emitter)"),
     ("`offset-path` reads `path()` only; `ray()`, `circle()` and `url()` are ignored, arcs flatten to their chord", "one flattener for M L H V C S Q T Z", "the arc flattening the vector mod already has, exposed or copied"),
     ("`column-rule` is `solid` or dashed/dotted only; `column-span` and `column-fill` are ignored", "the rule is a column's left border", "column-span needs the columns rebuilt around the spanning element"),

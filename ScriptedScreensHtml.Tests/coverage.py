@@ -135,7 +135,7 @@ sel_have = {":" + p for p in pseudos} | {"::" + p for p in pseudo_elements}
 mdn_sel_norm = {re.sub(r"\(\)$", "", k) for k in mdn_sel if k.startswith(":")}
 sel_miss = sorted(k for k in mdn_sel_norm if k not in sel_have)
 at_have = sorted(a for a in at_rules & (mdn_at | {"keyframes", "-webkit-keyframes"})); at_miss = sorted(mdn_at - at_rules)
-unit_miss = sorted(mdn_units - units)
+unit_miss = sorted(u for u in mdn_units if u.lower() not in {x.lower() for x in units})
 
 section("Summary")
 table(["Area", "Handled", "Of", "Share"], [

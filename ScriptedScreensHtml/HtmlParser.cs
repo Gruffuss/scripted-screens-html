@@ -31,7 +31,7 @@ internal static class HtmlParser
 {
     internal static readonly HashSet<string> Void = new(StringComparer.OrdinalIgnoreCase)
     {
-        "br", "hr", "img", "input", "meta", "link", "col", "wbr", "source",
+        "br", "hr", "img", "input", "meta", "link", "col", "wbr", "source", "area", "base", "track", "embed", "param",
     };
 
     private static readonly HashSet<string> RawText = new(StringComparer.OrdinalIgnoreCase)

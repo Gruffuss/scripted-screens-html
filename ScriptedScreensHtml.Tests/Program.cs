@@ -215,8 +215,27 @@ void TestBatchG()
     var bd = new HtmlNode { Tag = "span", Parent = HtmlParser.Parse("<dialog></dialog>").Children[0] }; bd.Attributes["data-pseudo"] = "backdrop";
     Check(CssParser.ParseSelector("dialog::backdrop", null)!.Matches(bd), "::backdrop is a pseudo-element");
     Check(warnings.Count == 0, $"no warnings for the G sheet (got {string.Join("; ", warnings)})");
+    TestBuildRows();
+}
+
+void TestBuildRows()
+{
+    var warnings = new List<string>();
+    var rules = CssParser.ParseStylesheet(":scope { a: 1 } [popover]:popover-open { a: 2 } details::details-content { a: 3 }", m => warnings.Add(m), new Dictionary<string, CssKeyframes>());
+    Check(rules.Count == 3 && warnings.Count == 0, $"scope, popover-open and details-content parse ({rules.Count}, {string.Join("; ", warnings)})");
+    var body = HtmlParser.Parse("<body><div popover id=p></div></body>").Children[0];
+    Check(CssParser.ParseSelector(":scope", null)!.Matches(body), ":scope alone is the root");
+    var pop = body.Children[0];
+    Check(!CssParser.ParseSelector(":popover-open", null)!.Matches(pop), ":popover-open: closed popover does not match");
+    pop.Attributes["data-popover-open"] = "";
+    Check(CssParser.ParseSelector(":popover-open", null)!.Matches(pop), ":popover-open: shown popover matches");
+    var dc = new HtmlNode { Tag = "div", Parent = HtmlParser.Parse("<details></details>").Children[0] }; dc.Attributes["data-pseudo"] = "details-content";
+    Check(CssParser.ParseSelector("details::details-content", null)!.Matches(dc), "::details-content is a pseudo-element");
+    var area = HtmlParser.Parse("<map name=m><area shape=rect coords=\"0,0,10,10\" id=a1><area shape=circle coords=\"5,5,3\" id=a2></map>").Children[0];
+    Check(area.Children.Count == 2 && area.Children[1].Tag == "area", "area is a void tag: two siblings under the map");
 }
 
 if (args.Length > 0 && args[0] == "--probe2") { Probe2.Run(); return 0; }
+if (args.Length > 0 && args[0] == "--probe3") { Probe3.Run(); return 0; }
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");
 return failures.Count == 0 ? 0 : 1;
