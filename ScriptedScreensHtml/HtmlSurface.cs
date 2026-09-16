@@ -732,7 +732,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
                 $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
                 + $"(layout {page._lastLayoutMs:0.0} + translate {page._lastTranslateMs:0.0}), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
-                + $"{page._tweens.Count} tweens, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}");
+                + $"{page._tweens.Count} tweens, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}");
             page._dScript = page._dAnim = page._dTween = page._dDom = page._dOther = 0;
         }
     }

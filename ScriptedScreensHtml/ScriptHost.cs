@@ -57,6 +57,7 @@ internal sealed class ScriptHost : IDisposable
     /// <summary>The worker is inside a read that needs its pending writes applied: the main thread drains them now.</summary>
     private volatile bool _syncing;
     private bool _pumpedMidFrame;
+    private int _workerIds;
     private readonly ConcurrentDictionary<string, (float w, float h)> _sizes = new(StringComparer.Ordinal);
     /// <summary>Per scroll container, as the vector mod last reported: [offset, scrollHeight, viewport height] in page px.</summary>
     internal readonly ConcurrentDictionary<string, float[]> ScrollState = new(StringComparer.Ordinal);
@@ -602,6 +603,22 @@ internal sealed class ScriptHost : IDisposable
         var parsed = HtmlParser.Parse(html, _ => { });
         var inlineOnly = HtmlRenderer.IsInlineOnly(parsed);
         var rich = inlineOnly ? HtmlRenderer.FragmentToRichText(html, _findNode(id), _rules) : string.Empty;
+        // ids and attributes are decided here, on the worker: a getAttribute after innerHTML then needs no
+        // wait for the main thread (a render's handler loop cost a game frame per element)
+        var assigned = false;
+        void Prepare(HtmlNode n)
+        {
+            foreach (var c in n.Children)
+            {
+                if (c.IsText) continue;
+                if (c.Attr("id") == null) { c.Attributes["id"] = "__w" + c.Tag + (++_workerIds); assigned = true; }
+                var cid = c.Attr("id")!;
+                foreach (var kv in c.Attributes) _attrCache[cid + "\n" + kv.Key] = kv.Value;
+                Prepare(c);
+            }
+        }
+        if (!inlineOnly) Prepare(parsed);
+        var markup = assigned ? HtmlRenderer.ToHtml(parsed, false) : html;
         Write(() =>
         {
             var ve = _find(id);
@@ -624,8 +641,8 @@ internal sealed class ScriptHost : IDisposable
                     foreach (var c in HtmlParser.Parse(html, _ => { }).Children) { c.Parent = node; node.Children.Add(c); }
             }
             // built elements, or inline text on a container that has no label of its own
-            if (html.Trim().Length > 0 && (!inlineOnly || label == null))
-                _appendHtml(id, html);
+            if (markup.Trim().Length > 0 && (!inlineOnly || label == null))
+                _appendHtml(id, markup);
         });
     }
 

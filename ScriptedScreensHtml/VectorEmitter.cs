@@ -260,7 +260,47 @@ internal static class VectorEmitter
             if (bgCss != null && bgCss.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) bgCss = ExpandRepeating(bgCss, w, h);
             var shadow = (css.TryGetValue("box-shadow", out var shCss) ? Shadows(shCss) : string.Empty) + filterShadow;
             var imageUrl = bgCss != null ? UrlOf(bgCss) : null;
-            if (imageUrl != null)
+            var layered = bgCss != null && imageUrl == null && bgCss.IndexOf("gradient(", StringComparison.OrdinalIgnoreCase) >= 0 && SplitTopLevelCommas(bgCss).Count > 1;
+            if (layered)
+            {
+                // a layered background: the colour layer (last) is the base, each gradient layer sits at its own
+                // position and size ("linear-gradient(...) left bottom/100% 3px no-repeat, #000" is a fill edge)
+                var layers = SplitTopLevelCommas(bgCss!);
+                var baseC = bg;
+                var gradientLayers = new List<string>();
+                foreach (var raw in layers)
+                {
+                    var layer = raw.Trim();
+                    if (layer.IndexOf("gradient(", StringComparison.OrdinalIgnoreCase) >= 0) gradientLayers.Add(layer);
+                    else if (StyleApplier.TryColor(layer, out var lc)) baseC = lc;
+                }
+                if (baseC.a > 0.002f)
+                {
+                    ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                        .Append(Radius(rs, w, h)).Append(" f=").Append(Hex(baseC)).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                    ctx.Out.Nodes++;
+                }
+                // CSS paints the first layer on top: emitted last
+                for (var li = gradientLayers.Count - 1; li >= 0; li--)
+                {
+                    var layer = gradientLayers[li];
+                    var close = MatchingParen(layer, layer.IndexOf('('));
+                    if (close < 0) continue;
+                    var gradient = layer.Substring(0, close + 1).Trim();
+                    LayerBox(layer.Substring(close + 1), w, h, out var lx, out var ly, out var lw, out var lh);
+                    if (lw <= 0.01f || lh <= 0.01f) continue;
+                    if (gradient.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) gradient = ExpandRepeating(gradient, lw, lh);
+                    if (gradient.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase))
+                        GradientBox(ctx, gradient, x + lx, y + ly, lw, lh, F(lw), F(lh), rs, indent, ve, xform, string.Empty);
+                    else if (gradient.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) && RadialDef(ctx, gradient) is { } lrid)
+                    {
+                        ctx.Body.Append(indent).Append("R x=").Append(F(x + lx)).Append(" y=").Append(F(y + ly)).Append(" w=").Append(F(lw)).Append(" h=").Append(F(lh))
+                            .Append(" f=@").Append(lrid).Append('\n');
+                        ctx.Out.Nodes++;
+                    }
+                }
+            }
+            else if (imageUrl != null)
             {
                 // background-image: url(): the colour (if any) under an IMG node (vector requirement 9)
                 if (bg.a > 0.002f)
@@ -949,7 +989,7 @@ internal static class VectorEmitter
             if (c >= 0x80 && !char.IsSurrogate(c) && cur != null && !cur.HasCharacter(c))
             {
                 if (!fbTried) { fb = AssetOf(FallbackFace); fbTried = true; }
-                missing = fb != null && fb.HasCharacter(c, false, true); // a dynamic atlas adds the glyph on request
+                missing = fb != null && fb.HasCharacter(c, true, true); // the face's own fallback chain counts, and a dynamic atlas adds on request
             }
             if (missing)
             {
@@ -965,6 +1005,60 @@ internal static class VectorEmitter
         }
         if (inRun) sb!.Append("</font>");
         return sb?.ToString() ?? text;
+    }
+
+    /// <summary>The index of the parenthesis closing the one at `open`, or -1.</summary>
+    private static int MatchingParen(string s, int open)
+    {
+        if (open < 0) return -1;
+        var depth = 0;
+        for (var i = open; i < s.Length; i++)
+        {
+            if (s[i] == '(') depth++;
+            else if (s[i] == ')' && --depth == 0) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// A background layer's box from the tokens after its image: [position] [/ size] [repeat]. Position
+    /// keywords or lengths (a percentage places the box the CSS way), size in px or % of the box, auto
+    /// the box itself. ponytail: repeat is ignored, the layer draws once.
+    /// </summary>
+    private static void LayerBox(string tail, float w, float h, out float lx, out float ly, out float lw, out float lh)
+    {
+        lx = 0f; ly = 0f; lw = w; lh = h;
+        var slash = tail.IndexOf('/');
+        var posPart = (slash >= 0 ? tail.Substring(0, slash) : tail).Trim();
+        var sizePart = slash >= 0 ? tail.Substring(slash + 1).Trim() : string.Empty;
+        var sizes = new List<string>();
+        foreach (var t in sizePart.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (t is "no-repeat" or "repeat" or "repeat-x" or "repeat-y" or "round" or "space") break;
+            sizes.Add(t);
+        }
+        float Dim(string t, float full) => t == "auto" ? full : t.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(t) / 100f * full : StyleApplier.Num(t);
+        if (sizes.Count > 0) { lw = Dim(sizes[0], w); lh = sizes.Count > 1 ? Dim(sizes[1], h) : lh; }
+        var xs = new List<string>(); var ys = new List<string>(); var plain = new List<string>();
+        foreach (var t in posPart.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (t is "no-repeat" or "repeat" or "repeat-x" or "repeat-y" or "round" or "space") continue;
+            if (t is "left" or "right") xs.Add(t);
+            else if (t is "top" or "bottom") ys.Add(t);
+            else if (t == "center") { if (xs.Count == 0 && plain.Count == 0) xs.Add(t); else ys.Add(t); }
+            else plain.Add(t);
+        }
+        float Pos(string t, float full, float size) => t switch
+        {
+            "left" or "top" => 0f,
+            "right" or "bottom" => full - size,
+            "center" => (full - size) * 0.5f,
+            _ => t.EndsWith("%", StringComparison.Ordinal) ? (full - size) * StyleApplier.Num(t) / 100f : StyleApplier.Num(t),
+        };
+        var px = xs.Count > 0 ? xs[0] : plain.Count > 0 ? plain[0] : "left";
+        var py = ys.Count > 0 ? ys[0] : plain.Count > (xs.Count > 0 ? 0 : 1) ? plain[xs.Count > 0 ? 0 : 1] : "top";
+        lx = Pos(px, w, lw);
+        ly = Pos(py, h, lh);
     }
 
     /// <summary>border-style dashed/dotted (from the shorthand or the property) as a dash pattern in border widths.</summary>
@@ -1600,7 +1694,7 @@ internal static class VectorEmitter
         return WeightFace(w, bold);
     }
 
-    private static string? WeightFace(string w, bool bold)
+    internal static string? WeightFace(string w, bool bold)
     {
         var v = w.Trim().ToLowerInvariant();
         if (v == "bold" || v == "bolder") return "Bold";
@@ -1618,7 +1712,7 @@ internal static class VectorEmitter
         return "Black";
     }
 
-    private static bool NamedWeight(string family)
+    internal static bool NamedWeight(string family)
     {
         var f = family.ToLowerInvariant();
         return f.Contains("bold") || f.Contains("black") || f.Contains("heavy") || f.Contains("semi") || f.Contains("medium")

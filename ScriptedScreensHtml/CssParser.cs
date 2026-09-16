@@ -736,9 +736,39 @@ internal static class CssParser
             if (important)
                 value = value.Substring(0, bang).Trim();
             if (name.Length > 0 && value.Length > 0)
+            {
                 list.Add(new CssDeclaration(name, value, important));
+                if (name == "font") list.AddRange(FontLonghands(value, important));
+            }
         }
         return list;
+    }
+
+    /// <summary>font: [style] [weight] size[/line-height] family-list, as its longhands (a later longhand in the same list still wins).</summary>
+    private static IEnumerable<CssDeclaration> FontLonghands(string v, bool important)
+    {
+        var parts = SplitTopLevel(v.Trim(), ' ');
+        var familyStart = -1;
+        for (var i = 0; i < parts.Count; i++)
+        {
+            var p = parts[i].Trim();
+            if (p.Length == 0) continue;
+            if (p == "italic" || p == "oblique") { yield return new CssDeclaration("font-style", p, important); continue; }
+            if (p == "bold" || p == "bolder" || p == "lighter" || (float.TryParse(p, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var wn) && wn >= 100f)) { yield return new CssDeclaration("font-weight", p, important); continue; }
+            if (p == "normal" || p == "small-caps") continue;
+            if (char.IsDigit(p[0]) || p[0] == '.')
+            {
+                var slash = p.IndexOf('/');
+                yield return new CssDeclaration("font-size", slash > 0 ? p.Substring(0, slash) : p, important);
+                if (slash > 0 && slash + 1 < p.Length) yield return new CssDeclaration("line-height", p.Substring(slash + 1), important);
+                familyStart = i + 1;
+                break;
+            }
+            // a keyword font (menu, caption...) or an unknown token: no longhands
+            yield break;
+        }
+        if (familyStart >= 0 && familyStart < parts.Count)
+            yield return new CssDeclaration("font-family", string.Join(" ", parts.GetRange(familyStart, parts.Count - familyStart)).Trim(), important);
     }
 
     public static CssSelector? ParseSelector(string text, Action<string>? warn)

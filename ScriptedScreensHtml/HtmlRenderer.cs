@@ -2583,6 +2583,39 @@ internal static class HtmlRenderer
             else
                 Warn($"css: animation \"{anim.Name}\" has no @keyframes");
         }
+        ResolveWeightFace(ve, record);
+    }
+
+    /// <summary>
+    /// The layout measures with the face the emitter draws: the family's real weight (and Condensed)
+    /// face where the Fonts mod has one, instead of the regular face under a synthetic bold that is
+    /// no wider. Otherwise a bold title measured narrow and the next flex item overlapped it.
+    /// </summary>
+    private static void ResolveWeightFace(VisualElement ve, Dictionary<string, string> record)
+    {
+        if (!record.TryGetValue("font-family", out var fam)) return;
+        string? first = null;
+        foreach (var raw in fam.Split(','))
+        {
+            var n = raw.Trim().Trim('"', '\'');
+            if (n.Length == 0) continue;
+            if (StyleApplier.MapGeneric(n) is { } g) { first ??= g; continue; }
+            first = n;
+            break;
+        }
+        if (first == null || VectorEmitter.NamedWeight(first)) return;
+        var face = first;
+        if (record.TryGetValue("font-stretch", out var st) && st.IndexOf("condensed", StringComparison.OrdinalIgnoreCase) >= 0 && FontLibrary.Get(face + " Condensed") != null)
+            face += " Condensed";
+        var fs = ve.style.unityFontStyleAndWeight.value;
+        var bold = fs == FontStyle.Bold || fs == FontStyle.BoldAndItalic;
+        var weight = record.TryGetValue("font-weight", out var w) ? VectorEmitter.WeightFace(w, bold) : (bold ? "Bold" : null);
+        if (weight == null) return;
+        var asset = FontLibrary.Get(face + " " + weight);
+        if (asset == null) return;
+        ve.style.unityFontDefinition = FontDefinition.FromSDFFont(asset);
+        var italic = fs == FontStyle.Italic || fs == FontStyle.BoldAndItalic;
+        ve.style.unityFontStyleAndWeight = italic ? FontStyle.Italic : FontStyle.Normal;
     }
 
     internal static void ApplyAnimationDeclaration(AnimationSpec anim, CssDeclaration d)

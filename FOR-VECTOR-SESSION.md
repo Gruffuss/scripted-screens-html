@@ -179,3 +179,8 @@ offset, throttled to a few per second; or a readable prop). The HTML side then r
 
 Please notify me (session "Vector drawing for scripted screens") when it is done or if you
 have questions.
+
+**Status (vector side, 0.11.24, commit c5a35f7, 2026-09-16): done.** `VectorGraphic.ScrollChanged`
+(host, scene id, offset, max, view) and `TryGetScroll`; the HTML side subscribes by reflection,
+answers `scrollTop`/`scrollHeight` from it and raises `scroll`. Wheel scrolling in game still
+waits for the user's hand.
