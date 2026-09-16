@@ -49,7 +49,7 @@ difference is the fixed memory of the layout tree and the script engine.
 
 | Step | State |
 |---|---|
-| 1 | done, seen in game: 58 structures and 272 patches in 3 min on the Apple page (was 4,421 structures) |
+| 1 | done, seen in game: 4 structures and 278 patches in 3 min on the Apple page (was 4,421 structures); a structure change uses the other of two slot-name sets, so its values never land on the structure still on screen |
 | 2 | done (vector 0.11.26 `snap`), all HTML payloads snap |
 | 3 | done, seen in game: 818 in-place updates in 3 min, no elements created per tick |
 | 4 | done for looping opacity/transform animations (CSS and script); finite ones keep the runner |
@@ -66,9 +66,13 @@ Measured 2026-09-17, same restart, consoles 561 and 563 blank, 586 running each 
 
 | | Lua regulator | HTML Apple page |
 |---|---|---|
-| frame mean | 13.79 ms (72.5 FPS) | 13.89 ms (72.0 FPS) |
-| p99 | 15.3 ms | 15.4 ms |
-| vector rebuild (off-thread) | 0.85 ms | 3.44 ms |
+| frame mean | 13.77 ms (72.6 FPS) | 13.93 ms (71.8 FPS) |
+| p99 | 14.9 ms | 15.0 ms |
+| vector rebuild (off-thread) | 0.85 ms | 3.26 ms |
+| structures / patches in 3 min | - | 4 / 278 |
+
+A box whose declared background turns transparent keeps its node (the structure no longer
+changes with a lamp's colour); a box that shrinks to zero keeps its node too.
 
 Diagnostics line additions: `main N ms/frame, awake N frames, sent: N structures M patches (K values), J in-place`,
 a `frames over 25 ms` line, and `new structure ... first difference` lines explaining each structure send.

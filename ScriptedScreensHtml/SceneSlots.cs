@@ -39,7 +39,7 @@ internal static class SceneSlots
     private static readonly HashSet<string> ColourKeys = new(StringComparer.Ordinal) { "f", "s" };
 
     /// <summary>The template and the values its slots name, in order.</summary>
-    public static string Split(string scene, Dictionary<string, Value> values)
+    public static string Split(string scene, Dictionary<string, Value> values, string prefix = "L")
     {
         values.Clear();
         var sb = new StringBuilder(scene.Length + scene.Length / 4);
@@ -69,7 +69,7 @@ internal static class SceneSlots
             }
             else
             {
-                SlotLine(text, line, sb, values);
+                SlotLine(text, line, sb, values, prefix);
             }
             if (end < scene.Length) sb.Append('\n');
             line++;
@@ -78,7 +78,7 @@ internal static class SceneSlots
         return sb.ToString();
     }
 
-    private static void SlotLine(string text, int line, StringBuilder sb, Dictionary<string, Value> values)
+    private static void SlotLine(string text, int line, StringBuilder sb, Dictionary<string, Value> values, string prefix)
     {
         var i = 0;
         // indent and op
@@ -103,7 +103,7 @@ internal static class SceneSlots
             var vEnd = ValueEnd(text, vStart);
             var raw = text.Substring(vStart, vEnd - vStart);
             sb.Append(key).Append('=');
-            sb.Append(SlotValue(key, raw, line, values));
+            sb.Append(SlotValue(key, raw, line, values, prefix));
             i = vEnd;
         }
     }
@@ -129,12 +129,12 @@ internal static class SceneSlots
         return i;
     }
 
-    private static string SlotValue(string key, string raw, int line, Dictionary<string, Value> values)
+    private static string SlotValue(string key, string raw, int line, Dictionary<string, Value> values, string prefix)
     {
         if (raw.Length == 0) return raw;
         var quoted = raw.Length >= 2 && raw[0] == '"' && raw[raw.Length - 1] == '"';
         var body = quoted ? raw.Substring(1, raw.Length - 2) : raw;
-        var name = "L" + line.ToString(CultureInfo.InvariantCulture) + "_" + Safe(key);
+        var name = prefix + line.ToString(CultureInfo.InvariantCulture) + "_" + Safe(key);
 
         if (body.Length > 0 && body[0] == '=')
         {

@@ -208,7 +208,8 @@ internal static class VectorEmitter
         // Background and border of the box itself.
         var clipText = (css.TryGetValue("background-clip", out var bclip) || css.TryGetValue("-webkit-background-clip", out bclip)) && bclip.Trim() == "text";
         var cornerPath = CornerPath(css, rs, x, y, w, h);
-        if (w > 0f && h > 0f && !clipText)
+        // a box that shrinks to nothing (a bar at 0 %) keeps its node, so the structure does not change with the value
+        if (w >= 0f && h >= 0f && !clipText)
         {
             var bg = rs.backgroundColor;
             css.TryGetValue("background", out var bgCss);
@@ -309,7 +310,9 @@ internal static class VectorEmitter
                     .Append(Radius(rs, w, h)).Append(" f=@").Append(rid).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
                 ctx.Out.Nodes++;
             }
-            else if (bg.a > 0.002f)
+            // a declared background keeps its box when it turns transparent (a lamp going dark), so the
+            // structure does not change with the colour; the vector mod skips invisible shapes itself
+            else if (bg.a > 0.002f || css.ContainsKey("background-color") || (css.TryGetValue("background", out var bgDecl) && StyleApplier.TryColor(bgDecl.Trim(), out _)))
             {
                 ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
                     .Append(Radius(rs, w, h)).Append(" f=").Append(Hex(bg)).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');

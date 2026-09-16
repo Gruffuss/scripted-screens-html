@@ -51,6 +51,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     private readonly Dictionary<string, SceneSlots.Value> _sentValues = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SceneSlots.Value> _slotScratch = new(StringComparer.Ordinal);
     private int _structureSends, _patchSends, _patchSlots, _morphs;
+    private string _slotPrefix = "L";
     private float _lastWhyAt;
     /// <summary>Page design width (meta viewport); 0 = the element's own width.</summary>
     private float _designWidth;
@@ -820,7 +821,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         // Translate once, then send only what changed (REDESIGN.md step 1): the scene's values are
         // data slots. The same structure as the one the vector mod has is a value patch: no
         // re-parse, no scene restart, only the slots that changed.
-        var template = SceneSlots.Split(output.Scene, _slotScratch);
+        var template = SceneSlots.Split(output.Scene, _slotScratch, _slotPrefix);
         if (template == _lastTemplate)
         {
             _lastScene = output.Scene;
@@ -863,6 +864,14 @@ internal sealed class HtmlSurface : MonoBehaviour
             _tweens.Epoch = Time.time;
             output = VectorEmitter.Emit(_built, _content, layout.x, layout.y, _tweens, Time.time, ScrollSet);
             template = SceneSlots.Split(output.Scene, _slotScratch);
+        }
+        // A new structure takes the other slot names: its values, sent before it, must not land on
+        // the structure still on screen (where the same name means another value). Two sets alternate,
+        // so the vector mod's table stays bounded.
+        if (_lastTemplate != null)
+        {
+            _slotPrefix = _slotPrefix == "L" ? "M" : "L";
+            template = SceneSlots.Split(output.Scene, _slotScratch, _slotPrefix);
         }
         _tweens.Epoch = Time.time;
         _lastScene = output.Scene;
