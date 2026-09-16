@@ -52,6 +52,8 @@ internal sealed class ScriptHost : IDisposable
         if (!_toMain.IsEmpty) _drained.Wait(250);
     }
     private readonly ConcurrentDictionary<string, (float w, float h)> _sizes = new(StringComparer.Ordinal);
+    /// <summary>Per scroll container, as the vector mod last reported: [offset, scrollHeight, viewport height] in page px.</summary>
+    internal readonly ConcurrentDictionary<string, float[]> ScrollState = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _attrCache = new(StringComparer.Ordinal);
     private volatile bool _stop;
     private volatile bool _dead;
@@ -414,6 +416,7 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__wantPointer", new Action<string>(type => _pointerTypes.Add(type)));
             _engine.SetValue("__cssOf", new Func<string, string, string>(CssOf));
             _engine.SetValue("__setScroll", new Action<string, double>((id, off) => Write(() => _setScroll(id, (float)off))));
+            _engine.SetValue("__scrollOf", new Func<string, float[]?>(id => ScrollState.TryGetValue(id, out var st) ? st : null));
             _engine.SetValue("__scrollBox", new Func<string, string?>(id =>
             {
                 // the nearest ancestor (or the element itself) that scrolls: overflow auto/scroll
@@ -445,7 +448,7 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__rect", new Func<string, double[]>(RectOf));
             _engine.SetValue("__elementAt", new Func<double, double, string?>(ElementAt));
             _engine.SetValue("__insertHtml", new Action<string, string, string>((parent, html, before) => Write(() => _insertHtml(parent, html, before))));
-            _engine.SetValue("__removeAttr", new Action<string, string>((id, name) => { _attrCache.TryRemove(id + "\n" + name, out _); Write(() => { var n = _findNode(id); if (n != null && n.Attributes.Remove(name)) AfterAttribute(id, n, name); }); }));
+            _engine.SetValue("__removeAttr", new Action<string, string>((id, name) => { _attrCache.TryRemove(id + "\n" + name, out _); Write(() => { var n = _findNode(id); if (n != null && n.Attributes.Remove(name)) { AfterAttribute(id, n, name); RecascadeForAttribute(id, n, name); } }); }));
             _engine.SetValue("__size", new Func<string, double[]>(Size));
             _engine.SetValue("__canvasFrame", new Action<string, double[], string[], int>(CanvasFrame));
             _engine.SetValue("__now", new Func<double>(() => _frameNow * 1000.0));
@@ -530,9 +533,11 @@ internal sealed class ScriptHost : IDisposable
             var ve = _find(id);
             if (ve == null) return;
             StyleApplier.Apply(ve, new CssDeclaration(css, value), Report);
-            if (_built != null && css.StartsWith("offset-", StringComparison.Ordinal))
+            if (_built != null)
             {
-                // the emitter reads the motion-path properties from the record, so a script write lands there too
+                // the record is what the emitter reads for everything the layout engine has no style for
+                // (gradients, clips, masks, shadows, motion paths...): a script write lands there too, as
+                // it would in a browser's computed style
                 var record = _built.CssOf(ve);
                 if (value.Trim().Length == 0) record.Remove(css); else record[css] = value.Trim();
             }
@@ -631,8 +636,17 @@ internal sealed class ScriptHost : IDisposable
             {
                 node.Attributes[name] = value;
                 AfterAttribute(id, node, name);
+                RecascadeForAttribute(id, node, name);
             }
         });
+    }
+
+    /// <summary>A write to an attribute the stylesheet selects on ([data-mode=dark]) re-runs the cascade for the element and its subtree.</summary>
+    private void RecascadeForAttribute(string id, HtmlNode node, string name)
+    {
+        if (_built == null || !_built.AttributeSelectors.Contains(name)) return;
+        var ve = _find(id);
+        if (ve != null) { _built.Reclass(ve, node.Attr("class") ?? string.Empty); _onLayoutAttr?.Invoke(); }
     }
 
     /// <summary>Attributes whose presence is layout: `open` shows a dialog or a details' content.</summary>
@@ -1019,8 +1033,8 @@ function __el(id){
     get className(){ return __getAttr(id, 'class') || ''; },
     animate: function(k, o){ return __animate_el(id, k, o); },
     getAnimations: function(){ return []; },
-    get scrollWidth(){ return __children_rects(id)[0]; }, get scrollHeight(){ return __children_rects(id)[1]; },
-    get scrollTop(){ return __scrollCache[id] || 0; }, set scrollTop(v){ __scrollCache[id] = Math.max(0, Number(v) || 0); __setScroll(id, __scrollCache[id]); },
+    get scrollWidth(){ return __children_rects(id)[0]; }, get scrollHeight(){ var s = __scrollOf(id); return s ? s[1] : __children_rects(id)[1]; },
+    get scrollTop(){ var s = __scrollOf(id); return s ? s[0] : (__scrollCache[id] || 0); }, set scrollTop(v){ __scrollCache[id] = Math.max(0, Number(v) || 0); __setScroll(id, __scrollCache[id]); },
     get scrollLeft(){ return 0; }, set scrollLeft(v){},
     scrollTo: function(a, b){ var y = (a && typeof a === 'object') ? (a.top || 0) : (b || 0); el.scrollTop = y; },
     scrollBy: function(a, b){ var y = (a && typeof a === 'object') ? (a.top || 0) : (b || 0); el.scrollTop = (__scrollCache[id] || 0) + y; },

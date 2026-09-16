@@ -35,6 +35,19 @@ internal static class VectorBridge
                 continue;
             var type = asm.GetType("ScriptedScreensVector.VectorElementPatch");
             _postfix = type?.GetMethod("Postfix", BindingFlags.NonPublic | BindingFlags.Static);
+            // vector 0.11.24: `VectorGraphic.ScrollChanged(host, scId, offset, max, view)` after a rebuild that
+            // moved a scroll container (ask 18). Older vector mods have no event: scroll stays one-way.
+            try
+            {
+                var graphic = asm.GetType("ScriptedScreensVector.VectorGraphic");
+                var evt = graphic?.GetEvent("ScrollChanged", BindingFlags.Public | BindingFlags.Static);
+                var handler = typeof(HtmlElementPatch).GetMethod("OnVectorScroll", BindingFlags.NonPublic | BindingFlags.Static);
+                if (evt != null && handler != null && evt.EventHandlerType != null)
+                    evt.AddEventHandler(null, Delegate.CreateDelegate(evt.EventHandlerType, handler));
+                else if (evt == null)
+                    ScriptedScreensHtmlPlugin.Log?.LogInfo("html: this vector mod does not report scroll offsets (needs 0.11.24); scroll events stay off");
+            }
+            catch (Exception ex) { ScriptedScreensHtmlPlugin.Log?.LogWarning("html: scroll report hook: " + ex.Message); }
             break;
         }
         if (_postfix == null)

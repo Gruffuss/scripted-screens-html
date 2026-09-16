@@ -39,6 +39,7 @@ const stubs = {
   __animate: () => 7,
   __cancelAnimation: h => calls.push('cancel:' + h),
   __children_rects: () => [30, 40],
+  __scrollOf: () => null,
 };
 Object.assign(globalThis, stubs);
 require('vm').runInThisContext(src);   // top-level vars become globals, as in the engine

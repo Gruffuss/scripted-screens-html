@@ -223,8 +223,8 @@ internal sealed class KeyframeRunner
         foreach (var d in frame.Declarations)
         {
             StyleApplier.Apply(_ve, d, _warn);
-            // ponytail: only the motion-path properties, which the emitter reads from the record rather than the resolved style
-            if (_record != null && d.Name.StartsWith("offset-", StringComparison.Ordinal)) _record[d.Name] = d.Value.Trim();
+            // the frame's values also go to the record the emitter reads (motion paths, gradients, masks...)
+            if (_record != null) _record[d.Name] = d.Value.Trim();
         }
         Wrote = true;
     }

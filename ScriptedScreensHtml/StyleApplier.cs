@@ -27,12 +27,12 @@ internal static class StyleApplier
         switch (d.Name)
         {
             // Box
-            case "width": s.width = Len(v); break;
-            case "height": s.height = Len(v); break;
-            case "min-width": s.minWidth = Len(v); break;
-            case "min-height": s.minHeight = Len(v); break;
-            case "max-width": s.maxWidth = Len(v); break;
-            case "max-height": s.maxHeight = Len(v); break;
+            case "width": s.width = LenFor(ve, "width", v); break;
+            case "height": s.height = LenFor(ve, "height", v); break;
+            case "min-width": s.minWidth = LenFor(ve, "min-width", v); break;
+            case "min-height": s.minHeight = LenFor(ve, "min-height", v); break;
+            case "max-width": s.maxWidth = LenFor(ve, "max-width", v); break;
+            case "max-height": s.maxHeight = LenFor(ve, "max-height", v); break;
             case "margin": Sides(v, out var mt, out var mr, out var mb, out var ml); s.marginTop = mt; s.marginRight = mr; s.marginBottom = mb; s.marginLeft = ml; break;
             case "margin-top": s.marginTop = Len(v); break;
             case "margin-right": s.marginRight = Len(v); break;
@@ -46,10 +46,10 @@ internal static class StyleApplier
 
             // Position
             case "position": s.position = v == "absolute" || v == "fixed" ? Position.Absolute : Position.Relative; break;
-            case "left": s.left = Len(v); break;
-            case "top": s.top = Len(v); break;
-            case "right": s.right = Len(v); break;
-            case "bottom": s.bottom = Len(v); break;
+            case "left": s.left = LenFor(ve, "left", v); break;
+            case "top": s.top = LenFor(ve, "top", v); break;
+            case "right": s.right = LenFor(ve, "right", v); break;
+            case "bottom": s.bottom = LenFor(ve, "bottom", v); break;
             case "inset": Sides(v, out var it, out var ir, out var ib, out var il); s.top = it; s.right = ir; s.bottom = ib; s.left = il; break;
 
             // Flex
@@ -114,7 +114,12 @@ internal static class StyleApplier
             case "justify-content":
                 s.justifyContent = v switch { "center" => Justify.Center, "flex-end" or "end" => Justify.FlexEnd, "space-between" => Justify.SpaceBetween, "space-around" or "space-evenly" => Justify.SpaceAround, _ => Justify.FlexStart };
                 break;
-            case "align-items": s.alignItems = AlignOf(v); break;
+            case "align-items":
+                // baseline: no such mode in the layout engine; bottoms align and PostLayout lifts each
+                // child by its own descent so the baselines meet (see PostLayout.Baseline)
+                if (v == "baseline" || v == "first baseline" || v == "last baseline") { s.alignItems = Align.FlexEnd; BaselineRows.Add(ve); break; }
+                s.alignItems = AlignOf(v);
+                break;
             case "align-self": s.alignSelf = AlignOf(v); break;
             case "align-content": s.alignContent = AlignOf(v); break;
             case "overflow":
@@ -657,6 +662,30 @@ internal static class StyleApplier
                 return r * step;
             }
         }
+    }
+
+    /// <summary>calc() with both px and % parts, per element and property: resolved against the containing block after layout (PostLayout).</summary>
+    internal static readonly Dictionary<VisualElement, List<(string prop, float px, float pct)>> MixedCalc = new();
+    /// <summary>Flex containers with align-items: baseline, aligned after layout (PostLayout).</summary>
+    internal static readonly HashSet<VisualElement> BaselineRows = new();
+
+    /// <summary>A length that may be a mixed calc(): the percent part goes to the layout now, the px part is added after layout.</summary>
+    private static StyleLength LenFor(VisualElement ve, string prop, string v)
+    {
+        v = v.Trim();
+        if (v.StartsWith("calc(", StringComparison.OrdinalIgnoreCase))
+        {
+            Calc(v, out var px, out var pct);
+            if (Mathf.Abs(px) > 0.0001f && Mathf.Abs(pct) > 0.0001f)
+            {
+                if (!MixedCalc.TryGetValue(ve, out var list)) MixedCalc[ve] = list = new List<(string, float, float)>();
+                list.RemoveAll(e => e.prop == prop);
+                list.Add((prop, px, pct));
+                return new Length(pct, LengthUnit.Percent);
+            }
+        }
+        if (MixedCalc.TryGetValue(ve, out var old)) old.RemoveAll(e => e.prop == prop);
+        return Len(v);
     }
 
     public static StyleLength Len(string v)

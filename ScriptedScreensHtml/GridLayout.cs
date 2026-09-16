@@ -53,6 +53,8 @@ internal sealed class GridLayout
         ve.RegisterCallback<GeometryChangedEvent>(_ => grid.Place());
         foreach (var child in ve.Children())
             child.RegisterCallback<GeometryChangedEvent>(_ => grid.Place());
+        // a re-cascade writes the items' own position/size again: place them afresh
+        built.AfterRecascade.Add(() => { grid._placed.Clear(); grid.Place(); });
     }
 
     private void Place()
@@ -233,11 +235,29 @@ internal sealed class GridLayout
             content[it.Row] = Mathf.Max(content[it.Row], ch);
         }
         var rowH = Resolve(rows, definiteHeight ? h : 0f, rowGap, false, out var anyFr);
+        // fr rows in a grid without a height of its own: all as tall as the tallest of them (grid-auto-rows: 1fr)
+        var frMax = 0f;
+        if (!definiteHeight)
+            for (var r = 0; r < rows.Count; r++) if (rows[r].Fr > 0f) frMax = Mathf.Max(frMax, content[r]);
         for (var r = 0; r < rows.Count; r++)
         {
-            if (rows[r].Auto || (!definiteHeight && rows[r].Fr > 0f))
-                rowH[r] = content[r];
+            if (rows[r].Auto) rowH[r] = content[r];
+            else if (!definiteHeight && rows[r].Fr > 0f) rowH[r] = frMax;
         }
+        if (definiteHeight)
+        {
+            // a grid with a height of its own hands the space its tracks leave to the auto rows (align-content: stretch)
+            var used = 0f; var autoRows = 0;
+            for (var r = 0; r < rows.Count; r++) { used += rowH[r]; if (rows[r].Auto) autoRows++; }
+            used += rowGap * Mathf.Max(0, rows.Count - 1);
+            var free = h - used;
+            if (autoRows > 0 && free > 0.5f)
+                for (var r = 0; r < rows.Count; r++) if (rows[r].Auto) rowH[r] += free / autoRows;
+        }
+        var alignItems = (Get(css, "align-items") ?? "stretch").Trim();
+        var justifyItems = (Get(css, "justify-items") ?? "stretch").Trim();
+        static float Factor(string v) => v is "center" ? 0.5f : v is "end" or "flex-end" or "self-end" or "last baseline" ? 1f : 0f;
+        static bool Stretches(string v) => v is "stretch" or "normal" or "auto";
 
         // Offsets.
         var colX = new float[cols.Count];
@@ -257,10 +277,22 @@ internal sealed class GridLayout
             for (var r = it.Row; r < it.Row + it.RowSpan && r < rows.Count; r++)
             {
                 chh += rowH[r] + (r > it.Row ? rowGap : 0f);
-                if (rows[r].Auto || (!definiteHeight && rows[r].Fr > 0f)) fixedRow = false;
+                if (rows[r].Auto && !definiteHeight) fixedRow = false;
             }
             var contentCol = !definiteWidth && it.ColSpan == 1 && it.Col < cols.Count && cols[it.Col].Auto;
-            var rect = new Rect(padL + colX[it.Col], padT + rowY[it.Row], contentCol ? -1f : cw, fixedRow ? chh : -1f);
+            // align-items / justify-items (and the self forms): a child that does not stretch keeps its
+            // own size and sits at the start, centre or end of its cell, measured from the layout
+            var ccss = _built.CssOf(it.Ve);
+            var alignSelf = (Get(ccss, "align-self") ?? alignItems).Trim();
+            var justifySelf = (Get(ccss, "justify-self") ?? justifyItems).Trim();
+            var ownH = Stretches(alignSelf) || !fixedRow;
+            var ownW = Stretches(justifySelf) || contentCol;
+            var childH = it.Ve.layout.height; if (float.IsNaN(childH)) childH = 0f;
+            var childW = it.Ve.layout.width; if (float.IsNaN(childW)) childW = 0f;
+            var offY = ownH ? 0f : Mathf.Max(0f, chh - childH) * Factor(alignSelf);
+            var offX = ownW ? 0f : Mathf.Max(0f, cw - childW) * Factor(justifySelf);
+            // a stretched item takes the cell (-1 = its own size, left to the cascade or the content)
+            var rect = new Rect(padL + colX[it.Col] + offX, padT + rowY[it.Row] + offY, ownW && !contentCol ? cw : -1f, ownH && fixedRow ? chh : -1f);
             if (_placed.TryGetValue(it.Ve, out var prev) && Same(prev, rect))
                 continue;
             _placed[it.Ve] = rect;
@@ -268,9 +300,9 @@ internal sealed class GridLayout
             s.position = Position.Absolute;
             s.left = rect.x;
             s.top = rect.y;
-            if (contentCol) s.width = StyleKeyword.Auto; else s.width = rect.width;
-            if (fixedRow) s.height = rect.height;
-            else s.height = StyleKeyword.Auto;
+            if (contentCol) s.width = StyleKeyword.Auto;
+            else if (ownW) s.width = rect.width;
+            if (ownH) s.height = fixedRow ? rect.height : StyleKeyword.Auto;
         }
 
         if (!definiteHeight)

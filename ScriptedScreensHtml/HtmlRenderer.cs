@@ -54,6 +54,10 @@ internal static class HtmlRenderer
         public string? BaseUrl;
         /// <summary>@starting-style rules: the state a newly shown element transitions from.</summary>
         public readonly List<CssRule> StartingRules = new();
+        /// <summary>Attribute names the stylesheet selects on ([data-mode=dark]): a script write to one re-cascades the element and its subtree.</summary>
+        public readonly HashSet<string> AttributeSelectors = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>Run after a re-cascade: the post-layout placements (grid items, mixed calc, baselines) put back what the cascade reset.</summary>
+        internal readonly List<Action> AfterRecascade = new();
         public readonly Dictionary<VisualElement, HtmlNode> NodeOf = new();
         public HtmlNode Document = new();
         /// <summary>display: grid containers, laid out by GridLayout once attached.</summary>
@@ -105,6 +109,24 @@ internal static class HtmlRenderer
             foreach (var c in classes.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 ve.AddToClassList(c);
             ApplyStyles(ve, node, Rules, this);
+            // the descendants too: their rules may key off this element (".dark .card", "[data-mode=dark]")
+            // and their var() values off custom properties it declares; labels rebuild their rich text
+            Recascade(ve);
+            foreach (var after in AfterRecascade) after();
+        }
+
+        private void Recascade(VisualElement ve)
+        {
+            foreach (var child in ve.Children())
+            {
+                if (NodeOf.TryGetValue(child, out var cn) && !cn.IsText)
+                {
+                    ApplyStyles(child, cn, Rules, this);
+                    if (child is Label label && cn.Children.Count > 0 && cn.Attr("data-control") == null && cn.Tag != "svg")
+                        label.text = RichText(cn, Rules);
+                }
+                Recascade(child);
+            }
         }
     }
 
@@ -127,11 +149,14 @@ internal static class HtmlRenderer
         AfterDecls.Clear();
         Tweens.AllowDiscrete.Clear();
         Tweens.PendingHide.Clear();
+        StyleApplier.MixedCalc.Clear();
+        StyleApplier.BaselineRows.Clear();
         CssParser.CounterStyles.Clear();
         CssParser.FontFaces.Clear();
         CssParser.Imports.Clear();
         CssParser.PropertyInitials.Clear();
         CssParser.StartingRules.Clear();
+        CssParser.UsedAttributes.Clear();
         _building = true;
         try { return BuildInner(source, font, result, doc, rules, script, Warn); }
         finally { _building = false; }
@@ -141,6 +166,7 @@ internal static class HtmlRenderer
     {
         Collect(doc, rules, script, result.Keyframes, Warn, result);
         result.StartingRules.AddRange(CssParser.StartingRules);
+        result.AttributeSelectors.UnionWith(CssParser.UsedAttributes);
         for (var i = 0; i < result.ExternalStyles.Count; i++) result.ExternalStyles[i] = ResolveUrl(result.ExternalStyles[i], result);
         for (var i = 0; i < result.ExternalScripts.Count; i++) result.ExternalScripts[i] = ResolveUrl(result.ExternalScripts[i], result);
         result.ExternalImports.AddRange(CssParser.Imports);
@@ -573,6 +599,9 @@ internal static class HtmlRenderer
 
         VisualElement ve;
         var mixed = false;
+        // display: flex / grid blockifies the children: spans in it are items with their own boxes, not one line of text
+        var itemsDisplay = CascadedValue(node, rules, "display") is { } dv0 && dv0.Trim().ToLowerInvariant() is "flex" or "inline-flex" or "grid" or "inline-grid"
+                           && node.Children.Exists(c => !c.IsText);
         if (IsTextLike(node) && node.Children.TrueForAll(c => c.IsText) && TextColumns(node, rules) is var textColumns && textColumns > 1)
         {
             // column-count on plain text: the words shared out over the columns as block children.
@@ -587,11 +616,11 @@ internal static class HtmlRenderer
                 node.Children.Add(col);
             }
         }
-        if (IsTextLike(node))
+        if (IsTextLike(node) && !itemsDisplay)
         {
             ve = new Label(RichText(node, rules));
         }
-        else if (Inline.Contains(node.Tag!) && IsInlineOnly(node) && IsTextLikeIgnoringSelf(node))
+        else if (Inline.Contains(node.Tag!) && IsInlineOnly(node) && IsTextLikeIgnoringSelf(node) && !itemsDisplay)
         {
             // An inline element reached here on its own (it carries an id or class) whose
             // content is plain text: a Label of its children's rich text; its own styles

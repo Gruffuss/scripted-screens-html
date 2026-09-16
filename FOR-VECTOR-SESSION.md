@@ -166,3 +166,16 @@ that straddles the clip boundary needs the boolean subtraction that is not there
 inside the clip is bridged as unclipped. A hole crossing the clip, or crossing the cut between a
 concave clip's convex pieces, no longer needs subtraction: the unclipped shape is triangulated and
 each triangle clipped (exact, no cracks). No warning remains. Test: `InGameTest-holes.lua`.
+
+## 18. Report a scroll container's offset to the host (asked 2026-09-16)
+
+A page script reacts to scrolling (`scroll` events, `scrollTop` reads: the Apple-style Atmo
+console fades the edges of its lists only where there is more content in that direction). The
+`SC` container scrolls on the client and the host never learns the offset: `sy` exists only
+inside expressions. Additive ask: when an `SC` (or scroll view) offset changes, tell the host
+element (a callback on the `vector` element with the scene id, the `SC` node id and the
+offset, throttled to a few per second; or a readable prop). The HTML side then raises
+`scroll` on the page element and answers `scrollTop` with the real value.
+
+Please notify me (session "Vector drawing for scripted screens") when it is done or if you
+have questions.

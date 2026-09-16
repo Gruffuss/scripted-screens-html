@@ -25,6 +25,15 @@ internal static class HtmlElementPatch
     /// <summary>Live pages by "board/surface/pageId", so data elements can find them.</summary>
     private static readonly Dictionary<string, HtmlSurface> Pages = new(StringComparer.Ordinal);
 
+    /// <summary>The vector mod's scroll report: the page whose element host this is gets the offset (VectorBridge subscribes this by reflection).</summary>
+    private static void OnVectorScroll(GameObject host, string scId, float offset, float max, float view)
+    {
+        if (host == null) return;
+        var name = host.name;
+        foreach (var page in Pages.Values)
+            if (page != null && name == "Ui:" + page.ElementId) { page.OnScrollReport(scId, offset, max, view); return; }
+    }
+
     /// <summary>
     /// Every data key ever sent to a page, merged. ScriptedScreens rebuilds the host on some
     /// events (the screen capture is one), which rebuilds the page from src with its

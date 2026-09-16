@@ -495,6 +495,9 @@ internal static class CssParser
     /// <summary>True once any stylesheet used :hover/:active/:focus, so the surface tracks the pointer.</summary>
     public static bool UsesPointerState;
 
+    /// <summary>Attribute names that appear in selectors, collected while parsing.</summary>
+    public static readonly HashSet<string> UsedAttributes = new(StringComparer.OrdinalIgnoreCase);
+    // declared above FocusSel: that selector is parsed while the type initialises and records its attribute name
     private static readonly CssSelector FocusSel = ParseSelector("[data-focus]", null)!;
 
     /// <summary>@font-face declarations collected while parsing; the renderer clears and registers them.</summary>
@@ -850,6 +853,7 @@ internal static class CssParser
             if (value.EndsWith(" i", StringComparison.OrdinalIgnoreCase)) value = value.Substring(0, value.Length - 2).Trim();
             if (value.Length >= 2 && (value[0] == '"' || value[0] == '\'') && value[value.Length - 1] == value[0]) value = value.Substring(1, value.Length - 2);
         }
+        UsedAttributes.Add(name.Trim());
         name = name.Trim();
         if (name.Length == 0) return false;
         compound.Pseudos.Add(n =>

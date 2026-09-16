@@ -93,6 +93,14 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     private void Update()
     {
+        // The script runs whether or not the panel is awake: a timer on a static page must fire.
+        // Its writes wake the panel so the change is laid out and emitted.
+        if (_script != null && _panel == null)
+        {
+            if (_scriptPending) { _scriptPending = false; _script.Run(_built?.Script ?? string.Empty); }
+            if (_script.Frame(Time.time, _byId)) { _dirty = true; Wake(); }
+            else if (_script.HasPendingWork) _awakeFrames = Mathf.Max(_awakeFrames, 2);
+        }
         if (_panel == null)
             return;
         ReportIfDue();
@@ -395,6 +403,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         _built = built;
         foreach (var grid in built.Grids)
             GridLayout.Attach(grid, built);
+        PostLayout.Attach(built);
 
         _script?.Dispose();
         _script = null;
@@ -491,8 +500,11 @@ internal sealed class HtmlSurface : MonoBehaviour
         // first (its load work, a short timer, an animation frame), each waited for, so the
         // capture shows what the script drew rather than the bare markup.
         if (_script != null)
-            for (var k = 0; k < 4; k++)
+        {
+            for (var k = 0; k < 6; k++)
                 _script.RunSynchronously(Time.time + k * 0.1f, _byId, 300);
+            _script.Pump(); // what the last frame queued lands before the capture's emit
+        }
         _dirty = false;
         EmitToVector();
         if (_restore != null)
@@ -1353,6 +1365,18 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>Scroll offsets a script asked for, by scroll box id, with a version the vector mod applies once (so/sov, vector requirement 7).</summary>
     internal readonly Dictionary<string, (float offset, int version)> ScrollSet = new(StringComparer.Ordinal);
     private int _scrollVersion;
+
+    /// <summary>
+    /// A scroll container moved on the client (wheel, drag, or a jump the script asked for):
+    /// the script sees the real scrollTop/scrollHeight and gets a `scroll` event, as in a browser.
+    /// </summary>
+    internal void OnScrollReport(string key, float offset, float max, float view)
+    {
+        if (_script == null) return;
+        var changed = !_script.ScrollState.TryGetValue(key, out var prev) || Mathf.Abs(prev[0] - offset) > 0.01f || Mathf.Abs(prev[1] - (max + view)) > 0.01f;
+        _script.ScrollState[key] = new[] { offset, max + view, view };
+        if (changed && prev != null) _script.EmitEvent(key, "scroll");
+    }
 
     private void SetScroll(string key, float offset)
     {

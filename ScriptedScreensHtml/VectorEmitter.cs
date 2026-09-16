@@ -252,7 +252,11 @@ internal static class VectorEmitter
                 ctx.Out.Nodes++;
                 bg = Color.clear;
             }
-            if (bgCss != null && bgCss.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) bgCss = ExpandRepeating(bgCss);
+            if (bgCss != null && bgCss.StartsWith("repeating-linear-gradient", StringComparison.OrdinalIgnoreCase) && Stripes(ctx, css, bgCss, ve, rs, x, y, w, h, indent))
+            {
+                bg = Color.clear; bgCss = null; // drawn as a repeat of stripes (marching when animated)
+            }
+            if (bgCss != null && bgCss.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) bgCss = ExpandRepeating(bgCss, w, h);
             var shadow = (css.TryGetValue("box-shadow", out var shCss) ? Shadows(shCss) : string.Empty) + filterShadow;
             var imageUrl = bgCss != null ? UrlOf(bgCss) : null;
             if (imageUrl != null)
@@ -1093,12 +1097,34 @@ internal static class VectorEmitter
 
     // ---------------------------------------------------------------- text
 
+    /// <summary>Properties a browser inherits; a label reads them from the nearest ancestor that sets them.</summary>
+    private static readonly string[] InheritedText = { "font-family", "font-weight", "font-style", "font-variant-numeric", "letter-spacing", "word-spacing", "line-height", "text-transform", "text-align", "text-align-last", "white-space", "text-shadow", "text-emphasis-style", "text-emphasis-color", "text-emphasis-position", "font-variant-caps", "text-indent" };
+
+    /// <summary>The label's record with the inherited text properties filled in from its ancestors (a copy only when something is added).</summary>
+    private static Dictionary<string, string> WithInherited(Ctx ctx, VisualElement ve, Dictionary<string, string> css)
+    {
+        Dictionary<string, string>? merged = null;
+        for (var p = ve.parent; p != null; p = p.parent)
+        {
+            var pc = ctx.Built.CssOf(p);
+            foreach (var name in InheritedText)
+            {
+                if (css.ContainsKey(name) || (merged != null && merged.ContainsKey(name))) continue;
+                if (!pc.TryGetValue(name, out var v)) continue;
+                merged ??= new Dictionary<string, string>(css, StringComparer.Ordinal);
+                merged[name] = v;
+            }
+        }
+        return merged ?? css;
+    }
+
     private static void EmitText(Ctx ctx, Label label, Dictionary<string, string> css, float x, float y, float w, float h, string indent)
     {
         var rs = label.resolvedStyle;
         var text = label.text ?? string.Empty;
         if (text.Length == 0)
             return;
+        css = WithInherited(ctx, label, css);
         if (css.TryGetValue("text-transform", out var tt))
             text = Transform(text, tt.Trim().ToLowerInvariant());
         // text-indent: TextMeshPro's line-indent is the first line of each paragraph, which
@@ -1125,12 +1151,13 @@ internal static class VectorEmitter
         text = text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n");
         // The scene reader types a clean number as a number even when quoted, and a number
         // has no text: "3" vanished from the footer. TextMeshPro's <noparse> keeps it a string.
-        if (float.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out _))
-            text = "<noparse>" + text + "</noparse>";
         // font-variant-numeric: tabular-nums: TextMeshPro has no OpenType features, but it can
         // monospace a span; digits get an em-fraction cell, the rest stays proportional.
         if (css.TryGetValue("font-variant-numeric", out var fvn) && fvn.Contains("tabular"))
             text = System.Text.RegularExpressions.Regex.Replace(text, "[0-9]+", m => "<mspace=0.6em>" + m.Value + "</mspace>");
+        // a purely numeric label is read as a number by the scene reader: guard it (after the tags above, which must stay tags)
+        else if (float.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+            text = "<noparse>" + text + "</noparse>";
         var align = rs.unityTextAlign;
         var centre = align == TextAnchor.MiddleCenter || align == TextAnchor.UpperCenter || align == TextAnchor.LowerCenter;
         var right = align == TextAnchor.MiddleRight || align == TextAnchor.UpperRight || align == TextAnchor.LowerRight;
@@ -1213,7 +1240,9 @@ internal static class VectorEmitter
         if (css.TryGetValue("letter-spacing", out var ls) && rs.fontSize > 0f)
         {
             // TextMeshPro's characterSpacing is hundredths of an em.
-            var px = ls.EndsWith("em", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(ls) * rs.fontSize : StyleApplier.Num(ls);
+            // an em value is read as a bare number times this label's font size (Num would resolve it against the cascade's em)
+            var lsv = ls.Trim();
+            var px = lsv.EndsWith("em", StringComparison.OrdinalIgnoreCase) && float.TryParse(lsv.Substring(0, lsv.Length - 2), NumberStyles.Float, CultureInfo.InvariantCulture, out var emv) ? emv * rs.fontSize : StyleApplier.Num(lsv);
             if (px != 0f) sb.Append(" cspace=").Append(F(px / rs.fontSize * 100f));
         }
         // text-align-last: the last line's alignment, which for a single-line label is the line
@@ -1224,7 +1253,19 @@ internal static class VectorEmitter
         else if (css.TryGetValue("text-align", out var ta) && ta.Trim() == "justify") sb.Append(" align=justified");
         else if (centre) sb.Append(" align=center");
         else if (right) sb.Append(" align=right");
-        sb.Append(" valign=middle");
+        // A browser starts a block's text at its top; the text is only centred when the box is a
+        // flex container that centres its items (or the box is no taller than its lines).
+        var lineHpx = rs.fontSize * 1.2f;
+        if (css.TryGetValue("line-height", out var lh0) && lh0.Trim() != "normal")
+        {
+            var lv = lh0.Trim();
+            lineHpx = lv.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(lv) : (lv.EndsWith("em", StringComparison.OrdinalIgnoreCase) || lv.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(lv) * (lv.EndsWith("%", StringComparison.Ordinal) ? 0.01f : 1f) : StyleApplier.Num(lv)) * rs.fontSize;
+        }
+        var lines = 1; foreach (var ch in text) if (ch == '\n') lines++;
+        var flexCentred = css.TryGetValue("display", out var dsp0) && dsp0.Trim() is "flex" or "inline-flex"
+                          && ((css.TryGetValue("align-items", out var ai0) && ai0.Trim() == "center") || (css.TryGetValue("flex-direction", out var fd0) && fd0.Trim().StartsWith("column", StringComparison.Ordinal) && css.TryGetValue("justify-content", out var jc0) && jc0.Trim() == "center"));
+        var tall = h > lineHpx * (lines + 0.5f) && !wraps && !flexCentred && !(ctx.Built.NodeOf.TryGetValue(label, out var tn) && tn.Tag is "td" or "th" or "button" or "summary" or "option" or "legend" or "label");
+        sb.Append(tall ? " valign=top" : " valign=middle");
         if (clipped)
             sb.Append(" fit=ellipsis");
         if (wraps)
@@ -1425,6 +1466,11 @@ internal static class VectorEmitter
     private static string? WeightFace(Dictionary<string, string> css, bool bold)
     {
         if (!css.TryGetValue("font-weight", out var w)) return bold ? "Bold" : null;
+        return WeightFace(w, bold);
+    }
+
+    private static string? WeightFace(string w, bool bold)
+    {
         var v = w.Trim().ToLowerInvariant();
         if (v == "bold" || v == "bolder") return "Bold";
         if (v == "lighter") return "Light";
@@ -2622,8 +2668,102 @@ internal static class VectorEmitter
         return t switch { "left" or "top" => 0f, "center" => 0.5f, "right" or "bottom" => 1f, _ => t.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(t) / 100f : 0.5f };
     }
 
-    /// <summary>repeating-linear/radial-gradient(...) rewritten as the plain gradient with its stop list repeated to 100%. Stop positions must be percentages.</summary>
-    private static string ExpandRepeating(string css)
+    /// <summary>The angle of a linear gradient's head ("90deg", "to right"), CSS default 180 (to bottom).</summary>
+    private static float GradientAngle(string head)
+    {
+        var h = head.Trim().ToLowerInvariant();
+        if (h.StartsWith("to ", StringComparison.Ordinal))
+        {
+            var a = 180f;
+            if (h.Contains("top")) a = 0f; if (h.Contains("right")) a = 90f; if (h.Contains("left")) a = 270f;
+            if (h.Contains("top") && h.Contains("right")) a = 45f; if (h.Contains("bottom") && h.Contains("right")) a = 135f;
+            if (h.Contains("bottom") && h.Contains("left")) a = 225f; if (h.Contains("top") && h.Contains("left")) a = 315f;
+            return a;
+        }
+        if (h.EndsWith("deg", StringComparison.Ordinal) || h.EndsWith("turn", StringComparison.Ordinal) || h.EndsWith("rad", StringComparison.Ordinal) || h.EndsWith("grad", StringComparison.Ordinal)) return Degrees(h);
+        return 180f;
+    }
+
+    /// <summary>
+    /// A repeating-linear-gradient along an axis whose stops are all hard edges (`a 0 6px, b 6px 12px`:
+    /// the stripe idiom), drawn as one repeat of rects per colour inside the box's clip. When a
+    /// keyframe animation moves `background-position`, the stripes march: an expression over t.
+    /// </summary>
+    private static bool Stripes(Ctx ctx, Dictionary<string, string> css, string bgCss, VisualElement ve, IResolvedStyle rs, float x, float y, float w, float h, string indent)
+    {
+        var open = bgCss.IndexOf('(');
+        var close = bgCss.LastIndexOf(')');
+        if (open < 0 || close < open) return false;
+        var args = SplitTopLevelCommas(bgCss.Substring(open + 1, close - open - 1));
+        var angle = 180f;
+        var first = 0;
+        if (args.Count > 0 && !StyleApplier.TryColor(args[0].Trim().Split(' ')[0], out _)) { angle = GradientAngle(args[0]); first = 1; }
+        angle = Mathf.Repeat(angle, 360f);
+        var horizontal = Mathf.Abs(angle - 90f) < 0.5f || Mathf.Abs(angle - 270f) < 0.5f;
+        var vertical = Mathf.Abs(angle) < 0.5f || Mathf.Abs(angle - 180f) < 0.5f;
+        if (!horizontal && !vertical) return false;
+        var span = horizontal ? w : h;
+        // stops as (position px, colour); a stop with two positions is two stops
+        var stops = new List<(float at, Color c)>();
+        for (var i = first; i < args.Count; i++)
+        {
+            var parts = args[i].Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0 || !StyleApplier.TryColor(parts[0], out var col)) return false;
+            if (parts.Length == 1) return false; // an auto-positioned stop: a soft ramp, not stripes
+            for (var p = 1; p < parts.Length; p++)
+                stops.Add((parts[p].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[p]) / 100f * span : StyleApplier.Num(parts[p]), col));
+        }
+        if (stops.Count < 2) return false;
+        var period = stops[stops.Count - 1].at - stops[0].at;
+        if (period < 0.5f) return false;
+        // every segment must be hard-edged: consecutive stops of different colours share a position
+        var segments = new List<(float s0, float s1, Color c)>();
+        for (var i = 1; i < stops.Count; i++)
+        {
+            if (stops[i].c == stops[i - 1].c) { segments.Add((stops[i - 1].at, stops[i].at, stops[i].c)); continue; }
+            if (Mathf.Abs(stops[i].at - stops[i - 1].at) > 0.01f) return false; // a ramp between colours: not stripes
+        }
+        if (segments.Count == 0) return false;
+        // marching: a keyframe animation on background-position, its 100% frame's offset over the duration
+        var shift = string.Empty;
+        foreach (var (element, spec) in ctx.Built.Animations)
+        {
+            if (element != ve || !ctx.Built.Keyframes.TryGetValue(spec.Name, out var kf) || spec.Duration <= 0f) continue;
+            if (css.TryGetValue("animation-play-state", out var ps) && ps.Trim() == "paused") continue;
+            var delta = 0f; var found = false;
+            foreach (var frame in kf.Frames)
+                foreach (var d in frame.Declarations)
+                    if (d.Name is "background-position" or "background-position-x" or "background-position-y")
+                    {
+                        var nums = d.Value.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                        var idx = d.Name == "background-position-y" ? 0 : horizontal ? 0 : 1;
+                        if (idx < nums.Length) { delta = StyleApplier.Num(nums[idx]) * (frame.Percent >= 99f ? 1f : 0f) + (frame.Percent < 99f ? delta : 0f); found = true; }
+                    }
+            if (found && Mathf.Abs(delta) > 0.01f)
+                shift = "+mod(t*" + F(delta / spec.Duration) + "+" + F(period * 1000f) + "," + F(period) + ")";
+        }
+        var id = "stripes" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h)).Append(Radius(rs, w, h)).Append(" }\n");
+        ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
+        var count = Mathf.CeilToInt(span / period) + 2;
+        var origin = (horizontal ? x : y) - period; // one period before the box so a shift never shows a gap
+        foreach (var (s0, s1, c) in segments)
+        {
+            if (s1 - s0 < 0.01f || c.a <= 0.002f) continue;
+            ctx.Body.Append(indent).Append("  RP n=").Append(count.ToString(CultureInfo.InvariantCulture)).Append(" { R ");
+            if (horizontal)
+                ctx.Body.Append("x==").Append(F(origin + s0)).Append("+i*").Append(F(period)).Append(shift).Append(" y=").Append(F(y)).Append(" w=").Append(F(s1 - s0)).Append(" h=").Append(F(h));
+            else
+                ctx.Body.Append("x=").Append(F(x)).Append(" y==").Append(F(origin + s0)).Append("+i*").Append(F(period)).Append(shift).Append(" w=").Append(F(w)).Append(" h=").Append(F(s1 - s0));
+            ctx.Body.Append(" f=").Append(Hex(c)).Append(" }\n");
+            ctx.Out.Nodes++;
+        }
+        ctx.Body.Append(indent).Append("}\n");
+        return true;
+    }
+
+    /// <summary>repeating-linear/radial-gradient(...) rewritten as the plain gradient with its stop list repeated to 100%; px stops are read against the gradient line.</summary>
+    private static string ExpandRepeating(string css, float w = 0f, float h = 0f)
     {
         var open = css.IndexOf('(');
         var close = css.LastIndexOf(')');
@@ -2632,11 +2772,17 @@ internal static class VectorEmitter
         var args = SplitTopLevelCommas(css.Substring(open + 1, close - open - 1));
         var head = new List<string>();
         var stops = new List<(float at, string colour)>();
+        var rad = (args.Count > 0 && !StyleApplier.TryColor(args[0].Trim().Split(' ')[0], out _) ? GradientAngle(args[0]) : 180f) * Mathf.Deg2Rad;
+        var lineLen = Mathf.Max(1f, w * Mathf.Abs(Mathf.Sin(rad)) + h * Mathf.Abs(Mathf.Cos(rad)));
         foreach (var raw in args)
         {
             var parts = raw.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length > 0 && StyleApplier.TryColor(parts[0], out _))
-                stops.Add((parts.Length > 1 && parts[1].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[1]) / 100f : float.NaN, parts[0]));
+            {
+                if (parts.Length == 1) stops.Add((float.NaN, parts[0]));
+                for (var p = 1; p < parts.Length; p++)
+                    stops.Add((parts[p].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[p]) / 100f : StyleApplier.Num(parts[p]) / lineLen, parts[0]));
+            }
             else head.Add(raw.Trim());
         }
         if (stops.Count < 2 || stops.Exists(s => float.IsNaN(s.at))) return name + css.Substring(open); // px stops: not expanded
