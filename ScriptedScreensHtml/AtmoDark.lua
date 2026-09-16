@@ -1,5 +1,6 @@
--- AtmoDark.lua -- the Coldbench dark Atmo Regulator mockup (AtmoUi/Dark) as a page: AtmoDark.html verbatim, embedded.
--- Generated from AtmoDark.html by the snippet in PLAN.md; edit the html, not this file. Push to the 3x3 console (586).
+-- AtmoDark.lua -- the same console in the Coldbench dark design system, written as an ordinary web page (HTML, CSS and a script) and embedded here.
+-- Paste into a Lua chip in a ScriptedScreens console; a 3x3 console shows it best (design width in the page).
+-- Maintainers: generated from AtmoDark.html in the repository (https://github.com/Gruffuss/scripted-screens-html); edit the html there.
 -- TAB picks the screen the page opens on (atmo | supply | filter | alarm | config), for captures.
 
 local TAB = "atmo"

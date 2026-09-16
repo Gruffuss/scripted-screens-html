@@ -1,5 +1,6 @@
--- AtmoLight.lua -- the Hardsuit (lit hull) Atmo Regulator mockup (AtmoUi/Light) as a page: AtmoLight.html verbatim, embedded.
--- Generated from AtmoLight.html the way AtmoApple.lua is from AtmoApple.html; edit the html, not this file. Push to the 3x3 console (586).
+-- AtmoLight.lua -- the same console in the Hardsuit light theme, written as an ordinary web page (HTML, CSS and a script) and embedded here.
+-- Paste into a Lua chip in a ScriptedScreens console; a 3x3 console shows it best (design width in the page).
+-- Maintainers: generated from AtmoLight.html in the repository (https://github.com/Gruffuss/scripted-screens-html); edit the html there.
 -- TAB picks the screen the page opens on (atmo | supply | filter | alarm | config), for captures.
 
 local TAB = "atmo"

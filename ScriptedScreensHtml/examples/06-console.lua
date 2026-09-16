@@ -1,7 +1,7 @@
 -- 06-console.lua -- a complete gas monitor. Paste into a Lua chip; works on any console size.
--- Shows: a grid of four tanks with expression-driven surfaces, live readouts, alarm states
--- switched by CSS class, a scrolling history graph bound to a number array, and a status
--- footer. Everything visual is HTML/CSS/SVG; Lua only samples and sends numbers.
+-- Shows: a grid of four tanks with expression-driven surfaces, live readouts, alarm borders
+-- and a warning set from data, a scrolling history graph bound to a number array, and a
+-- status footer. Everything visual is HTML/CSS/SVG; Lua only samples and sends numbers.
 -- Readings are simulated below; the `sample()` function is where device reads go.
 
 local ui = ss.ui.surface("main")
@@ -43,7 +43,6 @@ local page = [[
   header .clock { color: var(--dim); font-variant-numeric: tabular-nums; }
   .tanks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 12px; }
   .tank { background: var(--panel); border-radius: 10px; padding: 8px; display: flex; flex-direction: column; gap: 6px; border: 2px solid transparent; transition: border-color 0.4s; }
-  .tank.alarm { border-color: #B5352C; }
   .tank .head { display: flex; justify-content: space-between; font-weight: 600; }
   .tank .pct { color: var(--dim); font-weight: 400; }
   .tank svg { width: 100%; height: 110px; }

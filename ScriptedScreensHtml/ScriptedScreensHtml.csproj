@@ -5,7 +5,9 @@
         <RootNamespace>$(ModName)</RootNamespace>
         <TargetFramework>netstandard2.1</TargetFramework>
         <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-        <Version>0.0.1.0</Version>
+        <Version>0.2.0.0</Version>
+        <!-- symbols name no folder of the machine that built the mod -->
+        <PathMap>$(MSBuildProjectDirectory)=ScriptedScreensHtml</PathMap>
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     </PropertyGroup>
     <!-- Shared with the fonts mod so build paths and the Documents-directory override
@@ -54,10 +56,16 @@
     <ItemGroup>
         <!-- The JS engine and its parser ship next to the plugin; LaunchPad resolves them from the mod folder. -->
         <CopyItemsDeps Include="$(TargetDir)Jint.dll;$(TargetDir)Acornima.dll" />
+        <CopyItemsExamples Include="$(ProjectDir)\examples\**\*.lua" />
+        <CopyItemsMockups Include="$(ProjectDir)\AtmoApple.lua;$(ProjectDir)\AtmoDark.lua;$(ProjectDir)\AtmoLight.lua" />
+        <CopyItemsDocs Include="$(ProjectDir)\README.md;$(ProjectDir)\SUPPORT.md;$(ProjectDir)\QUICKSTART.md;$(ProjectDir)\CHANGELOG.md" />
     </ItemGroup>
     <Target Name="CopyAssetsToMods" AfterTargets="PostBuild">
         <Copy SourceFiles="@(CopyItemsDeps)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)" ContinueOnError="true" />
         <Copy SourceFiles="@(CopyItemsAbout)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)\About\%(RecursiveDir)" ContinueOnError="true" />
+        <Copy SourceFiles="@(CopyItemsExamples)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)\examples\%(RecursiveDir)" ContinueOnError="true" />
+        <Copy SourceFiles="@(CopyItemsDocs)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)" ContinueOnError="true" />
+        <Copy SourceFiles="@(CopyItemsMockups)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)\mockups" ContinueOnError="true" />
     </Target>
     <Target Name="GenerateVersionConst" BeforeTargets="CoreCompile">
         <PropertyGroup>

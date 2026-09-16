@@ -209,8 +209,8 @@ hundreds of elements per tick is a lot of layout. The diagnostics line tells you
 
 A magenta hatched frame around the page means the vector mod refused part of the scene; the
 reason is in the log. CSS the page uses that is not supported is logged once per property.
-Script errors are logged with their message and stack. `python mcp.py capture_scripted_screen`
-(StationeersLua's MCP) captures the page as an image, script output included.
+Script errors are logged with their message and stack. StationeersLua's MCP tool
+`capture_scripted_screen` captures the page as an image, script output included.
 
 ## Examples
 
@@ -218,15 +218,29 @@ Script errors are logged with their message and stack. `python mcp.py capture_sc
 
 | File | Shows |
 |---|---|
-| `01-hello.lua` | a styled page: layout, fonts, a card, a list |
+| `01-hello.lua` | a styled page: layout, fonts, a card, a list, a table |
 | `02-live-data.lua` | the data element: text, CSS and visibility bound by id, a transition on a bar |
 | `03-controls.lua` | buttons, inputs and a select talking to Lua through `on_click` and `on_change` |
 | `04-svg-gauge.lua` | an SVG tank with an expression-driven surface fed by `$level` |
 | `05-script.lua` | a page script building a table from a `data` event and reacting to clicks |
 | `06-console.lua` | a complete gas monitor: grid layout, live values, alarms, a history graph |
+`mockups/` beside them holds three complete consoles written as browser pages, each opening
+on the screen named by `TAB` at its top (`atmo`, `supply`, `filter`, `alarm`, `config`):
+
+| File | Shows |
+|---|---|
+| `AtmoApple.lua` | an Apple-style regulator console, five screens, a page script with a simulation |
+| `AtmoDark.lua` | the same console in the Coldbench dark design system: token sheets, layered backgrounds, corner marks |
+| `AtmoLight.lua` | the same console in the Hardsuit light theme: heavy outlines, a theme attribute switch |
+
+With StationeersLua installed, these docs and the examples are MCP resources: search with
+scope `html`, and start at `stationeers://html/index` (QUICKSTART.md with the full URI list).
+The mockups are `stationeers://html-mockups/<file>/part1`, `part2` and on, in a search scope of their own
+(`html-mockups`), since their CSS would otherwise answer every CSS question first.
 
 ## Where things live
 
-`SUPPORT.md` is the checklist of what works, `PLAN.md` the work log, `FOR-VECTOR-SESSION.md`
-what the vector mod is being asked for. Test pages `HtmlTest*.lua` are the verification
-pages, one per batch of features.
+`QUICKSTART.md` is the one page to read first, `CHANGELOG.md` the release history,
+`SUPPORT.md` the checklist of what works. The repository (https://github.com/Gruffuss/scripted-screens-html) also holds
+the work log (`PLAN.md`), the coverage table (`COVERAGE.md`), and the verification pages
+(`HtmlTest*.lua`), one per batch of features; none of those ship with the mod.

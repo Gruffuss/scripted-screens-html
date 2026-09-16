@@ -1,8 +1,8 @@
 # Writing a page for a console: what works from HTML, CSS and JS
 
 State as of 2026-09-15 (vector mod 0.11.23.0). Everything in the
-"works" tables below was seen on a console that day (`HtmlTest4` to `HtmlTest12`, on the
-2x2 and 3x3 test consoles). The contract is simple: **a page is written exactly as for a
+"works" tables below was seen on a console that day, on the verification pages
+(`HtmlTest4` to `HtmlTest12` in the repository, https://github.com/Gruffuss/scripted-screens-html), on 2x2 and 3x3 consoles. The contract is simple: **a page is written exactly as for a
 browser.** Anything a browser page does that fails here is a defect, not a convention, and
 the two lists at the end say what is still being finished.
 

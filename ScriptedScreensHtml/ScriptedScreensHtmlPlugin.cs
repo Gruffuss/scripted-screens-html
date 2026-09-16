@@ -47,6 +47,7 @@ public sealed class ScriptedScreensHtmlPlugin : ModBehaviour
             _harmony = new Harmony(PluginInfo.PLUGIN_GUID);
             _harmony.PatchAll(typeof(HtmlElementPatch).Assembly);
             Log.LogInfo($"Patched ScriptedScreens; element type \"{HtmlElementPatch.ElementType}\" is live.");
+            HtmlDocsTool.TryRegister();
         }
         catch (System.Exception ex)
         {

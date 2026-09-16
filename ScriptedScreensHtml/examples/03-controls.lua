@@ -19,7 +19,7 @@ local state = { setpoint = 101, mode = "auto", fan = false, count = 0 }
 local function show()
     data:set_props({ data = {
         echo = string.format("setpoint %d kPa, mode %s, fan %s, clicks %d",
-            state.setpoint, state.mode, state.fan and "on" or "off", state.count),
+            math.floor(state.setpoint), state.mode, state.fan and "on" or "off", state.count),
         fanled = state.fan,
     } })
     ui:commit()

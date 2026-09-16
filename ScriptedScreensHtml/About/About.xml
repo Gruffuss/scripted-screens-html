@@ -2,7 +2,7 @@
 <ModMetadata xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 	<Name>ScriptedScreens Html [StationeersLaunchPad]</Name>
 	<Author>Gruffuss</Author>
-	<Version>0.1.0.0</Version>
+	<Version>0.2.0.0</Version>
 	<Description>
 [h1]ScriptedScreens Html[/h1]
 [i]Client-side only. Nothing on disk is modified.[/i]
@@ -33,7 +33,25 @@ Transitions, keyframes and scroll-driven animations are compiled to expressions 
 [/list]
 
 [h2]Getting started[/h2]
-The mod folder holds a README guide, SUPPORT.md (everything seen working on a console, and the short list still being finished), and six numbered examples that each run on paste: a styled page, live data, controls, an SVG tank, a script-built table with a canvas chart, and a complete four-tank gas monitor.
+Everything is in the mod folder ([i]Documents/My Games/Stationeers/mods/ScriptedScreensHtml[/i]):
+[list]
+[*] [b]examples/[/b] -- six numbered scripts that each run on paste: a styled page with a table, live data, controls, an SVG tank, a script-built table, and a complete gas monitor
+[*] [b]mockups/[/b] -- three complete regulator consoles written as ordinary web pages, in three design styles, each with five screens
+[*] [b]QUICKSTART.md[/b] -- a one-page brief with a page and data element that run as written, and a checklist
+[*] [b]README.md[/b] -- the authoring guide: the html element, live data, controls, CSS, fonts, SVG and scripts
+[*] [b]SUPPORT.md[/b] -- everything seen working on a console, what is accepted without effect, and the short list still being finished
+[*] [b]CHANGELOG.md[/b] -- the full release history
+[/list]
+The same files are [url=https://github.com/Gruffuss/scripted-screens-html/tree/main/ScriptedScreensHtml]on GitHub[/url].
+
+[h2]AI editor support (MCP)[/h2]
+With [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3659911735]StationeersLua[/url] installed, an AI editor connected to its MCP server gets everything it needs to write console pages:
+[list]
+[*] [b]stationeers://html/index[/b] -- a brief written for AI: when to use the element, a page and data element that run as written, a checklist of the mistakes that fail silently, a symptom-to-cause table, and a map of every other page
+[*] the guide and SUPPORT.md, one searchable page per section (search scope [b]html[/b]), the changelog and all six examples
+[*] the three console mockups as whole pages, in a search scope of their own ([b]html-mockups[/b]) so their CSS does not crowd the answers
+[/list]
+The editor checks its work with StationeersLua's own tools: capture_scripted_screen for a picture of the console, get_chip_errors for the script. Nothing changes without StationeersLua; the mod works the same.
 
 [h2]Notes[/h2]
 [list]
@@ -43,10 +61,18 @@ The mod folder holds a README guide, SUPPORT.md (everything seen working on a co
 [/list]
 
 [h2]Changelog[/h2]
+[b]0.2.0[/b]
+[list]
+[*] [b]MCP support for AI editors.[/b] With StationeersLua's MCP server, the mod publishes a brief written for AI editors (stationeers://html/index), the guide and SUPPORT.md split into searchable sections (scope [b]html[/b]), the changelog, the six examples, and three whole-console mockups (scope [b]html-mockups[/b]).
+[*] QUICKSTART.md, CHANGELOG.md, examples/ and mockups/ ship in the mod folder.
+[*] Pages written from browser habit render as written in more cases: text beside an element inside a flex or grid box, the font shorthand's family and weight, real bold and condensed faces in layout, subscripts and symbols a face lacks, layered backgrounds with position and size, tabular digits, flex gaps after innerHTML, and an undefined var() dropped as a browser drops it.
+[*] Faster pages: a script re-rendering its page no longer waits a frame per element, and Diagnostics names every cause of a redraw.
+[/list]
 [b]0.1.0[/b]
 [list]
 [*] First release: HTML, CSS and JavaScript pages on ScriptedScreens consoles, drawn through ScriptedScreens Vector.
 [/list]
+Older releases: [b]CHANGELOG.md[/b] in the mod folder, or [url=https://github.com/Gruffuss/scripted-screens-html/blob/main/ScriptedScreensHtml/CHANGELOG.md]on GitHub[/url].
 
 [h2]Source[/h2]
 [url=https://github.com/Gruffuss/scripted-screens-html]github.com/Gruffuss/scripted-screens-html[/url] — MIT licensed. Issues and pull requests welcome.
