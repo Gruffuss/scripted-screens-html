@@ -12,8 +12,8 @@ using AtlasPopulationMode = UnityEngine.TextCore.Text.AtlasPopulationMode;
 namespace ScriptedScreensHtml;
 
 /// <summary>
-/// Font files on disk, as UI Toolkit (TextCore) font assets. Scans this mod's Assets/fonts
-/// and the Fonts mod's Assets/fonts next to it, so <c>font-family: Barlow</c> in a page is
+/// Font files on disk, as UI Toolkit (TextCore) font assets. Scans this mod's Assets/fonts,
+/// the Fonts mod's Assets/fonts next to it, and the player's <save folder>/fonts (which wins a clash), so <c>font-family: Barlow</c> in a page is
 /// the same Barlow file the vector layer's labels use. Assets are built lazily from the file
 /// with a dynamic SDF atlas, crisp at any size. Family and style come from the file name
 /// (Barlow-Bold.ttf = family "barlow", style "bold"); the family alone selects the regular
@@ -194,11 +194,15 @@ internal static class FontLibrary
         _files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         var here = Path.GetDirectoryName(typeof(FontLibrary).Assembly.Location) ?? string.Empty;
-        var folders = new[]
+        // Later folders win a name clash: the player's own fonts in <save folder>/fonts come last,
+        // as the Fonts mod orders them (a workshop update replaces the mod folders, not that one).
+        var folders = new List<string>
         {
             Path.Combine(here, "Assets", "fonts"),
             Path.Combine(here, "..", "ScriptedScreensFonts", "Assets", "fonts"),
         };
+        if (UserFontsFolder() is { } user)
+            folders.Add(user);
         foreach (var folder in folders)
         {
             if (!Directory.Exists(folder))
@@ -221,6 +225,26 @@ internal static class FontLibrary
             }
         }
         ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: font library scanned, {_files.Count} entries");
+    }
+
+    /// <summary>
+    /// <c>fonts</c> in the game's save folder (<c>Documents/My Games/Stationeers</c>, or the path
+    /// LaunchPad or the game settings override it with): where players put their own font files.
+    /// </summary>
+    private static string? UserFontsFolder()
+    {
+        try
+        {
+            var root = StationeersLaunchPad.LaunchPadPaths.SavePath;
+            if (string.IsNullOrEmpty(root))
+                root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "My Games", "Stationeers");
+            return Path.Combine(root, "fonts");
+        }
+        catch (Exception ex)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: could not resolve the game's save folder; player fonts are not scanned: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>"Barlow Condensed" and "BarlowCondensed" and "barlow-condensed" all match.</summary>

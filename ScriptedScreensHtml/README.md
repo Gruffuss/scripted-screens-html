@@ -144,6 +144,11 @@ Two things that are not a browser:
 
 ## Fonts
 
+Your own `.ttf`/`.otf` files go in `fonts` in the game's save folder
+(`Documents/My Games/Stationeers/fonts` unless LaunchPad or the game moved it), not in a mod
+folder: a workshop update replaces mod folders. The Fonts mod loads them for labels and this mod
+for pages; a file there wins over a bundled one of the same name.
+
 `font-family` names a typeface the Fonts mod has: the files in its `Assets/fonts` folder by
 family and style (`Barlow`, `Barlow SemiBold`, `Barlow Condensed`), then the game's own
 TextMeshPro faces, then the generic families mapped to what is installed (`monospace` is the
