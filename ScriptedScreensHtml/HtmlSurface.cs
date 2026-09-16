@@ -42,6 +42,9 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>The data element's id: the vector mod needs a host of its own for a data payload.</summary>
     internal string DataElementId = string.Empty;
     private bool _dirty;
+    private int _dScript, _dAnim, _dTween, _dDom, _dOther;   // dirty causes since the last diagnostics line
+    private int _seenLayoutWrites;
+    private int _settleFrames;
     private string _lastScene = string.Empty;
     /// <summary>Page design width (meta viewport); 0 = the element's own width.</summary>
     private float _designWidth;
@@ -98,7 +101,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (_script != null && _panel == null)
         {
             if (_scriptPending) { _scriptPending = false; _script.Run(_built?.Script ?? string.Empty); }
-            if (_script.Frame(Time.time, _byId)) { _dirty = true; Wake(); }
+            if (_script.Frame(Time.time, _byId)) { _dirty = true; _dScript++; Wake(); }
             else if (_script.HasPendingWork) _awakeFrames = Mathf.Max(_awakeFrames, 2);
         }
         if (_panel == null)
@@ -130,8 +133,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                 _script.Run(_built?.Script ?? string.Empty);
             }
             // Hand the worker this frame's time and sizes; apply whatever it finished.
-            if (_script.Frame(Time.time, _byId))
-                _dirty = true;
+            if (_script.Frame(Time.time, _byId)) { _dirty = true; _dScript++; }
             if (_script.HasPendingWork)
                 _awakeFrames = Mathf.Max(_awakeFrames, 2);
         }
@@ -140,10 +142,12 @@ internal sealed class HtmlSurface : MonoBehaviour
         // While any is running the panel must stay awake to repaint. Time.time, so it
         // pauses with the game like the vector layer.
         var animating = false;
+        // a runner whose element a script removed (an innerHTML page rebuilds its lamps every tick) would keep writing
+        _animations.RemoveAll(a => a.Element.panel == null);
         foreach (var a in _animations)
         {
             a.Update(Time.time);
-            if (a.Wrote) { a.Wrote = false; _dirty = true; }
+            if (a.Wrote) { a.Wrote = false; _dirty = true; _dAnim++; }
             if (a.Finished && !a.Restored)
             {
                 // animation-fill-mode: without forwards (the CSS default), the element
@@ -158,8 +162,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             animating |= !a.Finished;
         }
         // The last tween ending re-emits the scene once with plain numbers: static again.
-        if (_tweens.Expire(Time.time))
-            _dirty = true;
+        if (_tweens.Expire(Time.time)) { _dirty = true; _dTween++; }
         foreach (var svg in _svgs)
         {
             if (svg.Blending)
@@ -173,8 +176,25 @@ internal sealed class HtmlSurface : MonoBehaviour
 
         if (_dirty)
         {
-            _dirty = false;
-            EmitToVector();
+            // The layout passes (grid, line boxes, baselines, mixed calc) write styles from geometry
+            // events at the end of a frame and settle over a few frames. Emitting each of those frames
+            // drew every intermediate layout (twenty emits for one innerHTML); a browser paints a
+            // settled layout once. Hold while a frame's passes wrote, bounded so a pass that never
+            // settles still shows.
+            var writes = PostLayout.LayoutWrites;
+            if (writes != _seenLayoutWrites && _settleFrames < 8)
+            {
+                _seenLayoutWrites = writes;
+                _settleFrames++;
+                _awakeFrames = Mathf.Max(_awakeFrames, 2);
+            }
+            else
+            {
+                _seenLayoutWrites = writes;
+                _settleFrames = 0;
+                _dirty = false;
+                EmitToVector();
+            }
         }
 
         if (_awakeFrames > 0 && --_awakeFrames == 0 && _document != null)
@@ -422,7 +442,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                     {
                         HtmlRenderer.AppendFragment(p, pn, html, built);
                         AttachLayouts(built);
-                        _dirty = true;
+                        _dirty = true; _dDom++;
                         Wake();
                     }
                     else ScriptedScreensHtmlPlugin.Log?.LogWarning($"js: appendChild: no element \"{parentId}\"");
@@ -432,7 +452,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                     if (_byId.TryGetValue(id, out var r))
                     {
                         HtmlRenderer.Remove(r, built);
-                        _dirty = true;
+                        _dirty = true; _dDom++;
                         Wake();
                     }
                 },
@@ -445,12 +465,12 @@ internal sealed class HtmlSurface : MonoBehaviour
                     {
                         HtmlRenderer.InsertFragment(p, pn, html, beforeId, built);
                         AttachLayouts(built);
-                        _dirty = true;
+                        _dirty = true; _dDom++;
                         Wake();
                     }
                 });
         }
-        _script?.Attach(built, () => { _dirty = true; Wake(); }, LayoutSize(), StartAnimation, CancelAnimation);
+        _script?.Attach(built, () => { _dirty = true; _dOther++; Wake(); }, LayoutSize(), StartAnimation, CancelAnimation);
         // <link rel=stylesheet href> and <script src>: fetched the way ScriptedScreens fetches
         // an image, then the sheet is inlined and the page rebuilt, or the script run after
         // the inline ones. ponytail: http(s) only, no caching, 15 s timeout.
@@ -712,7 +732,8 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
                 $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
                 + $"(layout {page._lastLayoutMs:0.0} + translate {page._lastTranslateMs:0.0}), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
-                + $"{page._tweens.Count} tweens, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals");
+                + $"{page._tweens.Count} tweens, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}");
+            page._dScript = page._dAnim = page._dTween = page._dDom = page._dOther = 0;
         }
     }
 

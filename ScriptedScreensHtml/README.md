@@ -201,7 +201,9 @@ hundreds of elements per tick is a lot of layout. The diagnostics line tells you
 
 - `Diagnostics.Enabled`: one line per page per second in the BepInEx log: emits per second,
   layout and translate milliseconds, node count, scene size, live tweens, script
-  milliseconds per frame.
+  milliseconds per frame. A page emits once its layout has settled (a frame in which the
+  grid, line-box and baseline passes wrote nothing), so one innerHTML is one emit; a page
+  that re-renders every tick emits at its tick rate, not per frame.
 - `Diagnostics.DumpScenes`: the exact scene text the vector mod receives, in
   `scenes/<page id>.txt` beside the mod's DLL.
 

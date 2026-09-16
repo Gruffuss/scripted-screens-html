@@ -22,7 +22,25 @@ internal static class HtmlConfig
     /// scene emitted, script started). Off by default: warnings and errors always log, and
     /// the rest is noise in an ordinary session. The instrumentation stays compiled in.
     /// </summary>
-    internal static bool Diagnostics => _diagnostics?.Value ?? false;
+    internal static bool Diagnostics => Fresh() && (_diagnostics?.Value ?? false);
+
+    private static DateTime _seenWrite;
+    private static float _nextPoll;
+    /// <summary>The file is re-read when it changes on disk (checked every 5 s), so a flag flipped in a text editor takes effect without a restart.</summary>
+    private static bool Fresh()
+    {
+        if (_file == null) return true;
+        var now = UnityEngine.Time.realtimeSinceStartup;
+        if (now < _nextPoll) return true;
+        _nextPoll = now + 5f;
+        try
+        {
+            var w = System.IO.File.GetLastWriteTimeUtc(_file.ConfigFilePath);
+            if (w != _seenWrite) { _seenWrite = w; _file.Reload(); }
+        }
+        catch (Exception) { }
+        return true;
+    }
 
     /// <summary>
     /// Write the last emitted scene text of every page to <c>scenes/&lt;page&gt;.txt</c> beside

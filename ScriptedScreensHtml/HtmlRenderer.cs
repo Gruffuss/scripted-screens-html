@@ -64,6 +64,8 @@ internal static class HtmlRenderer
         internal readonly HashSet<VisualElement> AnimationAttached = new();
         /// <summary>Flex containers with a gap, re-applied when their children or cascade change.</summary>
         internal readonly HashSet<VisualElement> GapContainers = new();
+        /// <summary>Labels whose tabular-figure width pass is attached.</summary>
+        internal readonly HashSet<VisualElement> TabularAttached = new();
         public readonly Dictionary<VisualElement, HtmlNode> NodeOf = new();
         public HtmlNode Document = new();
         /// <summary>display: grid containers, laid out by GridLayout once attached.</summary>
@@ -653,7 +655,7 @@ internal static class HtmlRenderer
                 if (right == 1) result.CssOf(ve)["text-align"] = "center"; else if (right == 2) result.CssOf(ve)["text-align"] = "right";
             }
         }
-        else if (Inline.Contains(node.Tag!) && IsInlineOnly(node) && IsTextLikeIgnoringSelf(node) && !itemsDisplay)
+        else if (Inline.Contains(node.Tag!) && IsInlineOnly(node, rules) && IsTextLikeIgnoringSelf(node) && !itemsDisplay)
         {
             // An inline element reached here on its own (it carries an id or class) whose
             // content is plain text: a Label of its children's rich text; its own styles
@@ -736,7 +738,7 @@ internal static class HtmlRenderer
             {
                 if (list && child.Tag == "li")
                     AddMarker(child, node, result.CssOf(ve), ++ordinal, rules);
-                var inline = child.IsText ? child.Text.Trim().Length > 0 : (Inline.Contains(child.Tag!) && !Blockified(child) && IsInlineOnly(child)) || (child.Attr("data-pseudo") is { } dp && dp != "details-content") || child.Attr("data-marker") != null;
+                var inline = child.IsText ? child.Text.Trim().Length > 0 : (Inline.Contains(child.Tag!) && !Blockified(child, rules) && IsInlineOnly(child, rules)) || (child.Attr("data-pseudo") is { } dp && dp != "details-content") || child.Attr("data-marker") != null;
                 // the children of a flex or grid container are items, never gathered into a line box (CSS blockifies them)
                 if (inline && !itemsContainer && node.Tag is not ("table" or "tr" or "ul" or "ol" or "select" or "svg"))
                 {
@@ -745,7 +747,18 @@ internal static class HtmlRenderer
                     lineRun.Children.Add(child);
                     continue;
                 }
-                if (child.IsText) continue;
+                if (child.IsText)
+                {
+                    // a text node directly in a flex or grid container is an anonymous item of its own
+                    if (itemsContainer && child.Text.Trim().Length > 0)
+                    {
+                        var item = new HtmlNode { Tag = "span", Parent = node };
+                        item.Attributes["data-run"] = "1";
+                        item.Children.Add(child);
+                        Append(ve, item, rules, result);
+                    }
+                    continue;
+                }
                 CloseRun();
                 Append(ve, child, rules, result);
             }
@@ -940,7 +953,10 @@ internal static class HtmlRenderer
             matched.Sort((a, b) => a.spec != b.spec ? a.spec.CompareTo(b.spec) : a.order.CompareTo(b.order));
             foreach (var m in matched)
                 foreach (var d in m.rule.Declarations)
-                    own[d.Name] = HasFn(d.Value) ? ResolveVars(d.Value, c) : d.Value;
+                {
+                    var v = HasFn(d.Value) ? TryResolveVars(d.Value, c) : d.Value;
+                    if (v != null) own[d.Name] = v;
+                }
             if (c.Attr("style") is { } inlineStyle)
                 foreach (var d in CssParser.ParseDeclarations(inlineStyle))
                     own[d.Name] = d.Value;
@@ -1757,8 +1773,8 @@ internal static class HtmlRenderer
                 ve.RegisterCallback<GeometryChangedEvent>(_ =>
                 {
                     var w = ve.layout.width; var h = ve.layout.height;
-                    if (!hasH && w > 0f && Mathf.Abs(h - w / ratio) > 0.5f) ve.style.height = w / ratio;
-                    else if (hasH && h > 0f && Mathf.Abs(w - h * ratio) > 0.5f) ve.style.width = h * ratio;
+                    if (!hasH && w > 0f && Mathf.Abs(h - w / ratio) > 0.5f) { ve.style.height = w / ratio; PostLayout.LayoutWrites++; }
+                    else if (hasH && h > 0f && Mathf.Abs(w - h * ratio) > 0.5f) { ve.style.width = h * ratio; PostLayout.LayoutWrites++; }
                 });
             }
         }
@@ -1972,21 +1988,36 @@ internal static class HtmlRenderer
         return anyId;
     }
 
-    internal static bool IsInlineOnly(HtmlNode node)
+    internal static bool IsInlineOnly(HtmlNode node) => IsInlineOnly(node, null);
+
+    /// <summary>Only text and inline tags below, none of which the cascade (when given) or inline style makes a box.</summary>
+    internal static bool IsInlineOnly(HtmlNode node, List<CssRule>? rules)
     {
         foreach (var c in node.Children)
         {
             if (c.IsText)
                 continue;
-            if (!Inline.Contains(c.Tag!) || Blockified(c) || !IsInlineOnly(c))
+            if (!Inline.Contains(c.Tag!) || Blockified(c, rules) || !IsInlineOnly(c, rules))
                 return false;
         }
         return true;
     }
 
     /// <summary>An inline tag whose inline style makes it a box: position absolute/fixed, float, or a block-level display.</summary>
-    internal static bool Blockified(HtmlNode c)
+    internal static bool Blockified(HtmlNode c) => Blockified(c, null);
+
+    /// <summary>An inline tag whose cascaded display, position or float makes it a box (stylesheet rules count, as in a browser).</summary>
+    internal static bool Blockified(HtmlNode c, List<CssRule>? rules)
     {
+        if (rules != null)
+        {
+            var disp = CascadedValue(c, rules, "display")?.Trim().ToLowerInvariant();
+            if (disp != null && (disp.StartsWith("block") || disp.StartsWith("flex") || disp.StartsWith("grid") || disp.StartsWith("table") || disp.StartsWith("inline-block") || disp.StartsWith("inline-flex") || disp.StartsWith("inline-grid"))) return true;
+            var pos = CascadedValue(c, rules, "position")?.Trim().ToLowerInvariant();
+            if (pos is "absolute" or "fixed") return true;
+            var fl = CascadedValue(c, rules, "float")?.Trim().ToLowerInvariant();
+            if (fl != null && fl != "none") return true;
+        }
         if (c.Attr("style") is not { } st) return false;
         var s = st.ToLowerInvariant();
         if (s.IndexOf("position:", StringComparison.Ordinal) >= 0 && (s.Contains("absolute") || s.Contains("fixed"))) return true;
@@ -1995,7 +2026,7 @@ internal static class HtmlRenderer
         if (d >= 0)
         {
             var v = s.Substring(d + 8).TrimStart();
-            if (v.StartsWith("block") || v.StartsWith("flex") || v.StartsWith("grid") || v.StartsWith("table")) return true;
+            if (v.StartsWith("block") || v.StartsWith("flex") || v.StartsWith("grid") || v.StartsWith("table") || v.StartsWith("inline-block") || v.StartsWith("inline-flex") || v.StartsWith("inline-grid")) return true;
         }
         return false;
     }
@@ -2084,14 +2115,29 @@ internal static class HtmlRenderer
                 (node.Vars ??= new Dictionary<string, string>(StringComparer.Ordinal))[raw.Name] = raw.Value.Trim();
                 return;
             }
-            var d = HasFn(raw.Value)
-                ? new CssDeclaration(raw.Name, ResolveVars(raw.Value, node), raw.Important)
-                : raw;
+            var resolved = HasFn(raw.Value) ? TryResolveVars(raw.Value, node) : raw.Value;
+            if (resolved == null) return; // an undefined var() with no fallback: the declaration is dropped
+            var d = HasFn(raw.Value) ? new CssDeclaration(raw.Name, resolved, raw.Important) : raw;
             switch (d.Name)
             {
                 case "color": colour = d.Value; break;
                 case "font-size": size = d.Value; break;
-                case "font-family": face = d.Value.Split(',')[0].Trim().Trim('"', '\''); break;
+                case "font-family":
+                {
+                    // the first real family, else what the first generic stands for; a generic never reaches TextMeshPro as a name
+                    face = null;
+                    string? generic = null;
+                    foreach (var fam in d.Value.Split(','))
+                    {
+                        var name = fam.Trim().Trim('"', '\'');
+                        if (name.Length == 0) continue;
+                        if (StyleApplier.MapGeneric(name) is { } g) { generic ??= g; continue; }
+                        face = name;
+                        break;
+                    }
+                    face ??= generic;
+                    break;
+                }
                 case "vertical-align":
                 case "alignment-baseline":
                 case "baseline-shift":
@@ -2293,8 +2339,19 @@ internal static class HtmlRenderer
         return value;
     }
 
-    internal static string ResolveVars(string value, HtmlNode node)
+    internal static string ResolveVars(string value, HtmlNode node) => ResolveVarsCore(value, node, out _);
+
+    /// <summary>null when a var() names no custom property in scope and has no fallback: the declaration
+    /// is invalid at computed-value time and is dropped, as a browser drops it.</summary>
+    internal static string? TryResolveVars(string value, HtmlNode node)
     {
+        var r = ResolveVarsCore(value, node, out var unresolved);
+        return unresolved ? null : r;
+    }
+
+    private static string ResolveVarsCore(string value, HtmlNode node, out bool unresolved)
+    {
+        unresolved = false;
         value = ResolveEnvAndScheme(value);
         var sb = new StringBuilder();
         var i = 0;
@@ -2318,7 +2375,8 @@ internal static class HtmlRenderer
             string? found = null;
             for (var n = node; n != null && found == null; n = n.Parent)
                 if (n.Vars != null && n.Vars.TryGetValue(name, out var v)) found = v;
-            found ??= fallback != null ? ResolveVars(fallback, node) : CssParser.PropertyInitials.TryGetValue(name, out var initial) ? initial : string.Empty;
+            if (found == null && fallback != null) { found = ResolveVarsCore(fallback, node, out var fbBad); if (fbBad) unresolved = true; }
+            if (found == null) { unresolved = true; found = CssParser.PropertyInitials.TryGetValue(name, out var initial) ? initial : string.Empty; }
             sb.Append(found);
             i = j + 1;
         }
@@ -2429,9 +2487,9 @@ internal static class HtmlRenderer
             // included) sees the substituted value.
             if (raw.Name.StartsWith("--", StringComparison.Ordinal))
                 continue;
-            var d = HasFn(raw.Value)
-                ? new CssDeclaration(raw.Name, ResolveVars(raw.Value, node), raw.Important)
-                : raw;
+            var resolved = HasFn(raw.Value) ? TryResolveVars(raw.Value, node) : raw.Value;
+            if (resolved == null) continue; // an undefined var() with no fallback: the declaration is dropped
+            var d = HasFn(raw.Value) ? new CssDeclaration(raw.Name, resolved, raw.Important) : raw;
             // Keywords: inherit takes the parent's cascaded value (the layout inherits text
             // properties by itself, but not backgrounds or borders); initial/unset/revert
             // drop the declaration. currentColor is the element's own colour, else inherited.

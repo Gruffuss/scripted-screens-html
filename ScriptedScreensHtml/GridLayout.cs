@@ -303,6 +303,7 @@ internal sealed class GridLayout
             if (_placed.TryGetValue(it.Ve, out var prev) && Same(prev, rect))
                 continue;
             _placed[it.Ve] = rect;
+            PostLayout.LayoutWrites++;
             var s = it.Ve.style;
             s.position = Position.Absolute;
             s.left = rect.x;
@@ -319,6 +320,7 @@ internal sealed class GridLayout
             {
                 _minHeight = min;
                 _ve.style.minHeight = min;
+                PostLayout.LayoutWrites++;
             }
         }
         if (!definiteWidth)
@@ -328,6 +330,7 @@ internal sealed class GridLayout
             {
                 _minWidth = min;
                 _ve.style.minWidth = min;
+                PostLayout.LayoutWrites++;
             }
         }
         _ = anyFr;

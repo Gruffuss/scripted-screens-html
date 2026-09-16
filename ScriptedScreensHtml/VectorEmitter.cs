@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using TMPro;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -845,7 +846,7 @@ internal static class VectorEmitter
     /// the shape. The box is split instead: one rect per segment, each clipped to its band
     /// of the gradient line, each a solid colour or its own ramp. Exact, and static.
     /// </summary>
-    /// <summary>CSS box-shadow list to the vector `sh` list: [[dx,dy,blur,spread,#colour],...]. Inset shadows are skipped.</summary>
+    /// <summary>CSS box-shadow list to the vector `sh` list: [[dx,dy,blur,spread,#colour[,inset]],...]; the vector mod draws inset ones inside the shape (ask 2).</summary>
     private static string Shadows(string css, int max = int.MaxValue)
     {
         var sb = new StringBuilder();
@@ -875,6 +876,95 @@ internal static class VectorEmitter
             count++;
         }
         return sb.Length > 0 ? " sh=[" + sb + "]" : string.Empty;
+    }
+
+    /// <summary>The game's own face: it carries the subscripts, symbols and dingbats a console UI uses.</summary>
+    private const string FallbackFace = "font_english";
+    private static readonly Dictionary<string, (TMP_FontAsset? asset, float at)> FaceAssets = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The TextMeshPro asset a scene `font=` name resolves to (the Fonts mod registers file fonts under their family and style), cached; a miss is retried after 5 s.</summary>
+    private static TMP_FontAsset? AssetOf(string face)
+    {
+        if (FaceAssets.TryGetValue(face, out var e) && (e.asset != null || Time.realtimeSinceStartup - e.at < 5f)) return e.asset;
+        TMP_FontAsset? found = null;
+        foreach (var f in Resources.FindObjectsOfTypeAll<TMP_FontAsset>())
+            if (string.Equals(f.name, face, StringComparison.OrdinalIgnoreCase)) { found = f; break; }
+        if (!FaceAssets.ContainsKey(face) && HtmlConfig.Diagnostics)
+            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: face \"{face}\": {(found != null ? found.characterTable.Count + " characters" : "no TextMeshPro asset of that name")}");
+        FaceAssets[face] = (found, Time.realtimeSinceStartup);
+        return found;
+    }
+
+    private static readonly Dictionary<string, float> DigitEms = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The face's widest digit advance in em (its tabular cell); 0 when the face is unknown.</summary>
+    private static float DigitEm(string? face)
+    {
+        if (face == null) return 0f;
+        if (DigitEms.TryGetValue(face, out var em)) return em;
+        var asset = AssetOf(face);
+        em = 0f;
+        if (asset != null && asset.faceInfo.pointSize > 0)
+        {
+            for (var c = '0'; c <= '9'; c++)
+                if (asset.characterLookupTable.TryGetValue(c, out var ch) && ch.glyph != null)
+                    em = Mathf.Max(em, ch.glyph.metrics.horizontalAdvance / asset.faceInfo.pointSize);
+            if (em > 0f) DigitEms[face] = em;
+        }
+        return em;
+    }
+
+    /// <summary>
+    /// A browser draws a glyph the face lacks from a fallback font; TextMeshPro drops it. Runs of
+    /// such characters (outside tags, following the face of any inner font tag) take the game's own
+    /// face. The text is scene-escaped rich text, so a quote inside a tag is a backslash and a quote.
+    /// </summary>
+    internal static string GlyphFallback(string text, string? face)
+    {
+        var asset = face != null && !string.Equals(face, FallbackFace, StringComparison.OrdinalIgnoreCase) ? AssetOf(face) : null;
+        if (asset == null && text.IndexOf("<font=", StringComparison.Ordinal) < 0) return text;
+        TMP_FontAsset? fb = null; var fbTried = false;
+        StringBuilder? sb = null;
+        var inRun = false;
+        var stack = new List<TMP_FontAsset?>();
+        var cur = asset;
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c == '<')
+            {
+                var close = text.IndexOf('>', i);
+                if (close > i)
+                {
+                    var tag = text.Substring(i, close - i + 1);
+                    if (inRun) { sb!.Append("</font>"); inRun = false; }
+                    if (tag.StartsWith("<font=", StringComparison.Ordinal)) { stack.Add(cur); cur = AssetOf(tag.Substring(6, tag.Length - 7).Trim('"', '\\', ' ')) ?? cur; }
+                    else if (tag == "</font>" && stack.Count > 0) { cur = stack[stack.Count - 1]; stack.RemoveAt(stack.Count - 1); }
+                    sb?.Append(tag);
+                    i = close;
+                    continue;
+                }
+            }
+            var missing = false;
+            if (c >= 0x80 && !char.IsSurrogate(c) && cur != null && !cur.HasCharacter(c))
+            {
+                if (!fbTried) { fb = AssetOf(FallbackFace); fbTried = true; }
+                missing = fb != null && fb.HasCharacter(c, false, true); // a dynamic atlas adds the glyph on request
+            }
+            if (missing)
+            {
+                sb ??= new StringBuilder(text, 0, i, text.Length + 40);
+                if (!inRun) { sb.Append("<font=\\\"").Append(FallbackFace).Append("\\\">"); inRun = true; }
+                sb.Append(c);
+            }
+            else
+            {
+                if (inRun) { sb!.Append("</font>"); inRun = false; }
+                sb?.Append(c);
+            }
+        }
+        if (inRun) sb!.Append("</font>");
+        return sb?.ToString() ?? text;
     }
 
     /// <summary>border-style dashed/dotted (from the shorthand or the property) as a dash pattern in border widths.</summary>
@@ -1165,7 +1255,10 @@ internal static class VectorEmitter
         var clipped = (label.style.overflow.value == Overflow.Hidden && !Scrolls(css))
                       || (label.parent != null && label.parent.style.overflow.value == Overflow.Hidden && !Scrolls(ctx.Built.CssOf(label.parent)));
         var wraps = rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && (text.IndexOf(' ') >= 0 || text.IndexOf('​') >= 0);
-        if (!clipped && !wraps)
+        // text-overflow: ellipsis wants the exact box (the ellipsis sits at its edge); any other clipped
+        // label is clipped by its container's CP, so its own rect can carry the slack too
+        var ellipsis = clipped && css.TryGetValue("text-overflow", out var tov) && tov.Trim() == "ellipsis";
+        if (!ellipsis && !wraps)
         {
             // The layout width is UI Toolkit's measure of the text; TextMeshPro measures the
             // same face a little wider and wraps a shrink-wrapped label ("GA" / "S"). The
@@ -1177,8 +1270,20 @@ internal static class VectorEmitter
         }
         var sb = new StringBuilder();
         sb.Append(indent).Append("T x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h));
+        var textAt = sb.Length;
         sb.Append(" text=\"").Append(text).Append('"');
+        string? labelFace = null;
         sb.Append(" size=").Append(F(rs.fontSize));
+        // glyphs the face lacks (Barlow has no subscript digits, no gear) come from the game's own face, as a browser falls back;
+        // an inner font tag's face counts for its span
+        {
+            var withFallback = GlyphFallback(text, labelFace);
+            if (!ReferenceEquals(withFallback, text))
+            {
+                sb.Remove(textAt, text.Length + 8);
+                sb.Insert(textAt, " text=\"" + withFallback + "\"");
+            }
+        }
         var ttw = ctx.Tw?.Of(label, ctx.Now);
         var textClip = (css.TryGetValue("background-clip", out var tbc) || css.TryGetValue("-webkit-background-clip", out tbc)) && tbc.Trim() == "text";
         var textGrad = textClip && (css.TryGetValue("background", out var tbg) || css.TryGetValue("background-image", out tbg)) && tbg.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase) ? ParseGradient(tbg) : null;
@@ -1231,7 +1336,10 @@ internal static class VectorEmitter
                 }
             }
             if (first.Length > 0)
-                sb.Append(" font=\"").Append(FontLibrary.ResolveFace(first)).Append('"');
+            {
+                labelFace = FontLibrary.ResolveFace(first);
+                sb.Append(" font=\"").Append(labelFace).Append('"');
+            }
         }
         // A face that is already a named weight ("Barlow SemiBold") must not be bolded again:
         // TextMeshPro's synthetic bold widens every glyph on top of it.
@@ -1274,7 +1382,7 @@ internal static class VectorEmitter
                           && ((css.TryGetValue("align-items", out var ai0) && ai0.Trim() == "center") || (css.TryGetValue("flex-direction", out var fd0) && fd0.Trim().StartsWith("column", StringComparison.Ordinal) && css.TryGetValue("justify-content", out var jc0) && jc0.Trim() == "center"));
         var tall = h > lineHpx * (lines + 0.5f) && !wraps && !flexCentred && !(ctx.Built.NodeOf.TryGetValue(label, out var tn) && tn.Tag is "td" or "th" or "button" or "summary" or "option" or "legend" or "label");
         sb.Append(tall ? " valign=top" : " valign=middle");
-        if (clipped)
+        if (ellipsis)
             sb.Append(" fit=ellipsis");
         if (wraps)
             sb.Append(" wrap=1");
@@ -1322,6 +1430,21 @@ internal static class VectorEmitter
             if (mult > 0f && v != "normal") sb.Append(" lh=").Append(F(mult));
         }
         sb.Append(NodeId(ctx, label)).Append('\n');
+        // glyphs the face lacks (Barlow has no subscript digits, no gear) come from the game's own face, as a browser
+        // falls back; an inner font tag's face counts for its span. Tabular digits take the face's widest digit as
+        // their cell, as the font's own tabular figures would. The text attribute is found by search: earlier
+        // passes may have rewritten the rect before it.
+        {
+            var final = GlyphFallback(text, labelFace);
+            var em = DigitEm(labelFace);
+            if (em > 0f && final.IndexOf("<mspace=0.6em>", StringComparison.Ordinal) >= 0) final = final.Replace("<mspace=0.6em>", "<mspace=" + F(em) + "em>");
+            if (!ReferenceEquals(final, text) && final != text)
+            {
+                var key = " text=\"" + text + "\"";
+                var at = sb.ToString().IndexOf(key, StringComparison.Ordinal);
+                if (at >= 0) { sb.Remove(at, key.Length); sb.Insert(at, " text=\"" + final + "\""); }
+            }
+        }
         ctx.Body.Append(sb);
         ctx.Out.Nodes++;
         if (css.TryGetValue("text-emphasis-style", out var emphasis) && emphasis.Trim() != "none")
@@ -3000,7 +3123,10 @@ internal static class VectorEmitter
         matched.Sort((a, b) => a.spec != b.spec ? a.spec.CompareTo(b.spec) : a.order.CompareTo(b.order));
         foreach (var m in matched)
             foreach (var d in m.rule.Declarations)
-                css[d.Name] = d.Value.IndexOf("var(", StringComparison.Ordinal) >= 0 ? HtmlRenderer.ResolveVars(d.Value, node) : d.Value.Trim();
+            {
+                var v = d.Value.IndexOf("var(", StringComparison.Ordinal) >= 0 ? HtmlRenderer.TryResolveVars(d.Value, node) : d.Value.Trim();
+                if (v != null) css[d.Name] = v;
+            }
         return css;
     }
 

@@ -12,6 +12,10 @@ namespace ScriptedScreensHtml;
 /// </summary>
 internal static class PostLayout
 {
+    /// <summary>Style writes by the layout passes (grid placement, mixed calc, line boxes, baselines, aspect ratio):
+    /// the surface holds its emit while a frame's layout is still settling, as a browser paints only a settled layout.</summary>
+    internal static int LayoutWrites;
+
     public static void Attach(HtmlRenderer.Result built)
     {
         foreach (var kv in StyleApplier.MixedCalc)
@@ -35,6 +39,39 @@ internal static class PostLayout
             }
             parent.RegisterCallback<GeometryChangedEvent>(_ => Apply());
             built.AfterRecascade.Add(Apply);
+        }
+        // font-variant-numeric: tabular-nums: the emitter draws digits in cells of the widest digit; the
+        // layout measures them proportionally, so a sibling after the number would overlap it. The label's
+        // min-width is its natural width plus what the cells add.
+        foreach (var kv in built.NodeOf)
+        {
+            if (kv.Key is not Label tl || kv.Value.IsText || built.TabularAttached.Contains(tl)) continue;
+            var own = built.CssOf(tl);
+            if (!own.TryGetValue("font-variant-numeric", out var fvn) || !fvn.Contains("tabular") || own.ContainsKey("width")) continue;
+            built.TabularAttached.Add(tl);
+            var lbl = tl;
+            string? lastText = null;
+            void TabularWidth()
+            {
+                var t = lbl.text ?? string.Empty;
+                if (t.Length == 0 || t == lastText) return;
+                lastText = t;
+                var plain = System.Text.RegularExpressions.Regex.Replace(t, "<[^>]*>", string.Empty);
+                var maxW = 0f; var widths = new float[10];
+                for (var d = 0; d < 10; d++)
+                {
+                    widths[d] = lbl.MeasureTextSize(((char)('0' + d)).ToString(), 0f, VisualElement.MeasureMode.Undefined, 0f, VisualElement.MeasureMode.Undefined).x;
+                    maxW = Mathf.Max(maxW, widths[d]);
+                }
+                var extra = 0f;
+                foreach (var ch in plain) if (ch >= '0' && ch <= '9') extra += maxW - widths[ch - '0'];
+                if (extra <= 0.5f) return;
+                var natural = lbl.MeasureTextSize(t, 0f, VisualElement.MeasureMode.Undefined, 0f, VisualElement.MeasureMode.Undefined).x;
+                var min = natural + extra;
+                if (Differs(lbl.style.minWidth, min)) { lbl.style.minWidth = min; LayoutWrites++; }
+            }
+            tl.RegisterCallback<GeometryChangedEvent>(_ => TabularWidth());
+            built.AfterRecascade.Add(TabularWidth);
         }
         // line-height: a label's box is its line count times the line height, as a browser's line
         // boxes are (the layout engine sizes a label from the font's own line metrics). Skipped for a
@@ -70,7 +107,7 @@ internal static class PostLayout
                 var natural = lbl.MeasureTextSize(lbl.text ?? string.Empty, w, VisualElement.MeasureMode.AtMost, 0f, VisualElement.MeasureMode.Undefined).y;
                 var lines = Mathf.Max(1, Mathf.RoundToInt(natural / oneLine));
                 var target = lines * lh;
-                if (Differs(lbl.style.height, target)) lbl.style.height = target;
+                if (Differs(lbl.style.height, target)) { lbl.style.height = target; LayoutWrites++; }
             }
             built.LayoutAttached.Add(label);
             label.RegisterCallback<GeometryChangedEvent>(_ => FitLines());
@@ -89,16 +126,16 @@ internal static class PostLayout
     {
         switch (prop)
         {
-            case "width": if (Differs(s.width, v)) s.width = v; break;
-            case "height": if (Differs(s.height, v)) s.height = v; break;
-            case "min-width": if (Differs(s.minWidth, v)) s.minWidth = v; break;
-            case "min-height": if (Differs(s.minHeight, v)) s.minHeight = v; break;
-            case "max-width": if (Differs(s.maxWidth, v)) s.maxWidth = v; break;
-            case "max-height": if (Differs(s.maxHeight, v)) s.maxHeight = v; break;
-            case "left": if (Differs(s.left, v)) s.left = v; break;
-            case "top": if (Differs(s.top, v)) s.top = v; break;
-            case "right": if (Differs(s.right, v)) s.right = v; break;
-            case "bottom": if (Differs(s.bottom, v)) s.bottom = v; break;
+            case "width": if (Differs(s.width, v)) { s.width = v; LayoutWrites++; } break;
+            case "height": if (Differs(s.height, v)) { s.height = v; LayoutWrites++; } break;
+            case "min-width": if (Differs(s.minWidth, v)) { s.minWidth = v; LayoutWrites++; } break;
+            case "min-height": if (Differs(s.minHeight, v)) { s.minHeight = v; LayoutWrites++; } break;
+            case "max-width": if (Differs(s.maxWidth, v)) { s.maxWidth = v; LayoutWrites++; } break;
+            case "max-height": if (Differs(s.maxHeight, v)) { s.maxHeight = v; LayoutWrites++; } break;
+            case "left": if (Differs(s.left, v)) { s.left = v; LayoutWrites++; } break;
+            case "top": if (Differs(s.top, v)) { s.top = v; LayoutWrites++; } break;
+            case "right": if (Differs(s.right, v)) { s.right = v; LayoutWrites++; } break;
+            case "bottom": if (Differs(s.bottom, v)) { s.bottom = v; LayoutWrites++; } break;
         }
     }
 
@@ -152,6 +189,7 @@ internal static class PostLayout
             var cur = child.style.marginBottom;
             if (cur.keyword == StyleKeyword.Undefined && cur.value.unit == LengthUnit.Pixel && Mathf.Abs(cur.value.value - margin) < 0.5f) continue;
             child.style.marginBottom = margin;
+            LayoutWrites++;
         }
     }
 

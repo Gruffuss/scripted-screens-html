@@ -1013,6 +1013,30 @@ internal static class StyleApplier
         var v = d.Value.Trim();
         switch (d.Name)
         {
+            case "font":
+            {
+                // [style] [weight] size[/line-height] family-list
+                var parts = SplitTopLevel(v);
+                var familyStart = -1;
+                for (var i = 0; i < parts.Count; i++)
+                {
+                    var p = parts[i];
+                    if (p == "italic" || p == "oblique") { yield return new CssDeclaration("font-style", p, d.Important); continue; }
+                    if (p == "bold" || p == "bolder" || p == "lighter" || (IsNumber(p) && Num(p) >= 100)) { yield return new CssDeclaration("font-weight", p, d.Important); continue; }
+                    if (p == "normal" || p == "small-caps") continue;
+                    if (char.IsDigit(p[0]) || p[0] == '.')
+                    {
+                        var slash = p.IndexOf('/');
+                        yield return new CssDeclaration("font-size", slash > 0 ? p.Substring(0, slash) : p, d.Important);
+                        if (slash > 0 && slash + 1 < p.Length) yield return new CssDeclaration("line-height", p.Substring(slash + 1), d.Important);
+                        familyStart = i + 1;
+                        break;
+                    }
+                }
+                if (familyStart >= 0 && familyStart < parts.Count)
+                    yield return new CssDeclaration("font-family", string.Join(" ", parts.GetRange(familyStart, parts.Count - familyStart)), d.Important);
+                yield break;
+            }
             case "offset":
             {
                 // [offset-position]? [offset-path [offset-distance || offset-rotate]?]? [/ offset-anchor]?
