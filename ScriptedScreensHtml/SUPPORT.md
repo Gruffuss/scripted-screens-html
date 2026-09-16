@@ -93,10 +93,10 @@ vector node.
 | Box model | `width height min-* max-* margin padding border box-sizing` (content-box is the default, as in CSS) |
 | Display | `block inline inline-block flex inline-flex grid none contents -webkit-box`; `visibility` |
 | Flex | `flex-direction flex-wrap flex-flow flex flex-grow flex-shrink flex-basis justify-content align-items align-self align-content gap row-gap column-gap order place-items place-content place-self` |
-| Grid | `align-items`/`justify-items` and the `-self` forms (start, center, end, stretch) inside a cell; `grid-auto-rows: 1fr` rows equal in a grid without a height; `grid-template-columns/rows` (px % fr auto minmax repeat), `grid-template-areas`, `grid-template`, `grid-area` (name or lines), `grid-column/row(-start/-end)` incl. negative lines and `span`, `gap`, `grid-auto-rows/columns/flow`, auto placement, content-sized auto tracks |
+| Grid | `auto` columns sized by their content, `fr` columns sharing the rest; `align-items`/`justify-items` and the `-self` forms (start, center, end, stretch) inside a cell; `grid-auto-rows: 1fr` rows equal in a grid without a height; `grid-template-columns/rows` (px % fr auto minmax repeat), `grid-template-areas`, `grid-template`, `grid-area` (name or lines), `grid-column/row(-start/-end)` incl. negative lines and `span`, `gap`, `grid-auto-rows/columns/flow`, auto placement, content-sized auto tracks |
 | Position | `static relative absolute fixed sticky` (sticky inside a scrolling box), `top right bottom left inset`, `z-index` (across parents) |
 | Overflow | `hidden`, `clip`, `auto`/`scroll` (a real scroll box: wheel and drag; `scroll` events, `scrollTop` and `scrollHeight` read the real offset the vector mod reports (0.11.24), `scrollIntoView`), drawn scrollbars styled by `scrollbar-width`, `scrollbar-color` or `::-webkit-scrollbar*` |
-| Flex | `align-items: baseline` (bottoms aligned and each item lifted by its own descent, from the font size and line height); text in a box taller than its lines starts at the top, as a block does, and is centred only where the box is a flex container that centres its items |
+| Flex | a flex box holding only text places it by `justify-content`/`align-items` (buttons, tabs); `align-items: baseline` (bottoms aligned and each item lifted by its own descent, from the font size and line height); text in a box taller than its lines starts at the top, as a block does, and is centred only where the box is a flex container that centres its items |
 | Float, columns | `float: left/right` with text flowing beside, `clear`, `column-count` or `column-width` (block children, or the words of a text block), `columns`, `column-gap`, `column-rule`, `column-span: all`, `column-fill` (accepted: fills like balance) |
 | Motion path | `offset-path: path()` or `ray(angle size)` (from `offset-position`), the `offset` shorthand, `offset-anchor`, with `offset-distance` (px or %) and `offset-rotate` (`auto`, an angle, `auto` plus an angle); the distance animates through `transition` and `@keyframes` (the path between the two distances sampled 16 times into one expression over the tween's progress, the turn following the tangent) |
 | Other | `aspect-ratio`, `-webkit-line-clamp`/`line-clamp` (ellipsis on the last line) |
@@ -119,7 +119,7 @@ vector node.
 | Area | What works |
 |---|---|
 | Fonts | `font-family` resolves the Fonts mod's font files (family + weight + style, e.g. `Barlow`, `Barlow SemiBold`, `Barlow Condensed`), then registered TextMeshPro faces, then generic families mapped to what is installed (`monospace` to `code`); `font-size` (px em rem % keywords), `font-weight` (numeric weights pick real faces), `font-style`, `font` shorthand, `@font-face` aliases |
-| Layout | `line-height`, `letter-spacing`, `word-spacing`, `text-align` (incl. `justify`), `text-align-last`, `text-indent`, `white-space` (normal, nowrap, pre), `word-break: break-all`, `overflow-wrap`, `text-overflow: ellipsis`, `writing-mode: vertical-rl/lr, sideways-*`, `vertical-align` (sub, super, offsets) |
+| Layout | `line-height` (a label's box is its line count times the line height, as a browser's line boxes), `letter-spacing`, `word-spacing`, `text-align` (incl. `justify`), `text-align-last`, `text-indent`, `white-space` (normal, nowrap, pre), `word-break: break-all`, `overflow-wrap`, `text-overflow: ellipsis`, `writing-mode: vertical-rl/lr, sideways-*`, `vertical-align` (sub, super, offsets) |
 | Decoration | `text-decoration` and `-line/-color/-style/-thickness`, `text-underline-offset` (underline, overline, line-through; solid, double, dotted, dashed, wavy), `text-transform`, `font-variant-numeric: tabular-nums`, `color` |
 | Lists, counters | `list-style`, `list-style-type` (incl. `@counter-style` names), `list-style-image`, `list-style-position`, `counter-reset`, `counter-increment`, `counter-set`, `counter()`, `counters()` |
 
@@ -128,7 +128,7 @@ vector node.
 | Area | What works |
 |---|---|
 | Transitions | `transition` on size, position, opacity, transform, colours and `offset-distance`, a script's `style` writes reach the emitter for every property (gradients, masks, clips...), `transition-behavior: allow-discrete` (a `display: none` waits for the transition), `@starting-style` (`transition-property/duration/delay/timing-function`, `steps()`, `cubic-bezier()`); compiled to expressions, no per-frame work |
-| Keyframes | `@keyframes` with `animation-name/duration/delay/iteration-count/direction/fill-mode/play-state/timing-function`, `Element.animate()` |
+| Keyframes | `@keyframes` with `animation-name/duration/delay/iteration-count/direction/fill-mode/play-state/timing-function`, `Element.animate()`, `style.animation` written by a script |
 | Scroll-driven | `animation-timeline: scroll()` and `view()` over opacity and 2D transforms, evaluated from the scroll offset |
 | Pointer | `:hover` (follows the cursor, or the crosshair), `:active` (while pressed), `:focus`/`:focus-within` (after a click), `pointer-events: none`, `cursor` accepted |
 
