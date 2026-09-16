@@ -7,7 +7,10 @@
         <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
         <Version>0.2.0.0</Version>
         <!-- symbols name no folder of the machine that built the mod -->
-        <PathMap>$(MSBuildProjectDirectory)=ScriptedScreensHtml</PathMap>
+        <PathMap>$(MSBuildProjectDirectory)=/src/ScriptedScreensHtml,$(NuGetPackageRoot)=/nuget/</PathMap>
+        <!-- no Source Link: it maps the build folder to the (private) repository in the embedded symbols -->
+        <EnableSourceLink>false</EnableSourceLink>
+        <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     </PropertyGroup>
     <!-- Shared with the fonts mod so build paths and the Documents-directory override
