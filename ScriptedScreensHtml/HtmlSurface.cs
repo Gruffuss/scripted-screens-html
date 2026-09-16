@@ -46,6 +46,12 @@ internal sealed class HtmlSurface : MonoBehaviour
     private int _seenLayoutWrites;
     private int _settleFrames;
     private string _lastScene = string.Empty;
+    /// <summary>The structure the vector mod has (the scene with its values as $slots), and the values it was last sent.</summary>
+    private string? _lastTemplate;
+    private readonly Dictionary<string, SceneSlots.Value> _sentValues = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, SceneSlots.Value> _slotScratch = new(StringComparer.Ordinal);
+    private int _structureSends, _patchSends, _patchSlots, _morphs;
+    private float _lastWhyAt;
     /// <summary>Page design width (meta viewport); 0 = the element's own width.</summary>
     private float _designWidth;
 
@@ -94,15 +100,39 @@ internal sealed class HtmlSurface : MonoBehaviour
     // the first structure is emitted synchronously at build (below), so a capture that
     // rebuilds the surface sees the scene inside the same call.
 
+    // frames slower than 25 ms since the last diagnostics line, and the slowest (one count for all pages)
+    private static int _frameSeen = -1, _slowFrames;
+    private static float _worstFrame;
+
+    private long _updateTicks;
+    private int _awakeCount;
+
     private void Update()
     {
+        var u0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        try { UpdateInner(); }
+        finally
+        {
+            _updateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - u0;
+            if (_document != null && _document.gameObject.activeSelf) _awakeCount++;
+        }
+    }
+
+    private void UpdateInner()
+    {
+        if (Time.frameCount != _frameSeen)
+        {
+            _frameSeen = Time.frameCount;
+            var dt = Time.unscaledDeltaTime * 1000f;
+            if (dt > 25f) _slowFrames++;
+            if (dt > _worstFrame) _worstFrame = dt;
+        }
         // The script runs whether or not the panel is awake: a timer on a static page must fire.
         // Its writes wake the panel so the change is laid out and emitted.
         if (_script != null && _panel == null)
         {
             if (_scriptPending) { _scriptPending = false; _script.Run(_built?.Script ?? string.Empty); }
             if (_script.Frame(Time.time, _byId)) { _dirty = true; _dScript++; Wake(); }
-            else if (_script.HasPendingWork) _awakeFrames = Mathf.Max(_awakeFrames, 2);
         }
         if (_panel == null)
             return;
@@ -133,9 +163,9 @@ internal sealed class HtmlSurface : MonoBehaviour
                 _script.Run(_built?.Script ?? string.Empty);
             }
             // Hand the worker this frame's time and sizes; apply whatever it finished.
-            if (_script.Frame(Time.time, _byId)) { _dirty = true; _dScript++; }
-            if (_script.HasPendingWork)
-                _awakeFrames = Mathf.Max(_awakeFrames, 2);
+            // A pending timer does not keep the panel awake: an awake panel is re-rendered off-screen
+            // every frame (a texture nothing shows in vector mode). Writes wake it when they land.
+            if (_script.Frame(Time.time, _byId)) { _dirty = true; _dScript++; Wake(); }
         }
 
         // Keyframe animations step at keyframe boundaries; UI Toolkit interpolates between.
@@ -471,6 +501,24 @@ internal sealed class HtmlSurface : MonoBehaviour
                 });
         }
         _script?.Attach(built, () => { _dirty = true; _dOther++; Wake(); }, LayoutSize(), StartAnimation, CancelAnimation);
+        if (_script != null)
+            _script.TryMorph = (id, html) =>
+            {
+                if (!_byId.TryGetValue(id, out var target) || !built.NodeOf.TryGetValue(target, out var targetNode))
+                    return false;
+                // a restyled element starts without a transition (a browser's innerHTML makes a new one),
+                // except a running animation, which keeps its state (and the scene its structure)
+                if (!HtmlRenderer.Morph(target, targetNode, html, built, ve =>
+                    {
+                        var rec = built.CssOf(ve);
+                        if (!rec.ContainsKey("animation") && !rec.ContainsKey("animation-name")) _tweens.Forget(ve);
+                    }))
+                    return false;
+                AttachLayouts(built);
+                _dirty = true; _dDom++; _morphs++;
+                Wake();
+                return true;
+            };
         // <link rel=stylesheet href> and <script src>: fetched the way ScriptedScreens fetches
         // an image, then the sheet is inlined and the page rebuilt, or the script run after
         // the inline ones. ponytail: http(s) only, no caching, 15 s timeout.
@@ -723,6 +771,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (now < _nextReport)
             return;
         _nextReport = now + ReportIntervalSeconds;
+        ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: frames over 25 ms: {_slowFrames}, slowest {_worstFrame:0} ms, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}");
+        _slowFrames = 0; _worstFrame = 0f;
         foreach (var page in Surfaces)
         {
             if (page == null || page._built == null)
@@ -732,8 +782,10 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
                 $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
                 + $"(layout {page._lastLayoutMs:0.0} + translate {page._lastTranslateMs:0.0}), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
-                + $"{page._tweens.Count} tweens, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}");
+                + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}");
             page._dScript = page._dAnim = page._dTween = page._dDom = page._dOther = 0;
+            page._structureSends = page._patchSends = page._patchSlots = page._morphs = 0;
+            page._updateTicks = 0; page._awakeCount = 0;
         }
     }
 
@@ -751,6 +803,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         var layout = LayoutSize();
         _tweens.Diff(_content, _built, Time.time);
         var t1 = Clock.Elapsed.TotalMilliseconds;
+        if (_lastTemplate == null) _tweens.Epoch = Time.time;
         var output = VectorEmitter.Emit(_built, _content, layout.x, layout.y, _tweens, Time.time, ScrollSet);
         _lastLayoutMs = t1 - t0;
         _lastTranslateMs = Clock.Elapsed.TotalMilliseconds - t1;
@@ -762,13 +815,72 @@ internal sealed class HtmlSurface : MonoBehaviour
         // An identical scene is normally not resent. While tweens are live it must be: the
         // vector clock restarts on every apply and the expressions are written against it.
         ApplyExternals(output.Externals);
-        if (output.Scene == _lastScene && !_tweens.Any)
+        if (State is not SS.BoardState state)
             return;
-        _lastScene = output.Scene;
-
-        if (State is SS.BoardState state)
+        // Translate once, then send only what changed (REDESIGN.md step 1): the scene's values are
+        // data slots. The same structure as the one the vector mod has is a value patch: no
+        // re-parse, no scene restart, only the slots that changed.
+        var template = SceneSlots.Split(output.Scene, _slotScratch);
+        if (template == _lastTemplate)
         {
-            VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId, output.Scene);
+            _lastScene = output.Scene;
+            List<SS.UiProp>? patch = null;
+            foreach (var kv in _slotScratch)
+            {
+                if (_sentValues.TryGetValue(kv.Key, out var was) && was.Equals(kv.Value)) continue;
+                (patch ??= new List<SS.UiProp>()).Add(new SS.UiProp { Key = kv.Key, Value = kv.Value.IsNumber ? SS.UiValue.FromNumber(kv.Value.Number) : SS.UiValue.FromString(kv.Value.Text ?? string.Empty) });
+                _sentValues[kv.Key] = kv.Value;
+            }
+            if (patch != null)
+            {
+                VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
+                    new SS.UiValue { Type = SS.UiValueType.Map, Map = patch.ToArray() }, null, snap: true);
+                _patchSends++;
+                _patchSlots += patch.Count;
+            }
+            return;
+        }
+        if (HtmlConfig.Diagnostics && _lastTemplate != null && Time.realtimeSinceStartup - _lastWhyAt > 2f)
+        {
+            // why this is a structure and not a patch: the first line that differs
+            _lastWhyAt = Time.realtimeSinceStartup;
+            var was = _lastTemplate.Split('\n');
+            var now = template.Split('\n');
+            var k = 0;
+            while (k < was.Length && k < now.Length && was[k] == now[k]) k++;
+            // the spot in the line where they part, with some context
+            var la = k < was.Length ? was[k] : string.Empty;
+            var lb = k < now.Length ? now[k] : string.Empty;
+            var c = 0;
+            while (c < la.Length && c < lb.Length && la[c] == lb[c]) c++;
+            var from = Math.Max(0, c - 40);
+            string Cut(string[] lines) => k < lines.Length ? lines[k].Substring(Math.Min(from, lines[k].Length), Math.Min(120, Math.Max(0, lines[k].Length - from))).Trim() : "(end)";
+            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{ElementId}\": new structure ({was.Length} -> {now.Length} lines), first difference at line {k}: \"{Cut(was)}\" -> \"{Cut(now)}\"; last in-place miss: {HtmlRenderer.LastMorphMiss ?? "none"}");
+        }
+        // A new structure restarts the vector clock: running tweens are written against that moment.
+        if (_tweens.Any && _lastTemplate != null)
+        {
+            _tweens.Epoch = Time.time;
+            output = VectorEmitter.Emit(_built, _content, layout.x, layout.y, _tweens, Time.time, ScrollSet);
+            template = SceneSlots.Split(output.Scene, _slotScratch);
+        }
+        _tweens.Epoch = Time.time;
+        _lastScene = output.Scene;
+        _lastTemplate = template;
+        _structureSends++;
+        {
+            // the values first, so the structure never shows an unbound slot
+            _sentValues.Clear();
+            var slotProps = new SS.UiProp[_slotScratch.Count];
+            var k = 0;
+            foreach (var kv in _slotScratch)
+            {
+                slotProps[k++] = new SS.UiProp { Key = kv.Key, Value = kv.Value.IsNumber ? SS.UiValue.FromNumber(kv.Value.Number) : SS.UiValue.FromString(kv.Value.Text ?? string.Empty) };
+                _sentValues[kv.Key] = kv.Value;
+            }
+            VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
+                new SS.UiValue { Type = SS.UiValueType.Map, Map = slotProps }, null, snap: true);
+            VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId, template);
             if (HtmlConfig.Diagnostics)
                 ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: emitted {output.Nodes} vector nodes, {output.Scene.Length} chars");
             if (HtmlConfig.DumpScenes)
@@ -1114,6 +1226,15 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>Element.animate(): a keyframe runner made by the script; the handle cancels it.</summary>
     private int StartAnimation(VisualElement ve, CssKeyframes frames, AnimationSpec spec)
     {
+        // a looping opacity/transform animation runs in the scene (REDESIGN step 4), as for CSS ones
+        if (_built != null && float.IsPositiveInfinity(spec.Iterations) && !spec.Paused && VectorEmitter.Compilable(frames))
+        {
+            _built.TimeAnimations[ve] = (spec, Time.time);
+            _scriptTimeAnimations[++_animationSeq] = ve;
+            _dirty = true;
+            Wake();
+            return _animationSeq;
+        }
         var runner = new KeyframeRunner(ve, frames, spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), _built?.CssOf(ve));
         _animations.Add(runner);
         _scriptAnimations[++_animationSeq] = runner;
@@ -1123,6 +1244,14 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     private void CancelAnimation(int handle)
     {
+        if (_scriptTimeAnimations.TryGetValue(handle, out var timed))
+        {
+            _scriptTimeAnimations.Remove(handle);
+            _built?.TimeAnimations.Remove(timed);
+            _dirty = true;
+            Wake();
+            return;
+        }
         if (!_scriptAnimations.TryGetValue(handle, out var runner)) return;
         _scriptAnimations.Remove(handle);
         _animations.Remove(runner);
@@ -1133,6 +1262,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     }
 
     private readonly Dictionary<int, KeyframeRunner> _scriptAnimations = new();
+    private readonly Dictionary<int, VisualElement> _scriptTimeAnimations = new();
     private int _animationSeq;
 
     /// <summary>A click on a page click region: the script gets a `click` event on the element, with the pointer's page coordinates. A submit button also fires `submit` on its form.</summary>
@@ -1437,6 +1567,13 @@ internal sealed class HtmlSurface : MonoBehaviour
             // animation-timeline: scroll()/view(): the emitter writes the frames as expressions over the scroll offset; no clock runs it
             if (built.CssOf(element).TryGetValue("animation-timeline", out var timeline) && timeline.Trim() != "auto") continue;
             if (!built.Keyframes.TryGetValue(spec.Name, out var frames)) continue;
+            // a looping animation of opacity and transform only: the scene runs it (REDESIGN step 4), no
+            // runner, no redraw at every keyframe
+            if (float.IsPositiveInfinity(spec.Iterations) && !spec.Paused && VectorEmitter.Compilable(frames))
+            {
+                built.TimeAnimations[element] = (spec, Time.time);
+                continue;
+            }
             _animations.Add(new KeyframeRunner(element, frames, spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), built.CssOf(element)));
         }
     }

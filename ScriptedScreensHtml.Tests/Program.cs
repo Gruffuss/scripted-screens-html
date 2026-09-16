@@ -1,3 +1,4 @@
+using System.Linq;
 using System;
 using System.Collections.Generic;
 using ScriptedScreensHtml;
@@ -233,6 +234,36 @@ void TestBuildRows()
     Check(CssParser.ParseSelector("details::details-content", null)!.Matches(dc), "::details-content is a pseudo-element");
     var area = HtmlParser.Parse("<map name=m><area shape=rect coords=\"0,0,10,10\" id=a1><area shape=circle coords=\"5,5,3\" id=a2></map>").Children[0];
     Check(area.Children.Count == 2 && area.Children[1].Tag == "area", "area is a void tag: two siblings under the map");
+    TestSceneSlots();
+}
+
+void TestSceneSlots()
+{
+    // Two emits of the same page with different values: same template, only values differ;
+    // and filling the slots back in gives the scene that was emitted.
+    const string a = "SCENE w=640 h=640\nDEFS {\n  CP id=clip1 { R x=0 y=0 w=10 h=10 }\n}\nR x=20 y=79.5 w=152 h=46 rx=23 f=#FFFFFF sh=[[0,3,8,0,#0000001F]] id=tab1 click=1\nG clip=clip1 o==1+(-0.75)*smoothstep(0,1,clamp((t--0.023)/0.55,0,1)) {\n  T x=-10.6 y=79 w=213.2 h=46 text=\"say \\\"hi\\\"\\nO<sub>2</sub> 21.0\" size=18 f=#000000 font=\"Manrope SemiBold\" align=center lh=1.33\n}\n";
+    const string b = "SCENE w=640 h=640\nDEFS {\n  CP id=clip1 { R x=0 y=0 w=10 h=10 }\n}\nR x=20 y=79.5 w=160 h=46 rx=23 f=#EEF4FF sh=[[0,3,8,0,#0000001F]] id=tab1 click=1\nG clip=clip1 o==1+(-0.25)*smoothstep(0,1,clamp((t-1.5)/0.55,0,1)) {\n  T x=-10.6 y=79 w=213.2 h=46 text=\"22.4 %\" size=18 f=#000000 font=\"Manrope SemiBold\" align=center lh=1.33\n}\n";
+    var va = new Dictionary<string, SceneSlots.Value>();
+    var vb = new Dictionary<string, SceneSlots.Value>();
+    var ta = SceneSlots.Split(a, va);
+    var tb = SceneSlots.Split(b, vb);
+    Check(ta == tb, $"slots: same structure, same template\n{ta}\n{tb}");
+    Check(ta.Contains("CP id=clip1 { R x=0 y=0 w=10 h=10 }") && ta.StartsWith("SCENE w=640 h=640"), "slots: SCENE and DEFS stay literal");
+    Check(ta.Contains("sh=[[0,3,8,0,#0000001F]]") && ta.Contains("id=tab1") && ta.Contains("font=\"Manrope SemiBold\"") && ta.Contains("lh=1.33"), "slots: arrays, ids, fonts and number-only keys stay literal");
+    Check(va["L4_w"].Number == 152f && vb["L4_w"].Number == 160f && va["L4_f"].Text == "#FFFFFF", "slots: numbers and colours are values");
+    Check(va["L6_text"].Text == "say \"hi\"\nO<sub>2</sub> 21.0", $"slots: text is unescaped ({va["L6_text"].Text})");
+    Check(ta.Contains("(t-$L5_o_") && ta.Contains("+($L5_o_") && ta.Contains("*smoothstep($L5_o_") && ta.Contains(",clamp(("), $"slots: numbers in expressions become slots, signs included, names do not\n{ta}");
+    // fill the template back in and compare with the original
+    string Fill(string t, Dictionary<string, SceneSlots.Value> v)
+    {
+        foreach (var kv in v.OrderByDescending(k => k.Key.Length))
+        {
+            var repl = kv.Value.IsNumber ? kv.Value.Number.ToString(System.Globalization.CultureInfo.InvariantCulture) : kv.Value.Text!;
+            t = t.Replace("\"$" + kv.Key + "\"", "\"" + repl.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n") + "\"").Replace("$" + kv.Key, repl);
+        }
+        return t;
+    }
+    Check(Fill(ta, va) == a, $"slots: template plus values is the emitted scene\n{Fill(ta, va)}");
 }
 
 if (args.Length > 0 && args[0] == "--probe2") { Probe2.Run(); return 0; }

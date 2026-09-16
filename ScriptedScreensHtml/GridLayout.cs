@@ -54,12 +54,12 @@ internal sealed class GridLayout
         foreach (var child in ve.Children())
             child.RegisterCallback<GeometryChangedEvent>(_ => grid.Place());
         // a re-cascade writes the items' own position/size again: place them afresh
-        built.AfterRecascade.Add(() => { grid._placed.Clear(); grid.Place(); });
+        built.OnRecascade(ve, () => { grid._placed.Clear(); grid.Place(); });
     }
 
     private void Place()
     {
-        if (_placing) return;
+        if (_placing || _ve.panel == null) return;
         _placing = true;
         try { PlaceInner(); }
         catch (Exception ex) { ScriptedScreensHtmlPlugin.Log?.LogWarning("html: grid: " + ex.Message); }

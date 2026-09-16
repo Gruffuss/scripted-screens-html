@@ -12,6 +12,7 @@
         <!-- The parsers are Unity-free on purpose so they compile here from source. -->
         <Compile Include="..\ScriptedScreensHtml\HtmlParser.cs" />
         <Compile Include="..\ScriptedScreensHtml\CssParser.cs" />
+        <Compile Include="..\ScriptedScreensHtml\SceneSlots.cs" />
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />
         <Compile Include="Probe2.cs" />

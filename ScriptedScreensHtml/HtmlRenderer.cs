@@ -57,11 +57,54 @@ internal static class HtmlRenderer
         /// <summary>Attribute names the stylesheet selects on ([data-mode=dark]): a script write to one re-cascades the element and its subtree.</summary>
         public readonly HashSet<string> AttributeSelectors = new(StringComparer.OrdinalIgnoreCase);
         /// <summary>Run after a re-cascade: the post-layout placements (grid items, mixed calc, baselines) put back what the cascade reset.</summary>
-        internal readonly List<Action> AfterRecascade = new();
+        internal readonly List<(VisualElement owner, Action act)> AfterRecascade = new();
+        internal void OnRecascade(VisualElement owner, Action act) => AfterRecascade.Add((owner, act));
+
+        /// <summary>
+        /// Everything the page keeps per element, dropped when the element is removed. A page that
+        /// rebuilds its content with innerHTML every tick otherwise keeps every element it ever had:
+        /// the node map grew without bound and is walked on every rebuild, and the retained
+        /// subtrees lengthened every garbage collection (the game crawled within a minute).
+        /// </summary>
+        internal void ForgetElement(VisualElement ve)
+        {
+            if (NodeOf.TryGetValue(ve, out var node)) { FontSizes.Remove(node); NodeOf.Remove(ve); }
+            _css.Remove(ve);
+            LayoutAttached.Remove(ve);
+            AnimationAttached.Remove(ve);
+            GapContainers.Remove(ve);
+            TabularAttached.Remove(ve);
+            TimeAnimations.Remove(ve);
+            Externals.Remove(ve);
+            Grids.Remove(ve);
+            StyleApplier.MixedCalc.Remove(ve);
+            StyleApplier.BaselineRows.Remove(ve);
+            Tweens.Override.Remove(ve);
+            Tweens.AllowDiscrete.Remove(ve);
+            Tweens.PendingHide.Remove(ve);
+            _forgotten.Add(ve);
+        }
+
+        private readonly HashSet<VisualElement> _forgotten = new();
+
+        /// <summary>Lists pruned in one pass once enough elements went (removal from a list per element would be quadratic).</summary>
+        internal void PruneForgotten()
+        {
+            if (_forgotten.Count == 0) return;
+            Animations.RemoveAll(a => _forgotten.Contains(a.element));
+            AfterRecascade.RemoveAll(a => _forgotten.Contains(a.owner));
+            _forgotten.Clear();
+        }
+
+        /// <summary>Style records created so far (a page whose count climbs without bound builds without end).</summary>
+        internal int CssCount => _cssMade;
+        private int _cssMade;
         /// <summary>Elements whose grid or post-layout pass is attached, so a fragment appended later attaches only its own.</summary>
         internal readonly HashSet<VisualElement> LayoutAttached = new();
         /// <summary>Elements whose keyframe animation has its runner.</summary>
         internal readonly HashSet<VisualElement> AnimationAttached = new();
+        /// <summary>Infinite opacity/transform animations the scene runs by itself, with the Time.time they started.</summary>
+        internal readonly Dictionary<VisualElement, (AnimationSpec spec, float start)> TimeAnimations = new();
         /// <summary>Flex containers with a gap, re-applied when their children or cascade change.</summary>
         internal readonly HashSet<VisualElement> GapContainers = new();
         /// <summary>Labels whose tabular-figure width pass is attached.</summary>
@@ -76,14 +119,17 @@ internal static class HtmlRenderer
         public readonly Dictionary<HtmlNode, float> FontSizes = new();
 
         /// <summary>The declarations that won the cascade per element, for the vector emitter (gradients, transforms, fonts).</summary>
-        private readonly Dictionary<VisualElement, Dictionary<string, string>> _css = new();
+        // Weak keys: a record never keeps an element alive. A removed element's own callbacks can still
+        // ask for its record after the page forgot it (the growth that made the game crawl).
+        private readonly System.Runtime.CompilerServices.ConditionalWeakTable<VisualElement, Dictionary<string, string>> _css = new();
 
         public Dictionary<string, string> CssOf(VisualElement ve)
         {
             if (!_css.TryGetValue(ve, out var map))
             {
                 map = new Dictionary<string, string>(StringComparer.Ordinal);
-                _css[ve] = map;
+                _css.Add(ve, map);
+                _cssMade++;
             }
             return map;
         }
@@ -121,10 +167,10 @@ internal static class HtmlRenderer
             // and their var() values off custom properties it declares; labels rebuild their rich text
             Recascade(ve);
             // hooks of elements a script has since removed go (an innerHTML page rebuilds its content every tick)
-            AfterRecascade.RemoveAll(a => a.Target is VisualElement gone && gone.panel == null);
+            PruneForgotten();
             GapContainers.RemoveWhere(g => g.panel == null);
             foreach (var g in GapContainers) ApplyGap(g, CssOf(g), this);
-            foreach (var after in AfterRecascade) after();
+            foreach (var after in AfterRecascade.ToArray()) after.act();
         }
 
         private void Recascade(VisualElement ve)
@@ -382,14 +428,14 @@ internal static class HtmlRenderer
     }
 
     /// <summary>The node's markup back as HTML: its children (inner) or itself with them (outer). Generated content, markers and synthetic ids are left out.</summary>
-    internal static string ToHtml(HtmlNode node, bool outer)
+    internal static string ToHtml(HtmlNode node, bool outer, bool keepIds = false)
     {
         var sb = new StringBuilder();
-        if (outer) WriteNode(sb, node); else foreach (var c in node.Children) WriteNode(sb, c);
+        if (outer) WriteNode(sb, node, keepIds); else foreach (var c in node.Children) WriteNode(sb, c, keepIds);
         return sb.ToString();
     }
 
-    private static void WriteNode(StringBuilder sb, HtmlNode node)
+    private static void WriteNode(StringBuilder sb, HtmlNode node, bool keepIds = false)
     {
         if (node.IsText) { sb.Append(EscapeHtml(node.Text)); return; }
         if (node.Attr("data-pseudo") != null || node.Attr("data-marker") != null) return;
@@ -397,13 +443,15 @@ internal static class HtmlRenderer
         foreach (var kv in node.Attributes)
         {
             if (kv.Key == "data-listed" || kv.Key == "data-control") continue;
-            if (kv.Key == "id" && kv.Value.StartsWith("__", StringComparison.Ordinal)) continue;
+            // synthetic ids are hidden from a script reading innerHTML, but kept when the markup
+            // goes to the main thread: they are how an in-place update recognises its elements
+            if (kv.Key == "id" && !keepIds && kv.Value.StartsWith("__", StringComparison.Ordinal)) continue;
             sb.Append(' ').Append(kv.Key);
             if (kv.Value.Length > 0) sb.Append("=\"").Append(EscapeHtml(kv.Value)).Append('"');
         }
         sb.Append('>');
         if (HtmlParser.Void.Contains(node.Tag!)) return;
-        foreach (var c in node.Children) WriteNode(sb, c);
+        foreach (var c in node.Children) WriteNode(sb, c, keepIds);
         sb.Append("</").Append(node.Tag).Append('>');
     }
 
@@ -419,15 +467,16 @@ internal static class HtmlRenderer
             result.NodeOf.Remove(ve);
         }
         Forget(ve, result);
+        result.PruneForgotten();
         ve.RemoveFromHierarchy();
         if (parent != null && result.GapContainers.Contains(parent)) ApplyGap(parent, result.CssOf(parent), result);
     }
 
     private static void Forget(VisualElement ve, Result result)
     {
-        if (!string.IsNullOrEmpty(ve.name))
+        if (!string.IsNullOrEmpty(ve.name) && result.ById.TryGetValue(ve.name, out var same) && same == ve)
             result.ById.Remove(ve.name);
-        result.Externals.Remove(ve);
+        result.ForgetElement(ve);
         foreach (var child in ve.Children())
             Forget(child, result);
     }
@@ -2045,6 +2094,131 @@ internal static class HtmlRenderer
     }
 
     /// <summary>Flatten inline children to Unity rich text.</summary>
+    /// <summary>
+    /// innerHTML without a rebuild: when the new markup has the same shape as the element's
+    /// current children (same tags, same ids, text where there was text), the new attribute
+    /// values and text are copied onto the existing nodes; only elements whose attributes changed
+    /// are restyled and only labels whose content changed are re-rendered. No element is created
+    /// or thrown away, so a page that re-renders its screen every tick costs a few value writes.
+    /// False (nothing touched) when the shape differs: the caller rebuilds.
+    /// </summary>
+    internal static bool Morph(VisualElement parent, HtmlNode parentNode, string html, Result result, Action<VisualElement>? restyled)
+    {
+        var frag = HtmlParser.Parse(html, _ => { });
+        var why = SameShape(parentNode.Children, frag.Children, parentNode.Attr("id") ?? "?");
+        if (why != null)
+        {
+            LastMorphMiss = why;
+            return false;
+        }
+        var changed = new HashSet<HtmlNode>();
+        CopyInto(parentNode.Children, frag.Children, changed, result, restyled);
+        if (changed.Count > 0)
+            Relabel(parent, result, changed);
+        return true;
+    }
+
+    /// <summary>Why the last in-place update was refused (Diagnostics).</summary>
+    internal static string? LastMorphMiss;
+
+    private static bool Generated(HtmlNode n) => !n.IsText && (n.Attr("data-pseudo") != null || n.Attr("data-marker") != null);
+
+    /// <summary>
+    /// Null when the old children (without the ones the renderer generated: ::before/::after,
+    /// list markers) have the new markup's shape; otherwise where they differ. A node with
+    /// generated children must keep its attributes, since those children follow its cascade.
+    /// </summary>
+    private static string? SameShape(List<HtmlNode> a, List<HtmlNode> b, string at)
+    {
+        var ia = 0;
+        for (var ib = 0; ib < b.Count; ib++, ia++)
+        {
+            while (ia < a.Count && Generated(a[ia])) ia++;
+            if (ia >= a.Count) return at + ": fewer children than the new markup";
+            var x = a[ia]; var y = b[ib];
+            if (x.IsText != y.IsText) return at + "[" + ib + "]: text where an element is, or the reverse";
+            if (x.IsText) continue;
+            if (x.Tag != y.Tag) return at + "[" + ib + "]: <" + x.Tag + "> became <" + y.Tag + ">";
+            if (!string.Equals(x.Attr("id"), y.Attr("id"), StringComparison.Ordinal)) return at + "[" + ib + "]: id " + x.Attr("id") + " became " + y.Attr("id");
+            if (x.Children.Exists(Generated) && !SameAttributes(x, y)) return x.Attr("id") + ": attributes changed on an element with generated content";
+            var inner = SameShape(x.Children, y.Children, x.Attr("id") ?? at);
+            if (inner != null) return inner;
+        }
+        while (ia < a.Count && Generated(a[ia])) ia++;
+        return ia < a.Count ? at + ": more children than the new markup" : null;
+    }
+
+    /// <summary>Attributes the mod keeps on a node for itself (click region, list and control markers); markup never carries them.</summary>
+    private static readonly HashSet<string> InternalAttributes = new(StringComparer.OrdinalIgnoreCase) { "data-click", "data-listed", "data-control", "data-touched" };
+
+    private static bool SameAttributes(HtmlNode o, HtmlNode n)
+    {
+        var count = 0;
+        foreach (var kv in o.Attributes)
+        {
+            if (InternalAttributes.Contains(kv.Key)) continue;
+            count++;
+            if (!n.Attributes.TryGetValue(kv.Key, out var v) || !string.Equals(v, kv.Value, StringComparison.Ordinal)) return false;
+        }
+        foreach (var kv in n.Attributes) if (!InternalAttributes.Contains(kv.Key)) count--;
+        return count == 0;
+    }
+
+    private static void CopyInto(List<HtmlNode> old, List<HtmlNode> fresh, HashSet<HtmlNode> changed, Result result, Action<VisualElement>? restyled)
+    {
+        var io = 0;
+        for (var i = 0; i < fresh.Count; i++, io++)
+        {
+            while (io < old.Count && Generated(old[io])) io++;
+            var o = old[io]; var n = fresh[i];
+            if (o.IsText)
+            {
+                if (!string.Equals(o.Text, n.Text, StringComparison.Ordinal)) { o.Text = n.Text; changed.Add(o); }
+                continue;
+            }
+            if (!SameAttributes(o, n))
+            {
+                List<KeyValuePair<string, string>>? kept = null;
+                foreach (var kv in o.Attributes) if (InternalAttributes.Contains(kv.Key)) (kept ??= new()).Add(kv);
+                o.Attributes.Clear();
+                foreach (var kv in n.Attributes) o.Attributes[kv.Key] = kv.Value;
+                if (kept != null) foreach (var kv in kept) o.Attributes[kv.Key] = kv.Value;
+                changed.Add(o);
+                if (o.Attr("id") is { } id && result.ById.TryGetValue(id, out var ve) && result.NodeOf.ContainsKey(ve))
+                {
+                    ve.ClearClassList();
+                    foreach (var c in (o.Attr("class") ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries)) ve.AddToClassList(c);
+                    ApplyStyles(ve, o, result.Rules, result);
+                    restyled?.Invoke(ve);
+                }
+            }
+            CopyInto(o.Children, n.Children, changed, result, restyled);
+        }
+    }
+
+    /// <summary>Labels under <paramref name="root"/> whose content holds a changed node get their rich text again.</summary>
+    private static void Relabel(VisualElement root, Result result, HashSet<HtmlNode> changed)
+    {
+        foreach (var child in root.Children())
+        {
+            if (child is Label label && result.NodeOf.TryGetValue(child, out var node) && !node.IsText && node.Children.Count > 0
+                && node.Attr("data-control") == null && node.Tag != "svg" && Holds(node, changed))
+            {
+                var text = RichText(node, result.Rules);
+                if (!string.Equals(label.text, text, StringComparison.Ordinal)) label.text = text;
+            }
+            Relabel(child, result, changed);
+        }
+    }
+
+    private static bool Holds(HtmlNode node, HashSet<HtmlNode> changed)
+    {
+        if (changed.Contains(node)) return true;
+        foreach (var c in node.Children)
+            if (Holds(c, changed)) return true;
+        return false;
+    }
+
     private static string RichText(HtmlNode node, List<CssRule>? rules = null)
     {
         var sb = new StringBuilder();
@@ -2567,7 +2741,7 @@ internal static class HtmlRenderer
             if (record.ContainsKey("height") && st.height.keyword == StyleKeyword.Undefined && st.height.value.unit == LengthUnit.Pixel)
                 st.height = st.height.value.value + Px(st.paddingTop) + Px(st.paddingBottom) + st.borderTopWidth.value + st.borderBottomWidth.value;
         }
-        if (record.TryGetValue("display", out var display) && display.Trim() == "grid")
+        if (record.TryGetValue("display", out var display) && display.Trim() == "grid" && !result.Grids.Contains(ve))
             result.Grids.Add(ve);
         if (record.TryGetValue("position", out var position) && position.Trim() == "sticky")
         {
@@ -2578,7 +2752,7 @@ internal static class HtmlRenderer
 
         if (anim != null && anim.Name.Length > 0 && anim.Name != "none")
         {
-            if (result.Keyframes.ContainsKey(anim.Name))
+            if (result.Keyframes.ContainsKey(anim.Name) && !result.AnimationAttached.Contains(ve) && !result.Animations.Exists(a => a.element == ve))
                 result.Animations.Add((ve, anim));
             else
                 Warn($"css: animation \"{anim.Name}\" has no @keyframes");

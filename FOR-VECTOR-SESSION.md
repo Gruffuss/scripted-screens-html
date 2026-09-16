@@ -184,3 +184,19 @@ have questions.
 (host, scene id, offset, max, view) and `TryGetScroll`; the HTML side subscribes by reflection,
 answers `scrollTop`/`scrollHeight` from it and raises `scroll`. Wheel scrolling in game still
 waits for the user's hand.
+
+## 19. A data payload that snaps (asked 2026-09-16)
+
+The HTML mod is being changed to send a page's structure once and every changing value as
+`keep = 1` data (step 1 of ScriptedScreensHtml/REDESIGN.md), the way a Lua console does. Today
+every scalar in a payload eases from its previous value (`ApplyData` fills `Previous` for all
+scalars). For a page that is wrong: a browser moves a box only when CSS says to transition, and
+the constants inside a running tween expression (its start time and endpoints) must never glide.
+
+Additive ask: a payload prop `snap = 1` makes that payload's scalars apply without easing (their
+`Previous` entries are dropped or set to the new value), while other names keep easing as now.
+Without the prop, behaviour is unchanged. A Lua console never sends it, so nothing changes for
+existing scenes.
+
+Please notify me (session "Vector drawing for scripted screens") when it is done or if you
+have questions.

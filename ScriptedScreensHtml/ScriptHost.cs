@@ -57,7 +57,6 @@ internal sealed class ScriptHost : IDisposable
     /// <summary>The worker is inside a read that needs its pending writes applied: the main thread drains them now.</summary>
     private volatile bool _syncing;
     private bool _pumpedMidFrame;
-    private int _workerIds;
     private readonly ConcurrentDictionary<string, (float w, float h)> _sizes = new(StringComparer.Ordinal);
     /// <summary>Per scroll container, as the vector mod last reported: [offset, scrollHeight, viewport height] in page px.</summary>
     internal readonly ConcurrentDictionary<string, float[]> ScrollState = new(StringComparer.Ordinal);
@@ -311,8 +310,22 @@ internal sealed class ScriptHost : IDisposable
         _wake.Dispose();
     }
 
+    internal int CacheSizes => _attrCache.Count + _sizes.Count + _rects.Count;
+
     private void Snapshot(Dictionary<string, VisualElement> elements)
     {
+        // ids a script removed (an innerHTML rebuild makes new ones every tick) leave the caches;
+        // an id the worker assigned whose element is not built yet only loses its cached attributes
+        if (_sizes.Count > elements.Count * 2 + 64 || _attrCache.Count > elements.Count * 16 + 256)
+        {
+            foreach (var key in _sizes.Keys) if (!elements.ContainsKey(key)) _sizes.TryRemove(key, out _);
+            foreach (var key in _rects.Keys) if (!elements.ContainsKey(key)) _rects.TryRemove(key, out _);
+            foreach (var key in _attrCache.Keys)
+            {
+                var nl = key.IndexOf('\n');
+                if (nl > 0 && !elements.ContainsKey(key.Substring(0, nl))) _attrCache.TryRemove(key, out _);
+            }
+        }
         var origin = elements.TryGetValue("body", out var body) ? body.worldBound.position : UnityEngine.Vector2.zero;
         foreach (var kv in elements)
         {
@@ -426,7 +439,7 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__query", new Func<string, string[]>(sel => { Sync(); return _query(sel).ToArray(); }));
             _engine.SetValue("__setStyle", new Action<string, string, string>(SetStyle));
             _engine.SetValue("__setText", new Action<string, string>(SetText));
-            _engine.SetValue("__setHtml", new Action<string, string>(SetHtml));
+            _engine.SetValue("__setHtml", new Func<string, string, string[]>(SetHtml));
             _engine.SetValue("__setClass", new Action<string, string>(SetClass));
             _engine.SetValue("__getAttr", new Func<string, string, string?>(GetAttr));
             _engine.SetValue("__setAttr", new Action<string, string, string>(SetAttr));
@@ -560,6 +573,9 @@ internal sealed class ScriptHost : IDisposable
             {
                 // style.animation = "...": the shorthand parsed as the cascade parses it, a runner started (or stopped) for the element
                 var record0 = _built.CssOf(ve);
+                // the same value again changes nothing (a browser does not restart a running animation for it)
+                if (record0.TryGetValue(css, out var had) ? string.Equals(had, value.Trim(), StringComparison.Ordinal) : value.Trim().Length == 0)
+                    return;
                 if (value.Trim().Length == 0) record0.Remove(css); else record0[css] = value.Trim();
                 var spec = new AnimationSpec();
                 foreach (var kv in record0) if (kv.Key.StartsWith("animation", StringComparison.Ordinal)) HtmlRenderer.ApplyAnimationDeclaration(spec, new CssDeclaration(kv.Key, kv.Value));
@@ -595,7 +611,13 @@ internal sealed class ScriptHost : IDisposable
         });
     }
 
-    private void SetHtml(string id, string html)
+    /// <summary>Set by the surface: innerHTML applied in place when the markup keeps the shape (REDESIGN step 3); false = rebuild.</summary>
+    internal Func<string, string, bool>? TryMorph;
+    /// <summary>Per innerHTML target, the ids its last markup was given: the elements a new innerHTML replaces.</summary>
+    private readonly Dictionary<string, List<string>> _innerIds = new(StringComparer.Ordinal);
+
+    /// <summary>innerHTML. Returns the ids of the elements it replaced, so the page script drops their listeners and caches.</summary>
+    private string[] SetHtml(string id, string html)
     {
         // Parse on the worker (pure managed), assign on main. Inline-only markup becomes the
         // element's rich text; anything with real elements (blocks, ids, classes) replaces
@@ -605,22 +627,36 @@ internal sealed class ScriptHost : IDisposable
         var rich = inlineOnly ? HtmlRenderer.FragmentToRichText(html, _findNode(id), _rules) : string.Empty;
         // ids and attributes are decided here, on the worker: a getAttribute after innerHTML then needs no
         // wait for the main thread (a render's handler loop cost a game frame per element)
+        // An element without an id is named by its place in the markup, so markup of the same
+        // shape names its elements the same way and can be applied in place.
         var assigned = false;
-        void Prepare(HtmlNode n)
+        var replaced = _innerIds.TryGetValue(id, out var before) ? before.ToArray() : Array.Empty<string>();
+        foreach (var old in replaced)
+            foreach (var key in _attrCache.Keys)
+                if (key.Length > old.Length && key[old.Length] == '\n' && key.StartsWith(old, StringComparison.Ordinal)) _attrCache.TryRemove(key, out _);
+        var ids = new List<string>();
+        void Prepare(HtmlNode n, string path)
         {
+            var k = 0;
             foreach (var c in n.Children)
             {
                 if (c.IsText) continue;
-                if (c.Attr("id") == null) { c.Attributes["id"] = "__w" + c.Tag + (++_workerIds); assigned = true; }
+                var here = path + "_" + (k++).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if (c.Attr("id") == null) { c.Attributes["id"] = "__h" + id + here; assigned = true; }
                 var cid = c.Attr("id")!;
+                ids.Add(cid);
                 foreach (var kv in c.Attributes) _attrCache[cid + "\n" + kv.Key] = kv.Value;
-                Prepare(c);
+                Prepare(c, here);
             }
         }
-        if (!inlineOnly) Prepare(parsed);
-        var markup = assigned ? HtmlRenderer.ToHtml(parsed, false) : html;
+        if (!inlineOnly) Prepare(parsed, string.Empty);
+        _innerIds[id] = ids;
+        var markup = assigned ? HtmlRenderer.ToHtml(parsed, false, keepIds: true) : html;
         Write(() =>
         {
+            // same shape: the elements stay, their values change
+            if (!inlineOnly && markup.Trim().Length > 0 && TryMorph != null && TryMorph(id, markup))
+                return;
             var ve = _find(id);
             var node = _findNode(id);
             // whatever elements were inside go, with their ids and layout
@@ -644,6 +680,7 @@ internal sealed class ScriptHost : IDisposable
             if (markup.Trim().Length > 0 && (!inlineOnly || label == null))
                 _appendHtml(id, markup);
         });
+        return replaced;
     }
 
     private void SetClass(string id, string cls)
@@ -1113,7 +1150,7 @@ function __el(id){
     get style(){ return __styleProxy(id); },
     set textContent(v){ __textCache[id] = String(v); delete __htmlCache[id]; __setText(id, String(v)); }, get textContent(){ return __textCache[id] !== undefined ? __textCache[id] : __textOf(id); },
     set innerText(v){ el.textContent = v; }, get innerText(){ return el.textContent; },
-    set innerHTML(v){ __htmlCache[id] = String(v); delete __textCache[id]; __setHtml(id, String(v)); }, get innerHTML(){ return __htmlCache[id] !== undefined ? __htmlCache[id] : __htmlOf(id, false); },
+    set innerHTML(v){ __htmlCache[id] = String(v); delete __textCache[id]; var gone = __setHtml(id, String(v)); if (gone) for (var gi = 0; gi < gone.length; gi++) { var g = gone[gi]; delete __elListeners[g]; delete __elHandlers[g]; delete __htmlCache[g]; delete __textCache[g]; delete __styleCache[g]; } }, get innerHTML(){ return __htmlCache[id] !== undefined ? __htmlCache[id] : __htmlOf(id, false); },
     get outerHTML(){ return __htmlOf(id, true); },
     get children(){ return __children(id).map(__el); }, get childNodes(){ return __children(id).map(__el); },
     get childElementCount(){ return __children(id).length; },

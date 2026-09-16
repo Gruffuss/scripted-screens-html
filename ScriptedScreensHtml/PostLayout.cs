@@ -21,11 +21,12 @@ internal static class PostLayout
         foreach (var kv in StyleApplier.MixedCalc)
         {
             var ve = kv.Key;
-            var entries = new List<(string prop, float px, float pct)>(kv.Value);
             var parent = ve.parent;
             if (parent == null || !built.LayoutAttached.Add(ve)) continue;
+            var entries = new List<(string prop, float px, float pct)>(kv.Value);
             void Apply()
             {
+                if (ve.panel == null) return;
                 var prs = parent.resolvedStyle;
                 var cw = parent.layout.width - prs.paddingLeft - prs.paddingRight - prs.borderLeftWidth - prs.borderRightWidth;
                 var chh = parent.layout.height - prs.paddingTop - prs.paddingBottom - prs.borderTopWidth - prs.borderBottomWidth;
@@ -38,7 +39,7 @@ internal static class PostLayout
                 }
             }
             parent.RegisterCallback<GeometryChangedEvent>(_ => Apply());
-            built.AfterRecascade.Add(Apply);
+            built.OnRecascade(ve, Apply);
         }
         // font-variant-numeric: tabular-nums: the emitter draws digits in cells of the widest digit; the
         // layout measures them proportionally, so a sibling after the number would overlap it. The label's
@@ -53,6 +54,7 @@ internal static class PostLayout
             string? lastText = null;
             void TabularWidth()
             {
+                if (lbl.panel == null) return;
                 var t = lbl.text ?? string.Empty;
                 if (t.Length == 0 || t == lastText) return;
                 lastText = t;
@@ -71,7 +73,7 @@ internal static class PostLayout
                 if (Differs(lbl.style.minWidth, min)) { lbl.style.minWidth = min; LayoutWrites++; }
             }
             tl.RegisterCallback<GeometryChangedEvent>(_ => TabularWidth());
-            built.AfterRecascade.Add(TabularWidth);
+            built.OnRecascade(lbl, TabularWidth);
         }
         // line-height: a label's box is its line count times the line height, as a browser's line
         // boxes are (the layout engine sizes a label from the font's own line metrics). Skipped for a
@@ -87,6 +89,7 @@ internal static class PostLayout
             var text = lhText;
             void FitLines()
             {
+                if (lbl.panel == null) return;
                 var parent = lbl.parent;
                 if (parent != null)
                 {
@@ -111,14 +114,14 @@ internal static class PostLayout
             }
             built.LayoutAttached.Add(label);
             label.RegisterCallback<GeometryChangedEvent>(_ => FitLines());
-            built.AfterRecascade.Add(FitLines);
+            built.OnRecascade(lbl, FitLines);
         }
         foreach (var row in StyleApplier.BaselineRows)
         {
             var container = row;
             if (!built.LayoutAttached.Add(container)) continue;
             container.RegisterCallback<GeometryChangedEvent>(_ => AlignBaselines(container));
-            built.AfterRecascade.Add(() => AlignBaselines(container));
+            built.OnRecascade(container, () => AlignBaselines(container));
         }
     }
 
@@ -171,6 +174,7 @@ internal static class PostLayout
     /// </summary>
     private static void AlignBaselines(VisualElement row)
     {
+        if (row.panel == null) return;
         var lift = new List<(VisualElement ve, float b)>();
         var deepest = 0f;
         foreach (var child in row.Children())

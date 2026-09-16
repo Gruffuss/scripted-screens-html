@@ -229,6 +229,13 @@ internal sealed class Tweens
 
     public bool Any => _live.Count > 0;
     public int Count => _live.Count;
+    /// <summary>Time.time when the scene the vector mod shows was applied (its `t` = 0); NaN before the first.</summary>
+    public float Epoch = float.NaN;
+    public int Shown => _shown.Count;
+    /// <summary>The element counts as new: no transition from what it showed before (innerHTML replaces elements in a browser).</summary>
+    public void Forget(VisualElement ve) { _shown.Remove(ve); _live.Remove(ve); _ended.Remove(ve); }
+    private readonly Dictionary<VisualElement, Tween> _ended = new();
+    private int _walked;
 
     /// <summary>After layout, before emitting: start a tween for every element that changed and has a transition.</summary>
     /// <summary>transition-behavior: allow-discrete on these: a display: none write waits for the element's transition to end.</summary>
@@ -238,7 +245,15 @@ internal sealed class Tweens
 
     public void Diff(VisualElement root, HtmlRenderer.Result built, float now)
     {
+        _walked = 0;
         Walk(root, built, now);
+        if (_shown.Count > _walked * 2 + 64)
+        {
+            // elements a script removed: their snapshots (and any tween) go
+            _scratch.Clear();
+            foreach (var kv in _shown) if (kv.Key.panel == null) _scratch.Add(kv.Key);
+            foreach (var ve in _scratch) { _shown.Remove(ve); _live.Remove(ve); _ended.Remove(ve); }
+        }
         if (PendingHide.Count == 0) return;
         // nothing tweens for it after all: hide now rather than never
         _scratch.Clear();
@@ -263,6 +278,7 @@ internal sealed class Tweens
                 var from = _live.TryGetValue(ve, out var running) && running.Active(now) ? running.At(now) : prev;
                 var start = now + timing.delay;
                 _live[ve] = new Tween { From = from, To = cur, Start = start, Duration = timing.dur, Ease = timing.ease };
+                _ended.Remove(ve);
             }
             else
             {
@@ -270,6 +286,7 @@ internal sealed class Tweens
             }
         }
         _shown[ve] = cur;
+        _walked++;
         foreach (var child in ve.Children())
             Walk(child, built, now);
     }
@@ -277,11 +294,14 @@ internal sealed class Tweens
     public Tween? Of(VisualElement ve, float now)
     {
         if (!_live.TryGetValue(ve, out var t) || !t.Active(now))
-            return null;
-        // The vector mod's `t` restarts at zero every time a scene is applied, so the
-        // expression is written relative to THIS emission: a tween already under way has a
-        // negative start and picks up mid-flight.
-        t.P = Tween.Eased(t.Ease, t.Start - now, t.Duration);
+        {
+            if (!_ended.TryGetValue(ve, out t))
+                return null;
+        }
+        // The vector mod's `t` restarts at zero when a structure is applied, and only then: the
+        // expression is written relative to that moment (Epoch), so value patches sent later
+        // leave a running tween on the same clock.
+        t.P = Tween.Eased(t.Ease, t.Start - (float.IsNaN(Epoch) ? now : Epoch), t.Duration);
         return t;
     }
 
@@ -296,6 +316,9 @@ internal sealed class Tweens
                 _scratch.Add(kv.Key);
         foreach (var ve in _scratch)
         {
+            // kept, finished: its expression (now at its end value) stays in the scene, so an animated
+            // element's structure does not change between segments and updates stay value patches
+            _ended[ve] = _live[ve];
             _live.Remove(ve);
             if (PendingHide.Remove(ve)) ve.style.display = DisplayStyle.None; // the held-back display: none lands now
         }

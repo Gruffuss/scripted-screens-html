@@ -195,49 +195,16 @@ internal static class VectorEmitter
             ctx.Body.Append(indent).Append("G o=").Append(tw != null ? tw.Lerp(tw.From.Opacity, rs.opacity) : F(rs.opacity)).Append(" {\n");
             groups++;
         }
+        if (ctx.Built.TimeAnimations.TryGetValue(ve, out var ta) && TimeTimeline(ctx, ve, ta.spec, ta.start, x, y, w, h) is { } timeG)
+        {
+            ctx.Body.Append(indent).Append(timeG).Append(" {\n");  // a looping animation the scene runs by itself
+            groups++;
+        }
         if (!float.IsNaN(ctx.ScrollTop) && css.TryGetValue("animation-timeline", out var tlc) && tlc.Trim() != "auto" && ScrollTimeline(ctx, ve, css, tlc, x, y, w, h) is { } tlg)
         {
             ctx.Body.Append(indent).Append(tlg).Append(" {\n");  // keyframes as expressions over the scroll offset
             groups++;
         }
-        if (ve.style.overflow.value == Overflow.Hidden && w > 0f && h > 0f)
-        {
-            if (Scrolls(css))
-            {
-                // overflow: auto / scroll: the vector mod's scroll container. It clips to the
-                // box and slides its children by a client-side offset (wheel or drag), so a
-                // scroll costs one rebuild and no tick. Children stay in page coordinates.
-                var ch = 0f;
-                foreach (var child in ve.Children())
-                {
-                    if (child.resolvedStyle.display == DisplayStyle.None) continue;
-                    var cl = child.layout;
-                    if (float.IsNaN(cl.yMax)) continue;
-                    ch = Mathf.Max(ch, cl.yMax + child.resolvedStyle.marginBottom);
-                }
-                ch += rs.paddingBottom;
-                ctx.Body.Append(indent).Append("SC id=").Append(string.IsNullOrEmpty(ve.name) ? "scroll" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture) : ve.name)
-                    .Append(" x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h))
-                    .Append(" ch=").Append(F(Mathf.Max(ch, h))).Append(Radius(rs, w, h));
-                if (ctx.ScrollSet != null && !string.IsNullOrEmpty(ve.name) && ctx.ScrollSet.TryGetValue(ve.name, out var ss))
-                    ctx.Body.Append(" so=").Append(F(ss.offset)).Append(" sov=").Append(ss.version); // applied once per version (vector requirement 7)
-                ctx.Body.Append(" {\n");
-                ctx.Out.Nodes++;
-                groups++;
-                scrollTop = y;
-                scrollCh = Mathf.Max(ch, h);
-            }
-            else
-            {
-                var id = "clip" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-                var margin = css.TryGetValue("overflow-clip-margin", out var ocm) ? StyleApplier.Num(ocm) : 0f;  // the clip box grown by overflow-clip-margin
-                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x - margin)).Append(" y=").Append(F(y - margin))
-                    .Append(" w=").Append(F(w + 2f * margin)).Append(" h=").Append(F(h + 2f * margin)).Append(Radius(rs, w + 2f * margin, h + 2f * margin)).Append(" }\n");
-                ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
-                groups++;
-            }
-        }
-
         // Background and border of the box itself.
         var clipText = (css.TryGetValue("background-clip", out var bclip) || css.TryGetValue("-webkit-background-clip", out bclip)) && bclip.Trim() == "text";
         var cornerPath = CornerPath(css, rs, x, y, w, h);
@@ -447,6 +414,46 @@ internal static class VectorEmitter
                 Side(ctx, indent, x + w - rs.borderRightWidth, y, rs.borderRightWidth, h, rs.borderRightColor);
                 Side(ctx, indent, x, y + h - rs.borderBottomWidth, w, rs.borderBottomWidth, rs.borderBottomColor);
                 Side(ctx, indent, x, y, rs.borderLeftWidth, h, rs.borderLeftColor);
+            }
+        }
+
+        // overflow clips the content, not the box: the element's own background, border and shadow
+        // are drawn above, outside its clip (a shadow clipped by its own box was invisible and costly)
+        if (ve.style.overflow.value == Overflow.Hidden && w > 0f && h > 0f)
+        {
+            if (Scrolls(css))
+            {
+                // overflow: auto / scroll: the vector mod's scroll container. It clips to the
+                // box and slides its children by a client-side offset (wheel or drag), so a
+                // scroll costs one rebuild and no tick. Children stay in page coordinates.
+                var ch = 0f;
+                foreach (var child in ve.Children())
+                {
+                    if (child.resolvedStyle.display == DisplayStyle.None) continue;
+                    var cl = child.layout;
+                    if (float.IsNaN(cl.yMax)) continue;
+                    ch = Mathf.Max(ch, cl.yMax + child.resolvedStyle.marginBottom);
+                }
+                ch += rs.paddingBottom;
+                ctx.Body.Append(indent).Append("SC id=").Append(string.IsNullOrEmpty(ve.name) ? "scroll" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture) : ve.name)
+                    .Append(" x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h))
+                    .Append(" ch=").Append(F(Mathf.Max(ch, h))).Append(Radius(rs, w, h));
+                if (ctx.ScrollSet != null && !string.IsNullOrEmpty(ve.name) && ctx.ScrollSet.TryGetValue(ve.name, out var ss))
+                    ctx.Body.Append(" so=").Append(F(ss.offset)).Append(" sov=").Append(ss.version); // applied once per version (vector requirement 7)
+                ctx.Body.Append(" {\n");
+                ctx.Out.Nodes++;
+                groups++;
+                scrollTop = y;
+                scrollCh = Mathf.Max(ch, h);
+            }
+            else
+            {
+                var id = "clip" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+                var margin = css.TryGetValue("overflow-clip-margin", out var ocm) ? StyleApplier.Num(ocm) : 0f;  // the clip box grown by overflow-clip-margin
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x - margin)).Append(" y=").Append(F(y - margin))
+                    .Append(" w=").Append(F(w + 2f * margin)).Append(" h=").Append(F(h + 2f * margin)).Append(Radius(rs, w + 2f * margin, h + 2f * margin)).Append(" }\n");
+                ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
+                groups++;
             }
         }
 
@@ -3277,6 +3284,34 @@ internal static class VectorEmitter
     /// eased per segment; scroll() runs over the box's whole range, view() while the
     /// element crosses the viewport. No clock, no rebuilds: the vector mod evaluates sy.
     /// </summary>
+    /// <summary>Keyframes that change only opacity and transform: the scene can run them as one expression.</summary>
+    internal static bool Compilable(CssKeyframes frames)
+    {
+        if (frames.Frames.Count == 0) return false;
+        foreach (var f in frames.Frames)
+            foreach (var d in f.Declarations)
+                if (d.Name != "opacity" && d.Name != "transform") return false;
+        return true;
+    }
+
+    /// <summary>
+    /// A looping keyframe animation as a G over the scene clock: progress is the phase of
+    /// (t - start) in the duration (a triangle for alternate). Start is written relative to the
+    /// moment the structure was applied (the vector clock's zero), so value patches leave it running.
+    /// </summary>
+    private static string? TimeTimeline(Ctx ctx, VisualElement ve, AnimationSpec spec, float started, float x, float y, float w, float h)
+    {
+        if (!ctx.Built.Keyframes.TryGetValue(spec.Name, out var frames) || frames.Frames.Count == 0) return null;
+        var epoch = ctx.Tw != null && !float.IsNaN(ctx.Tw.Epoch) ? ctx.Tw.Epoch : ctx.Now;
+        var s0 = started + spec.Delay - epoch;
+        var d = Mathf.Max(0.001f, spec.Duration);
+        var elapsed = "max(0,t-(" + F(s0) + "))";
+        var p = spec.Alternate
+            ? "(1-abs(mod(" + elapsed + "," + F(2f * d) + ")/" + F(d) + "-1))"
+            : "(mod(" + elapsed + "," + F(d) + ")/" + F(d) + ")";
+        return KeyframeGroup(spec, frames, p, x, y, w, h);
+    }
+
     private static string? ScrollTimeline(Ctx ctx, VisualElement ve, Dictionary<string, string> css, string timeline, float x, float y, float w, float h)
     {
         AnimationSpec? spec = null;
@@ -3292,6 +3327,12 @@ internal static class VectorEmitter
         }
         else
             p = "clamp(sy/" + F(Mathf.Max(1f, ctx.ScrollRange)) + ",0,1)";
+        return KeyframeGroup(spec, frames, p, x, y, w, h);
+    }
+
+    /// <summary>The frames as a G whose opacity and transform follow progress <paramref name="p"/> (0..1).</summary>
+    private static string KeyframeGroup(AnimationSpec spec, CssKeyframes frames, string p, float x, float y, float w, float h)
+    {
         if (spec.Reverse) p = "(1-" + p + ")";
 
         var keys = new List<(float at, float o, float tx, float ty, float sx, float sy, float r)>();
