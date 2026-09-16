@@ -38,7 +38,12 @@ is a rippling gas surface bound to live data, drawn every frame by the client.
 
 ## Build
 
-Requires the vector mod checked out beside this repository (`../ScriptedScreensVector`) and a
-`Stationeers.VS.User.props` next to `Stationeers.VS.props` in the fonts mod folder with
-`SteamLibraryDirectory` pointing at `steamapps\common`. Then `dotnet build` in
-`ScriptedScreensHtml/`; the build deploys to the game's `mods` folder.
+Requires a `Stationeers.VS.User.props` next to `Stationeers.VS.props` in `ScriptedScreensHtml/`
+with `SteamLibraryDirectory` pointing at `steamapps\common` (and `StationeersDocumentsDirectory`
+when Documents is redirected). Then `dotnet build -c Release` in `ScriptedScreensHtml/`; the build
+deploys to the game's `mods` folder.
+
+At runtime the page is drawn by ScriptedScreens Vector
+([scripted-screens-vector](https://github.com/Gruffuss/scripted-screens-vector)) in the typefaces of
+ScriptedScreens Fonts ([scripted-screens-fonts](https://github.com/Gruffuss/scripted-screens-fonts));
+both are separate mods with their own repositories, and neither is needed to build this one.

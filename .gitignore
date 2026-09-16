@@ -15,6 +15,10 @@ ScriptedScreensVector/
 ScriptedScreensVector.Tests/
 vector-format-spec.md
 
+# The Fonts mod has its own repository too: github.com/Gruffuss/scripted-screens-fonts.
+# It sits beside this one on disk because the HTML mod draws in its typefaces at runtime.
+StationeersLuaAddonTemplate-main/
+
 # Editor backups, IDE, OS
 *.bak-*
 .vs/

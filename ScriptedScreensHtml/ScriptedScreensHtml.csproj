@@ -12,8 +12,8 @@
     </PropertyGroup>
     <!-- Shared with the fonts mod so build paths and the Documents-directory override
          live in exactly one place (that folder's Stationeers.VS.User.props). -->
-    <Import Project="..\StationeersLuaAddonTemplate-main\Stationeers.VS.props" />
-    <Import Project="..\StationeersLuaAddonTemplate-main\Stationeers.VS.References.props" />
+    <Import Project="Stationeers.VS.props" />
+    <Import Project="Stationeers.VS.References.props" />
     <PropertyGroup>
         <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
         <AssemblyVersion>$(Version)</AssemblyVersion>

@@ -81,7 +81,7 @@ Older releases: [b]CHANGELOG.md[/b] in the mod folder, or [url=https://github.co
 [list]
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3666779631]ScriptedScreens[/url] — [b]required[/b]; load before this mod
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3787517570]ScriptedScreens Vector[/url] — [b]required[/b]; draws the page
-[*] ScriptedScreens Fonts — [b]required[/b]; the typefaces (in the same repository)
+[*] [url=https://github.com/Gruffuss/scripted-screens-fonts]ScriptedScreens Fonts[/url] — [b]required[/b]; the typefaces
 [*] [url=https://github.com/StationeersLaunchPad/StationeersLaunchPad]StationeersLaunchPad[/url]
 [*] [url=https://github.com/BepInEx/BepInEx]BepInEx 5.x[/url]
 [/list]
