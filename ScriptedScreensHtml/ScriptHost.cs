@@ -83,6 +83,8 @@ internal sealed class ScriptHost : IDisposable
     private Action? _onLayoutAttr;
     private UnityEngine.Vector2 _viewport = new(460f, 460f);
     private Func<VisualElement, CssKeyframes, AnimationSpec, int>? _animate;
+    /// <summary>Runners started by a script's style.animation write, by element, so a new value replaces the old run.</summary>
+    private readonly Dictionary<VisualElement, int> _runningAnimations = new();
     private Action<int>? _cancelAnimation;
     public void Attach(HtmlRenderer.Result built, Action onLayoutAttr, UnityEngine.Vector2 viewport, Func<VisualElement, CssKeyframes, AnimationSpec, int> animate, Action<int> cancelAnimation)
     {
@@ -246,7 +248,9 @@ internal sealed class ScriptHost : IDisposable
             _frameRequested = true;
             _wake.Set();
         }
-        return Pump();
+        // A frame's writes land together once the worker is done with it (a browser's task is
+        // atomic too); pumping mid-frame made every write its own layout and emit.
+        return _busy ? false : Pump();
     }
 
     /// <summary>Apply queued DOM writes and canvas frames. Main thread. Returns whether anything was applied.</summary>
@@ -532,7 +536,21 @@ internal sealed class ScriptHost : IDisposable
         {
             var ve = _find(id);
             if (ve == null) return;
-            StyleApplier.Apply(ve, new CssDeclaration(css, value), Report);
+            // var()/env() in a script's value resolve against the element, as the cascade would
+            if (HtmlRenderer.HasFn(value) && _findNode(id) is { } vnode) value = HtmlRenderer.ResolveVars(value, vnode);
+            if (!css.StartsWith("animation", StringComparison.Ordinal)) StyleApplier.Apply(ve, new CssDeclaration(css, value), Report);
+            if (_built != null && css.StartsWith("animation", StringComparison.Ordinal))
+            {
+                // style.animation = "...": the shorthand parsed as the cascade parses it, a runner started (or stopped) for the element
+                var record0 = _built.CssOf(ve);
+                if (value.Trim().Length == 0) record0.Remove(css); else record0[css] = value.Trim();
+                var spec = new AnimationSpec();
+                foreach (var kv in record0) if (kv.Key.StartsWith("animation", StringComparison.Ordinal)) HtmlRenderer.ApplyAnimationDeclaration(spec, new CssDeclaration(kv.Key, kv.Value));
+                if (_runningAnimations.TryGetValue(ve, out var oldHandle)) { _cancelAnimation?.Invoke(oldHandle); _runningAnimations.Remove(ve); }
+                if (spec.Name.Length > 0 && spec.Name != "none" && _built.Keyframes.TryGetValue(spec.Name, out var kf) && _animate != null)
+                    _runningAnimations[ve] = _animate(ve, kf, spec);
+                return;
+            }
             if (_built != null)
             {
                 // the record is what the emitter reads for everything the layout engine has no style for
@@ -576,7 +594,11 @@ internal sealed class ScriptHost : IDisposable
             if (node != null)
                 foreach (var c in node.Children.ToArray())
                     if (!c.IsText && c.Attr("id") is { } cid && cid != id) _remove(cid);
-            var label = ve != null ? HtmlSurface.TextTargetFor(ve, id) : null;
+            // a text target only for inline markup: for elements, a stub text label made earlier goes
+            // (it had flex-grow and took the first child's space)
+            var label = ve != null && (inlineOnly || ve is Label) ? HtmlSurface.TextTargetFor(ve, id) : null;
+            if (ve != null && !inlineOnly && ve is not Label && ve.childCount >= 1 && ve[0] is Label stub && stub.name == "#text")
+                ve.RemoveAt(0);
             if (label != null)
                 label.text = rich;
             if (node != null && !node.IsText)

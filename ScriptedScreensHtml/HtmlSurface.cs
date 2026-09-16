@@ -401,9 +401,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         _byId = built.ById;
         _shapes = built.Shapes;
         _built = built;
-        foreach (var grid in built.Grids)
-            GridLayout.Attach(grid, built);
-        PostLayout.Attach(built);
+        AttachLayouts(built);
 
         _script?.Dispose();
         _script = null;
@@ -423,6 +421,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                     if (_byId.TryGetValue(parentId, out var p) && built.NodeOf.TryGetValue(p, out var pn))
                     {
                         HtmlRenderer.AppendFragment(p, pn, html, built);
+                        AttachLayouts(built);
                         _dirty = true;
                         Wake();
                     }
@@ -445,6 +444,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                     if (_byId.TryGetValue(parentId, out var p) && built.NodeOf.TryGetValue(p, out var pn))
                     {
                         HtmlRenderer.InsertFragment(p, pn, html, beforeId, built);
+                        AttachLayouts(built);
                         _dirty = true;
                         Wake();
                     }
@@ -470,12 +470,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         }
 
         _animations.Clear();
-        foreach (var (element, spec) in built.Animations)
-        {
-            // animation-timeline: scroll()/view(): the emitter writes the frames as expressions over the scroll offset; no clock runs it
-            if (built.CssOf(element).TryGetValue("animation-timeline", out var timeline) && timeline.Trim() != "auto") continue;
-            _animations.Add(new KeyframeRunner(element, built.Keyframes[spec.Name], spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), built.CssOf(element)));
-        }
+        built.AnimationAttached.Clear();
+        AttachAnimations(built);
 
         _dirty = true;
         Wake();
@@ -657,6 +653,29 @@ internal sealed class HtmlSurface : MonoBehaviour
             var name = string.IsNullOrEmpty(ElementId) ? "page" : ElementId;
             foreach (var bad in System.IO.Path.GetInvalidFileNameChars()) name = name.Replace(bad, '_');
             System.IO.File.WriteAllText(System.IO.Path.Combine(dir, name + ".txt"), scene);
+            // the layout tree beside it: every element with its tag, id and laid-out box, including the
+            // containers the scene never draws, so a misplaced box can be traced to the element that moved it
+            if (_content != null && _built != null)
+            {
+                var sb = new StringBuilder();
+                var origin = _content.worldBound.position;
+                void Walk(VisualElement ve, int depth)
+                {
+                    var wb = ve.worldBound;
+                    var tag = _built.NodeOf.TryGetValue(ve, out var n) ? (n.Tag ?? "#text") : "?";
+                    sb.Append(' ', depth * 2).Append(tag).Append(' ').Append(ve.name).Append(ve is Label ? " [label]" : string.Empty)
+                      .Append(" x=").Append((wb.x - origin.x).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture))
+                      .Append(" y=").Append((wb.y - origin.y).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture))
+                      .Append(" w=").Append(wb.width.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture))
+                      .Append(" h=").Append(wb.height.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture));
+                    if (ve.resolvedStyle.display == DisplayStyle.None) sb.Append(" display=none");
+                    if (ve.resolvedStyle.position == Position.Absolute) sb.Append(" abs");
+                    sb.AppendLine();
+                    foreach (var c in ve.Children()) Walk(c, depth + 1);
+                }
+                Walk(_content, 0);
+                System.IO.File.WriteAllText(System.IO.Path.Combine(dir, name + "-layout.txt"), sb.ToString());
+            }
         }
         catch (Exception ex)
         {
@@ -1258,6 +1277,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (_built.NodeOf.TryGetValue(_content, out var body))
         {
             HtmlRenderer.AppendFragment(_content, body, sb.ToString(), _built);
+            AttachLayouts(_built);
             _datalistFor = key;
             _dirty = true;
             Wake();
@@ -1376,6 +1396,28 @@ internal sealed class HtmlSurface : MonoBehaviour
         var changed = !_script.ScrollState.TryGetValue(key, out var prev) || Mathf.Abs(prev[0] - offset) > 0.01f || Mathf.Abs(prev[1] - (max + view)) > 0.01f;
         _script.ScrollState[key] = new[] { offset, max + view, view };
         if (changed && prev != null) _script.EmitEvent(key, "scroll");
+    }
+
+    /// <summary>Grid and post-layout passes for every element that has none yet: after the build, and after each fragment a script appends.</summary>
+    private void AttachLayouts(HtmlRenderer.Result built)
+    {
+        foreach (var grid in built.Grids)
+            if (built.LayoutAttached.Add(grid)) GridLayout.Attach(grid, built);
+        PostLayout.Attach(built);
+        AttachAnimations(built);
+    }
+
+    /// <summary>A keyframe runner for every animated element that has none yet (the build, then each fragment a script appends).</summary>
+    private void AttachAnimations(HtmlRenderer.Result built)
+    {
+        foreach (var (element, spec) in built.Animations)
+        {
+            if (!built.AnimationAttached.Add(element)) continue;
+            // animation-timeline: scroll()/view(): the emitter writes the frames as expressions over the scroll offset; no clock runs it
+            if (built.CssOf(element).TryGetValue("animation-timeline", out var timeline) && timeline.Trim() != "auto") continue;
+            if (!built.Keyframes.TryGetValue(spec.Name, out var frames)) continue;
+            _animations.Add(new KeyframeRunner(element, frames, spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), built.CssOf(element)));
+        }
     }
 
     private void SetScroll(string key, float offset)

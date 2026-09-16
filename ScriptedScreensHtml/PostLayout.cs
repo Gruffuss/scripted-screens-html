@@ -19,7 +19,7 @@ internal static class PostLayout
             var ve = kv.Key;
             var entries = new List<(string prop, float px, float pct)>(kv.Value);
             var parent = ve.parent;
-            if (parent == null) continue;
+            if (parent == null || !built.LayoutAttached.Add(ve)) continue;
             void Apply()
             {
                 var prs = parent.resolvedStyle;
@@ -36,9 +36,50 @@ internal static class PostLayout
             parent.RegisterCallback<GeometryChangedEvent>(_ => Apply());
             built.AfterRecascade.Add(Apply);
         }
+        // line-height: a label's box is its line count times the line height, as a browser's line
+        // boxes are (the layout engine sizes a label from the font's own line metrics). Skipped for a
+        // label with its own height or flex, and for one a row stretches.
+        foreach (var kv in built.NodeOf)
+        {
+            if (kv.Key is not Label label || kv.Value.IsText) continue;
+            var lhText = LineHeightOf(built, label);
+            if (lhText == null || built.LayoutAttached.Contains(label)) continue;
+            var own = built.CssOf(label);
+            if (own.ContainsKey("height") || own.ContainsKey("min-height") || own.ContainsKey("flex") || own.ContainsKey("flex-basis")) continue;
+            var lbl = label;
+            var text = lhText;
+            void FitLines()
+            {
+                var parent = lbl.parent;
+                if (parent != null)
+                {
+                    var prs = parent.resolvedStyle;
+                    var row = prs.flexDirection == FlexDirection.Row || prs.flexDirection == FlexDirection.RowReverse;
+                    if (row && (prs.alignItems == Align.Stretch || prs.alignItems == Align.Auto) && lbl.resolvedStyle.alignSelf is Align.Auto or Align.Stretch) return;
+                }
+                if (lbl.resolvedStyle.flexGrow > 0f) return; // a growing label's height is the flex layout's to set
+                if (string.IsNullOrWhiteSpace(lbl.text) || lbl.resolvedStyle.position == Position.Absolute) return; // an empty box, or one placed by its edges
+                var fs = lbl.resolvedStyle.fontSize;
+                if (fs <= 0f) return;
+                var lh = LineHeightPx(text, fs);
+                if (lh <= 0f) return;
+                var oneLine = lbl.MeasureTextSize("X", 0f, VisualElement.MeasureMode.Undefined, 0f, VisualElement.MeasureMode.Undefined).y;
+                if (oneLine <= 0f || float.IsNaN(oneLine)) return;
+                var w = lbl.layout.width;
+                if (float.IsNaN(w) || w <= 0f) return;
+                var natural = lbl.MeasureTextSize(lbl.text ?? string.Empty, w, VisualElement.MeasureMode.AtMost, 0f, VisualElement.MeasureMode.Undefined).y;
+                var lines = Mathf.Max(1, Mathf.RoundToInt(natural / oneLine));
+                var target = lines * lh;
+                if (Differs(lbl.style.height, target)) lbl.style.height = target;
+            }
+            built.LayoutAttached.Add(label);
+            label.RegisterCallback<GeometryChangedEvent>(_ => FitLines());
+            built.AfterRecascade.Add(FitLines);
+        }
         foreach (var row in StyleApplier.BaselineRows)
         {
             var container = row;
+            if (!built.LayoutAttached.Add(container)) continue;
             container.RegisterCallback<GeometryChangedEvent>(_ => AlignBaselines(container));
             built.AfterRecascade.Add(() => AlignBaselines(container));
         }
@@ -59,6 +100,28 @@ internal static class PostLayout
             case "right": if (Differs(s.right, v)) s.right = v; break;
             case "bottom": if (Differs(s.bottom, v)) s.bottom = v; break;
         }
+    }
+
+    /// <summary>The line-height that applies to a label: its own, else the nearest ancestor's; null for normal.</summary>
+    private static string? LineHeightOf(HtmlRenderer.Result built, VisualElement ve)
+    {
+        for (var p = ve; p != null; p = p.parent)
+        {
+            if (built.CssOf(p).TryGetValue("line-height", out var v))
+            {
+                v = v.Trim();
+                return v == "normal" || v == "inherit" || v == "initial" ? null : v;
+            }
+        }
+        return null;
+    }
+
+    private static float LineHeightPx(string v, float fontSize)
+    {
+        if (v.EndsWith("px", System.StringComparison.OrdinalIgnoreCase)) return StyleApplier.Num(v);
+        if (v.EndsWith("%", System.StringComparison.Ordinal)) return StyleApplier.Num(v) / 100f * fontSize;
+        if (v.EndsWith("em", System.StringComparison.OrdinalIgnoreCase) && float.TryParse(v.Substring(0, v.Length - 2), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var em)) return em * fontSize;
+        return float.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n * fontSize : StyleApplier.Num(v);
     }
 
     private static bool Differs(StyleLength l, float v) => l.keyword != StyleKeyword.Undefined || l.value.unit != LengthUnit.Pixel || Mathf.Abs(l.value.value - v) > 0.5f;

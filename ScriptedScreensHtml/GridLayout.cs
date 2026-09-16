@@ -210,16 +210,23 @@ internal sealed class GridLayout
         }
 
         // Column widths. Content-sized auto columns measure the widest single-column child.
-        var colW = Resolve(cols, w, colGap, definiteWidth, out _);
-        if (!definiteWidth)
+        // auto columns take their content's width (measured from the layout, which sizes them
+        // to content); fr columns share what is left
+        var colW = Resolve(cols, w, colGap, false, out _);
+        foreach (var it in items)
         {
-            foreach (var it in items)
-            {
-                if (it.ColSpan != 1 || it.Col >= cols.Count || !cols[it.Col].Auto) continue;
-                var iw = it.Ve.layout.width;
-                if (float.IsNaN(iw)) continue;
-                colW[it.Col] = Mathf.Max(colW[it.Col], iw);
-            }
+            if (it.ColSpan != 1 || it.Col >= cols.Count || !cols[it.Col].Auto) continue;
+            var iw = it.Ve.layout.width;
+            if (float.IsNaN(iw)) continue;
+            colW[it.Col] = Mathf.Max(colW[it.Col], iw);
+        }
+        if (definiteWidth && cols.Exists(c => c.Auto))
+        {
+            var fixedSum = 0f; var frSum = 0f;
+            foreach (var c in cols) if (c.Fr > 0f) frSum += c.Fr;
+            for (var c = 0; c < cols.Count; c++) if (cols[c].Fr <= 0f) fixedSum += colW[c];
+            var free = Mathf.Max(0f, w - fixedSum - colGap * Mathf.Max(0, cols.Count - 1));
+            if (frSum > 0f) for (var c = 0; c < cols.Count; c++) if (cols[c].Fr > 0f) colW[c] = free * cols[c].Fr / frSum;
         }
 
         // Row heights: explicit tracks, implicit rows from grid-auto-rows; auto rows measure
@@ -279,7 +286,7 @@ internal sealed class GridLayout
                 chh += rowH[r] + (r > it.Row ? rowGap : 0f);
                 if (rows[r].Auto && !definiteHeight) fixedRow = false;
             }
-            var contentCol = !definiteWidth && it.ColSpan == 1 && it.Col < cols.Count && cols[it.Col].Auto;
+            var contentCol = it.ColSpan == 1 && it.Col < cols.Count && cols[it.Col].Auto;
             // align-items / justify-items (and the self forms): a child that does not stretch keeps its
             // own size and sits at the start, centre or end of its cell, measured from the layout
             var ccss = _built.CssOf(it.Ve);

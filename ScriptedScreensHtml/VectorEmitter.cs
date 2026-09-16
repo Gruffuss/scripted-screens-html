@@ -1262,6 +1262,14 @@ internal static class VectorEmitter
             lineHpx = lv.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(lv) : (lv.EndsWith("em", StringComparison.OrdinalIgnoreCase) || lv.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(lv) * (lv.EndsWith("%", StringComparison.Ordinal) ? 0.01f : 1f) : StyleApplier.Num(lv)) * rs.fontSize;
         }
         var lines = 1; foreach (var ch in text) if (ch == '\n') lines++;
+        if (clipped && !wraps && lines == 1 && h < rs.fontSize * 1.4f)
+        {
+            // TextMeshPro drops a line whose own metrics exceed the box before it ellipsizes: give the
+            // single line its metric height, centred on the CSS line box (the clip stays the CSS box)
+            var need = rs.fontSize * 1.4f;
+            sb.Replace(" y=" + F(y) + " w=", " y=" + F(y - (need - h) * 0.5f) + " w=");
+            sb.Replace(" h=" + F(h) + " text=", " h=" + F(need) + " text=");
+        }
         var flexCentred = css.TryGetValue("display", out var dsp0) && dsp0.Trim() is "flex" or "inline-flex"
                           && ((css.TryGetValue("align-items", out var ai0) && ai0.Trim() == "center") || (css.TryGetValue("flex-direction", out var fd0) && fd0.Trim().StartsWith("column", StringComparison.Ordinal) && css.TryGetValue("justify-content", out var jc0) && jc0.Trim() == "center"));
         var tall = h > lineHpx * (lines + 0.5f) && !wraps && !flexCentred && !(ctx.Built.NodeOf.TryGetValue(label, out var tn) && tn.Tag is "td" or "th" or "button" or "summary" or "option" or "legend" or "label");
