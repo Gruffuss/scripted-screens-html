@@ -144,16 +144,15 @@ Two things that are not a browser:
 
 ## Fonts
 
-Your own `.ttf`/`.otf` files go in `fonts` in the game's save folder
-(`Documents/My Games/Stationeers/fonts` unless LaunchPad or the game moved it), not in a mod
-folder: a workshop update replaces mod folders. The Fonts mod loads them for labels and this mod
-for pages; a file there wins over a bundled one of the same name.
-
-`font-family` names a typeface the Fonts mod has: the files in its `Assets/fonts` folder by
-family and style (`Barlow`, `Barlow SemiBold`, `Barlow Condensed`), then the game's own
-TextMeshPro faces, then the generic families mapped to what is installed (`monospace` is the
-game's `code` face). A glyph a font lacks draws as a box, as the font policy says: choose a
-face that has it (`noto-punc` for arrows and symbols).
+`font-family` names any face registered with the game's text engine: the ones the Fonts mod
+loads (by family and style: `Barlow`, `Barlow SemiBold`, `Barlow Condensed`, and your own font
+files, which go wherever the Fonts mod's documentation says) and the game's own faces
+(`LiberationSans SDF`, `font_english`, `noto-punc`). `font-weight` picks the registered weight
+face (`600` is `SemiBold`) where there is one. Generic families map to what is installed
+(`sans-serif` is Barlow, `monospace` the game's `code` face). This mod reads no font files: it
+lays the page out with the registered faces themselves, so a face the Fonts mod has not loaded
+yet is picked up a few seconds after it arrives. A glyph a face lacks is drawn from the game's
+own face.
 
 ## SVG
 

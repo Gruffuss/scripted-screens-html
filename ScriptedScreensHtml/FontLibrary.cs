@@ -12,45 +12,40 @@ using AtlasPopulationMode = UnityEngine.TextCore.Text.AtlasPopulationMode;
 namespace ScriptedScreensHtml;
 
 /// <summary>
-/// Font files on disk, as UI Toolkit (TextCore) font assets. Scans this mod's Assets/fonts,
-/// the Fonts mod's Assets/fonts next to it, and the player's <save folder>/fonts (which wins a clash), so <c>font-family: Barlow</c> in a page is
-/// the same Barlow file the vector layer's labels use. Assets are built lazily from the file
-/// with a dynamic SDF atlas, crisp at any size. Family and style come from the file name
-/// (Barlow-Bold.ttf = family "barlow", style "bold"); the family alone selects the regular
-/// face and UI Toolkit synthesises bold and italic. ponytail: read the name table for real
-/// family names if a file ever does not follow the Family-Style convention.
+/// The faces pages are laid out with. The vector mod draws text through TextMeshPro, in the faces
+/// the game and the Fonts mod registered; UI Toolkit, which lays the page out, cannot use a
+/// TextMeshPro face, so each one is mirrored into a UI Toolkit font asset by name
+/// (<c>font-family: Barlow</c>, weight 600 = the registered "Barlow SemiBold"). This mod reads no
+/// font files and knows no font folders: where fonts come from is the Fonts mod's business.
 /// </summary>
 internal static class FontLibrary
 {
-    private static Dictionary<string, string>? _files;   // "family" and "family|style" -> path
     private static readonly Dictionary<string, FontAsset?> Cache = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>When a name last failed to resolve: the Fonts mod registers its faces over the first minutes, so a miss is retried.</summary>
+    private static readonly Dictionary<string, float> MissedAt = new(StringComparer.OrdinalIgnoreCase);
+    private const float RetryAfterSeconds = 5f;
     /// <summary>@font-face names: the family the page uses -> the TextMeshPro face name the file is registered under.</summary>
     private static readonly Dictionary<string, string> AliasFace = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// @font-face { font-family: X; src: url(file.ttf) }: X resolves to that file. The url is
-    /// matched by file name against the font folders (a page cannot ship a file, and
-    /// everything the Fonts mod loaded is there). Weight and style pick the styled face.
+    /// @font-face { font-family: X; src: url(Family-Style.ttf) }: X resolves to the face the Fonts
+    /// mod registered that file under (a page cannot ship a file). Weight and style pick the styled
+    /// face: a bold rule maps "X Bold" as well.
     /// </summary>
     public static void Alias(string family, string src, string weight, string style)
     {
-        Scan();
-        var wanted = Path.GetFileName(src.Replace('\\', '/'));
-        string? path = null;
-        foreach (var kv in _files!)
-            if (string.Equals(Path.GetFileName(kv.Value), wanted, StringComparison.OrdinalIgnoreCase)) { path = kv.Value; break; }
-        if (path == null)
-        {
-            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: @font-face \"{family}\": no font file named \"{wanted}\" in the font folders");
+        var face = FaceNameFromFile(Path.GetFileName(src.Replace('\\', '/')));
+        if (face.Length == 0)
             return;
-        }
-        var key = Normalise(family);
         var bold = weight.Trim().ToLowerInvariant() is "bold" or "bolder" || (float.TryParse(weight.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) && n >= 600);
         var italic = style.Trim().ToLowerInvariant() is "italic" or "oblique";
-        _files[bold && italic ? key + "|bolditalic" : bold ? key + "|bold" : italic ? key + "|italic" : key] = path;
-        if (!_files.ContainsKey(key)) _files[key] = path;
-        AliasFace[family] = FaceNameFromFile(path);
+        var key = bold && italic ? family + " Bold Italic" : bold ? family + " Bold" : italic ? family + " Italic" : family;
+        AliasFace[key] = face;
+        if (!AliasFace.ContainsKey(family)) AliasFace[family] = face;
         Cache.Remove(key);
+        Cache.Remove(family);
+        if (Find(face) == null)
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: @font-face \"{family}\": no registered face \"{face}\" yet (the Fonts mod registers font files by family and style)");
     }
 
     /// <summary>The face name the vector layer (TextMeshPro, registered by the Fonts mod) knows a page's family by: the @font-face alias resolved, else the name itself.</summary>
@@ -60,9 +55,9 @@ internal static class FontLibrary
     }
 
     /// <summary>"BarlowCondensed-SemiBold.ttf" -> "Barlow Condensed SemiBold", the way the Fonts mod names it from the font's own metadata.</summary>
-    private static string FaceNameFromFile(string path)
+    private static string FaceNameFromFile(string file)
     {
-        var stem = Path.GetFileNameWithoutExtension(path);
+        var stem = Path.GetFileNameWithoutExtension(file);
         var dash = stem.IndexOf('-');
         var family = dash > 0 ? stem.Substring(0, dash) : stem;
         var style = dash > 0 ? stem.Substring(dash + 1) : string.Empty;
@@ -76,31 +71,17 @@ internal static class FontLibrary
         return sb.ToString();
     }
 
+    /// <summary>A registered face as a UI Toolkit font asset, or null (then the page keeps the default face).</summary>
     public static FontAsset? Get(string family)
     {
-        // Generic families (sans-serif, monospace ...) are not resolved: the legacy face
-        // stays, and a page that wants a real font names one.
-        var key = Normalise(family);
-        if (Cache.TryGetValue(key, out var cached))
+        var name = ResolveFace(family);
+        if (Cache.TryGetValue(name, out var cached) && cached != null)
             return cached;
-
-        Scan();
-        FontAsset? asset = null;
-        if (_files!.TryGetValue(key, out var path) || _files.TryGetValue(key + "|regular", out path))
-        {
-            try
-            {
-                asset = FontAsset.CreateFontAsset(path, 0, 90, 9, GlyphRenderMode.SDFAA, 1024, 1024);
-                asset.name = Path.GetFileNameWithoutExtension(path);
-            }
-            catch (Exception ex)
-            {
-                ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: font \"{family}\" failed to load from {path}: {ex.Message}");
-                asset = null;
-            }
-        }
-        asset ??= Mirror(family);
-        Cache[key] = asset;
+        if (MissedAt.TryGetValue(name, out var at) && Time.realtimeSinceStartup - at < RetryAfterSeconds)
+            return null;
+        var asset = Mirror(name);
+        if (asset != null) { Cache[name] = asset; MissedAt.Remove(name); }
+        else MissedAt[name] = Time.realtimeSinceStartup;
         return asset;
     }
 
@@ -134,16 +115,20 @@ internal static class FontLibrary
 
     private static FontAsset? Mirror(string family)
     {
-        TMP_FontAsset? tmp = null;
-        foreach (var f in Resources.FindObjectsOfTypeAll<TMP_FontAsset>())
-        {
-            if (string.Equals(f.name, family, StringComparison.OrdinalIgnoreCase))
-            {
-                tmp = f;
-                break;
-            }
-        }
+        var tmp = Find(family);
         return tmp == null ? null : MirrorAsset(tmp, isDefault: false);
+    }
+
+    /// <summary>The registered TextMeshPro face of that name; "Barlow SemiBold", "BarlowSemiBold" and "barlow-semibold" all match.</summary>
+    private static TMP_FontAsset? Find(string family)
+    {
+        var wanted = Normalise(family);
+        if (wanted.Length == 0)
+            return null;
+        foreach (var f in Resources.FindObjectsOfTypeAll<TMP_FontAsset>())
+            if (Normalise(f.name) == wanted)
+                return f;
+        return null;
     }
 
     private static FontAsset? MirrorAsset(TMP_FontAsset tmp, bool isDefault)
@@ -183,66 +168,6 @@ internal static class FontLibrary
         catch (Exception ex)
         {
             ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: could not mirror TMP font \"{tmp.name}\": {ex}");
-            return null;
-        }
-    }
-
-    private static void Scan()
-    {
-        if (_files != null)
-            return;
-        _files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        var here = Path.GetDirectoryName(typeof(FontLibrary).Assembly.Location) ?? string.Empty;
-        // Later folders win a name clash: the player's own fonts in <save folder>/fonts come last,
-        // as the Fonts mod orders them (a workshop update replaces the mod folders, not that one).
-        var folders = new List<string>
-        {
-            Path.Combine(here, "Assets", "fonts"),
-            Path.Combine(here, "..", "ScriptedScreensFonts", "Assets", "fonts"),
-        };
-        if (UserFontsFolder() is { } user)
-            folders.Add(user);
-        foreach (var folder in folders)
-        {
-            if (!Directory.Exists(folder))
-                continue;
-            foreach (var file in Directory.GetFiles(folder, "*.*", SearchOption.AllDirectories))
-            {
-                var ext = Path.GetExtension(file).ToLowerInvariant();
-                if (ext != ".ttf" && ext != ".otf")
-                    continue;
-                var stem = Path.GetFileNameWithoutExtension(file);
-                var dash = stem.IndexOf('-');
-                var family = Normalise(dash > 0 ? stem.Substring(0, dash) : stem);
-                var style = dash > 0 ? Normalise(stem.Substring(dash + 1)) : "regular";
-                _files[family + "|" + style] = file;
-                // "Barlow SemiBold", "BarlowSemiBold" and "barlow-semibold" all normalise
-                // to the same key, so a styled face is addressable by its full name.
-                _files[family + style] = file;
-                if (style == "regular" || style == "book" || !_files.ContainsKey(family))
-                    _files[family] = file;
-            }
-        }
-        ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: font library scanned, {_files.Count} entries");
-    }
-
-    /// <summary>
-    /// <c>fonts</c> in the game's save folder (<c>Documents/My Games/Stationeers</c>, or the path
-    /// LaunchPad or the game settings override it with): where players put their own font files.
-    /// </summary>
-    private static string? UserFontsFolder()
-    {
-        try
-        {
-            var root = StationeersLaunchPad.LaunchPadPaths.SavePath;
-            if (string.IsNullOrEmpty(root))
-                root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "My Games", "Stationeers");
-            return Path.Combine(root, "fonts");
-        }
-        catch (Exception ex)
-        {
-            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: could not resolve the game's save folder; player fonts are not scanned: {ex.Message}");
             return null;
         }
     }

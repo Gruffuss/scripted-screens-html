@@ -188,9 +188,9 @@ internal static class StyleApplier
             // Text
             case "font-family":
             {
-                // Font files first (the Fonts mod's Barlow etc., as dynamic SDF assets built
-                // by UI Toolkit's own text engine), registered TextMeshPro faces second. No
-                // OS fonts. An unknown family keeps the inherited legacy face and warns once.
+                // A face registered with TextMeshPro (the Fonts mod's, the game's), mirrored for
+                // UI Toolkit's layout. No font files, no OS fonts. An unknown family keeps the
+                // inherited face and warns once.
                 FontAsset? sdf = null;
                 foreach (var raw in v.Split(','))
                 {

@@ -4,6 +4,11 @@ Newest first. The workshop page carries only the latest releases; this file has 
 
 ## 0.2.0
 
+- Pages are laid out with the faces the Fonts mod and the game registered, mirrored by name; the
+  mod reads no font files and knows no font folders (a Workshop install names mod folders by item
+  id, and player fonts live where the Fonts mod keeps them). A face registered later is picked up
+  within seconds.
+
 - Documentation and examples are published to the StationeersLua MCP: search scope `html`,
   `stationeers://html/index` as the quick start, the guide and SUPPORT.md one resource per
   section, the changelog, and every chip under `examples/`.

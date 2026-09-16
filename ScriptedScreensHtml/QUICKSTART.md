@@ -95,7 +95,7 @@ inputs, selects, checkboxes and ranges report to `function on_change(v)` as `"na
 | a theme switch | `[data-mode="dark"]` rules with custom properties; the script sets the attribute |
 
 Fonts: `font-family: Barlow`, `'Barlow Condensed'`, `Manrope` and every weight the Fonts mod
-ships, plus any `.ttf`/`.otf` the player put in `fonts` in the game's save folder (`font-weight: 600` picks the SemiBold face); `monospace` is the game's `code` face; a
+loads, including the player's own font files (`font-weight: 600` picks the SemiBold face); the game's own faces by name (`font_english`, `noto-punc`); `monospace` is the game's `code` face; a
 glyph a face lacks (subscript digits, the gear) comes from the game's own face automatically.
 
 ## Rules that fail silently
