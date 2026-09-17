@@ -253,7 +253,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             try { work(); }
             catch (Exception ex) { ScriptedScreensHtmlPlugin.Log?.LogError($"html \"{ElementId}\": {ex}"); }
         }
-        if (_script != null && _script.Frame(now, _byId)) { _dirty = true; _dScript++; Wake(); }
+        if (_script != null && _script.Frame(now, _byId, waitMs: 12)) { _dirty = true; _dScript++; Wake(); }
 
         // Keyframe animations step at keyframe boundaries; the scene interpolates between.
         // Time.time, so they pause with the game like the vector layer.

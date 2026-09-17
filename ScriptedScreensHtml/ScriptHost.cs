@@ -46,6 +46,14 @@ internal sealed class ScriptHost : IDisposable
         _toMain.Enqueue(a);
     }
 
+    /// <summary>A write that can add, remove or rename elements: an existence check waits for it (the rest never can change one).</summary>
+    private void WriteStructural(Action a)
+    {
+        System.Threading.Interlocked.Increment(ref _structuralPending);
+        Write(() => { try { a(); } finally { System.Threading.Interlocked.Decrement(ref _structuralPending); } });
+    }
+    private int _structuralPending;
+
     /// <summary>Before a tree read on the worker: wait (up to a frame or two) for pending writes to land on the main thread.</summary>
     private void Sync()
     {
@@ -66,10 +74,21 @@ internal sealed class ScriptHost : IDisposable
     private volatile bool _frameRequested;
     private volatile bool _hasDataHandler;
     private volatile bool _hasPendingWork;
+    /// <summary>An animation frame callback is waiting: frames follow the game's, as a browser's follow the display.</summary>
+    private volatile bool _rafPending;
+    private readonly ManualResetEventSlim _frameFinished = new(true);
+
+    /// <summary>__hasPending: 2 an animation frame, 1 only timers, 0 nothing.</summary>
+    private void SetPending(Jint.Native.JsValue pending)
+    {
+        var level = pending.IsNumber() ? pending.AsNumber() : 0;
+        _hasPendingWork = level > 0;
+        _rafPending = level > 1;
+    }
     private volatile bool _busy;
     private volatile float _frameNow;
     private float _lastFrameAt = -1f;
-    private const float MinFrameInterval = 1f / 30f;   // the layer's animation floor, as for the vector mod
+    private const float MinFrameInterval = 1f / 30f;   // timers only; animation frames follow the game's frames
     private Engine? _engine;   // worker thread only
 
     public bool HasDataHandler => _hasDataHandler;
@@ -242,17 +261,26 @@ internal sealed class ScriptHost : IDisposable
     }
 
     /// <summary>Main thread, once per frame: refresh what the script may read, ask for a frame, apply what came back.</summary>
-    public bool Frame(float nowSeconds, Dictionary<string, VisualElement> elements)
+    /// <param name="waitMs">How long the caller (a page thread, never the game thread) waits for the frame it asked for, so its writes land in this page frame.</param>
+    public bool Frame(float nowSeconds, Dictionary<string, VisualElement> elements, int waitMs = 0)
     {
         if (_dead)
             return false;
         Snapshot(elements);
-        if (!_busy && nowSeconds - _lastFrameAt >= MinFrameInterval)
+        var interval = _rafPending ? 0f : MinFrameInterval;
+        if (!_busy && !_frameRequested && nowSeconds - _lastFrameAt >= interval)
         {
             _lastFrameAt = nowSeconds;
             _frameNow = nowSeconds;
+            _frameFinished.Reset();
             _frameRequested = true;
             _wake.Set();
+            if (waitMs > 0)
+            {
+                var until = Environment.TickCount + waitMs;
+                while (!_frameFinished.Wait(1) && Environment.TickCount < until)
+                    if (_syncing && Pump()) _pumpedMidFrame = true;
+            }
         }
         // A frame's writes land together once the worker is done with it (a browser's task is
         // atomic too); pumping mid-frame made every write its own layout and emit.
@@ -436,7 +464,7 @@ internal sealed class ScriptHost : IDisposable
                 o.Strict(false);
             });
             _engine.SetValue("__log", new Action<string, string>(Log));
-            _engine.SetValue("__has", new Func<string, bool>(id => { Sync(); return _find(id) != null || _findShape(id) != null; }));
+            _engine.SetValue("__has", new Func<string, bool>(id => { if (_structuralPending > 0) Sync(); return _find(id) != null || _findShape(id) != null; }));
             _engine.SetValue("__parseHtml", new Func<string, string>(html => TreeJson(HtmlParser.Parse(html)))); // DOMParser: the page parser, on the worker
             _engine.SetValue("__query", new Func<string, string[]>(sel => { Sync(); return _query(sel).ToArray(); }));
             _engine.SetValue("__setStyle", new Action<string, string, string>(SetStyle));
@@ -445,8 +473,8 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__setClass", new Action<string, string>(SetClass));
             _engine.SetValue("__getAttr", new Func<string, string, string?>(GetAttr));
             _engine.SetValue("__setAttr", new Action<string, string, string>(SetAttr));
-            _engine.SetValue("__appendHtml", new Action<string, string>((parent, html) => Write(() => _appendHtml(parent, html))));
-            _engine.SetValue("__remove", new Action<string>(id => Write(() => _remove(id))));
+            _engine.SetValue("__appendHtml", new Action<string, string>((parent, html) => WriteStructural(() => _appendHtml(parent, html))));
+            _engine.SetValue("__remove", new Action<string>(id => WriteStructural(() => _remove(id))));
             _engine.SetValue("__setValue", new Action<string, string>((id, v) => Write(() => _setValue(id, v))));
             _engine.SetValue("__wantClicks", new Action<string>(id => Write(() => _wantClicks(id))));
             _engine.SetValue("__wantPointer", new Action<string>(type => _pointerTypes.Add(type)));
@@ -483,7 +511,7 @@ internal sealed class ScriptHost : IDisposable
             _engine.SetValue("__contains", new Func<string, string, bool>((a, b) => { Sync(); return Contains(a, b); }));
             _engine.SetValue("__rect", new Func<string, double[]>(RectOf));
             _engine.SetValue("__elementAt", new Func<double, double, string?>(ElementAt));
-            _engine.SetValue("__insertHtml", new Action<string, string, string>((parent, html, before) => Write(() => _insertHtml(parent, html, before))));
+            _engine.SetValue("__insertHtml", new Action<string, string, string>((parent, html, before) => WriteStructural(() => _insertHtml(parent, html, before))));
             _engine.SetValue("__removeAttr", new Action<string, string>((id, name) => { _attrCache.TryRemove(id + "\n" + name, out _); Write(() => { var n = _findNode(id); if (n != null && n.Attributes.Remove(name)) { AfterAttribute(id, n, name); RecascadeForAttribute(id, n, name); } }); }));
             _engine.SetValue("__size", new Func<string, double[]>(Size));
             _engine.SetValue("__canvasFrame", new Action<string, double[], string[], int>(CanvasFrame));
@@ -528,12 +556,13 @@ internal sealed class ScriptHost : IDisposable
         try
         {
             var pending = _engine!.Invoke("__tick", nowSeconds * 1000.0);
-            _hasPendingWork = pending.IsBoolean() && pending.AsBoolean();
+            SetPending(pending);
         }
         finally
         {
             LastFrameMs = (float)((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
             _busy = false;
+            _frameFinished.Set();
         }
     }
 
@@ -541,8 +570,7 @@ internal sealed class ScriptHost : IDisposable
     {
         var has = _engine!.Invoke("__hasDataHandler");
         _hasDataHandler = has.IsBoolean() && has.AsBoolean();
-        var pending = _engine.Invoke("__hasPending");
-        _hasPendingWork = pending.IsBoolean() && pending.AsBoolean();
+        SetPending(_engine.Invoke("__hasPending"));
     }
 
     // ---- callbacks from the script (worker thread): reads answer from snapshots, writes queue to main ----
@@ -593,6 +621,12 @@ internal sealed class ScriptHost : IDisposable
                 // it would in a browser's computed style
                 var record = _built.CssOf(ve);
                 if (value.Trim().Length == 0) record.Remove(css); else record[css] = value.Trim();
+            }
+            // kept on the node as a browser keeps it in the style attribute: a re-cascade applies it again
+            if (_findNode(id) is { } styled)
+            {
+                if (value.Trim().Length == 0) styled.ScriptStyle?.Remove(css);
+                else (styled.ScriptStyle ??= new Dictionary<string, string>(StringComparer.Ordinal))[css] = value.Trim();
             }
         });
     }
@@ -654,7 +688,7 @@ internal sealed class ScriptHost : IDisposable
         if (!inlineOnly) Prepare(parsed, string.Empty);
         _innerIds[id] = ids;
         var markup = assigned ? HtmlRenderer.ToHtml(parsed, false, keepIds: true) : html;
-        Write(() =>
+        WriteStructural(() =>
         {
             // same shape: the elements stay, their values change
             if (!inlineOnly && markup.Trim().Length > 0 && TryMorph != null && TryMorph(id, markup))
@@ -687,6 +721,9 @@ internal sealed class ScriptHost : IDisposable
 
     private void SetClass(string id, string cls)
     {
+        // the same class list again restyles nothing
+        if (_attrCache.TryGetValue(id + "\n" + "class", out var had) && had == cls)
+            return;
         _attrCache[id + "\n" + "class"] = cls;
         Write(() =>
         {
@@ -710,7 +747,8 @@ internal sealed class ScriptHost : IDisposable
     private void SetAttr(string id, string name, string value)
     {
         _attrCache[id + "\n" + name] = value;
-        Write(() =>
+        Action<Action> write = name == "id" ? WriteStructural : Write;
+        write(() =>
         {
             var shape = _findShape(id);
             if (shape != null)
@@ -829,7 +867,7 @@ function clearTimeout(id){ __timers = __timers.filter(function(t){ return t.id !
 var clearInterval = clearTimeout;
 function requestAnimationFrame(fn){ var id = __nextId++; __rafs.push({id:id, fn:fn}); return id; }
 function cancelAnimationFrame(id){ __rafs = __rafs.filter(function(r){ return r.id !== id; }); }
-function __hasPending(){ return __rafs.length > 0 || __timers.length > 0; }
+function __hasPending(){ return __rafs.length > 0 ? 2 : __timers.length > 0 ? 1 : 0; }
 function __tick(now){
   __now_ms = now;
   var rafs = __rafs; __rafs = [];
@@ -929,6 +967,8 @@ function __ctx(id){
 function __flushCanvases(){ for (var k in __canvases) { var c = __canvases[k]; if (c.__cmds.length) c.__flush(); } }
 
 var __textCache = {}, __htmlCache = {}, __styleCache = {}, __scrollCache = {};
+// one element object per id, as a browser returns the same object for the same element (and building one is not cheap)
+var __elShims = {};
 // ---- readiness: after the page script, as a browser fires them after parsing ----
 document_readyState = 'loading';
 function __ready(){
@@ -1114,7 +1154,9 @@ function __pointer(id, type, x, y){
 
 // ---- elements ----
 function __el(id){
-  var el = {
+  var cached = __elShims[id];
+  if (cached) return cached;
+  var el = __elShims[id] = {
     dispatchEvent: function(ev){ if (!ev || !ev.type) return true; ev.target = ev.target || el; __dispatchOn(id, ev); return !ev.defaultPrevented; },
     insertAdjacentHTML: function(where, html){ where = String(where).toLowerCase(); if (where === 'beforeend') __appendHtml(id, String(html)); else if (where === 'afterbegin') { var c = __children(id); if (c.length) __insertHtml(id, String(html), c[0]); else __appendHtml(id, String(html)); } else if (where === 'beforebegin') { var p = __parent(id); if (p) __insertHtml(p, String(html), id); } else if (where === 'afterend') { var p2 = __parent(id); var s = __sibling(id, 1); if (p2) { if (s) __insertHtml(p2, String(html), s.id); else __appendHtml(p2, String(html)); } } },
     insertAdjacentElement: function(where, n){ el.insertAdjacentHTML(where, __serialize(n)); if (n.__adopt) n.__adopt(); return n; },
@@ -1150,9 +1192,9 @@ function __el(id){
     get oninput(){ return (__elHandlers[id] || {}).oninput; }, set oninput(f){ (__elHandlers[id] = __elHandlers[id] || {}).oninput = f; },
     select: function(){},
     get style(){ return __styleProxy(id); },
-    set textContent(v){ __textCache[id] = String(v); delete __htmlCache[id]; __setText(id, String(v)); }, get textContent(){ return __textCache[id] !== undefined ? __textCache[id] : __textOf(id); },
+    set textContent(v){ if (__textCache[id] === String(v) && __htmlCache[id] === undefined) return; __textCache[id] = String(v); delete __htmlCache[id]; __setText(id, String(v)); }, get textContent(){ return __textCache[id] !== undefined ? __textCache[id] : __textOf(id); },
     set innerText(v){ el.textContent = v; }, get innerText(){ return el.textContent; },
-    set innerHTML(v){ __htmlCache[id] = String(v); delete __textCache[id]; var gone = __setHtml(id, String(v)); if (gone) for (var gi = 0; gi < gone.length; gi++) { var g = gone[gi]; delete __elListeners[g]; delete __elHandlers[g]; delete __htmlCache[g]; delete __textCache[g]; delete __styleCache[g]; } }, get innerHTML(){ return __htmlCache[id] !== undefined ? __htmlCache[id] : __htmlOf(id, false); },
+    set innerHTML(v){ __htmlCache[id] = String(v); delete __textCache[id]; var gone = __setHtml(id, String(v)); if (gone) for (var gi = 0; gi < gone.length; gi++) { var g = gone[gi]; delete __elListeners[g]; delete __elHandlers[g]; delete __htmlCache[g]; delete __textCache[g]; delete __styleCache[g]; delete __elShims[g]; } }, get innerHTML(){ return __htmlCache[id] !== undefined ? __htmlCache[id] : __htmlOf(id, false); },
     get outerHTML(){ return __htmlOf(id, true); },
     get children(){ return __children(id).map(__el); }, get childNodes(){ return __children(id).map(__el); },
     get childElementCount(){ return __children(id).length; },

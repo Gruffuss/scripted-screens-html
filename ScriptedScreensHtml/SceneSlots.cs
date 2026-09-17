@@ -37,6 +37,8 @@ internal static class SceneSlots
         "x", "y", "w", "h", "cx", "cy", "r", "rx", "ry", "x1", "y1", "x2", "y2", "o", "fo", "fo2", "so", "sw", "size",
     };
     private static readonly HashSet<string> ColourKeys = new(StringComparer.Ordinal) { "f", "s" };
+    /// <summary>Two-number pairs the vector mod reads item by item, each item a number or an expression.</summary>
+    private static readonly HashSet<string> PairKeys = new(StringComparer.Ordinal) { "t", "s", "a" };
 
     /// <summary>The template and the values its slots name, in order.</summary>
     public static string Split(string scene, Dictionary<string, Value> values, string prefix = "L")
@@ -155,6 +157,24 @@ internal static class SceneSlots
         {
             values[name] = new Value(body);
             return "$" + name;
+        }
+        if (PairKeys.Contains(key) && !quoted && raw.Length > 2 && raw[0] == '[' && raw[raw.Length - 1] == ']' && raw.IndexOf('[', 1) < 0)
+        {
+            // a group's translate, scale and anchor: an element moved by a script changes values, not the structure
+            var items = raw.Substring(1, raw.Length - 2).Split(',');
+            var sb = new StringBuilder(raw.Length + 16).Append('[');
+            for (var k = 0; k < items.Length; k++)
+            {
+                if (k > 0) sb.Append(',');
+                if (float.TryParse(items[k], NumberStyles.Float, CultureInfo.InvariantCulture, out var item))
+                {
+                    var slot = name + "_" + k.ToString(CultureInfo.InvariantCulture);
+                    values[slot] = new Value(item);
+                    sb.Append('$').Append(slot);
+                }
+                else sb.Append(items[k]);
+            }
+            return sb.Append(']').ToString();
         }
         return raw;
     }

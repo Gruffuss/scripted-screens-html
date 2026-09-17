@@ -15,6 +15,10 @@ internal sealed class HtmlNode
     public HtmlNode? Parent;
     /// <summary>Custom properties (--name) declared on this node; lookups walk up the tree.</summary>
     public Dictionary<string, string>? Vars;
+    /// <summary>A script's element.style writes, as a browser's style attribute holds them: they outlive a re-cascade and beat the rules.</summary>
+    public Dictionary<string, string>? ScriptStyle;
+    /// <summary>The properties the last cascade set on this node, so a rule that stops matching can be undone.</summary>
+    public HashSet<string>? Cascaded;
 
     public bool IsText => Tag == null;
 

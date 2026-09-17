@@ -311,8 +311,8 @@ void TestSceneSlots()
 {
     // Two emits of the same page with different values: same template, only values differ;
     // and filling the slots back in gives the scene that was emitted.
-    const string a = "SCENE w=640 h=640\nDEFS {\n  CP id=clip1 { R x=0 y=0 w=10 h=10 }\n}\nR x=20 y=79.5 w=152 h=46 rx=23 f=#FFFFFF sh=[[0,3,8,0,#0000001F]] id=tab1 click=1\nG clip=clip1 o==1+(-0.75)*smoothstep(0,1,clamp((t--0.023)/0.55,0,1)) {\n  T x=-10.6 y=79 w=213.2 h=46 text=\"say \\\"hi\\\"\\nO<sub>2</sub> 21.0\" size=18 f=#000000 font=\"Manrope SemiBold\" align=center lh=1.33\n}\n";
-    const string b = "SCENE w=640 h=640\nDEFS {\n  CP id=clip1 { R x=0 y=0 w=10 h=10 }\n}\nR x=20 y=79.5 w=160 h=46 rx=23 f=#EEF4FF sh=[[0,3,8,0,#0000001F]] id=tab1 click=1\nG clip=clip1 o==1+(-0.25)*smoothstep(0,1,clamp((t-1.5)/0.55,0,1)) {\n  T x=-10.6 y=79 w=213.2 h=46 text=\"22.4 %\" size=18 f=#000000 font=\"Manrope SemiBold\" align=center lh=1.33\n}\n";
+    const string a = "SCENE w=640 h=640\nDEFS {\n  CP id=clip1 { R x=0 y=0 w=10 h=10 }\n}\nR x=20 y=79.5 w=152 h=46 rx=23 f=#FFFFFF sh=[[0,3,8,0,#0000001F]] id=tab1 click=1\nG clip=clip1 o==1+(-0.75)*smoothstep(0,1,clamp((t--0.023)/0.55,0,1)) {\n  T x=-10.6 y=79 w=213.2 h=46 text=\"say \\\"hi\\\"\\nO<sub>2</sub> 21.0\" size=18 f=#000000 font=\"Manrope SemiBold\" align=center lh=1.33\n}\nG a=[0,90] t=[-140.9,0] {\n  R x=0 y=0 w=4 h=4 f=#FFFFFF\n}\n";
+    const string b = "SCENE w=640 h=640\nDEFS {\n  CP id=clip1 { R x=0 y=0 w=10 h=10 }\n}\nR x=20 y=79.5 w=160 h=46 rx=23 f=#EEF4FF sh=[[0,3,8,0,#0000001F]] id=tab1 click=1\nG clip=clip1 o==1+(-0.25)*smoothstep(0,1,clamp((t-1.5)/0.55,0,1)) {\n  T x=-10.6 y=79 w=213.2 h=46 text=\"22.4 %\" size=18 f=#000000 font=\"Manrope SemiBold\" align=center lh=1.33\n}\nG a=[0,90] t=[-144.7,0] {\n  R x=0 y=0 w=4 h=4 f=#FFFFFF\n}\n";
     var va = new Dictionary<string, SceneSlots.Value>();
     var vb = new Dictionary<string, SceneSlots.Value>();
     var ta = SceneSlots.Split(a, va);
@@ -321,6 +321,7 @@ void TestSceneSlots()
     Check(ta.Contains("CP id=clip1 { R x=0 y=0 w=10 h=10 }") && ta.StartsWith("SCENE w=640 h=640"), "slots: SCENE and DEFS stay literal");
     Check(ta.Contains("sh=[[0,3,8,0,#0000001F]]") && ta.Contains("id=tab1") && ta.Contains("font=\"Manrope SemiBold\"") && ta.Contains("lh=1.33"), "slots: arrays, ids, fonts and number-only keys stay literal");
     Check(va["L4_w"].Number == 152f && vb["L4_w"].Number == 160f && va["L4_f"].Text == "#FFFFFF", "slots: numbers and colours are values");
+    Check(va["L8_t_0"].Number == -140.9f && vb["L8_t_0"].Number == -144.7f && ta.Contains("t=[$L8_t_0,$L8_t_1]"), $"slots: a moved group is values, not structure\n{ta}");
     Check(va["L6_text"].Text == "say \"hi\"\nO<sub>2</sub> 21.0", $"slots: text is unescaped ({va["L6_text"].Text})");
     Check(ta.Contains("(t-$L5_o_") && ta.Contains("+($L5_o_") && ta.Contains("*smoothstep($L5_o_") && ta.Contains(",clamp(("), $"slots: numbers in expressions become slots, signs included, names do not\n{ta}");
     // fill the template back in and compare with the original

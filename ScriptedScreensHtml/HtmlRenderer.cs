@@ -2648,11 +2648,31 @@ internal static class HtmlRenderer
             foreach (var d in CssParser.ParseDeclarations(inline))
                 (d.Important ? important : ordered).Add(d);
         }
+        if (node.ScriptStyle != null)
+            foreach (var kv in node.ScriptStyle) ordered.Add(new CssDeclaration(kv.Key, kv.Value));
         ordered.AddRange(important);
         ordered = StyleApplier.Expand(ordered);
 
         AnimationSpec? anim = null;
         var record = result.CssOf(ve);
+
+        // A re-cascade (a class or attribute change) starts from scratch as a browser's does: what the
+        // last cascade set and this one does not goes back to its default, then the tag's defaults.
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var d in ordered) if (!d.Name.StartsWith("--", StringComparison.Ordinal)) names.Add(d.Name);
+        if (node.Cascaded != null)
+        {
+            var reset = false;
+            foreach (var old in node.Cascaded)
+            {
+                if (names.Contains(old)) continue;
+                record.Remove(old);
+                StyleApplier.Reset(ve, old);
+                reset = true;
+            }
+            if (reset && node.Tag != null) TagDefaults(ve, node.Tag);
+        }
+        node.Cascaded = names;
         StyleApplier.EmSize = InheritedFontSize(node.Parent, result);
         // Custom properties first, whatever rule they came from: `:root { --pad }` sorts after
         // `body { padding: var(--pad) }` by specificity, and the variable must exist by then.

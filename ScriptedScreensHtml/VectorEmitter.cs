@@ -362,6 +362,12 @@ internal static class VectorEmitter
                 ctx.Body.Append(indent).Append(CornerPath(css, rs, x + bw * 0.5f, y + bw * 0.5f, w - bw, h - bw)).Append(" f=none s=").Append(Hex(rs.borderTopColor)).Append(" sw=").Append(F(bw)).Append('\n');
                 ctx.Out.Nodes++;
             }
+            else if (mixed && rounded && RoundedSides(styles, rs, out var ringWidth, out var ringColours))
+            {
+                // Some sides without a border (a dome: border-bottom: none), the rest one solid width:
+                // the drawn sides follow the rounded corners, as a browser draws them.
+                SideArcs(ctx, indent, x, y, w, h, ringWidth, rs, ringColours);
+            }
             else if (mixed && (bw > 0.01f || rs.borderRightWidth > 0.01f || rs.borderBottomWidth > 0.01f || rs.borderLeftWidth > 0.01f))
             {
                 // Different styles per side: each side its own stroke, dashed or dotted as it says, none drawing nothing.
@@ -397,7 +403,7 @@ internal static class VectorEmitter
                 // A ring with a differently coloured side (the classic spinner): one stroked
                 // arc path per side, each running from the middle of one corner arc to the
                 // middle of the next, so the sides meet cleanly with butt caps.
-                SideArcs(ctx, indent, x, y, w, h, bw, rs);
+                SideArcs(ctx, indent, x, y, w, h, bw, rs, new[] { rs.borderTopColor, rs.borderRightColor, rs.borderBottomColor, rs.borderLeftColor });
             }
             else if (bw > 0.01f && rs.borderTopColor.a > 0.002f && sameWidth)
             {
@@ -511,7 +517,22 @@ internal static class VectorEmitter
             ctx.Body.Append(indent).Append("}\n");
     }
 
-    private static void SideArcs(Ctx ctx, string indent, float x, float y, float w, float h, float bw, OffThread.Box rs)
+    /// <summary>Every side with a border is solid and of one width; the others draw nothing (their colour is clear).</summary>
+    private static bool RoundedSides(string[] styles, OffThread.Box rs, out float width, out Color[] colours)
+    {
+        var widths = new[] { rs.borderTopWidth, rs.borderRightWidth, rs.borderBottomWidth, rs.borderLeftWidth };
+        colours = new[] { rs.borderTopColor, rs.borderRightColor, rs.borderBottomColor, rs.borderLeftColor };
+        width = 0f;
+        for (var i = 0; i < 4; i++)
+        {
+            if (styles[i] is "none" or "hidden" || widths[i] <= 0.01f) { colours[i] = Color.clear; continue; }
+            if (styles[i] != "solid" || (width > 0f && !Mathf.Approximately(width, widths[i]))) return false;
+            width = widths[i];
+        }
+        return width > 0f;
+    }
+
+    private static void SideArcs(Ctx ctx, string indent, float x, float y, float w, float h, float bw, OffThread.Box rs, Color[] colours)
     {
         // Stroke path inset by half the width; radii shrink by the same amount.
         var half = bw * 0.5f;
@@ -531,10 +552,10 @@ internal static class VectorEmitter
         Vector2 mtl = ctl + new Vector2(-k * tl, -k * tl), mtr = ctr + new Vector2(k * tr, -k * tr), mbr = cbr + new Vector2(k * br, k * br), mbl = cbl + new Vector2(-k * bl, k * bl);
 
         // Each side: arc out of the previous corner, straight run, arc into the next corner.
-        Arc(ctx, indent, bw, rs.borderTopColor, mtl, tl, new Vector2(x + tl, y), new Vector2(x + w - tr, y), tr, mtr);
-        Arc(ctx, indent, bw, rs.borderRightColor, mtr, tr, new Vector2(x + w, y + tr), new Vector2(x + w, y + h - br), br, mbr);
-        Arc(ctx, indent, bw, rs.borderBottomColor, mbr, br, new Vector2(x + w - br, y + h), new Vector2(x + bl, y + h), bl, mbl);
-        Arc(ctx, indent, bw, rs.borderLeftColor, mbl, bl, new Vector2(x, y + h - bl), new Vector2(x, y + tl), tl, mtl);
+        Arc(ctx, indent, bw, colours[0], mtl, tl, new Vector2(x + tl, y), new Vector2(x + w - tr, y), tr, mtr);
+        Arc(ctx, indent, bw, colours[1], mtr, tr, new Vector2(x + w, y + tr), new Vector2(x + w, y + h - br), br, mbr);
+        Arc(ctx, indent, bw, colours[2], mbr, br, new Vector2(x + w - br, y + h), new Vector2(x + bl, y + h), bl, mbl);
+        Arc(ctx, indent, bw, colours[3], mbl, bl, new Vector2(x, y + h - bl), new Vector2(x, y + tl), tl, mtl);
     }
 
     private static void Arc(Ctx ctx, string indent, float bw, Color c, Vector2 from, float r0, Vector2 a, Vector2 b, float r1, Vector2 to)

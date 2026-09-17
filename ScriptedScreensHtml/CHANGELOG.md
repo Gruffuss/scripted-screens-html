@@ -11,6 +11,19 @@ Newest first. The workshop page is a short overview; this file has the full hist
 - A page rebuilt for a screen capture runs its script to the first render, then gets the data Lua
   sent, then a few frames, so the capture shows the page as its script draws it.
 - The Apple mockup keeps its lists' scroll positions when it redraws.
+- `examples/07-game.lua`: Stationeer Run, an endless runner played with clicks, with a demo that
+  plays itself until someone taps.
+- `requestAnimationFrame` runs once per game frame, and a frame's writes reach the screen in the
+  next one (animation frames were capped at 30 a second and landed two or three frames late).
+- `document.getElementById` returns the same object for the same element, and a lookup no longer
+  waits for the frame's style writes to be applied (a script that moved elements ran at 3 frames
+  a second).
+- An element moved by a script sends new values, not a new scene structure.
+- A class or attribute change undoes what the rules that stopped matching had set (a title stayed
+  red after its parent lost the class that coloured it); a script's `element.style` values survive
+  the re-cascade and win over the rules, as the style attribute does.
+- A rounded box with some sides unbordered (`border-bottom: none`) draws the others along its
+  rounded corners.
 - Pages are laid out with the faces the Fonts mod and the game registered, mirrored by name; the
   mod reads no font files and knows no font folders (a Workshop install names mod folders by item
   id, and player fonts live where the Fonts mod keeps them). A face registered later is picked up

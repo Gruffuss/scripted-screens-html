@@ -22,6 +22,85 @@ internal static class StyleApplier
 
     private static readonly HashSet<string> Reported = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// A property the cascade no longer sets (its rule stopped matching) goes back to its initial
+    /// value. Properties only the emitter reads (gradients, shadows, clips) are undone by their
+    /// removal from the record; ponytail: rarer layout properties keep their last value.
+    /// </summary>
+    public static void Reset(VisualElement ve, string name)
+    {
+        var s = ve.style;
+        var none = StyleKeyword.Null;
+        switch (name)
+        {
+            case "width": s.width = none; break;
+            case "height": s.height = none; break;
+            case "min-width": s.minWidth = none; break;
+            case "min-height": s.minHeight = none; break;
+            case "max-width": s.maxWidth = none; break;
+            case "max-height": s.maxHeight = none; break;
+            case "margin": s.marginTop = s.marginRight = s.marginBottom = s.marginLeft = none; break;
+            case "margin-top": s.marginTop = none; break;
+            case "margin-right": s.marginRight = none; break;
+            case "margin-bottom": s.marginBottom = none; break;
+            case "margin-left": s.marginLeft = none; break;
+            case "padding": s.paddingTop = s.paddingRight = s.paddingBottom = s.paddingLeft = none; break;
+            case "padding-top": s.paddingTop = none; break;
+            case "padding-right": s.paddingRight = none; break;
+            case "padding-bottom": s.paddingBottom = none; break;
+            case "padding-left": s.paddingLeft = none; break;
+            case "position": s.position = none; break;
+            case "left": s.left = none; break;
+            case "top": s.top = none; break;
+            case "right": s.right = none; break;
+            case "bottom": s.bottom = none; break;
+            case "inset": s.top = s.right = s.bottom = s.left = none; break;
+            case "display": s.display = none; s.flexDirection = none; break;
+            case "flex-direction": s.flexDirection = none; break;
+            case "flex-wrap": s.flexWrap = none; break;
+            case "flex-grow": s.flexGrow = none; break;
+            case "flex-shrink": s.flexShrink = none; break;
+            case "flex-basis": s.flexBasis = none; break;
+            case "flex": s.flexGrow = none; s.flexShrink = none; s.flexBasis = none; break;
+            case "justify-content": s.justifyContent = none; break;
+            case "align-items": s.alignItems = none; break;
+            case "align-self": s.alignSelf = none; break;
+            case "align-content": s.alignContent = none; break;
+            case "overflow": case "overflow-y": s.overflow = none; break;
+            case "visibility": s.visibility = none; break;
+            case "opacity": s.opacity = none; break;
+            case "color": s.color = none; break;
+            case "background": case "background-color": s.backgroundColor = none; break;
+            case "border-color": s.borderTopColor = s.borderRightColor = s.borderBottomColor = s.borderLeftColor = none; break;
+            case "border-top-color": s.borderTopColor = none; break;
+            case "border-right-color": s.borderRightColor = none; break;
+            case "border-bottom-color": s.borderBottomColor = none; break;
+            case "border-left-color": s.borderLeftColor = none; break;
+            case "border": case "border-width":
+                s.borderTopWidth = s.borderRightWidth = s.borderBottomWidth = s.borderLeftWidth = none;
+                s.borderTopColor = s.borderRightColor = s.borderBottomColor = s.borderLeftColor = none;
+                break;
+            case "border-top": case "border-top-width": s.borderTopWidth = none; break;
+            case "border-right": case "border-right-width": s.borderRightWidth = none; break;
+            case "border-bottom": case "border-bottom-width": s.borderBottomWidth = none; break;
+            case "border-left": case "border-left-width": s.borderLeftWidth = none; break;
+            case "border-radius": s.borderTopLeftRadius = s.borderTopRightRadius = s.borderBottomRightRadius = s.borderBottomLeftRadius = none; break;
+            case "font-family": s.face = null; break;
+            case "font-size": s.fontSize = none; break;
+            case "font-weight": case "font-style": s.unityFontStyleAndWeight = none; break;
+            case "text-align": s.unityTextAlign = none; break;
+            case "white-space": s.whiteSpace = none; break;
+            case "letter-spacing": s.letterSpacing = none; break;
+            case "word-spacing": s.wordSpacing = none; break;
+            case "text-transform": s.textTransform = null; break;
+            case "text-overflow": s.textOverflow = none; break;
+            case "transform": s.translate = none; s.rotate = none; s.scale = none; break;
+            case "translate": s.translate = none; break;
+            case "rotate": s.rotate = none; break;
+            case "scale": s.scale = none; break;
+        }
+    }
+
     public static void Apply(VisualElement ve, CssDeclaration d, Action<string>? warn)
     {
         var v = d.Value.Trim();

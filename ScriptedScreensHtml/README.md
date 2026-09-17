@@ -187,8 +187,8 @@ writes. `console.log` goes to the BepInEx log.
 
 Use it for what a browser page would use it for: building the DOM from data, reacting to
 clicks, drawing on a canvas. Do not use it for animation loops that could be CSS or an SVG
-expression: a `requestAnimationFrame` loop costs one page emit per frame (capped at 30 a
-second), a CSS animation costs nothing.
+expression: a `requestAnimationFrame` loop costs one page emit per game frame (off the game thread, but
+not free), a CSS animation costs nothing.
 
 ## Performance, in one paragraph
 
@@ -228,6 +228,7 @@ Script errors are logged with their message and stack. StationeersLua's MCP tool
 | `04-svg-gauge.lua` | an SVG tank with an expression-driven surface fed by `$level` |
 | `05-script.lua` | a page script building a table from a `data` event and reacting to clicks |
 | `06-console.lua` | a complete gas monitor: grid layout, live values, alarms, a history graph |
+| `07-game.lua` | Stationeer Run, an endless runner: a `requestAnimationFrame` loop, clicks, a demo that plays itself |
 `mockups/` beside them holds three complete consoles written as browser pages, each opening
 on the screen named by `TAB` at its top (`atmo`, `supply`, `filter`, `alarm`, `config`):
 

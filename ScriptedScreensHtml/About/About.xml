@@ -20,7 +20,7 @@ Adds an [b]html[/b] element to ScriptedScreens consoles: give it HTML, CSS and, 
 [/list]
 
 [h2]Getting started[/h2]
-The mod folder holds six examples that run on paste, three complete console mockups, a one-page QUICKSTART.md, the guide (README.md), the support list (SUPPORT.md) and the release history (CHANGELOG.md), also [url=https://github.com/Gruffuss/scripted-screens-html/tree/main/ScriptedScreensHtml]on GitHub[/url]. With StationeersLua installed, AI editors can read and search the same docs through its MCP server.
+The mod folder holds seven examples that run on paste (one is a small game), three complete console mockups, a one-page QUICKSTART.md, the guide (README.md), the support list (SUPPORT.md) and the release history (CHANGELOG.md), also [url=https://github.com/Gruffuss/scripted-screens-html/tree/main/ScriptedScreensHtml]on GitHub[/url]. With StationeersLua installed, AI editors can read and search the same docs through its MCP server.
 
 [h2]What's new in 0.2.0[/h2]
 [list]
