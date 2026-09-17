@@ -467,8 +467,12 @@ internal sealed class HtmlSurface : MonoBehaviour
                 _scriptPending = false;
                 _script.Run(_built?.Script ?? string.Empty);
             }
+            var w0 = Clock.Elapsed.TotalMilliseconds;
+            var timedOut = 0;
             for (var k = 0; k < 6; k++)
-                _script.RunSynchronously(Time.time + k * 0.1f, _byId, 300);
+                if (!_script.RunSynchronously(Time.time + k * 0.1f, _byId, 300)) timedOut++;
+            if (HtmlConfig.Diagnostics)
+                ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{ElementId}\": capture warm-up {Clock.Elapsed.TotalMilliseconds - w0:0} ms, {timedOut} of 6 frames timed out");
             _script.Pump(); // what the last frame queued lands before the capture's emit
         }
         EmitNowInline();

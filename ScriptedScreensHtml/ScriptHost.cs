@@ -284,10 +284,11 @@ internal sealed class ScriptHost : IDisposable
     }
 
     /// <summary>Run everything queued plus one frame and wait for it (capture path). Main thread.</summary>
-    public void RunSynchronously(float nowSeconds, Dictionary<string, VisualElement> elements, int timeoutMs)
+    /// <returns>Whether the frame finished within the timeout.</returns>
+    public bool RunSynchronously(float nowSeconds, Dictionary<string, VisualElement> elements, int timeoutMs)
     {
         if (_dead)
-            return;
+            return false;
         Snapshot(elements);
         using var done = new ManualResetEventSlim(false);
         _toEngine.Enqueue(() =>
@@ -299,6 +300,7 @@ internal sealed class ScriptHost : IDisposable
         var until = Environment.TickCount + timeoutMs;
         while (!done.Wait(5) && Environment.TickCount < until) Pump();
         Pump();
+        return done.IsSet;
     }
 
     public void Dispose()
