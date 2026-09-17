@@ -218,22 +218,25 @@ function scenery() {
     s += '<div class="star" style="left:' + x + 'px;top:' + y + 'px;opacity:' + o.toFixed(2) + '"></div>';
   }
   $('stars').innerHTML = s;
+  // one run of hills across 800px, drawn twice: sliding by 800 then lands on the same shapes
   const ridge = (id, n, h, w, seed) => {
     let r = '';
     for (let i = 0; i < n; i++) {
       const hh = h + ((i * seed) % 5) * 14, ww = w + ((i * seed) % 3) * 40;
-      r += '<div style="left:' + (i * 1600 / n) + 'px;top:' + (GROUND - hh) + 'px;width:' + ww + 'px;height:' + hh + 'px"></div>';
+      const x = i * 800 / n;
+      r += '<div style="left:' + x + 'px;top:' + (GROUND - hh) + 'px;width:' + ww + 'px;height:' + hh + 'px"></div>'
+        + '<div style="left:' + (x + 800) + 'px;top:' + (GROUND - hh) + 'px;width:' + ww + 'px;height:' + hh + 'px"></div>';
     }
     $(id).innerHTML = r;
   };
   ridge('ridgeFar', 8, Math.round(70 * K), 220, 3);
   ridge('ridgeNear', 6, Math.round(40 * K), 260, 7);
   let d = '';
-  for (let i = 0; i < 2; i++)
+  for (let i = 0; i < 2; i++)  // the same dome 800px apart, so the slide repeats on itself
     d += '<div class="dome" style="left:' + (300 + i * 800) + 'px;top:' + GROUND + 'px"><div class="cap"></div><div class="base"></div><div class="lamp"></div></div>';
   $('domes').innerHTML = d;
   let p = '';
-  for (let i = 0; i < 14; i++)
+  for (let i = 0; i < 14; i++)   // each pebble keeps its own place in the 800px run and wraps there
     p += '<div class="pebble" id="pb' + i + '" style="width:' + (8 + (i * 7) % 20) + 'px;top:' + (GROUND + 12 + (i * 13) % Math.max(12, FIELD_H - GROUND - 18)) + 'px"></div>';
   $('pebbles').innerHTML = p;
   let o = '';
@@ -447,7 +450,7 @@ function draw() {
   $('ridgeNear').style.transform = 'translateX(' + (-g.near).toFixed(1) + 'px)';
   $('domes').style.transform = 'translateX(' + (-g.domes).toFixed(1) + 'px)';
   for (let i = 0; i < 14; i++) {
-    const x = ((i * 61 + 800) - g.ground % 800 + 800) % 860 - 30;
+    const x = (i * 57 + 11 - g.ground + 1600) % 800 - 20;
     $('pb' + i).style.transform = 'translateX(' + x.toFixed(1) + 'px)';
   }
   for (const o of obs) {

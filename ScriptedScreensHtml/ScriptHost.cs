@@ -596,6 +596,17 @@ internal sealed class ScriptHost : IDisposable
         {
             var ve = _find(id);
             if (ve == null) return;
+            // A custom property is not a style of its own: it is declared on the element, and every
+            // rule that reads it with var() is cascaded again for the element and its subtree.
+            if (css.StartsWith("--", StringComparison.Ordinal))
+            {
+                if (_findNode(id) is not { } target) return;
+                if (value.Trim().Length == 0) target.Vars?.Remove(css);
+                else (target.Vars ??= new Dictionary<string, string>(StringComparer.Ordinal))[css] = value.Trim();
+                _built?.Reclass(ve, target.Attr("class") ?? string.Empty);
+                _onLayoutAttr?.Invoke();
+                return;
+            }
             // var()/env() in a script's value resolve against the element, as the cascade would
             if (HtmlRenderer.HasFn(value) && _findNode(id) is { } vnode) value = HtmlRenderer.ResolveVars(value, vnode);
             if (!css.StartsWith("animation", StringComparison.Ordinal)) StyleApplier.Apply(ve, new CssDeclaration(css, value), Report);

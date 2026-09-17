@@ -25,6 +25,8 @@ Newest first. The workshop page is a short overview; this file has the full hist
   the re-cascade and win over the rules, as the style attribute does.
 - Writing the same `element.style`, class or text again changes nothing, so a page whose script
   rewrites unchanged values every frame is not laid out and translated again.
+- A script's `element.style.setProperty('--name', ...)` declares the custom property on the
+  element and re-runs the rules that read it with `var()`, as a browser does.
 - A number with `tabular-nums` set on an ancestor keeps one width while it counts; the width pass
   ignored inherited values, so a changing score wrapped under its label for a frame.
 - A rounded box with some sides unbordered (`border-bottom: none`) draws the others along its
