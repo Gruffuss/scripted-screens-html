@@ -34,7 +34,7 @@ Full history: [url=https://github.com/Gruffuss/scripted-screens-html/blob/main/S
 [list]
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3666779631]ScriptedScreens[/url] (required)
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3787517570]ScriptedScreens Vector[/url] (required, draws the page)
-[*] [url=https://github.com/Gruffuss/scripted-screens-fonts]ScriptedScreens Fonts[/url] (required, the typefaces)
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3803224901]ScriptedScreens Fonts[/url] (required, the typefaces)
 [*] [url=https://github.com/StationeersLaunchPad/StationeersLaunchPad]StationeersLaunchPad[/url] with [url=https://github.com/BepInEx/BepInEx]BepInEx 5.x[/url]
 [/list]
 Source: [url=https://github.com/Gruffuss/scripted-screens-html]github.com/Gruffuss/scripted-screens-html[/url] (MIT).
@@ -52,6 +52,9 @@ Source: [url=https://github.com/Gruffuss/scripted-screens-html]github.com/Gruffu
 		</Mod>
 		<Mod>
 			<Id>3787517570</Id>
+		</Mod>
+		<Mod>
+			<Id>3803224901</Id>
 		</Mod>
 	</Dependencies>
 </ModMetadata>
