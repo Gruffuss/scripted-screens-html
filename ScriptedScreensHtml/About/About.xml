@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ModMetadata xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-	<Name>ScriptedScreens Html [StationeersLaunchPad]</Name>
-	<Author>Gruffuss</Author>
-	<Version>0.2.0.0</Version>
-	<Description>
+  <Name>ScriptedScreens Html [StationeersLaunchPad]</Name>
+  <ModID>gruffuss.stationeers.scriptedscreens.html</ModID>
+  <Author>Gruffuss</Author>
+  <Version>0.2.0.0</Version>
+  <Description>
 [h1]ScriptedScreens Html[/h1]
 [i]Write a console screen as a web page. Client-side only.[/i]
 
@@ -39,22 +40,16 @@ Full history: [url=https://github.com/Gruffuss/scripted-screens-html/blob/main/S
 [/list]
 Source: [url=https://github.com/Gruffuss/scripted-screens-html]github.com/Gruffuss/scripted-screens-html[/url] (MIT).
 	</Description>
-	<WorkshopHandle>0</WorkshopHandle>
-	<Tags>
-		<Tag>Mod</Tag>
-		<Tag>BepInEx</Tag>
-		<Tag>StationeersLaunchPad</Tag>
-	</Tags>
-	<ModID>gruffuss.stationeers.scriptedscreens.html</ModID>
-	<Dependencies>
-		<Mod>
-			<Id>3666779631</Id>
-		</Mod>
-		<Mod>
-			<Id>3787517570</Id>
-		</Mod>
-		<Mod>
-			<Id>3803224901</Id>
-		</Mod>
-	</Dependencies>
+  <ChangeLog xsi:nil="true" />
+  <WorkshopHandle>3803228086</WorkshopHandle>
+  <IsBetaProgramMod>false</IsBetaProgramMod>
+  <Tags>
+    <Tag>Mod</Tag>
+    <Tag>BepInEx</Tag>
+    <Tag>StationeersLaunchPad</Tag>
+  </Tags>
+  <DependsOn WorkshopHandle="3666779631" />
+  <DependsOn WorkshopHandle="3787517570" />
+  <DependsOn WorkshopHandle="3803224901" />
+  <InGameDescription xsi:nil="true" />
 </ModMetadata>
