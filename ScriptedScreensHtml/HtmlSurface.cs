@@ -89,6 +89,7 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     internal void SetSource(string source)
     {
+        Hold();
         _source = source;
         if (!Surfaces.Contains(this))
             Surfaces.Add(this);
@@ -114,7 +115,9 @@ internal sealed class HtmlSurface : MonoBehaviour
         try { UpdateInner(); }
         finally
         {
-            _updateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - u0;
+            var spent = System.Diagnostics.Stopwatch.GetTimestamp() - u0;
+            _updateTicks += spent;
+            _allUpdateTicks += spent;
             if (_document != null && _document.gameObject.activeSelf) _awakeCount++;
         }
     }
@@ -130,7 +133,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         }
         // The script runs whether or not the panel is awake: a timer on a static page must fire.
         // Its writes wake the panel so the change is laid out and emitted.
-        if (_script != null && _panel == null)
+        if (_script != null && _panel == null && _job == null)
         {
             if (_scriptPending) { _scriptPending = false; _script.Run(_built?.Script ?? string.Empty); }
             if (_script.Frame(Time.time, _byId)) { _dirty = true; _dScript++; Wake(); }
@@ -138,6 +141,12 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (_panel == null)
             return;
         ReportIfDue();
+        if (_job != null)
+        {
+            if (!_job.IsCompleted)
+                return; // the worker reads this page: nothing changes it until the job ends
+            FinishJob();
+        }
 
         // A texture created last frame has been painted into (offscreen panels repaint
         // after LateUpdate), so it can be shown now. Showing it the frame it was created
@@ -224,7 +233,9 @@ internal sealed class HtmlSurface : MonoBehaviour
                 _seenLayoutWrites = writes;
                 _settleFrames = 0;
                 _dirty = false;
+                var e0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 EmitToVector();
+                _allEmitTicks += System.Diagnostics.Stopwatch.GetTimestamp() - e0;
             }
         }
 
@@ -561,6 +572,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// </summary>
     internal void EmitNow()
     {
+        Hold();
         // A capture builds and copies the page in one call. The script gets a few frames
         // first (its load work, a short timer, an animation frame), each waited for, so the
         // capture shows what the script drew rather than the bare markup.
@@ -571,12 +583,12 @@ internal sealed class HtmlSurface : MonoBehaviour
             _script.Pump(); // what the last frame queued lands before the capture's emit
         }
         _dirty = false;
-        EmitToVector();
+        EmitToVector(inline: true);
         if (_restore != null)
         {
             // the layout exists now: put the old surface's hover, press and focus back and emit once more
             ApplyRestoredPointer();
-            if (_dirty) { _dirty = false; EmitToVector(); }
+            if (_dirty) { _dirty = false; EmitToVector(inline: true); }
         }
     }
 
@@ -756,11 +768,14 @@ internal sealed class HtmlSurface : MonoBehaviour
     private static readonly List<HtmlSurface> Surfaces = new();
     private static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
     private static double _nextReport;
+    private static int _framesAtReport;
+    private static long _allUpdateTicks, _allEmitTicks;
     private const double ReportIntervalSeconds = 1.0;
     private int _emits;
     private int _emitsAtReport;
     private double _lastLayoutMs;
     private double _lastTranslateMs;
+    private double _translateMsTotal;
     private int _lastNodes;
     private int _lastChars;
 
@@ -772,8 +787,15 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (now < _nextReport)
             return;
         _nextReport = now + ReportIntervalSeconds;
-        ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: frames over 25 ms: {_slowFrames}, slowest {_worstFrame:0} ms, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}");
+        var frames = Mathf.Max(1, Time.frameCount - _framesAtReport);
+        _framesAtReport = Time.frameCount;
+        double PerFrame(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / frames;
+        ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: frames over 25 ms: {_slowFrames}, slowest {_worstFrame:0} ms, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}; "
+            + $"game thread per frame: ui toolkit update {PerFrame(UiToolkitPatch.UpdateTicks):0.00} ms + paint {PerFrame(UiToolkitPatch.RepaintTicks):0.00} ms, "
+            + $"pages {PerFrame(_allUpdateTicks):0.00} ms (emit {PerFrame(_allEmitTicks):0.00})");
         _slowFrames = 0; _worstFrame = 0f;
+        UiToolkitPatch.UpdateTicks = UiToolkitPatch.RepaintTicks = 0;
+        _allUpdateTicks = _allEmitTicks = 0;
         foreach (var page in Surfaces)
         {
             if (page == null || page._built == null)
@@ -782,130 +804,236 @@ internal sealed class HtmlSurface : MonoBehaviour
             page._emitsAtReport = page._emits;
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
                 $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
-                + $"(layout {page._lastLayoutMs:0.0} + translate {page._lastTranslateMs:0.0}), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
+                + $"(layout {page._lastLayoutMs:0.00} + copy {page._lastCopyMs:0.00} on the game thread, translate {page._lastTranslateMs:0.0} on a worker, {page._translateMsTotal / ReportIntervalSeconds:0.0} ms/s; waited {page._heldMs:0.00} ms), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
                 + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}");
             page._dScript = page._dAnim = page._dTween = page._dDom = page._dOther = 0;
             page._structureSends = page._patchSends = page._patchSlots = page._morphs = 0;
-            page._updateTicks = 0; page._awakeCount = 0;
+            page._updateTicks = 0; page._awakeCount = 0; page._translateMsTotal = 0; page._heldMs = 0;
         }
     }
 
-    private void EmitToVector()
+    // ---- translation off the game thread ----
+    // The game thread lays the page out and copies what the translator reads (OffThread.Capture);
+    // a worker translates the copy, splits it into a template and values and decides what to send;
+    // the game thread hands that to the vector mod on a later frame. While a job runs nothing
+    // changes the page: Update waits, and every entry point that would change it finishes the job
+    // first (Hold), which normally costs nothing since a job ends long before the next frame.
+
+    private sealed class EmitResult
     {
+        public VectorEmitter.Output Output = null!;
+        public double TranslateMs;
+        public bool Stale;
+        public SS.UiProp[]? Patch;
+        public string? Structure;
+        public SS.UiProp[]? Values;
+        public string? Why;
+    }
+
+    private System.Threading.Tasks.Task<EmitResult>? _job;
+    private readonly Dictionary<VisualElement, OffThread.Box> _boxes = new();
+    private readonly List<VisualElement> _boxScratch = new();
+    private double _lastCopyMs;
+
+    /// <summary>Finishes a translation in flight before the page changes. Game thread.</summary>
+    private void Hold()
+    {
+        if (_job == null)
+            return;
+        if (!_job.IsCompleted)
+        {
+            var w0 = Clock.Elapsed.TotalMilliseconds;
+            try { _job.Wait(); } catch (AggregateException) { }
+            _heldMs += Clock.Elapsed.TotalMilliseconds - w0;
+        }
+        FinishJob();
+    }
+
+    private double _heldMs;
+
+    /// <summary>Lays the page out, copies it and starts its translation; <paramref name="inline"/> runs it on the game thread (a capture needs the scene inside the call).</summary>
+    private void EmitToVector(bool inline = false)
+    {
+        Hold();
         if (_content == null || _document == null || _built == null)
             return;
         var t0 = Clock.Elapsed.TotalMilliseconds;
         Wake();
         UpdateRuntimePanels?.Invoke(null, null);
-        var root = _document.rootVisualElement;
-        if (root == null)
+        if (_document.rootVisualElement == null)
             return;
-
-        var layout = LayoutSize();
-        _tweens.Diff(_content, _built, Time.time);
         var t1 = Clock.Elapsed.TotalMilliseconds;
-        if (_lastTemplate == null) _tweens.Epoch = Time.time;
-        var output = VectorEmitter.Emit(_built, _content, layout.x, layout.y, _tweens, Time.time, ScrollSet);
+        OffThread.Capture(_content, _built, _boxes, _boxScratch);
+        var layout = LayoutSize();
+        var globals = OffThread.Globals.Take();
+        var now = Time.time;
+        var diagnostics = HtmlConfig.Diagnostics;
+        var t2 = Clock.Elapsed.TotalMilliseconds;
         _lastLayoutMs = t1 - t0;
-        _lastTranslateMs = Clock.Elapsed.TotalMilliseconds - t1;
+        _lastCopyMs = t2 - t1;
+        if (inline)
+        {
+            var result = Translate(layout, now, globals, diagnostics, worker: false);
+            _job = System.Threading.Tasks.Task.FromResult(result);
+            FinishJob();
+            return;
+        }
+        _job = System.Threading.Tasks.Task.Run(() => Translate(layout, now, globals, diagnostics, worker: true));
+    }
+
+    /// <summary>The job: translation, template split and the send decision. Reads only the copies; touches only this surface's own send state.</summary>
+    private EmitResult Translate(Vector2 layout, float now, OffThread.Globals globals, bool diagnostics, bool worker)
+    {
+        var r = new EmitResult();
+        var c0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        OffThread.Active = worker;
+        OffThread.Boxes = _boxes;
+        OffThread.Job = globals;
+        OffThread.Stale = false;
+        try
+        {
+            _tweens.Diff(_content!, _built!, now);
+            if (_lastTemplate == null) _tweens.Epoch = now;
+            var output = VectorEmitter.Emit(_built!, _content!, layout.x, layout.y, _tweens, now, ScrollSet);
+            r.Output = output;
+            var template = SceneSlots.Split(output.Scene, _slotScratch, _slotPrefix);
+            if (template == _lastTemplate)
+            {
+                _lastScene = output.Scene;
+                List<SS.UiProp>? patch = null;
+                foreach (var kv in _slotScratch)
+                {
+                    if (_sentValues.TryGetValue(kv.Key, out var was) && was.Equals(kv.Value)) continue;
+                    (patch ??= new List<SS.UiProp>()).Add(Prop(kv.Key, kv.Value));
+                    _sentValues[kv.Key] = kv.Value;
+                }
+                r.Patch = patch?.ToArray();
+                return r;
+            }
+            if (diagnostics && _lastTemplate != null && OffThread.Seconds - _lastWhyAt > 2f)
+            {
+                // why this is a structure and not a patch: the first line that differs
+                _lastWhyAt = OffThread.Seconds;
+                var was = _lastTemplate.Split('\n');
+                var cur = template.Split('\n');
+                var k = 0;
+                while (k < was.Length && k < cur.Length && was[k] == cur[k]) k++;
+                var la = k < was.Length ? was[k] : string.Empty;
+                var lb = k < cur.Length ? cur[k] : string.Empty;
+                var c = 0;
+                while (c < la.Length && c < lb.Length && la[c] == lb[c]) c++;
+                var from = Math.Max(0, c - 40);
+                string Cut(string[] lines) => k < lines.Length ? lines[k].Substring(Math.Min(from, lines[k].Length), Math.Min(120, Math.Max(0, lines[k].Length - from))).Trim() : "(end)";
+                r.Why = $"html \"{ElementId}\": new structure ({was.Length} -> {cur.Length} lines), first difference at line {k}: \"{Cut(was)}\" -> \"{Cut(cur)}\"; last in-place miss: {HtmlRenderer.LastMorphMiss ?? "none"}";
+            }
+            // A new structure restarts the vector clock: running tweens are written against that moment.
+            if (_tweens.Any && _lastTemplate != null)
+            {
+                _tweens.Epoch = now;
+                output = VectorEmitter.Emit(_built!, _content!, layout.x, layout.y, _tweens, now, ScrollSet);
+                r.Output = output;
+            }
+            // A new structure takes the other slot names: its values, sent before it, must not land on
+            // the structure still on screen (where the same name means another value). Two sets alternate,
+            // so the vector mod's table stays bounded.
+            if (_lastTemplate != null)
+                _slotPrefix = _slotPrefix == "L" ? "M" : "L";
+            template = SceneSlots.Split(output.Scene, _slotScratch, _slotPrefix);
+            _tweens.Epoch = now;
+            _lastScene = output.Scene;
+            _lastTemplate = template;
+            _sentValues.Clear();
+            var values = new SS.UiProp[_slotScratch.Count];
+            var n = 0;
+            foreach (var kv in _slotScratch)
+            {
+                values[n++] = Prop(kv.Key, kv.Value);
+                _sentValues[kv.Key] = kv.Value;
+            }
+            r.Values = values;
+            r.Structure = template;
+            return r;
+        }
+        finally
+        {
+            r.Stale = OffThread.Stale;
+            OffThread.Active = false;
+            OffThread.Boxes = null;
+            r.TranslateMs = (System.Diagnostics.Stopwatch.GetTimestamp() - c0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        }
+    }
+
+    private static SS.UiProp Prop(string key, SceneSlots.Value v) =>
+        new() { Key = key, Value = v.IsNumber ? SS.UiValue.FromNumber(v.Number) : SS.UiValue.FromString(v.Text ?? string.Empty) };
+
+    /// <summary>Hands a finished translation to the vector mod. Game thread.</summary>
+    private void FinishJob()
+    {
+        var job = _job;
+        if (job == null || !job.IsCompleted)
+            return;
+        _job = null;
+        if (job.IsFaulted)
+        {
+            // a translation that failed leaves no trustworthy send state: the next one sends everything
+            ScriptedScreensHtmlPlugin.Log?.LogError($"html \"{ElementId}\": translation failed: {job.Exception?.InnerException}");
+            _lastTemplate = null;
+            return;
+        }
+        var r = job.Result;
+        _tweens.ApplyHides();
+        if (OffThread.ResolveFonts()) { _dirty = true; _dOther++; }
+        if (r.Stale || r.Output == null)
+        {
+            // the tree changed under the job: try again with a full send
+            _lastTemplate = null;
+            _dirty = true;
+            _dOther++;
+            return;
+        }
+        var output = r.Output;
+        _lastTranslateMs = r.TranslateMs;
+        _translateMsTotal += r.TranslateMs;
         _lastNodes = output.Nodes;
         _lastChars = output.Scene.Length;
         _emits++;
         foreach (var w in output.Warnings)
             ScriptedScreensHtmlPlugin.Log?.LogWarning(w);
-        // An identical scene is normally not resent. While tweens are live it must be: the
-        // vector clock restarts on every apply and the expressions are written against it.
+        if (r.Why != null)
+            ScriptedScreensHtmlPlugin.Log?.LogInfo(r.Why);
         ApplyExternals(output.Externals);
         if (State is not SS.BoardState state)
             return;
-        // Translate once, then send only what changed (REDESIGN.md step 1): the scene's values are
-        // data slots. The same structure as the one the vector mod has is a value patch: no
-        // re-parse, no scene restart, only the slots that changed.
-        var template = SceneSlots.Split(output.Scene, _slotScratch, _slotPrefix);
-        if (template == _lastTemplate)
+        if (r.Structure == null)
         {
-            _lastScene = output.Scene;
-            List<SS.UiProp>? patch = null;
-            foreach (var kv in _slotScratch)
-            {
-                if (_sentValues.TryGetValue(kv.Key, out var was) && was.Equals(kv.Value)) continue;
-                (patch ??= new List<SS.UiProp>()).Add(new SS.UiProp { Key = kv.Key, Value = kv.Value.IsNumber ? SS.UiValue.FromNumber(kv.Value.Number) : SS.UiValue.FromString(kv.Value.Text ?? string.Empty) });
-                _sentValues[kv.Key] = kv.Value;
-            }
-            if (patch != null)
-            {
-                VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
-                    new SS.UiValue { Type = SS.UiValueType.Map, Map = patch.ToArray() }, null, snap: true);
-                _patchSends++;
-                _patchSlots += patch.Count;
-            }
+            if (r.Patch == null)
+                return;
+            VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
+                new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Patch }, null, snap: true);
+            _patchSends++;
+            _patchSlots += r.Patch.Length;
             return;
         }
-        if (HtmlConfig.Diagnostics && _lastTemplate != null && Time.realtimeSinceStartup - _lastWhyAt > 2f)
-        {
-            // why this is a structure and not a patch: the first line that differs
-            _lastWhyAt = Time.realtimeSinceStartup;
-            var was = _lastTemplate.Split('\n');
-            var now = template.Split('\n');
-            var k = 0;
-            while (k < was.Length && k < now.Length && was[k] == now[k]) k++;
-            // the spot in the line where they part, with some context
-            var la = k < was.Length ? was[k] : string.Empty;
-            var lb = k < now.Length ? now[k] : string.Empty;
-            var c = 0;
-            while (c < la.Length && c < lb.Length && la[c] == lb[c]) c++;
-            var from = Math.Max(0, c - 40);
-            string Cut(string[] lines) => k < lines.Length ? lines[k].Substring(Math.Min(from, lines[k].Length), Math.Min(120, Math.Max(0, lines[k].Length - from))).Trim() : "(end)";
-            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{ElementId}\": new structure ({was.Length} -> {now.Length} lines), first difference at line {k}: \"{Cut(was)}\" -> \"{Cut(now)}\"; last in-place miss: {HtmlRenderer.LastMorphMiss ?? "none"}");
-        }
-        // A new structure restarts the vector clock: running tweens are written against that moment.
-        if (_tweens.Any && _lastTemplate != null)
-        {
-            _tweens.Epoch = Time.time;
-            output = VectorEmitter.Emit(_built, _content, layout.x, layout.y, _tweens, Time.time, ScrollSet);
-            template = SceneSlots.Split(output.Scene, _slotScratch);
-        }
-        // A new structure takes the other slot names: its values, sent before it, must not land on
-        // the structure still on screen (where the same name means another value). Two sets alternate,
-        // so the vector mod's table stays bounded.
-        if (_lastTemplate != null)
-        {
-            _slotPrefix = _slotPrefix == "L" ? "M" : "L";
-            template = SceneSlots.Split(output.Scene, _slotScratch, _slotPrefix);
-        }
-        _tweens.Epoch = Time.time;
-        _lastScene = output.Scene;
-        _lastTemplate = template;
         _structureSends++;
+        // the values first, so the structure never shows an unbound slot
+        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
+            new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Values ?? Array.Empty<SS.UiProp>() }, null, snap: true);
+        VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId, r.Structure);
+        if (HtmlConfig.Diagnostics)
+            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: emitted {output.Nodes} vector nodes, {output.Scene.Length} chars");
+        if (HtmlConfig.DumpScenes)
+            DumpScene(output.Scene);
+        if (!_sceneLive)
         {
-            // the values first, so the structure never shows an unbound slot
-            _sentValues.Clear();
-            var slotProps = new SS.UiProp[_slotScratch.Count];
-            var k = 0;
-            foreach (var kv in _slotScratch)
+            // The first structure: data that arrived before it was dropped by the vector
+            // mod (no scene to attach to), so everything forwarded so far goes again.
+            _sceneLive = true;
+            if (_forwarded.Count > 0)
             {
-                slotProps[k++] = new SS.UiProp { Key = kv.Key, Value = kv.Value.IsNumber ? SS.UiValue.FromNumber(kv.Value.Number) : SS.UiValue.FromString(kv.Value.Text ?? string.Empty) };
-                _sentValues[kv.Key] = kv.Value;
-            }
-            VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
-                new SS.UiValue { Type = SS.UiValueType.Map, Map = slotProps }, null, snap: true);
-            VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId, template);
-            if (HtmlConfig.Diagnostics)
-                ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: emitted {output.Nodes} vector nodes, {output.Scene.Length} chars");
-            if (HtmlConfig.DumpScenes)
-                DumpScene(output.Scene);
-            if (!_sceneLive)
-            {
-                // The first structure: data that arrived before it was dropped by the vector
-                // mod (no scene to attach to), so everything forwarded so far goes again.
-                _sceneLive = true;
-                if (_forwarded.Count > 0)
-                {
-                    var all = new List<SS.UiProp>(_forwarded.Count);
-                    foreach (var kv in _forwarded)
-                        all.Add(new SS.UiProp { Key = kv.Key, Value = kv.Value });
-                    SendData(all);
-                }
+                var all = new List<SS.UiProp>(_forwarded.Count);
+                foreach (var kv in _forwarded)
+                    all.Add(new SS.UiProp { Key = kv.Key, Value = kv.Value });
+                SendData(all);
             }
         }
     }
@@ -1047,6 +1175,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// </summary>
     internal bool OnExternalInput(string key, string evt, string value, out string name, out string delivered)
     {
+        Hold();
         name = key;
         delivered = string.Empty;
         if (!_externalNodes.TryGetValue(key, out var node))
@@ -1099,6 +1228,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// </summary>
     internal bool OnControlClick(string key, out string name, out string delivered)
     {
+        Hold();
         name = key;
         delivered = string.Empty;
         if (_built == null || !_byId.TryGetValue(key, out var ve) || !_built.NodeOf.TryGetValue(ve, out var node))
@@ -1277,6 +1407,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>A click on a page click region: the script gets a `click` event on the element, with the pointer's page coordinates. A submit button also fires `submit` on its form.</summary>
     internal void OnPageClick(string key)
     {
+        Hold();
         SetFocus(key);
         _script?.EmitClick(key, _pointerPage.x, _pointerPage.y);
         if (_built != null && _byId.TryGetValue(key, out var ve) && _built.NodeOf.TryGetValue(ve, out var node)
@@ -1319,6 +1450,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>The pointer at a fraction of the host rect: which page boxes are under it.</summary>
     internal void PointerMove(Vector2 fraction)
     {
+        Hold();
         _lastFraction = fraction;
         SavePointer(true, _active.Count > 0, fraction);
         var layout = LayoutSize();
@@ -1338,6 +1470,7 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     internal void PointerLeave()
     {
+        Hold();
         SavePointer(false, false, _lastFraction);
         if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseout", _pointerPage.x, _pointerPage.y);
         _hoverDeepest = null;
@@ -1347,6 +1480,7 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     internal void PointerDown(Vector2 fraction)
     {
+        Hold();
         _lastFraction = fraction;
         SavePointer(true, true, fraction);
         var layout = LayoutSize();
@@ -1359,6 +1493,7 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     internal void PointerUp()
     {
+        Hold();
         SavePointer(true, false, _lastFraction);
         if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseup", _pointerPage.x, _pointerPage.y);
         SetState(_active, "data-active", null);
@@ -1552,6 +1687,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// </summary>
     internal void OnScrollReport(string key, float offset, float max, float view)
     {
+        Hold();
         if (_script == null) return;
         var changed = !_script.ScrollState.TryGetValue(key, out var prev) || Mathf.Abs(prev[0] - offset) > 0.01f || Mathf.Abs(prev[1] - (max + view)) > 0.01f;
         _script.ScrollState[key] = new[] { offset, max + view, view };
@@ -1747,6 +1883,15 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     private void ApplyPairs(List<KeyValuePair<string, SS.UiValue>> entries)
     {
+        // Lua data lands outside Update; its cost counts toward the page's game-thread time all the same
+        var d0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        try { ApplyPairsInner(entries); }
+        finally { _allUpdateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - d0; }
+    }
+
+    private void ApplyPairsInner(List<KeyValuePair<string, SS.UiValue>> entries)
+    {
+        Hold();
         ForwardData(entries);
         // Ids bind first, always: a key naming an element is the simplest contract a page
         // has. A script's data handler gets the same payload as an event afterwards; keys

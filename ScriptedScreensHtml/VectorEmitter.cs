@@ -40,7 +40,6 @@ internal static class VectorEmitter
         public StringBuilder Body = new();
         public StringBuilder Defs = new();
         public HtmlRenderer.Result Built = null!;
-        public Vector2 RootOrigin;
         public int Ids;
         public Output Out = new();
         public HashSet<string> Reported = new(StringComparer.Ordinal);
@@ -63,7 +62,7 @@ internal static class VectorEmitter
 
     public static Output Emit(HtmlRenderer.Result built, VisualElement root, float designW, float designH, Tweens? tweens = null, float now = 0f, Dictionary<string, (float offset, int version)>? scrollSet = null)
     {
-        var ctx = new Ctx { Built = built, RootOrigin = root.worldBound.position, Tw = tweens, Now = now, ScrollSet = scrollSet, PageW = designW, PageH = designH };
+        var ctx = new Ctx { Built = built, Tw = tweens, Now = now, ScrollSet = scrollSet, PageW = designW, PageH = designH };
         var inv = CultureInfo.InvariantCulture;
         EmitElement(ctx, root, Vector2.zero, 0);
         if (ctx.Deferred.Count > 0)
@@ -86,11 +85,11 @@ internal static class VectorEmitter
 
     private static void EmitElement(Ctx ctx, VisualElement ve, Vector2 parentPos, int depth)
     {
-        var rs = ve.resolvedStyle;
+        var rs = OffThread.Of(ve);
         if (rs.display == DisplayStyle.None || rs.visibility == UnityEngine.UIElements.Visibility.Hidden)
             return;
 
-        var layout = ve.layout;
+        var layout = rs.layout;
         if (float.IsNaN(layout.width) || float.IsNaN(layout.height))
             return;
         var x = parentPos.x + layout.x;
@@ -422,7 +421,7 @@ internal static class VectorEmitter
 
         // overflow clips the content, not the box: the element's own background, border and shadow
         // are drawn above, outside its clip (a shadow clipped by its own box was invisible and costly)
-        if (ve.style.overflow.value == Overflow.Hidden && w > 0f && h > 0f)
+        if (rs.overflow == Overflow.Hidden && w > 0f && h > 0f)
         {
             if (Scrolls(css))
             {
@@ -432,10 +431,10 @@ internal static class VectorEmitter
                 var ch = 0f;
                 foreach (var child in ve.Children())
                 {
-                    if (child.resolvedStyle.display == DisplayStyle.None) continue;
-                    var cl = child.layout;
+                    if (OffThread.Of(child).display == DisplayStyle.None) continue;
+                    var cl = OffThread.Of(child).layout;
                     if (float.IsNaN(cl.yMax)) continue;
-                    ch = Mathf.Max(ch, cl.yMax + child.resolvedStyle.marginBottom);
+                    ch = Mathf.Max(ch, cl.yMax + OffThread.Of(child).marginBottom);
                 }
                 ch += rs.paddingBottom;
                 ctx.Body.Append(indent).Append("SC id=").Append(string.IsNullOrEmpty(ve.name) ? "scroll" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture) : ve.name)
@@ -512,7 +511,7 @@ internal static class VectorEmitter
             ctx.Body.Append(indent).Append("}\n");
     }
 
-    private static void SideArcs(Ctx ctx, string indent, float x, float y, float w, float h, float bw, IResolvedStyle rs)
+    private static void SideArcs(Ctx ctx, string indent, float x, float y, float w, float h, float bw, OffThread.Box rs)
     {
         // Stroke path inset by half the width; radii shrink by the same amount.
         var half = bw * 0.5f;
@@ -607,10 +606,10 @@ internal static class VectorEmitter
         var size = "closest-side";
         foreach (var p in parts) if (p is "closest-side" or "farthest-side" or "closest-corner" or "farthest-corner" or "sides") size = p;
         var parent = ve.parent;
-        var pw = parent != null && !float.IsNaN(parent.layout.width) ? parent.layout.width : StyleApplier.ViewportW;
-        var ph = parent != null && !float.IsNaN(parent.layout.height) ? parent.layout.height : StyleApplier.ViewportH;
+        var pw = parent != null && !float.IsNaN(OffThread.Of(parent).layout.width) ? OffThread.Of(parent).layout.width : StyleApplier.ViewportW;
+        var ph = parent != null && !float.IsNaN(OffThread.Of(parent).layout.height) ? OffThread.Of(parent).layout.height : StyleApplier.ViewportH;
         // the start, in the containing block's space: the anchor's own place (auto), the centre (normal), or a position
-        var start = new Vector2(ve.layout.x + (ax - x), ve.layout.y + (ay - y));
+        var start = new Vector2(OffThread.Of(ve).layout.x + (ax - x), OffThread.Of(ve).layout.y + (ay - y));
         if (css.TryGetValue("offset-position", out var op))
         {
             var o = op.Trim().ToLowerInvariant();
@@ -650,7 +649,8 @@ internal static class VectorEmitter
     /// <summary>offset-path: path("...") flattened, with its length; null for anything else.</summary>
     internal static (List<Vector2> pts, float total)? Path(string pathCss)
     {
-        if (PathCache.TryGetValue(pathCss, out var cached)) return cached;
+        lock (PathCache)
+            if (PathCache.TryGetValue(pathCss, out var cached)) return cached;
         var open = pathCss.IndexOf("path(", StringComparison.OrdinalIgnoreCase);
         if (open < 0) return null;
         var close = pathCss.LastIndexOf(')');
@@ -659,8 +659,11 @@ internal static class VectorEmitter
         if (pts.Count < 2) return null;
         var total = 0f;
         for (var i = 1; i < pts.Count; i++) total += Vector2.Distance(pts[i - 1], pts[i]);
-        if (PathCache.Count > 256) PathCache.Clear();
-        PathCache[pathCss] = (pts, total);
+        lock (PathCache)
+        {
+            if (PathCache.Count > 256) PathCache.Clear();
+            PathCache[pathCss] = (pts, total);
+        }
         return (pts, total);
     }
 
@@ -716,8 +719,8 @@ internal static class VectorEmitter
             }
         }
         // the path is in the containing block's space: the parent's origin in page coordinates, less the anchor
-        var ox = x - ve.layout.x - ax;
-        var oy = y - ve.layout.y - ay;
+        var ox = x - OffThread.Of(ve).layout.x - ax;
+        var oy = y - OffThread.Of(ve).layout.y - ay;
         var end = Sample(pts, Mathf.Clamp(dist, 0f, total));
         var place = new OffsetPlace { Dx = ox + end.p.x, Dy = oy + end.p.y, Rot = autoTurn * end.along + extra, Ax = ax, Ay = ay };
         if (tw == null || Mathf.Abs(tw.From.Offset - tw.To.Offset) < 0.01f || tw.P.Length == 0) return place;
@@ -835,7 +838,7 @@ internal static class VectorEmitter
         /// <summary>The element's resolved transform (UI Toolkit has already applied the CSS), tweened if one is running.</summary>
         public static Xform? From(VisualElement ve, Tweens.Tween? tw, float x, float y, float w, float h, OffsetPlace? offset = null)
         {
-            var rs = ve.resolvedStyle;
+            var rs = OffThread.Of(ve);
             var xf = new Xform
             {
                 Ax = offset?.Ax ?? x + w * 0.5f, Ay = offset?.Ay ?? y + h * 0.5f,
@@ -933,7 +936,8 @@ internal static class VectorEmitter
     private static readonly Dictionary<string, (TMP_FontAsset? asset, float at)> FaceAssets = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The TextMeshPro asset a scene `font=` name resolves to (the Fonts mod registers file fonts under their family and style), cached; a miss is retried after 5 s.</summary>
-    private static TMP_FontAsset? AssetOf(string face)
+    /// <remarks>Game thread only; a translation asks <see cref="OffThread.Face"/>.</remarks>
+    internal static TMP_FontAsset? AssetOf(string face)
     {
         if (FaceAssets.TryGetValue(face, out var e) && (e.asset != null || Time.realtimeSinceStartup - e.at < 5f)) return e.asset;
         TMP_FontAsset? found = null;
@@ -948,9 +952,11 @@ internal static class VectorEmitter
     private static readonly Dictionary<string, float> DigitEms = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The face's widest digit advance in em (its tabular cell); 0 when the face is unknown.</summary>
-    private static float DigitEm(string? face)
+    private static float DigitEm(string? face) => face == null ? 0f : OffThread.Digit(face);
+
+    /// <remarks>Game thread only.</remarks>
+    internal static float DigitEmOf(string face)
     {
-        if (face == null) return 0f;
         if (DigitEms.TryGetValue(face, out var em)) return em;
         var asset = AssetOf(face);
         em = 0f;
@@ -971,12 +977,11 @@ internal static class VectorEmitter
     /// </summary>
     internal static string GlyphFallback(string text, string? face)
     {
-        var asset = face != null && !string.Equals(face, FallbackFace, StringComparison.OrdinalIgnoreCase) ? AssetOf(face) : null;
+        var asset = face != null && !string.Equals(face, FallbackFace, StringComparison.OrdinalIgnoreCase) && OffThread.Face(face) ? face : null;
         if (asset == null && text.IndexOf("<font=", StringComparison.Ordinal) < 0) return text;
-        TMP_FontAsset? fb = null; var fbTried = false;
         StringBuilder? sb = null;
         var inRun = false;
-        var stack = new List<TMP_FontAsset?>();
+        var stack = new List<string?>();
         var cur = asset;
         for (var i = 0; i < text.Length; i++)
         {
@@ -988,7 +993,7 @@ internal static class VectorEmitter
                 {
                     var tag = text.Substring(i, close - i + 1);
                     if (inRun) { sb!.Append("</font>"); inRun = false; }
-                    if (tag.StartsWith("<font=", StringComparison.Ordinal)) { stack.Add(cur); cur = AssetOf(tag.Substring(6, tag.Length - 7).Trim('"', '\\', ' ')) ?? cur; }
+                    if (tag.StartsWith("<font=", StringComparison.Ordinal)) { stack.Add(cur); var named = tag.Substring(6, tag.Length - 7).Trim('"', '\\', ' '); if (OffThread.Face(named)) cur = named; }
                     else if (tag == "</font>" && stack.Count > 0) { cur = stack[stack.Count - 1]; stack.RemoveAt(stack.Count - 1); }
                     sb?.Append(tag);
                     i = close;
@@ -996,11 +1001,8 @@ internal static class VectorEmitter
                 }
             }
             var missing = false;
-            if (c >= 0x80 && !char.IsSurrogate(c) && cur != null && !cur.HasCharacter(c))
-            {
-                if (!fbTried) { fb = AssetOf(FallbackFace); fbTried = true; }
-                missing = fb != null && fb.HasCharacter(c, true, true); // the face's own fallback chain counts, and a dynamic atlas adds on request
-            }
+            if (c >= 0x80 && !char.IsSurrogate(c) && cur != null && !OffThread.Has(cur, c, false))
+                missing = OffThread.Has(FallbackFace, c, true); // the face's own fallback chain counts, and a dynamic atlas adds on request
             if (missing)
             {
                 sb ??= new StringBuilder(text, 0, i, text.Length + 40);
@@ -1122,7 +1124,7 @@ internal static class VectorEmitter
         return id;
     }
 
-    private static void GradientBox(Ctx ctx, string css, float x, float y, float w, float h, string ws, string hs, IResolvedStyle rs, string indent, VisualElement ve, Xform? xf, string shadow = "")
+    private static void GradientBox(Ctx ctx, string css, float x, float y, float w, float h, string ws, string hs, OffThread.Box rs, string indent, VisualElement ve, Xform? xf, string shadow = "")
     {
         var parsed = ParseGradient(css);
         if (parsed == null) return;
@@ -1314,7 +1316,7 @@ internal static class VectorEmitter
 
     private static void EmitText(Ctx ctx, Label label, Dictionary<string, string> css, float x, float y, float w, float h, string indent)
     {
-        var rs = label.resolvedStyle;
+        var rs = OffThread.Of(label);
         var text = label.text ?? string.Empty;
         if (text.Length == 0)
             return;
@@ -1356,8 +1358,8 @@ internal static class VectorEmitter
         var centre = align == TextAnchor.MiddleCenter || align == TextAnchor.UpperCenter || align == TextAnchor.LowerCenter;
         var right = align == TextAnchor.MiddleRight || align == TextAnchor.UpperRight || align == TextAnchor.LowerRight;
         // A label in a scrolling box is not clipped to a line: the container slides it.
-        var clipped = (label.style.overflow.value == Overflow.Hidden && !Scrolls(css))
-                      || (label.parent != null && label.parent.style.overflow.value == Overflow.Hidden && !Scrolls(ctx.Built.CssOf(label.parent)));
+        var clipped = (rs.overflow == Overflow.Hidden && !Scrolls(css))
+                      || (label.parent != null && OffThread.Of(label.parent).overflow == Overflow.Hidden && !Scrolls(ctx.Built.CssOf(label.parent)));
         var wraps = rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && (text.IndexOf(' ') >= 0 || text.IndexOf('​') >= 0);
         // text-overflow: ellipsis wants the exact box (the ellipsis sits at its edge); any other clipped
         // label is clipped by its container's CP, so its own rect can carry the slack too
@@ -1430,10 +1432,10 @@ internal static class VectorEmitter
                 // A weight or stretch the family has as a real face beats a synthetic one:
                 // Barlow ships Thin..Black and Condensed, and TextMeshPro's synthetic bold
                 // only widens glyphs.
-                if (css.TryGetValue("font-stretch", out var stretch) && stretch.IndexOf("condensed", StringComparison.OrdinalIgnoreCase) >= 0 && FontLibrary.Get(first + " Condensed") != null)
+                if (css.TryGetValue("font-stretch", out var stretch) && stretch.IndexOf("condensed", StringComparison.OrdinalIgnoreCase) >= 0 && OffThread.Library(first + " Condensed"))
                     first += " Condensed";
                 var weight = WeightFace(css, wantBold);
-                if (weight != null && FontLibrary.Get(first + " " + weight) != null)
+                if (weight != null && OffThread.Library(first + " " + weight))
                 {
                     first += " " + weight;
                     wantBold = false;
@@ -1608,11 +1610,11 @@ internal static class VectorEmitter
     /// and line-through in their colour, thickness, style and offset. The text width is
     /// the layout's measure; the vertical positions follow the label's middle alignment.
     /// </summary>
-    private static void EmitDecoration(Ctx ctx, Label label, Deco d, IResolvedStyle rs, float x, float y, float w, float h, bool centre, bool right, string indent)
+    private static void EmitDecoration(Ctx ctx, Label label, Deco d, OffThread.Box rs, float x, float y, float w, float h, bool centre, bool right, string indent)
     {
         var fs = rs.fontSize;
         if (fs <= 0f) return;
-        var tw = label.MeasureTextSize(label.text ?? string.Empty, 0f, VisualElement.MeasureMode.Undefined, 0f, VisualElement.MeasureMode.Undefined).x;
+        var tw = rs.textWidth; // measured on the game thread with the snapshot
         if (float.IsNaN(tw) || tw <= 0f) tw = w;
         tw = Mathf.Min(tw, w);
         var left = centre ? x + (w - tw) * 0.5f : right ? x + w - tw : x;
@@ -1759,7 +1761,7 @@ internal static class VectorEmitter
             oy = y + (h - vb.height * s) * 0.5f;
         }
         var id = "svg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h)).Append(Radius(svg.resolvedStyle, w, h)).Append(" }\n");
+        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h)).Append(Radius(OffThread.Of(svg), w, h)).Append(" }\n");
 
         // Uniform fit: one scaled group. Non-uniform (preserveAspectRatio="none" on a box of
         // another shape): the scale is baked into every coordinate instead, so a stroke keeps
@@ -2293,7 +2295,7 @@ internal static class VectorEmitter
 
     // ---------------------------------------------------------------- paint helpers
 
-    private static string Radius(IResolvedStyle rs, float w, float h, float inset = 0f)
+    private static string Radius(OffThread.Box rs, float w, float h, float inset = 0f)
     {
         var tl = rs.borderTopLeftRadius;
         var tr = rs.borderTopRightRadius;
@@ -2323,7 +2325,7 @@ internal static class VectorEmitter
     /// the text colour; checked, filled with the accent (`accent-color`, else the page's link
     /// blue) with a white tick or dot. The click region is the background rect emitted above.
     /// </summary>
-    private static void EmitCheck(Ctx ctx, string control, HtmlNode node, Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h, string indent)
+    private static void EmitCheck(Ctx ctx, string control, HtmlNode node, Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, float h, string indent)
     {
         if (control is "progress" or "meter")
         {
@@ -2381,7 +2383,7 @@ internal static class VectorEmitter
     }
 
     /// <summary>progress and meter: a rounded track in the box's background (else a dim grey) and a fill in the accent, or the meter's low/high colour.</summary>
-    private static void EmitBar(Ctx ctx, string control, HtmlNode node, Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h, string indent)
+    private static void EmitBar(Ctx ctx, string control, HtmlNode node, Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, float h, string indent)
     {
         float Attr(string name, float fallback) => node.Attr(name) is { } v && float.TryParse(v.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f : fallback;
         var min = control == "meter" ? Attr("min", 0f) : 0f;
@@ -2769,7 +2771,7 @@ internal static class VectorEmitter
     // ---------------------------------------------------------------- Batch C helpers
 
     /// <summary>IMG node (vector requirement 9): a picture in scene order with fit and the box's radii.</summary>
-    private static void EmitImage(Ctx ctx, string src, string fit, Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h, string indent, string nodeId)
+    private static void EmitImage(Ctx ctx, string src, string fit, Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, float h, string indent, string nodeId)
     {
         var f = fit switch { "cover" => "cover", "contain" or "scale-down" => "contain", _ => "fill" };
         src = HtmlRenderer.ResolveUrl(src, ctx.Built);
@@ -2785,7 +2787,7 @@ internal static class VectorEmitter
     /// in the same box. ponytail: the marks are spaced by their own advance, not the glyphs'
     /// under them, so they drift on a proportional face; exact only for monospace text.
     /// </summary>
-    private static void EmitEmphasis(Ctx ctx, Dictionary<string, string> css, IResolvedStyle rs, string text, string style, float x, float y, float w, float h, string indent)
+    private static void EmitEmphasis(Ctx ctx, Dictionary<string, string> css, OffThread.Box rs, string text, string style, float x, float y, float w, float h, string indent)
     {
         var s = style.Trim().ToLowerInvariant();
         var open = s.Contains("open");
@@ -2924,7 +2926,7 @@ internal static class VectorEmitter
     /// the stripe idiom), drawn as one repeat of rects per colour inside the box's clip. When a
     /// keyframe animation moves `background-position`, the stripes march: an expression over t.
     /// </summary>
-    private static bool Stripes(Ctx ctx, Dictionary<string, string> css, string bgCss, VisualElement ve, IResolvedStyle rs, float x, float y, float w, float h, string indent)
+    private static bool Stripes(Ctx ctx, Dictionary<string, string> css, string bgCss, VisualElement ve, OffThread.Box rs, float x, float y, float w, float h, string indent)
     {
         var open = bgCss.IndexOf('(');
         var close = bgCss.LastIndexOf(')');
@@ -3035,7 +3037,7 @@ internal static class VectorEmitter
     private static string shadowOf(Dictionary<string, string> css, string filterShadow) => (css.TryGetValue("box-shadow", out var s) ? Shadows(s) : string.Empty) + filterShadow;
 
     /// <summary>corner-shape: the box outline as a P with bevel, scoop or notch corners at the border radii; null for round/square.</summary>
-    private static string? CornerPath(Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h)
+    private static string? CornerPath(Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, float h)
     {
         // corner-shape takes one to four values (top-left, top-right, bottom-right, bottom-left, as
         // border-radius); corner-<side>-shape and corner-<corner>-shape override per corner
@@ -3086,7 +3088,7 @@ internal static class VectorEmitter
     /// Slices in percent are exact; a number/px slice needs the image size, which is not
     /// known here, so it is read as thirds (the common nine-slice layout) and reported.
     /// </summary>
-    private static bool BorderImage(Ctx ctx, Dictionary<string, string> css, IResolvedStyle rs, float x, float y, float w, float h, string indent)
+    private static bool BorderImage(Ctx ctx, Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, float h, string indent)
     {
         string? source = null;
         var sliceText = "100%";
@@ -3598,7 +3600,7 @@ internal static class VectorEmitter
     }
 
     /// <summary>mask-image: a linear or radial gradient as a GL/GR def whose alpha masks the subtree (vector requirement 10).</summary>
-    private static string? MaskDef(Ctx ctx, string css, float x, float y, float w, float h, Dictionary<string, string>? all = null, IResolvedStyle? rs = null)
+    private static string? MaskDef(Ctx ctx, string css, float x, float y, float w, float h, Dictionary<string, string>? all = null, OffThread.Box? rs = null)
     {
         var v = css.Trim();
         if (v.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase)) return RadialDef(ctx, v);

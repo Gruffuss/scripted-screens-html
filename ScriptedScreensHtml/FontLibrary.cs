@@ -40,8 +40,11 @@ internal static class FontLibrary
         var bold = weight.Trim().ToLowerInvariant() is "bold" or "bolder" || (float.TryParse(weight.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) && n >= 600);
         var italic = style.Trim().ToLowerInvariant() is "italic" or "oblique";
         var key = bold && italic ? family + " Bold Italic" : bold ? family + " Bold" : italic ? family + " Italic" : family;
-        AliasFace[key] = face;
-        if (!AliasFace.ContainsKey(family)) AliasFace[family] = face;
+        lock (AliasFace)
+        {
+            AliasFace[key] = face;
+            if (!AliasFace.ContainsKey(family)) AliasFace[family] = face;
+        }
         Cache.Remove(key);
         Cache.Remove(family);
         if (Find(face) == null)
@@ -51,7 +54,8 @@ internal static class FontLibrary
     /// <summary>The face name the vector layer (TextMeshPro, registered by the Fonts mod) knows a page's family by: the @font-face alias resolved, else the name itself.</summary>
     public static string ResolveFace(string family)
     {
-        return AliasFace.TryGetValue(family, out var face) ? face : family;
+        lock (AliasFace)
+            return AliasFace.TryGetValue(family, out var face) ? face : family;
     }
 
     /// <summary>"BarlowCondensed-SemiBold.ttf" -> "Barlow Condensed SemiBold", the way the Fonts mod names it from the font's own metadata.</summary>

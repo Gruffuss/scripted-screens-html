@@ -22,7 +22,7 @@ internal static class HtmlConfig
     /// scene emitted, script started). Off by default: warnings and errors always log, and
     /// the rest is noise in an ordinary session. The instrumentation stays compiled in.
     /// </summary>
-    internal static bool Diagnostics => Fresh() && (_diagnostics?.Value ?? false);
+    internal static bool Diagnostics => OffThread.Active ? OffThread.Job.Diagnostics : Fresh() && (_diagnostics?.Value ?? false);
 
     private static DateTime _seenWrite;
     private static float _nextPoll;
@@ -66,5 +66,6 @@ internal static class HtmlConfig
             "Write each page's last emitted vector scene to scenes/<page>.txt next to the mod " +
             "DLL, on every emit. Development tool for reading exactly what the translation " +
             "produced.");
+
     }
 }

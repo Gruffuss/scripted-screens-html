@@ -215,7 +215,7 @@ internal sealed class KeyframeRunner
     private void SetTransition(float seconds)
     {
         // Vector mode: the segment becomes a tween (an expression over t), not a UI Toolkit transition.
-        Tweens.Override[_ve] = (seconds, _spec.Easing);
+        lock (Tweens.Shared) Tweens.Override[_ve] = (seconds, _spec.Easing);
     }
 
     private void ApplyFrame(CssKeyframe frame)

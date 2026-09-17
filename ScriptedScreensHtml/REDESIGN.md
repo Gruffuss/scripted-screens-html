@@ -74,5 +74,24 @@ Measured 2026-09-17, same restart, consoles 561 and 563 blank, 586 running each 
 A box whose declared background turns transparent keeps its node (the structure no longer
 changes with a lamp's colour); a box that shrinks to zero keeps its node too.
 
+## Off the game thread (2026-09-17)
+
+UI Toolkit keeps its layout in native code only the game thread may read, so that is the one
+reason the page needed the game thread for more than handing a scene to the vector mod. The game
+thread now lays out and copies what the translator reads (`OffThread.Box` per element); a worker
+translates the copy, splits it into template and values and decides the send; the game thread
+sends it on a later frame. Font questions a worker cannot answer are answered after the job and
+the page emits again. While a job runs nothing changes the page (Update waits; pointer, click,
+data and source changes finish the job first).
+
+Measured on the Apple page, game focused, 90 s runs: translation on the game thread 0.26-0.29 ->
+0.036 ms/frame (copy 0.15 ms per emit; translation 2.5 ms per emit on a worker); all page code on
+the game thread 0.47 -> 0.25 ms/frame, now including Lua data application, which was not counted
+before. UI Toolkit's own update: 0.03 ms/frame. Remaining game-thread work: applying the page
+script's results, keyframe runners and data binding (UI Toolkit writes).
+
+Frame time cannot show differences this size: identical runs differ by up to 1 ms. Compare the
+per-part timings.
+
 Diagnostics line additions: `main N ms/frame, awake N frames, sent: N structures M patches (K values), J in-place`,
 a `frames over 25 ms` line, and `new structure ... first difference` lines explaining each structure send.

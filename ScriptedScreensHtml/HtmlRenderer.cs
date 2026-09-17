@@ -79,9 +79,12 @@ internal static class HtmlRenderer
             Grids.Remove(ve);
             StyleApplier.MixedCalc.Remove(ve);
             StyleApplier.BaselineRows.Remove(ve);
-            Tweens.Override.Remove(ve);
-            Tweens.AllowDiscrete.Remove(ve);
-            Tweens.PendingHide.Remove(ve);
+            lock (Tweens.Shared)
+            {
+                Tweens.Override.Remove(ve);
+                Tweens.AllowDiscrete.Remove(ve);
+                Tweens.PendingHide.Remove(ve);
+            }
             _forgotten.Add(ve);
         }
 
@@ -205,8 +208,11 @@ internal static class HtmlRenderer
         CssParser.ViewportHeight = CssParser.ViewportWidth * SurfaceAspect;
         Counters.Clear();
         AfterDecls.Clear();
-        Tweens.AllowDiscrete.Clear();
-        Tweens.PendingHide.Clear();
+        lock (Tweens.Shared)
+        {
+            Tweens.AllowDiscrete.Clear();
+            Tweens.PendingHide.Clear();
+        }
         StyleApplier.MixedCalc.Clear();
         StyleApplier.BaselineRows.Clear();
         CssParser.CounterStyles.Clear();
@@ -737,7 +743,7 @@ internal static class HtmlRenderer
         {
             var tcss = result.CssOf(ve);
             if ((tcss.TryGetValue("transition-behavior", out var tb) && tb.Contains("allow-discrete")) || (tcss.TryGetValue("transition", out var tr0) && tr0.Contains("allow-discrete")))
-                Tweens.AllowDiscrete.Add(ve);
+                lock (Tweens.Shared) Tweens.AllowDiscrete.Add(ve);
         }
         if (node.Tag == "dialog")
         {

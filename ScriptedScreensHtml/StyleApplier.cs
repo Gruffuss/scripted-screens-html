@@ -58,8 +58,11 @@ internal static class StyleApplier
                 // inline / inline-block: the layout has no inline flow, and an element that
                 // reached here is already its own box, so the value is accepted as-is.
                 // transition-behavior: allow-discrete holds display: none until the transition ends (Tweens)
-                if (v == "none" && Tweens.AllowDiscrete.Contains(ve)) { Tweens.PendingHide.Add(ve); break; }
-                Tweens.PendingHide.Remove(ve);
+                lock (Tweens.Shared)
+                {
+                    if (v == "none" && Tweens.AllowDiscrete.Contains(ve)) { Tweens.PendingHide.Add(ve); break; }
+                    Tweens.PendingHide.Remove(ve);
+                }
                 s.display = v == "none" ? DisplayStyle.None : DisplayStyle.Flex;
                 // CSS: a flex container lays out in a row unless told otherwise; a block (or
                 // grid, whose children are placed absolutely) stacks. Later declarations win.
@@ -550,12 +553,15 @@ internal static class StyleApplier
     public static bool IsNumber(string v) => float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
 
     /// <summary>Unit context for em, rem, vw and vh: set per element by the cascade, per page by the renderer.</summary>
-    internal static float EmSize = 16f;
-    internal static float RootFontSize = 16f;
+    /// A translation worker reads the values the game thread had when its job started (OffThread.Job).
+    internal static float EmSize { get => OffThread.Active ? OffThread.Job.EmSize : _emSize; set => _emSize = value; }
+    internal static float RootFontSize { get => OffThread.Active ? OffThread.Job.RootFontSize : _rootFontSize; set => _rootFontSize = value; }
     /// <summary>color-scheme: dark seen in the cascade; light-dark() picks its second value then.</summary>
-    internal static bool ColorSchemeDark;
-    internal static float ViewportW = 460f;
-    internal static float ViewportH = 460f;
+    internal static bool ColorSchemeDark { get => OffThread.Active ? OffThread.Job.ColorSchemeDark : _colorSchemeDark; set => _colorSchemeDark = value; }
+    internal static float ViewportW { get => OffThread.Active ? OffThread.Job.ViewportW : _viewportW; set => _viewportW = value; }
+    internal static float ViewportH { get => OffThread.Active ? OffThread.Job.ViewportH : _viewportH; set => _viewportH = value; }
+    private static float _emSize = 16f, _rootFontSize = 16f, _viewportW = 460f, _viewportH = 460f;
+    private static bool _colorSchemeDark;
 
     /// <summary>A number in px (or the bare number of a percentage). Units: px pt em rem vw vh; calc().</summary>
     public static float Num(string v)

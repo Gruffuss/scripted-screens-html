@@ -38,7 +38,7 @@ internal sealed class Tweens
 
         public static Snap Of(VisualElement ve, Dictionary<string, string>? css = null)
         {
-            var rs = ve.resolvedStyle;
+            var rs = OffThread.Of(ve);
             var offset = 0f;
             if (css != null && css.TryGetValue("offset-path", out var path) && css.TryGetValue("offset-distance", out var od))
                 offset = OffsetPx(od, path);
@@ -46,7 +46,7 @@ internal sealed class Tweens
             {
                 Offset = offset,
                 Hidden = rs.display == DisplayStyle.None,
-                Rect = ve.layout,
+                Rect = rs.layout,
                 Opacity = rs.opacity,
                 Rotate = rs.rotate.angle.ToDegrees(),
                 Translate = new Vector2(rs.translate.x, rs.translate.y),
@@ -243,6 +243,17 @@ internal sealed class Tweens
     /// <summary>Elements whose display: none is held back until their running tween ends.</summary>
     internal static readonly HashSet<VisualElement> PendingHide = new();
 
+    /// <summary>Guards the static sets above: other pages write them on the game thread while a translation reads them.</summary>
+    internal static readonly object Shared = new();
+    /// <summary>display: none writes Diff decided on; the game thread applies them (<see cref="ApplyHides"/>).</summary>
+    internal readonly List<VisualElement> HideNow = new();
+
+    public void ApplyHides()
+    {
+        foreach (var ve in HideNow) ve.style.display = DisplayStyle.None;
+        HideNow.Clear();
+    }
+
     public void Diff(VisualElement root, HtmlRenderer.Result built, float now)
     {
         _walked = 0;
@@ -254,11 +265,14 @@ internal sealed class Tweens
             foreach (var kv in _shown) if (kv.Key.panel == null) _scratch.Add(kv.Key);
             foreach (var ve in _scratch) { _shown.Remove(ve); _live.Remove(ve); _ended.Remove(ve); }
         }
-        if (PendingHide.Count == 0) return;
-        // nothing tweens for it after all: hide now rather than never
-        _scratch.Clear();
-        foreach (var ve in PendingHide) if (!_live.TryGetValue(ve, out var t) || !t.Active(now)) _scratch.Add(ve);
-        foreach (var ve in _scratch) { ve.style.display = DisplayStyle.None; PendingHide.Remove(ve); }
+        lock (Shared)
+        {
+            if (PendingHide.Count == 0) return;
+            // nothing tweens for it after all: hide now rather than never (the game thread writes it after the job)
+            _scratch.Clear();
+            foreach (var ve in PendingHide) if (!_live.TryGetValue(ve, out var t) || !t.Active(now)) _scratch.Add(ve);
+            foreach (var ve in _scratch) { HideNow.Add(ve); PendingHide.Remove(ve); }
+        }
     }
 
     private void Walk(VisualElement ve, HtmlRenderer.Result built, float now)
@@ -320,7 +334,9 @@ internal sealed class Tweens
             // element's structure does not change between segments and updates stay value patches
             _ended[ve] = _live[ve];
             _live.Remove(ve);
-            if (PendingHide.Remove(ve)) ve.style.display = DisplayStyle.None; // the held-back display: none lands now
+            bool held;
+            lock (Shared) held = PendingHide.Remove(ve);
+            if (held) ve.style.display = DisplayStyle.None; // the held-back display: none lands now
         }
         return _scratch.Count > 0;
     }
@@ -384,7 +400,10 @@ internal sealed class Tweens
 
     private static (float dur, Easing ease, float delay) Timing(VisualElement ve, HtmlRenderer.Result built, in Snap prev, in Snap cur)
     {
-        if (Override.TryGetValue(ve, out var o))
+        (float dur, Easing ease) o;
+        bool overridden;
+        lock (Shared) overridden = Override.TryGetValue(ve, out o);
+        if (overridden)
             return (o.dur, o.ease, 0f);
 
         if (!built.CssOf(ve).TryGetValue("transition", out var css))
