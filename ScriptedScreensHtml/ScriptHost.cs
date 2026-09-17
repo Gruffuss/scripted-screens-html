@@ -601,8 +601,14 @@ internal sealed class ScriptHost : IDisposable
             if (css.StartsWith("--", StringComparison.Ordinal))
             {
                 if (_findNode(id) is not { } target) return;
-                if (value.Trim().Length == 0) target.Vars?.Remove(css);
-                else (target.Vars ??= new Dictionary<string, string>(StringComparer.Ordinal))[css] = value.Trim();
+                // kept with the element's other script styles, so the re-cascade below does not put
+                // the stylesheet's own value back over it
+                if (value.Trim().Length == 0) { target.ScriptStyle?.Remove(css); target.Vars?.Remove(css); }
+                else
+                {
+                    (target.ScriptStyle ??= new Dictionary<string, string>(StringComparer.Ordinal))[css] = value.Trim();
+                    (target.Vars ??= new Dictionary<string, string>(StringComparer.Ordinal))[css] = value.Trim();
+                }
                 _built?.Reclass(ve, target.Attr("class") ?? string.Empty);
                 _onLayoutAttr?.Invoke();
                 return;
