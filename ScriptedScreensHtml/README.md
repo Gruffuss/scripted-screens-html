@@ -183,7 +183,11 @@ A `<script>` in the page runs on a worker thread, with the DOM you expect: `docu
 `fetch`-less networking (see above), `Element.animate()`, `elementFromPoint`, `DOMParser`,
 `XMLSerializer`, `<canvas>` with a full 2D context
 (drawn as vector paths), `import` from a URL in a module script. Reads after writes see the
-writes. `console.log` goes to the BepInEx log.
+writes. Sizes are the exception: `clientHeight`, `getBoundingClientRect` and the rest report the
+last drawn layout, so a script that changes something and wants the new size reads it on the next
+frame, where a browser would lay the page out on the spot. `window.innerWidth` and
+`window.innerHeight` are the page's own design size and are right from the first line.
+`console.log` goes to the BepInEx log.
 
 Use it for what a browser page would use it for: building the DOM from data, reacting to
 clicks, drawing on a canvas. Do not use it for animation loops that could be CSS or an SVG
