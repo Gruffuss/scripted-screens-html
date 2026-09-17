@@ -447,8 +447,13 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal void EmitNow()
     {
         Hold();
+        var s0 = _structureSends;
+        var p0 = _patchSends;
         lock (CascadeGate)
             EmitNowLocked();
+        if (HtmlConfig.Diagnostics)
+            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{ElementId}\": rebuilt on host {transform.parent?.gameObject.GetInstanceID()} at frame {Time.frameCount}, sent inside the call: "
+                + (_structureSends > s0 ? "structure" : _patchSends > p0 ? "values only (same template)" : "nothing"));
     }
 
     private void EmitNowLocked()
