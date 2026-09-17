@@ -22,6 +22,8 @@ Newest first. The workshop page is a short overview; this file has the full hist
 - A class or attribute change undoes what the rules that stopped matching had set (a title stayed
   red after its parent lost the class that coloured it); a script's `element.style` values survive
   the re-cascade and win over the rules, as the style attribute does.
+- Writing the same `element.style`, class or text again changes nothing, so a page whose script
+  rewrites unchanged values every frame is not laid out and translated again.
 - A rounded box with some sides unbordered (`border-bottom: none`) draws the others along its
   rounded corners.
 - Pages are laid out with the faces the Fonts mod and the game registered, mirrored by name; the

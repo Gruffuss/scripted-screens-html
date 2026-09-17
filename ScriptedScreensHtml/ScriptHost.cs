@@ -969,6 +969,8 @@ function __flushCanvases(){ for (var k in __canvases) { var c = __canvases[k]; i
 var __textCache = {}, __htmlCache = {}, __styleCache = {}, __scrollCache = {};
 // one element object per id, as a browser returns the same object for the same element (and building one is not cheap)
 var __elShims = {};
+// an element that leaves the page takes its cached state with it (an element added later under the same id starts clean)
+function __forget(id){ delete __elShims[id]; delete __styleCache[id]; delete __textCache[id]; delete __htmlCache[id]; }
 // ---- readiness: after the page script, as a browser fires them after parsing ----
 document_readyState = 'loading';
 function __ready(){
@@ -1078,7 +1080,7 @@ window.self = window; window.top = window; window.parent = window; window.frames
 function __styleProxy(id){
   var cache = __styleCache[id] = __styleCache[id] || {};
   var target = {
-    setProperty: function(p, v){ p = __kebab(p); cache[p] = String(v); __setStyle(id, p, String(v)); },
+    setProperty: function(p, v){ p = __kebab(p); if (cache[p] === String(v)) return; cache[p] = String(v); __setStyle(id, p, String(v)); },
     getPropertyValue: function(p){ p = __kebab(p); return cache[p] !== undefined ? cache[p] : ''; },
     removeProperty: function(p){ p = __kebab(p); var old = cache[p]; delete cache[p]; __setStyle(id, p, ''); return old || ''; },
     get cssText(){ var s = ''; for (var k in cache) s += k + ': ' + cache[k] + '; '; return s.trim(); },
@@ -1086,7 +1088,7 @@ function __styleProxy(id){
     get length(){ return Object.keys(cache).length; }
   };
   return new Proxy(target, {
-    set: function(t, p, v){ if (p in t) { t[p] = v; return true; } var k = __kebab(String(p)); cache[k] = String(v); __setStyle(id, k, String(v)); return true; },
+    set: function(t, p, v){ if (p in t) { t[p] = v; return true; } var k = __kebab(String(p)); if (cache[k] === String(v)) return true; cache[k] = String(v); __setStyle(id, k, String(v)); return true; },
     get: function(t, p){ if (p in t) return t[p]; var k = __kebab(String(p)); return cache[k] !== undefined ? cache[k] : ''; }
   });
 }
@@ -1257,8 +1259,8 @@ function __el(id){
     get tagName(){ return String(__getAttr(id, '__tag') || 'DIV').toUpperCase(); },
     appendChild: function(c){ __appendHtml(id, __serialize(c)); if (c.__adopt) c.__adopt(); return c; },
     append: function(){ for (var i = 0; i < arguments.length; i++) { var c = arguments[i]; if (typeof c === 'string') __appendHtml(id, __escape(c)); else el.appendChild(c); } },
-    removeChild: function(c){ __remove(c.id); return c; },
-    remove: function(){ __remove(id); }
+    removeChild: function(c){ __forget(c.id); __remove(c.id); return c; },
+    remove: function(){ __forget(id); __remove(id); }
   };
   el.classList = {
     __list: function(){ return String(__getAttr(id, 'class') || '').split(/\s+/).filter(Boolean); },
@@ -1396,7 +1398,7 @@ function __detached(tag){
   Object.defineProperty(o, 'parentElement', { get: function(){ return o.__live ? __el(o.id).parentElement : (o.__parent && o.__parent.__tag !== '#document' ? o.__parent : null); } });
   Object.defineProperty(o, 'outerHTML', { get: function(){ return o.__live ? __el(o.id).outerHTML : __serialize(o, true); } });
   o.append = function(){ for (var i = 0; i < arguments.length; i++) { var c = arguments[i]; o.appendChild(typeof c === 'string' ? { textContent: c } : c); } };
-  o.removeChild = function(c){ if (o.__live) __remove(c.id); else o.__children = o.__children.filter(function(x){ return x !== c; }); return c; };
+  o.removeChild = function(c){ if (o.__live) { __forget(c.id); __remove(c.id); } else o.__children = o.__children.filter(function(x){ return x !== c; }); return c; };
   o.remove = function(){ if (o.__live) __remove(o.id); };
   o.__listeners = [];
   o.addEventListener = function(type, fn){ if (o.__live) __el(o.id).addEventListener(type, fn); else o.__listeners.push([type, fn]); };
