@@ -56,16 +56,17 @@ internal static class HtmlConfig
 
         _diagnostics = _file.Bind(
             "Diagnostics", "Enabled", false,
-            "Log a line per page every 5 seconds and the informational lines (page built, " +
-            "scene emitted, script started). Development tool; leave off for normal play. " +
-            "Lines look like: 'html \"gas\": 2.0 emits/s, last 1.4 ms (layout 0.6 + translate " +
-            "0.8), 226 nodes / 43 KB, 3 tweens, script 0.3 ms/frame, 0 externals'.");
+            "Log a cost line per page every second, plus the informational lines (page built, " +
+            "script started, why a scene was rebuilt). Development tool; leave off for normal play. " +
+            "Lines look like: 'html \"gas\": 2.0 emits/s, last 1.4 ms (layout 0.6 + copy 0.1, " +
+            "translate 0.7; page thread 3.0 ms/s; ...), 226 nodes / 43 KB, ...'.");
 
         _dumpScenes = _file.Bind(
             "Diagnostics", "DumpScenes", false,
-            "Write each page's last emitted vector scene to scenes/<page>.txt next to the mod " +
-            "DLL, on every emit. Development tool for reading exactly what the translation " +
-            "produced.");
+            "Write each page's vector scene to scenes/<page>.txt next to the mod DLL (and its " +
+            "layout to scenes/<page>-layout.txt): on every new structure, and at most every two " +
+            "seconds while only values change. Development tool for reading exactly what the " +
+            "translation produced; each file is overwritten, not appended. Leave it off for normal play.");
 
     }
 }
