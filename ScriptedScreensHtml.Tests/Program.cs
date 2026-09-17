@@ -235,6 +235,73 @@ void TestBuildRows()
     var area = HtmlParser.Parse("<map name=m><area shape=rect coords=\"0,0,10,10\" id=a1><area shape=circle coords=\"5,5,3\" id=a2></map>").Children[0];
     Check(area.Children.Count == 2 && area.Children[1].Tag == "area", "area is a void tag: two siblings under the map");
     TestSceneSlots();
+    TestTextMeasure();
+}
+
+void TestTextMeasure()
+{
+    // a face at point size 100: letters advance 50, space 25, hyphen 30; A then V kerns by -10
+    var face = new FaceData { Name = "Test", PointSize = 100f, Scale = 1f, LineHeight = 120f, BoldSpacing = 10f };
+    uint g = 1;
+    foreach (var ch in "abcdefghijklmnopqrstuvwxyzAV<>") face.Chars[ch] = new FaceData.Glyph { Index = g++, Advance = 50f, Scale = 1f };
+    face.Chars[' '] = new FaceData.Glyph { Index = g++, Advance = 25f, Scale = 1f };
+    face.Chars['-'] = new FaceData.Glyph { Index = g++, Advance = 30f, Scale = 1f };
+    face.Chars[0x200B] = new FaceData.Glyph { Index = g++, Advance = 0f, Scale = 1f };
+    face.Pairs[(face.Chars['V'].Index << 16) | face.Chars['A'].Index] = (-10f, 0f, false);
+    var big = new FaceData { Name = "Big", PointSize = 50f, Scale = 1f, LineHeight = 60f };
+    big.Chars['a'] = new FaceData.Glyph { Index = 1, Advance = 50f, Scale = 1f };
+    TextMeasure.Register(big);
+    var style = new TextMeasure.Style { Size = 20f, Rich = true };   // element scale 0.2: a letter is 10 px, a space 5
+    var wrap = style; wrap.Wrap = true;
+    TextMeasure.Result M(string text, in TextMeasure.Style s, float width = 10000f) => TextMeasure.Measure(text, face, s, width);
+    bool Near(float a, float b) => Math.Abs(a - b) < 0.02f;
+
+    var r = M("abc", style);
+    Check(Near(r.Width, 30f) && r.Lines == 1 && Near(r.LineHeight, 24f), $"text: three letters are 30 px on one line ({r.Width}, {r.Lines}, {r.LineHeight})");
+    r = M("aaa aaa", wrap, 50f);
+    Check(r.Lines == 2 && Near(r.Width, 30f), $"text: wraps at the space, the space adds no width ({r.Width}, {r.Lines})");
+    r = M("aaa aaa", style, 50f);
+    Check(r.Lines == 1 && Near(r.Width, 65f), $"text: without wrapping it stays one line ({r.Width}, {r.Lines})");
+    r = M("aaaaaaa", wrap, 30f);
+    Check(r.Lines == 3 && Near(r.Width, 30f), $"text: a word with no break point breaks before the letter that overflows ({r.Width}, {r.Lines})");
+    r = M("aa-aaa", wrap, 40f);
+    Check(r.Lines == 2 && Near(r.Width, 30f), $"text: breaks after a hyphen, which stays on the first line ({r.Width}, {r.Lines})");
+    r = M("aa​aaa", wrap, 40f);
+    Check(r.Lines == 2 && Near(r.Width, 30f), $"text: breaks at a zero-width space ({r.Width}, {r.Lines})");
+    r = M("aa aaa", wrap, 40f);
+    Check(r.Lines == 2 && Near(r.Width, 35f), $"text: a no-break space is not a break point: the word breaks at the overflowing letter ({r.Width}, {r.Lines})");
+    r = M("<b>ab</b>", style);
+    Check(Near(r.Width, 22f), $"text: bold adds the face's bold spacing per letter ({r.Width})");
+    r = M("ab", new TextMeasure.Style { Size = 20f, Bold = true, Rich = true });
+    Check(Near(r.Width, 22f), $"text: a bold style counts like a b tag ({r.Width})");
+    r = M("<size=40>a</size>a", style);
+    Check(Near(r.Width, 30f), $"text: a size tag scales its letters ({r.Width})");
+    r = M("<size=50%>a</size>a", style);
+    Check(Near(r.Width, 15f), $"text: a percentage size is of the base size ({r.Width})");
+    r = M("aa", new TextMeasure.Style { Size = 20f, LetterSpacing = 2f, Rich = true });
+    Check(Near(r.Width, 22f), $"text: letter spacing is added after each letter ({r.Width})");
+    r = M("a a", new TextMeasure.Style { Size = 20f, WordSpacing = 4f, Rich = true });
+    Check(Near(r.Width, 29f), $"text: word spacing is added after each space ({r.Width})");
+    r = M("AV", style);
+    Check(Near(r.Width, 18f), $"text: a kerning pair moves the second letter ({r.Width})");
+    r = M("aa\naaa", style);
+    Check(r.Lines == 2 && Near(r.Width, 30f), $"text: a newline starts a line; width is the widest ({r.Width}, {r.Lines})");
+    r = M("a<br>aaa", style);
+    Check(r.Lines == 2 && Near(r.Width, 30f), $"text: br is a newline ({r.Width}, {r.Lines})");
+    r = M("<mspace=0.5em>ab</mspace>", style);
+    Check(Near(r.Width, 20f), $"text: mspace makes each letter a cell of the given width ({r.Width})");
+    r = M("<font=\"Big\">a</font>a", style);
+    Check(Near(r.Width, 30f), $"text: a font tag measures with that face's point size ({r.Width})");
+    r = M("<noparse><b></noparse>", style);
+    Check(Near(r.Width, 30f), $"text: noparse draws tags as text ({r.Width})");
+    r = M("<color=#fff><u>ab</u></color>", style);
+    Check(Near(r.Width, 20f), $"text: colour and underline tags take no width ({r.Width})");
+    r = M("<zzz>", style);
+    Check(Near(r.Width, 50f), $"text: an unknown tag is text ({r.Width})");
+    var before = GC.GetAllocatedBytesForCurrentThread();
+    for (var k = 0; k < 1000; k++) M("<b>Room</b> pressure <size=80%>kPa</size> and more words", wrap, 60f);
+    var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+    Check(allocated < 1000, $"text: measuring allocates nothing once warm ({allocated} bytes for 1000 calls)");
 }
 
 void TestSceneSlots()

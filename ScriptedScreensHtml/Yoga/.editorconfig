@@ -1,0 +1,4 @@
+# Vendored code: not held to this project's analyzers.
+[*.cs]
+generated_code = true
+dotnet_analyzer_diagnostic.severity = none
