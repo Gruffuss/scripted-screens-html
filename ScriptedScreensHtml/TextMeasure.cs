@@ -65,6 +65,8 @@ internal static class TextMeasure
         public bool Wrap { get; set; }
         /// <summary>Rich-text tags are read (the labels the emitter writes are rich text).</summary>
         public bool Rich { get; set; }
+        /// <summary>CSS text-transform outside tags, as the emitter applies it: 1 uppercase, 2 lowercase, 3 capitalize.</summary>
+        public int Transform { get; set; }
     }
 
     /// <summary>Faces by name, for rich-text font tags. Filled on the game thread (<see cref="Register"/>).</summary>
@@ -231,6 +233,7 @@ internal static class TextMeasure
         var scales = _scaleStack ??= new List<float>(4);
         faces.Clear(); sizes.Clear(); scales.Clear();
         var t = new Tags { Face = baseFace, Size = style.Size, ScaleMul = 1f, Bold = style.Bold ? 1 : 0 };
+        var wordStart = true;
         var i = 0;
         while (i < text.Length)
         {
@@ -257,6 +260,17 @@ internal static class TextMeasure
                         continue;
                     }
                 }
+            }
+            if (style.Transform != 0)
+            {
+                var original = c;
+                c = style.Transform switch
+                {
+                    1 => char.ToUpperInvariant(c),
+                    2 => char.ToLowerInvariant(c),
+                    _ => wordStart ? char.ToUpperInvariant(c) : c,
+                };
+                wordStart = char.IsWhiteSpace(original);
             }
             uint code = c;
             if (char.IsHighSurrogate(c) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))

@@ -193,7 +193,7 @@ internal static class HtmlRenderer
 
     private static int _autoId;
 
-    public static Result Build(string source, Font? font)
+    public static Result Build(string source, FaceData? font)
     {
         var result = new Result();
         void Warn(string m) => result.Warnings.Add(m);
@@ -226,7 +226,7 @@ internal static class HtmlRenderer
         finally { _building = false; }
     }
 
-    private static Result BuildInner(string source, Font? font, Result result, HtmlNode doc, List<CssRule> rules, StringBuilder script, Action<string> Warn)
+    private static Result BuildInner(string source, FaceData? font, Result result, HtmlNode doc, List<CssRule> rules, StringBuilder script, Action<string> Warn)
     {
         Collect(doc, rules, script, result.Keyframes, Warn, result);
         result.StartingRules.AddRange(CssParser.StartingRules);
@@ -250,7 +250,7 @@ internal static class HtmlRenderer
         root.style.fontSize = 16; // a browser's default, so a page that names no font-size still has text
         root.style.whiteSpace = WhiteSpace.Normal;
         if (font != null)
-            root.style.unityFont = font;
+            root.style.face = font;
         result.Root = root;
 
         result.NodeOf[root] = body;
@@ -737,7 +737,7 @@ internal static class HtmlRenderer
             // cascade record before the rules, and the layout face follows.
             result.CssOf(ve)["font-family"] = "monospace";
             var mono = FontLibrary.Get("code");
-            if (mono != null) ve.style.unityFontDefinition = FontDefinition.FromSDFFont(mono);
+            if (mono != null) ve.style.face = mono;
         }
         ApplyStyles(ve, node, rules, result);
         {
@@ -2793,7 +2793,7 @@ internal static class HtmlRenderer
         if (weight == null) return;
         var asset = FontLibrary.Get(face + " " + weight);
         if (asset == null) return;
-        ve.style.unityFontDefinition = FontDefinition.FromSDFFont(asset);
+        ve.style.face = asset;
         var italic = fs == FontStyle.Italic || fs == FontStyle.BoldAndItalic;
         ve.style.unityFontStyleAndWeight = italic ? FontStyle.Italic : FontStyle.Normal;
     }

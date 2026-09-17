@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using UnityEngine;
 using UnityEngine.UIElements;
+using UIVisibility = UnityEngine.UIElements.Visibility;
 
 namespace ScriptedScreensHtml;
 
@@ -22,6 +23,13 @@ internal static class OffThread
     /// <summary>A copy was missing: the tree changed under the job, so its result is thrown away.</summary>
     [ThreadStatic] internal static bool Stale;
 
+    /// <summary>The game thread, recorded at load; engine objects are only touched there.</summary>
+    internal static int MainThreadId = -1;
+    internal static bool OnMain => MainThreadId < 0 || Environment.CurrentManagedThreadId == MainThreadId;
+
+    /// <summary>The game's clock (Time.time) this frame, for page code off the game thread.</summary>
+    internal static volatile float Now;
+
     private static readonly Stopwatch Clock = Stopwatch.StartNew();
     internal static float Seconds => (float)Clock.Elapsed.TotalSeconds;
 
@@ -31,7 +39,7 @@ internal static class OffThread
         public bool Seen;
         public Rect layout;
         public DisplayStyle display;
-        public UnityEngine.UIElements.Visibility visibility;
+        public UIVisibility visibility;
         public float opacity, fontSize, marginBottom;
         public float borderTopWidth, borderRightWidth, borderBottomWidth, borderLeftWidth;
         public Color borderTopColor, borderRightColor, borderBottomColor, borderLeftColor;

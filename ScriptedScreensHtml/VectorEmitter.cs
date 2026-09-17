@@ -1147,6 +1147,16 @@ internal static class VectorEmitter
 
         if (cuts.Count == 0)
         {
+            // one colour at every stop is a flat fill: a multi-stop def is refined into many
+            // triangles (a rounded box went from 30 vertices to ~21,000), for nothing
+            var flat = true;
+            for (var i = 1; i < stops.Count; i++) flat &= stops[i].c == stops[0].c;
+            if (flat)
+            {
+                ctx.Body.Append(indent).Append('R').Append(rect).Append(" f=").Append(Hex(stops[0].c)).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Out.Nodes++;
+                return;
+            }
             var gid = "grad" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
             GradientDefLine(ctx, gid, dx, dy, 0f, 1f, stops);
             ctx.Body.Append(indent).Append('R').Append(rect).Append(" f=@").Append(gid).Append(NodeId(ctx, ve)).Append('\n');

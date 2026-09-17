@@ -4,23 +4,18 @@ using System.IO;
 using TMPro;
 using UnityEngine;
 using SS = ScriptedScreens.ScriptableUi.ScriptedScreensScriptableUiSystem;
-using UnityEngine.TextCore.LowLevel;
-using UnityEngine.TextCore;
-using UnityEngine.TextCore.Text;
-using AtlasPopulationMode = UnityEngine.TextCore.Text.AtlasPopulationMode;
 
 namespace ScriptedScreensHtml;
 
 /// <summary>
-/// The faces pages are laid out with. The vector mod draws text through TextMeshPro, in the faces
-/// the game and the Fonts mod registered; UI Toolkit, which lays the page out, cannot use a
-/// TextMeshPro face, so each one is mirrored into a UI Toolkit font asset by name
-/// (<c>font-family: Barlow</c>, weight 600 = the registered "Barlow SemiBold"). This mod reads no
-/// font files and knows no font folders: where fonts come from is the Fonts mod's business.
+/// The faces pages are laid out with: the ones the vector mod draws in, registered with TextMeshPro
+/// by the game and the Fonts mod, found by name (<c>font-family: Barlow</c>, weight 600 = the
+/// registered "Barlow SemiBold") and copied for measuring (<see cref="FaceCopy"/>). This mod reads
+/// no font files and knows no font folders: where fonts come from is the Fonts mod's business.
 /// </summary>
 internal static class FontLibrary
 {
-    private static readonly Dictionary<string, FontAsset?> Cache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, FaceData?> Cache = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>When a name last failed to resolve: the Fonts mod registers its faces over the first minutes, so a miss is retried.</summary>
     private static readonly Dictionary<string, float> MissedAt = new(StringComparer.OrdinalIgnoreCase);
     private const float RetryAfterSeconds = 5f;
@@ -45,8 +40,11 @@ internal static class FontLibrary
             AliasFace[key] = face;
             if (!AliasFace.ContainsKey(family)) AliasFace[family] = face;
         }
-        Cache.Remove(key);
-        Cache.Remove(family);
+        lock (Cache)
+        {
+            Cache.Remove(key);
+            Cache.Remove(family);
+        }
         if (Find(face) == null)
             ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: @font-face \"{family}\": no registered face \"{face}\" yet (the Fonts mod registers font files by family and style)");
     }
@@ -75,55 +73,64 @@ internal static class FontLibrary
         return sb.ToString();
     }
 
-    /// <summary>A registered face as a UI Toolkit font asset, or null (then the page keeps the default face).</summary>
-    public static FontAsset? Get(string family)
+    /// <summary>
+    /// A registered face, copied for text measurement, or null (then the element keeps the
+    /// inherited face). On the game thread an unknown name is looked up now; elsewhere it is
+    /// queued for <see cref="ResolvePending"/> and the page lays out again once it resolves.
+    /// </summary>
+    public static FaceData? Get(string family)
     {
         var name = ResolveFace(family);
-        if (Cache.TryGetValue(name, out var cached) && cached != null)
-            return cached;
-        if (MissedAt.TryGetValue(name, out var at) && Time.realtimeSinceStartup - at < RetryAfterSeconds)
-            return null;
-        var asset = Mirror(name);
-        if (asset != null) { Cache[name] = asset; MissedAt.Remove(name); }
-        else MissedAt[name] = Time.realtimeSinceStartup;
-        return asset;
-    }
-
-    /// <summary>
-    /// A font the game or the Fonts mod registered with TextMeshPro, by asset name, as a
-    /// UI Toolkit asset. TextMeshPro and TextCore share FaceInfo and Glyph, so the mirror is
-    /// the same atlas texture and the same tables under a different class; a static copy,
-    /// since the TMP asset's atlas is what it is. This is what makes every face the vector
-    /// layer's labels can use available to a page.
-    /// </summary>
-    private static FontAsset? _default;
-
-    /// <summary>The face ScriptedScreens' own labels use, mirrored. Also the glyph fallback for every other mirrored face.</summary>
-    public static FontAsset? Default()
-    {
-        if (_default != null)
-            return _default;
-        TMP_FontAsset? tmp = null;
-        try { tmp = SS.GetFont(); } catch (Exception) { tmp = null; }
-        _default = tmp != null ? MirrorAsset(tmp, isDefault: true) : null;
-        // ScriptedScreens gives its labels a DejaVu fallback for glyphs the face lacks
-        // (subscripts, arrows, the degree sign); the mirror gets the same one.
-        if (_default != null)
+        lock (Cache)
         {
-            var dejavu = Mirror("ss_dejavu_fallback");
-            if (dejavu != null)
-                _default.fallbackFontAssetTable = new List<FontAsset> { dejavu };
+            if (Cache.TryGetValue(name, out var cached) && cached != null)
+                return cached;
+            if (MissedAt.TryGetValue(name, out var at) && OffThread.Seconds - at < RetryAfterSeconds)
+                return null;
+            if (!OffThread.OnMain)
+            {
+                Pending.Add(name);
+                return null;
+            }
         }
-        return _default;
+        var tmp = Find(name);
+        var face = tmp != null ? FaceCopy.Of(tmp) : null;
+        lock (Cache)
+        {
+            if (face != null) { Cache[name] = face; MissedAt.Remove(name); }
+            else MissedAt[name] = OffThread.Seconds;
+        }
+        return face;
     }
 
-    private static FontAsset? Mirror(string family)
+    private static readonly HashSet<string> Pending = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly List<string> Resolving = new();
+
+    /// <summary>Looks up the names workers asked for. Game thread. True when one resolved.</summary>
+    public static bool ResolvePending()
     {
-        var tmp = Find(family);
-        return tmp == null ? null : MirrorAsset(tmp, isDefault: false);
+        lock (Cache)
+        {
+            if (Pending.Count == 0) return false;
+            Resolving.AddRange(Pending);
+            Pending.Clear();
+        }
+        var any = false;
+        foreach (var name in Resolving)
+            any |= Get(name) != null;
+        Resolving.Clear();
+        return any;
     }
 
-    /// <summary>The registered TextMeshPro face of that name; "Barlow SemiBold", "BarlowSemiBold" and "barlow-semibold" all match.</summary>
+    /// <summary>The face ScriptedScreens' own labels use (what a page with no font-family is drawn in). Game thread.</summary>
+    public static FaceData? Default()
+    {
+        TMP_FontAsset? tmp;
+        try { tmp = SS.GetFont(); } catch (Exception) { tmp = null; }
+        return tmp != null ? FaceCopy.Of(tmp) : null;
+    }
+
+    /// <summary>The registered TextMeshPro face of that name; "Barlow SemiBold", "BarlowSemiBold" and "barlow-semibold" all match. Game thread.</summary>
     private static TMP_FontAsset? Find(string family)
     {
         var wanted = Normalise(family);
@@ -133,47 +140,6 @@ internal static class FontLibrary
             if (Normalise(f.name) == wanted)
                 return f;
         return null;
-    }
-
-    private static FontAsset? MirrorAsset(TMP_FontAsset tmp, bool isDefault)
-    {
-        if (tmp.atlasTextures == null || tmp.atlasTextures.Length == 0)
-            return null;
-
-        try
-        {
-            var asset = ScriptableObject.CreateInstance<FontAsset>();
-            asset.name = tmp.name + " (ui)";
-            asset.faceInfo = tmp.faceInfo;
-            asset.atlasPopulationMode = AtlasPopulationMode.Static;
-            asset.atlasWidth = tmp.atlasWidth;
-            asset.atlasHeight = tmp.atlasHeight;
-            asset.atlasPadding = tmp.atlasPadding;
-            asset.atlasRenderMode = tmp.atlasRenderMode;
-            asset.atlasTextures = tmp.atlasTextures;
-            asset.material = tmp.material;
-            asset.glyphTable = new List<Glyph>(tmp.glyphTable);
-            var chars = new List<Character>(tmp.characterTable.Count);
-            foreach (var c in tmp.characterTable)
-                chars.Add(new Character(c.unicode, asset, c.glyph));
-            asset.characterTable = chars;
-            asset.ReadFontAssetDefinition();
-            // Glyphs a face lacks (the game's "code" has 98 characters, no arrows or degree
-            // sign) come from the default label face, as they do for TextMeshPro labels.
-            if (!isDefault)
-            {
-                var fallback = Default();
-                if (fallback != null)
-                    asset.fallbackFontAssetTable = new List<FontAsset> { fallback };
-            }
-            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: mirrored TMP font \"{tmp.name}\" ({chars.Count} characters) for UI Toolkit");
-            return asset;
-        }
-        catch (Exception ex)
-        {
-            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: could not mirror TMP font \"{tmp.name}\": {ex}");
-            return null;
-        }
     }
 
     /// <summary>"Barlow Condensed" and "BarlowCondensed" and "barlow-condensed" all match.</summary>

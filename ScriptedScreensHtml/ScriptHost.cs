@@ -165,7 +165,7 @@ internal sealed class ScriptHost : IDisposable
     {
         // the clock the page script sees: a timer it sets must be measured from now, not from
         // zero (the first frame then fired every load-time setTimeout at once)
-        if (_frameNow <= 0f) _frameNow = UnityEngine.Time.time;
+        if (_frameNow <= 0f) _frameNow = OffThread.Now;
         _toEngine.Enqueue(() =>
         {
             if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: running page script ({script.Length} chars)");

@@ -15,25 +15,25 @@ using ProgrammableVisorGlasses = ScriptedScreens.ProgrammableVisorGlasses;
 namespace ScriptedScreensHtml;
 
 /// <summary>
-/// Probe: does the shipped UI Toolkit runtime render to a texture in this build?
-/// Owns a PanelSettings, a RenderTexture, a UIDocument, and a RawImage showing the result.
+/// A page on a console: its element tree (laid out by <see cref="Panel"/>), its script, its data
+/// and input, and the translation into the vector scene the vector mod draws.
 /// </summary>
-/// <remarks>
-/// Resolution follows on-screen size. The element rect is in canvas units (436x400 on a
-/// 460 console) but the console is drawn far larger on screen, so a texture at canvas size
-/// is visibly blurred. The panel is rendered at <c>scale</c> times canvas size, where the
-/// scale is the measured ratio of screen pixels to canvas units, quantised so camera drift
-/// does not recreate the texture every frame.
-/// </remarks>
 internal sealed class HtmlSurface : MonoBehaviour
 {
-    private const float MaxScale = 16f;  // texture capped at MaxTextureSize; 4096 / 460 = 8.9x, 4096 / 768 = 5.3x
-    private const int MaxTextureSize = 4096;
     private const int DataAwakeFrames = 60;
 
 
     /// <summary>Scale per page key, so a host rebuilt by ScriptedScreens comes back at the same sharpness.</summary>
     internal string PageKey = string.Empty;
+
+    /// <summary>
+    /// The live surface per page. A rebuild (a screen capture does one) makes a new surface for the
+    /// same page before Unity destroys the old one at the end of the frame; the old one must stop
+    /// sending then, or its value patches (under its own slot names) land on the new scene.
+    /// </summary>
+    private static readonly Dictionary<string, HtmlSurface> Current = new(StringComparer.Ordinal);
+
+    private bool IsCurrent => string.IsNullOrEmpty(PageKey) || !Current.TryGetValue(PageKey, out var live) || live == this;
     /// <summary>What the bridge needs to address the vector mod: the host identity and the page element id.</summary>
     internal object? Board;
     internal object? Cartridge;
@@ -43,8 +43,6 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal string DataElementId = string.Empty;
     private bool _dirty;
     private int _dScript, _dAnim, _dTween, _dDom, _dOther;   // dirty causes since the last diagnostics line
-    private int _seenLayoutWrites;
-    private int _settleFrames;
     private string _lastScene = string.Empty;
     /// <summary>The structure the vector mod has (the scene with its values as $slots), and the values it was last sent.</summary>
     private string? _lastTemplate;
@@ -61,19 +59,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal string Surface = string.Empty;
 
 
-    /// <summary>UIElementsRuntimeUtility.UpdateRuntimePanels: sizes a panel from its settings. Per-frame normally.</summary>
-    private static readonly MethodInfo? UpdateRuntimePanels = RuntimeUtilityMethod("UpdateRuntimePanels");
-
-    private static MethodInfo? RuntimeUtilityMethod(string name)
-    {
-        return typeof(PanelSettings).Assembly.GetType("UnityEngine.UIElements.UIElementsRuntimeUtility")
-            ?.GetMethod(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-    }
-
-    private PanelSettings? _panel;
-    private RenderTexture? _texture;
-    private RenderTexture? _pending;
-    private UIDocument? _document;
+    private Panel? _panel;
     private VisualElement? _content;
     private Dictionary<string, VisualElement> _byId = new(System.StringComparer.Ordinal);
     private Dictionary<string, SvgShape> _shapes = new(System.StringComparer.Ordinal);
@@ -85,15 +71,15 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>Frames the document stays enabled after a change. 0 = asleep, panel disposed.</summary>
     private int _awakeFrames;
     private string _source = string.Empty;
-    private float _scale = 1f;
 
     internal void SetSource(string source)
     {
+        if (!string.IsNullOrEmpty(PageKey))
+            Current[PageKey] = this;
         Hold();
         _source = source;
         if (!Surfaces.Contains(this))
             Surfaces.Add(this);
-        EnsurePanel();
         Build();
     }
 
@@ -118,7 +104,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             var spent = System.Diagnostics.Stopwatch.GetTimestamp() - u0;
             _updateTicks += spent;
             _allUpdateTicks += spent;
-            if (_document != null && _document.gameObject.activeSelf) _awakeCount++;
+            if (_awakeFrames > 0) _awakeCount++;
         }
     }
 
@@ -127,66 +113,155 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (Time.frameCount != _frameSeen)
         {
             _frameSeen = Time.frameCount;
+            OffThread.Now = Time.time;
             var dt = Time.unscaledDeltaTime * 1000f;
             if (dt > 25f) _slowFrames++;
             if (dt > _worstFrame) _worstFrame = dt;
         }
-        // The script runs whether or not the panel is awake: a timer on a static page must fire.
-        // Its writes wake the panel so the change is laid out and emitted.
-        if (_script != null && _panel == null && _job == null)
-        {
-            if (_scriptPending) { _scriptPending = false; _script.Run(_built?.Script ?? string.Empty); }
-            if (_script.Frame(Time.time, _byId)) { _dirty = true; _dScript++; Wake(); }
-        }
         if (_panel == null)
+        {
+            // a surface with no page (a capture's clone before its build): its script still runs here
+            if (_script != null)
+            {
+                if (_scriptPending) { _scriptPending = false; _script.Run(_built?.Script ?? string.Empty); }
+                if (_script.Frame(Time.time, _byId)) { _dirty = true; _dScript++; Wake(); }
+            }
             return;
+        }
         ReportIfDue();
-        if (_job != null)
-        {
-            if (!_job.IsCompleted)
-                return; // the worker reads this page: nothing changes it until the job ends
+        if (!IsCurrent)
+            return; // replaced by a rebuilt surface for the same page: it sends from now on
+        if (_pageState == PageRunning)
+            return; // the page thread owns the page until its frame ends
+        if (_pageState == PageDone)
             FinishJob();
-        }
-
-        // A texture created last frame has been painted into (offscreen panels repaint
-        // after LateUpdate), so it can be shown now. Showing it the frame it was created
-        // put an empty texture on screen for one frame: the flicker.
-        if (_pending != null)
+        if (FontLibrary.ResolvePending()) { _dirty = true; _dOther++; }
+        if (_scriptPending && _script != null)
         {
-            var old = _texture;
-            _texture = _pending;
-            _pending = null;
-            if (old != null)
+            // the page script starts once the page exists; its engine thread runs it
+            _scriptPending = false;
+            _script.Run(_built?.Script ?? string.Empty);
+        }
+        if (_dirty || !_inbox.IsEmpty || _script != null || _animations.Count > 0 || _tweens.Any || AnySvgBlending())
+            StartFrame(Time.time, LayoutSize());
+        if (_awakeFrames > 0)
+            _awakeFrames--;
+    }
+
+    private bool AnySvgBlending()
+    {
+        foreach (var svg in _svgs)
+            if (svg.Blending) return true;
+        return false;
+    }
+
+    // ---- the page's own thread ----
+    // Everything a page does between frames runs here: queued input and data, the script's
+    // writes, animation steps, transitions, layout and translation. The game thread starts a frame
+    // with the time and the layout size, and on a later frame collects the result and hands it to
+    // the vector mod. Nothing else touches the page while a frame runs: a game-thread entry point
+    // that must answer at once waits for it (Hold); the rest are queued (Post).
+
+    private const int PageIdle = 0, PageRunning = 1, PageDone = 2;
+    private volatile int _pageState;
+    private System.Threading.Thread? _pageThread;
+    private readonly System.Threading.AutoResetEvent _pageWake = new(false);
+    private readonly System.Threading.ManualResetEventSlim _pageDone = new(true);
+    private volatile bool _pageStop;
+    private float _frameNow;
+    private Vector2 _frameSize;
+    private OffThread.Globals _frameGlobals;
+    private bool _frameDiagnostics;
+    private EmitResult? _frameResult;
+    private Exception? _frameError;
+    private double _workerMsTotal;
+    private readonly System.Collections.Concurrent.ConcurrentQueue<Action> _inbox = new();
+
+    /// <summary>
+    /// Cascade, layout and the shared state they use (counters, pending calc, the em size) are
+    /// one page at a time; translation, the long part, runs on all page threads at once.
+    /// </summary>
+    internal static readonly object CascadeGate = new();
+
+    /// <summary>Runs <paramref name="work"/> on the page thread at the start of its next frame. Game thread.</summary>
+    private void Post(Action work) => _inbox.Enqueue(work);
+
+    private void StartFrame(float now, Vector2 size)
+    {
+        if (_pageThread == null)
+        {
+            _pageThread = new System.Threading.Thread(PageLoop) { IsBackground = true, Name = "html page " + ElementId };
+            _pageThread.Start();
+        }
+        _frameNow = now;
+        _frameSize = size;
+        _frameGlobals = OffThread.Globals.Take();
+        _frameDiagnostics = HtmlConfig.Diagnostics;
+        _frameResult = null;
+        _frameError = null;
+        _pageDone.Reset();
+        _pageState = PageRunning;
+        _pageWake.Set();
+    }
+
+    private void PageLoop()
+    {
+        // this thread never touches the engine: font questions are queued for the game thread
+        OffThread.Active = true;
+        while (true)
+        {
+            _pageWake.WaitOne();
+            if (_pageStop) return;
+            var w0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            try { _frameResult = PageFrame(); }
+            catch (Exception ex) { _frameError = ex; }
+            finally
             {
-                old.Release();
-                Destroy(old);
+                _workerMsTotal += (System.Diagnostics.Stopwatch.GetTimestamp() - w0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                _pageState = PageDone;
+                _pageDone.Set();
             }
         }
+    }
 
-        if (_script != null)
+    /// <summary>One frame of the page, on its thread. The result is null when nothing changed.</summary>
+    private EmitResult? PageFrame()
+    {
+        var now = _frameNow;
+        OffThread.Job = _frameGlobals;
+        lock (CascadeGate)
         {
-            if (_scriptPending)
-            {
-                // Queue the page script one frame after build, so layout has happened and
-                // clientWidth is real. The worker runs it before any data queued after it.
-                _scriptPending = false;
-                _script.Run(_built?.Script ?? string.Empty);
-            }
-            // Hand the worker this frame's time and sizes; apply whatever it finished.
-            // A pending timer does not keep the panel awake: an awake panel is re-rendered off-screen
-            // every frame (a texture nothing shows in vector mode). Writes wake it when they land.
-            if (_script.Frame(Time.time, _byId)) { _dirty = true; _dScript++; Wake(); }
+            StepPage(now);
+            if (!_dirty || _content == null || _panel == null || _built == null)
+                return null;
+            _dirty = false;
+            var t0 = Clock.Elapsed.TotalMilliseconds;
+            _panel.Layout(_frameSize.x, _frameSize.y);
+            var t1 = Clock.Elapsed.TotalMilliseconds;
+            OffThread.Capture(_content, _built, _boxes, _boxScratch);
+            _lastLayoutMs = t1 - t0;
+            _lastCopyMs = Clock.Elapsed.TotalMilliseconds - t1;
         }
+        return Translate(_frameSize, now, _frameGlobals, _frameDiagnostics, worker: true);
+    }
 
-        // Keyframe animations step at keyframe boundaries; UI Toolkit interpolates between.
-        // While any is running the panel must stay awake to repaint. Time.time, so it
-        // pauses with the game like the vector layer.
-        var animating = false;
+    /// <summary>Queued input and data, the script's writes, animation steps and transitions.</summary>
+    private void StepPage(float now)
+    {
+        while (_inbox.TryDequeue(out var work))
+        {
+            try { work(); }
+            catch (Exception ex) { ScriptedScreensHtmlPlugin.Log?.LogError($"html \"{ElementId}\": {ex}"); }
+        }
+        if (_script != null && _script.Frame(now, _byId)) { _dirty = true; _dScript++; Wake(); }
+
+        // Keyframe animations step at keyframe boundaries; the scene interpolates between.
+        // Time.time, so they pause with the game like the vector layer.
         // a runner whose element a script removed (an innerHTML page rebuilds its lamps every tick) would keep writing
         _animations.RemoveAll(a => a.Element.panel == null);
         foreach (var a in _animations)
         {
-            a.Update(Time.time);
+            a.Update(now);
             if (a.Wrote) { a.Wrote = false; _dirty = true; _dAnim++; }
             if (a.Finished && !a.Restored)
             {
@@ -199,94 +274,9 @@ internal sealed class HtmlSurface : MonoBehaviour
                     _dirty = true;
                 }
             }
-            animating |= !a.Finished;
         }
         // The last tween ending re-emits the scene once with plain numbers: static again.
-        if (_tweens.Expire(Time.time)) { _dirty = true; _dTween++; }
-        foreach (var svg in _svgs)
-        {
-            if (svg.Blending)
-            {
-                svg.MarkDirtyRepaint();
-                animating = true;
-            }
-        }
-        if (animating)
-            _awakeFrames = Mathf.Max(_awakeFrames, 2);
-
-        if (_dirty)
-        {
-            // The layout passes (grid, line boxes, baselines, mixed calc) write styles from geometry
-            // events at the end of a frame and settle over a few frames. Emitting each of those frames
-            // drew every intermediate layout (twenty emits for one innerHTML); a browser paints a
-            // settled layout once. Hold while a frame's passes wrote, bounded so a pass that never
-            // settles still shows.
-            var writes = PostLayout.LayoutWrites;
-            if (writes != _seenLayoutWrites && _settleFrames < 8)
-            {
-                _seenLayoutWrites = writes;
-                _settleFrames++;
-                _awakeFrames = Mathf.Max(_awakeFrames, 2);
-            }
-            else
-            {
-                _seenLayoutWrites = writes;
-                _settleFrames = 0;
-                _dirty = false;
-                var e0 = System.Diagnostics.Stopwatch.GetTimestamp();
-                EmitToVector();
-                _allEmitTicks += System.Diagnostics.Stopwatch.GetTimestamp() - e0;
-            }
-        }
-
-        if (_awakeFrames > 0 && --_awakeFrames == 0 && _document != null)
-            _document.gameObject.SetActive(false);
-
-    }
-
-    /// <summary>The scale that fills the texture cap for this page's layout size.</summary>
-    private float FixedScale()
-    {
-        var layout = LayoutSize();
-        var largest = Mathf.Max(layout.x, layout.y);
-        return Mathf.Clamp(MaxTextureSize / Mathf.Max(64f, largest), 1f, MaxScale);
-    }
-
-    private void EnsurePanel()
-    {
-        if (_panel != null)
-            return;
-
-        // FIXED MAXIMUM, by decision (2026-09-10): the largest texture the cap allows,
-        // for every console, made once and never re-made. Measuring on-screen size and
-        // re-rendering in steps was tried twice and both times the step was a visible
-        // change in clarity while walking; the user chose stability over 1:1.
-        _scale = 1f;
-        var (w, h) = TextureSize(_scale);
-
-        _texture = CreateTexture(w, h);
-
-        _panel = ScriptableObject.CreateInstance<PanelSettings>();
-        _panel.name = "HtmlSurface Panel";
-        _panel.scaleMode = PanelScaleMode.ConstantPixelSize;
-        _panel.scale = _scale;
-        _panel.clearColor = true;
-        _panel.colorClearValue = new Color(0, 0, 0, 0);
-        _panel.targetTexture = _texture;
-
-        // Deliberately NOT parented under the console: the screen capture clones the
-        // surface tree, and a cloned UIDocument would attach a second root to this panel
-        // mid-frame and then be destroyed. Lifetime is tied to us via OnDestroy instead.
-        var docGo = new GameObject("HtmlDocument:" + gameObject.GetInstanceID().ToString(CultureInfo.InvariantCulture));
-        _document = docGo.AddComponent<UIDocument>();
-        _document.panelSettings = _panel;
-
-        // No RawImage: the panel exists for LAYOUT only. What is drawn is the vector scene
-        // the emitter derives from that layout; the vector mod renders it as geometry.
-
-        ReportShaders();
-        if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo(
-            $"html surface created: {w}x{h} at scale {_scale}, layout {LayoutSize()} for rect {((RectTransform)transform).rect.size}, theme={(_panel.themeStyleSheet == null ? "none" : _panel.themeStyleSheet.name)}");
+        if (_tweens.Expire(now)) { _dirty = true; _dTween++; }
     }
 
     /// <summary>
@@ -312,129 +302,16 @@ internal sealed class HtmlSurface : MonoBehaviour
         return new Vector2(width, Mathf.Max(64f, width * aspect));
     }
 
-    /// <summary>
-    /// 24 depth bits: UI Toolkit clips rounded corners (overflow: hidden + border-radius)
-    /// through the stencil buffer, and with 0 the clipped element painted solid white.
-    /// Mipmaps + trilinear so a console seen from a distance minifies smoothly instead of
-    /// shimmering; the panel repaints into level 0 and the chain regenerates automatically.
-    /// </summary>
-    private static RenderTexture CreateTexture(int w, int h)
-    {
-        // Mipmaps + anisotropic: a fixed 4096 texture is minified at any normal distance,
-        // and without mips that aliases and shimmers. Negative bias keeps it on the sharp side.
-        var rt = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32)
-        {
-            name = "HtmlSurface RT",
-            useMipMap = true,
-            autoGenerateMips = true,
-            filterMode = FilterMode.Trilinear,
-            anisoLevel = 16,
-            mipMapBias = -0.5f,
-        };
-        rt.Create();
-        return rt;
-    }
-
-    private void Resize(float scale)
-    {
-        if (_panel == null || _pending != null)
-            return;
-        _scale = scale;
-        var (w, h) = TextureSize(scale);
-        var fresh = CreateTexture(w, h);
-        _panel.targetTexture = fresh;
-        _panel.scale = scale;
-        _pending = fresh;
-        Wake();
-        if (HtmlConfig.Diagnostics)
-            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: resized to {w}x{h} at scale {scale}");
-    }
-
-    private (int w, int h) TextureSize(float scale)
-    {
-        var size = LayoutSize();
-        var w = Mathf.Clamp(Mathf.RoundToInt(size.x * scale), 64, MaxTextureSize);
-        var h = Mathf.Clamp(Mathf.RoundToInt(size.y * scale), 64, MaxTextureSize);
-        return (w, h);
-    }
-
-    private void ReportShaders()
-    {
-        foreach (var f in new[] { "m_AtlasBlitShader", "m_RuntimeShader", "m_RuntimeWorldShader" })
-        {
-            var field = typeof(PanelSettings).GetField(f, BindingFlags.NonPublic | BindingFlags.Instance);
-            var shader = field?.GetValue(_panel) as Shader;
-            if (HtmlConfig.Diagnostics)
-                ScriptedScreensHtmlPlugin.Log?.LogInfo($"  {f}: {(shader == null ? "NULL" : shader.name)}");
-        }
-    }
-
-    private static Font? FindFont()
-    {
-        foreach (var n in new[] { "LegacyRuntime.ttf", "Arial.ttf" })
-        {
-            try
-            {
-                var f = Resources.GetBuiltinResource<Font>(n);
-                if (f != null)
-                    return f;
-            }
-            catch (System.Exception)
-            {
-                // Not present in this Unity version; try the next name.
-            }
-        }
-
-        var any = Resources.FindObjectsOfTypeAll<Font>();
-        return any.Length > 0 ? any[0] : null;
-    }
-
-    /// <summary>
-    /// Enable the document so the panel exists and repaints, attach our content to its
-    /// (fresh) root, and schedule sleep. Disabling the document nulls its root, so the
-    /// content tree is kept on our side and re-attached each wake.
-    /// </summary>
-    private void Wake(int frames = 3)
-    {
-        if (_document == null || _content == null)
-            return;
-
-        if (!_document.gameObject.activeSelf)
-            _document.gameObject.SetActive(true);
-
-        var root = _document.rootVisualElement;
-        if (root == null)
-        {
-            ScriptedScreensHtmlPlugin.Log?.LogWarning("html: rootVisualElement is null on wake");
-            return;
-        }
-
-        // The document root is a plain child of the panel's tree and sizes to its content
-        // unless told to fill. Without this the root measured 436x53 on a 436x400 panel
-        // and the scene was a strip along the top.
-        root.style.position = Position.Absolute;
-        root.style.left = 0;
-        root.style.top = 0;
-        root.style.right = 0;
-        root.style.bottom = 0;
-
-        if (_content.parent != root)
-        {
-            root.Clear();
-            root.Add(_content);
-        }
-
-        // At least two repaints: one into the texture, one more so a pending swap lands on content.
-        _awakeFrames = Mathf.Max(_awakeFrames, frames);
-    }
+    /// <summary>Marks the page busy for a few frames (the diagnostics line counts them).</summary>
+    private void Wake(int frames = 3) => _awakeFrames = Mathf.Max(_awakeFrames, frames);
 
     private void Build()
     {
-        if (_document == null)
-            return;
+        Hold();
         try
         {
-            BuildInner();
+            lock (CascadeGate)
+                BuildInner();
         }
         catch (System.Exception ex)
         {
@@ -448,18 +325,15 @@ internal sealed class HtmlSurface : MonoBehaviour
             var size = LayoutSize();
             HtmlRenderer.SurfaceAspect = size.x > 0f ? size.y / size.x : 1f;
         }
-        var built = HtmlRenderer.Build(_source, FindFont());
+        var face = FontLibrary.Default();
+        ResolvedStyle.DefaultFace = face;
+        var built = HtmlRenderer.Build(_source, face);
         foreach (var w in built.Warnings)
             ScriptedScreensHtmlPlugin.Log?.LogWarning(w);
 
-        if (!Mathf.Approximately(built.ViewportWidth, _designWidth))
-        {
-            // A new design width changes the layout size; rebuild the texture for it.
-            _designWidth = built.ViewportWidth;
-            Resize(1f);
-        }
-
+        _designWidth = built.ViewportWidth;
         _content = built.Root;
+        _panel = new Panel(_content);
         _byId = built.ById;
         _shapes = built.Shapes;
         _built = built;
@@ -573,6 +447,13 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal void EmitNow()
     {
         Hold();
+        lock (CascadeGate)
+            EmitNowLocked();
+    }
+
+    private void EmitNowLocked()
+    {
+        Hold();
         // A capture builds and copies the page in one call. The script gets a few frames
         // first (its load work, a short timer, an animation frame), each waited for, so the
         // capture shows what the script drew rather than the bare markup.
@@ -582,13 +463,13 @@ internal sealed class HtmlSurface : MonoBehaviour
                 _script.RunSynchronously(Time.time + k * 0.1f, _byId, 300);
             _script.Pump(); // what the last frame queued lands before the capture's emit
         }
-        _dirty = false;
-        EmitToVector(inline: true);
+        EmitNowInline();
         if (_restore != null)
         {
             // the layout exists now: put the old surface's hover, press and focus back and emit once more
             ApplyRestoredPointer();
-            if (_dirty) { _dirty = false; EmitToVector(inline: true); }
+            DrainInbox();
+            if (_dirty) EmitNowInline();
         }
     }
 
@@ -791,10 +672,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         _framesAtReport = Time.frameCount;
         double PerFrame(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / frames;
         ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: frames over 25 ms: {_slowFrames}, slowest {_worstFrame:0} ms, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}; "
-            + $"game thread per frame: ui toolkit update {PerFrame(UiToolkitPatch.UpdateTicks):0.00} ms + paint {PerFrame(UiToolkitPatch.RepaintTicks):0.00} ms, "
-            + $"pages {PerFrame(_allUpdateTicks):0.00} ms (emit {PerFrame(_allEmitTicks):0.00})");
+            + $"game thread per frame: pages {PerFrame(_allUpdateTicks):0.00} ms (emit {PerFrame(_allEmitTicks):0.00})");
         _slowFrames = 0; _worstFrame = 0f;
-        UiToolkitPatch.UpdateTicks = UiToolkitPatch.RepaintTicks = 0;
         _allUpdateTicks = _allEmitTicks = 0;
         foreach (var page in Surfaces)
         {
@@ -804,11 +683,11 @@ internal sealed class HtmlSurface : MonoBehaviour
             page._emitsAtReport = page._emits;
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
                 $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
-                + $"(layout {page._lastLayoutMs:0.00} + copy {page._lastCopyMs:0.00} on the game thread, translate {page._lastTranslateMs:0.0} on a worker, {page._translateMsTotal / ReportIntervalSeconds:0.0} ms/s; waited {page._heldMs:0.00} ms), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
+                + $"(layout {page._lastLayoutMs:0.00} + copy {page._lastCopyMs:0.00}, translate {page._lastTranslateMs:0.0}; page thread {page._workerMsTotal / ReportIntervalSeconds:0.0} ms/s; game thread waited {page._heldMs:0.00} ms), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
                 + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}");
             page._dScript = page._dAnim = page._dTween = page._dDom = page._dOther = 0;
             page._structureSends = page._patchSends = page._patchSlots = page._morphs = 0;
-            page._updateTicks = 0; page._awakeCount = 0; page._translateMsTotal = 0; page._heldMs = 0;
+            page._updateTicks = 0; page._awakeCount = 0; page._translateMsTotal = 0; page._heldMs = 0; page._workerMsTotal = 0;
         }
     }
 
@@ -830,55 +709,55 @@ internal sealed class HtmlSurface : MonoBehaviour
         public string? Why;
     }
 
-    private System.Threading.Tasks.Task<EmitResult>? _job;
     private readonly Dictionary<VisualElement, OffThread.Box> _boxes = new();
     private readonly List<VisualElement> _boxScratch = new();
     private double _lastCopyMs;
 
-    /// <summary>Finishes a translation in flight before the page changes. Game thread.</summary>
+    /// <summary>Waits for the page thread's frame and hands its result on, before the game thread touches the page. Game thread.</summary>
     private void Hold()
     {
-        if (_job == null)
+        if (_pageState == PageIdle)
             return;
-        if (!_job.IsCompleted)
+        if (_pageState == PageRunning)
         {
             var w0 = Clock.Elapsed.TotalMilliseconds;
-            try { _job.Wait(); } catch (AggregateException) { }
+            _pageDone.Wait();
             _heldMs += Clock.Elapsed.TotalMilliseconds - w0;
         }
         FinishJob();
     }
 
-    private double _heldMs;
+    /// <summary>Runs what was posted for the page thread, here and now. Game thread, page thread idle.</summary>
+    private void DrainInbox()
+    {
+        while (_inbox.TryDequeue(out var work))
+            work();
+    }
 
-    /// <summary>Lays the page out, copies it and starts its translation; <paramref name="inline"/> runs it on the game thread (a capture needs the scene inside the call).</summary>
-    private void EmitToVector(bool inline = false)
+    private double _heldMs;
+    private float _lastPatchDump;
+
+    /// <summary>Lays the page out and translates it here and now, on the game thread (a capture needs the scene inside the call).</summary>
+    private void EmitNowInline()
     {
         Hold();
-        if (_content == null || _document == null || _built == null)
+        DrainInbox();
+        if (_content == null || _panel == null || _built == null)
             return;
+        _dirty = false;
         var t0 = Clock.Elapsed.TotalMilliseconds;
         Wake();
-        UpdateRuntimePanels?.Invoke(null, null);
-        if (_document.rootVisualElement == null)
-            return;
+        var size = LayoutSize();
+        _panel.Layout(size.x, size.y);
         var t1 = Clock.Elapsed.TotalMilliseconds;
         OffThread.Capture(_content, _built, _boxes, _boxScratch);
-        var layout = LayoutSize();
-        var globals = OffThread.Globals.Take();
-        var now = Time.time;
-        var diagnostics = HtmlConfig.Diagnostics;
         var t2 = Clock.Elapsed.TotalMilliseconds;
         _lastLayoutMs = t1 - t0;
         _lastCopyMs = t2 - t1;
-        if (inline)
-        {
-            var result = Translate(layout, now, globals, diagnostics, worker: false);
-            _job = System.Threading.Tasks.Task.FromResult(result);
-            FinishJob();
-            return;
-        }
-        _job = System.Threading.Tasks.Task.Run(() => Translate(layout, now, globals, diagnostics, worker: true));
+        _frameResult = Translate(size, Time.time, OffThread.Globals.Take(), HtmlConfig.Diagnostics, worker: false);
+        _frameError = null;
+        _pageState = PageDone;
+        FinishJob();
     }
 
     /// <summary>The job: translation, template split and the send decision. Reads only the copies; touches only this surface's own send state.</summary>
@@ -886,6 +765,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         var r = new EmitResult();
         var c0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var wasActive = OffThread.Active;
         OffThread.Active = worker;
         OffThread.Boxes = _boxes;
         OffThread.Job = globals;
@@ -957,7 +837,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         finally
         {
             r.Stale = OffThread.Stale;
-            OffThread.Active = false;
+            OffThread.Active = wasActive;
             OffThread.Boxes = null;
             r.TranslateMs = (System.Diagnostics.Stopwatch.GetTimestamp() - c0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         }
@@ -969,19 +849,27 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>Hands a finished translation to the vector mod. Game thread.</summary>
     private void FinishJob()
     {
-        var job = _job;
-        if (job == null || !job.IsCompleted)
+        if (_pageState != PageDone)
             return;
-        _job = null;
-        if (job.IsFaulted)
+        _pageState = PageIdle;
+        var r = _frameResult;
+        var error = _frameError;
+        _frameResult = null;
+        _frameError = null;
+        if (error != null)
         {
-            // a translation that failed leaves no trustworthy send state: the next one sends everything
-            ScriptedScreensHtmlPlugin.Log?.LogError($"html \"{ElementId}\": translation failed: {job.Exception?.InnerException}");
+            // a frame that failed leaves no trustworthy send state: the next one sends everything
+            ScriptedScreensHtmlPlugin.Log?.LogError($"html \"{ElementId}\": page frame failed: {error}");
             _lastTemplate = null;
+            _dirty = true;
             return;
         }
-        var r = job.Result;
         _tweens.ApplyHides();
+        if (r == null)
+        {
+            if (OffThread.ResolveFonts()) { _dirty = true; _dOther++; }
+            return;
+        }
         if (OffThread.ResolveFonts()) { _dirty = true; _dOther++; }
         if (r.Stale || r.Output == null)
         {
@@ -1001,6 +889,8 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogWarning(w);
         if (r.Why != null)
             ScriptedScreensHtmlPlugin.Log?.LogInfo(r.Why);
+        if (!IsCurrent)
+            return;
         ApplyExternals(output.Externals);
         if (State is not SS.BoardState state)
             return;
@@ -1008,6 +898,12 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             if (r.Patch == null)
                 return;
+            // the scene as drawn now (structure plus values), at most every two seconds
+            if (HtmlConfig.DumpScenes && OffThread.Seconds - _lastPatchDump > 2f)
+            {
+                _lastPatchDump = OffThread.Seconds;
+                DumpScene(output.Scene);
+            }
             VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
                 new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Patch }, null, snap: true);
             _patchSends++;
@@ -1176,6 +1072,13 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal bool OnExternalInput(string key, string evt, string value, out string name, out string delivered)
     {
         Hold();
+        lock (CascadeGate)
+            return OnExternalInputLocked(key, evt, value, out name, out delivered);
+    }
+
+    private bool OnExternalInputLocked(string key, string evt, string value, out string name, out string delivered)
+    {
+        Hold();
         name = key;
         delivered = string.Empty;
         if (!_externalNodes.TryGetValue(key, out var node))
@@ -1227,6 +1130,13 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// the name and value for Lua. False when the id is not such a control.
     /// </summary>
     internal bool OnControlClick(string key, out string name, out string delivered)
+    {
+        Hold();
+        lock (CascadeGate)
+            return OnControlClickLocked(key, out name, out delivered);
+    }
+
+    private bool OnControlClickLocked(string key, out string name, out string delivered)
     {
         Hold();
         name = key;
@@ -1368,13 +1278,13 @@ internal sealed class HtmlSurface : MonoBehaviour
         // a looping opacity/transform animation runs in the scene (REDESIGN step 4), as for CSS ones
         if (_built != null && float.IsPositiveInfinity(spec.Iterations) && !spec.Paused && VectorEmitter.Compilable(frames))
         {
-            _built.TimeAnimations[ve] = (spec, Time.time);
+            _built.TimeAnimations[ve] = (spec, OffThread.Now);
             _scriptTimeAnimations[++_animationSeq] = ve;
             _dirty = true;
             Wake();
             return _animationSeq;
         }
-        var runner = new KeyframeRunner(ve, frames, spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), _built?.CssOf(ve));
+        var runner = new KeyframeRunner(ve, frames, spec, OffThread.Now, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), _built?.CssOf(ve));
         _animations.Add(runner);
         _scriptAnimations[++_animationSeq] = runner;
         _awakeFrames = Mathf.Max(_awakeFrames, 2);
@@ -1408,6 +1318,13 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal void OnPageClick(string key)
     {
         Hold();
+        lock (CascadeGate)
+            OnPageClickLocked(key);
+    }
+
+    private void OnPageClickLocked(string key)
+    {
+        Hold();
         SetFocus(key);
         _script?.EmitClick(key, _pointerPage.x, _pointerPage.y);
         if (_built != null && _byId.TryGetValue(key, out var ve) && _built.NodeOf.TryGetValue(ve, out var node)
@@ -1423,6 +1340,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     private readonly HashSet<HtmlNode> _hovered = new();
     private readonly HashSet<HtmlNode> _active = new();
     private HtmlNode? _focused;
+    private volatile string? _focusedId;
     private string? _hoverDeepest;
 
     private (bool inside, bool down, Vector2 fraction, string? focus)? _restore;
@@ -1442,7 +1360,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     private void SavePointer(bool inside, bool down, Vector2 fraction)
     {
         if (PageKey == null) return;
-        HtmlElementPatch.PointerStates[PageKey] = (inside, down, fraction, _focused?.Attr("id"));
+        HtmlElementPatch.PointerStates[PageKey] = (inside, down, fraction, _focusedId);
     }
 
     private Vector2 _lastFraction;
@@ -1450,9 +1368,16 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>The pointer at a fraction of the host rect: which page boxes are under it.</summary>
     internal void PointerMove(Vector2 fraction)
     {
-        Hold();
+        SavePointer(true, _pressed, fraction);
+        Post(() => PointerMoveOnPage(fraction));
+    }
+
+    /// <summary>Whether a press is held, as the game thread last saw it (the page's own set lives on its thread).</summary>
+    private volatile bool _pressed;
+
+    private void PointerMoveOnPage(Vector2 fraction)
+    {
         _lastFraction = fraction;
-        SavePointer(true, _active.Count > 0, fraction);
         var layout = LayoutSize();
         _pointerPage = new Vector2(fraction.x * layout.x, fraction.y * layout.y);
         var deepest = Deepest(_pointerPage);
@@ -1470,8 +1395,13 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     internal void PointerLeave()
     {
-        Hold();
+        _pressed = false;
         SavePointer(false, false, _lastFraction);
+        Post(PointerLeaveOnPage);
+    }
+
+    private void PointerLeaveOnPage()
+    {
         if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseout", _pointerPage.x, _pointerPage.y);
         _hoverDeepest = null;
         SetState(_hovered, "data-hover", null);
@@ -1480,9 +1410,14 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     internal void PointerDown(Vector2 fraction)
     {
-        Hold();
-        _lastFraction = fraction;
+        _pressed = true;
         SavePointer(true, true, fraction);
+        Post(() => PointerDownOnPage(fraction));
+    }
+
+    private void PointerDownOnPage(Vector2 fraction)
+    {
+        _lastFraction = fraction;
         var layout = LayoutSize();
         _pointerPage = new Vector2(fraction.x * layout.x, fraction.y * layout.y);
         var deepest = Deepest(_pointerPage);
@@ -1493,8 +1428,13 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     internal void PointerUp()
     {
-        Hold();
+        _pressed = false;
         SavePointer(true, false, _lastFraction);
+        Post(PointerUpOnPage);
+    }
+
+    private void PointerUpOnPage()
+    {
         if (_hoverDeepest != null) _script?.EmitPointer(_hoverDeepest, "mouseup", _pointerPage.x, _pointerPage.y);
         SetState(_active, "data-active", null);
     }
@@ -1595,6 +1535,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         var changed = false;
         if (_focused != null) { _focused.Attributes.Remove("data-focus"); Recascade(_focused); changed = true; }
         _focused = node;
+        _focusedId = node.Attr("id");
         node.Attributes["data-focus"] = string.Empty;
         Recascade(node);
         if (changed || CssParser.UsesPointerState) { _dirty = true; Wake(); }
@@ -1688,6 +1629,13 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal void OnScrollReport(string key, float offset, float max, float view)
     {
         Hold();
+        lock (CascadeGate)
+            OnScrollReportLocked(key, offset, max, view);
+    }
+
+    private void OnScrollReportLocked(string key, float offset, float max, float view)
+    {
+        Hold();
         if (_script == null) return;
         var changed = !_script.ScrollState.TryGetValue(key, out var prev) || Mathf.Abs(prev[0] - offset) > 0.01f || Mathf.Abs(prev[1] - (max + view)) > 0.01f;
         _script.ScrollState[key] = new[] { offset, max + view, view };
@@ -1716,10 +1664,10 @@ internal sealed class HtmlSurface : MonoBehaviour
             // runner, no redraw at every keyframe
             if (float.IsPositiveInfinity(spec.Iterations) && !spec.Paused && VectorEmitter.Compilable(frames))
             {
-                built.TimeAnimations[element] = (spec, Time.time);
+                built.TimeAnimations[element] = (spec, OffThread.Now);
                 continue;
             }
-            _animations.Add(new KeyframeRunner(element, frames, spec, Time.time, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), built.CssOf(element)));
+            _animations.Add(new KeyframeRunner(element, frames, spec, OffThread.Now, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), built.CssOf(element)));
         }
     }
 
@@ -1753,9 +1701,11 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>The live page for a host and page element id, for routing control events.</summary>
     internal static HtmlSurface? Find(object? board, object? cartridge, object? visor, string surface, string pageId)
     {
-        foreach (var s in Surfaces)
+        for (var i = Surfaces.Count - 1; i >= 0; i--)
         {
-            if (s == null || s.State == null) continue;
+            // newest first: a rebuilt surface is registered after the one it replaces
+            var s = Surfaces[i];
+            if (s == null || s.State == null || !s.IsCurrent) continue;
             if (!ReferenceEquals(s.Board, board) || !ReferenceEquals(s.Cartridge, cartridge) || !ReferenceEquals(s.Visor, visor)) continue;
             if (s.Surface == surface && s.ElementId == pageId) return s;
         }
@@ -1885,14 +1835,17 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         // Lua data lands outside Update; its cost counts toward the page's game-thread time all the same
         var d0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        try { ApplyPairsInner(entries); }
+        try
+        {
+            // the vector scene's copy goes now (the vector mod is the game thread's); the page's on its thread
+            ForwardData(entries);
+            Post(() => BindData(entries));
+        }
         finally { _allUpdateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - d0; }
     }
 
-    private void ApplyPairsInner(List<KeyValuePair<string, SS.UiValue>> entries)
+    private void BindData(List<KeyValuePair<string, SS.UiValue>> entries)
     {
-        Hold();
-        ForwardData(entries);
         // Ids bind first, always: a key naming an element is the simplest contract a page
         // has. A script's data handler gets the same payload as an event afterwards; keys
         // it consumes that match no id are not warned about when a script is present.
@@ -1929,7 +1882,7 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     private void SendData(List<SS.UiProp> props)
     {
-        if (string.IsNullOrEmpty(DataElementId) || State is not SS.BoardState state)
+        if (string.IsNullOrEmpty(DataElementId) || State is not SS.BoardState state || !IsCurrent)
             return;
         var map = new SS.UiValue { Type = SS.UiValueType.Map, Map = props.ToArray() };
         VectorBridge.Data(Board, Cartridge, Visor, state, Surface, DataElementId, "html:" + ElementId, map, null);
@@ -2038,20 +1991,10 @@ internal sealed class HtmlSurface : MonoBehaviour
     private void OnDestroy()
     {
         Surfaces.Remove(this);
+        if (!string.IsNullOrEmpty(PageKey) && Current.TryGetValue(PageKey, out var live) && live == this)
+            Current.Remove(PageKey);
         _script?.Dispose();
-        if (_document != null)
-            Destroy(_document.gameObject);
-        if (_panel != null)
-            Destroy(_panel);
-        if (_texture != null)
-        {
-            _texture.Release();
-            Destroy(_texture);
-        }
-        if (_pending != null)
-        {
-            _pending.Release();
-            Destroy(_pending);
-        }
+        _pageStop = true;
+        _pageWake.Set();
     }
 }

@@ -6,6 +6,8 @@ using UnityEngine;
 using UnityEngine.TextCore.Text;
 using UnityEngine.UIElements;
 
+using IStyle = ScriptedScreensHtml.ElementStyle;
+
 namespace ScriptedScreensHtml;
 
 /// <summary>
@@ -191,18 +193,18 @@ internal static class StyleApplier
             // Text
             case "font-family":
             {
-                // A face registered with TextMeshPro (the Fonts mod's, the game's), mirrored for
-                // UI Toolkit's layout. No font files, no OS fonts. An unknown family keeps the
-                // inherited face and warns once.
-                FontAsset? sdf = null;
+                // A face registered with TextMeshPro (the Fonts mod's, the game's), copied for
+                // measuring. No font files, no OS fonts. An unknown family keeps the inherited
+                // face and warns once.
+                FaceData? face = null;
                 foreach (var raw in v.Split(','))
                 {
                     var name = raw.Trim().Trim('"', (char)39);
                     if (name.Length == 0) continue;
-                    sdf = FontLibrary.Get(MapGeneric(name) ?? name);
-                    if (sdf != null) break;
+                    face = FontLibrary.Get(MapGeneric(name) ?? name);
+                    if (face != null) break;
                 }
-                if (sdf != null) s.unityFontDefinition = FontDefinition.FromSDFFont(sdf);
+                if (face != null) s.face = face;
                 else Unknown(d, warn);
                 break;
             }
@@ -257,6 +259,8 @@ internal static class StyleApplier
                 break;
             }
             case "letter-spacing": s.letterSpacing = Len(v); break;
+            // drawn by the emitter; the layout measures the transformed text
+            case "text-transform": s.textTransform = v.Trim().ToLowerInvariant(); break;
             case "word-spacing": s.wordSpacing = Len(v); break;
             case "text-overflow": s.textOverflow = v == "ellipsis" ? TextOverflow.Ellipsis : TextOverflow.Clip; break;
             case "text-shadow":
@@ -354,35 +358,16 @@ internal static class StyleApplier
         }
     }
 
-    /// <summary>
-    /// linear-gradient(angle|to side, colour [stop%], ...) baked into a 64-pixel ramp texture
-    /// and stretched as the background image. UI Toolkit has no gradient of its own; the ramp
-    /// is invisible at any console size once bilinear-filtered. ponytail: snapped to the
-    /// nearer axis; a diagonal renders as horizontal or vertical.
-    /// </summary>
+    /// <summary>linear-gradient(...) as a background: its stops are checked here; the emitter draws it from the CSS record.</summary>
     private static void Gradient(IStyle s, string v, Action<string>? warn)
     {
         var open = v.IndexOf('(');
         var close = v.LastIndexOf(')');
         if (open < 0 || close < open) { warn?.Invoke($"css: bad gradient \"{v}\""); return; }
         var args = SplitTopLevelCommas(v.Substring(open + 1, close - open - 1));
-        var angle = 180f; // CSS default: to bottom
         var first = args.Count > 0 ? args[0].Trim() : string.Empty;
-        if (first.StartsWith("to ", StringComparison.OrdinalIgnoreCase))
-        {
-            angle = first.Substring(3).Trim() switch
-            {
-                "top" => 0f, "right" => 90f, "bottom" => 180f, "left" => 270f,
-                "top right" or "right top" => 45f, "bottom right" or "right bottom" => 135f,
-                "bottom left" or "left bottom" => 225f, "top left" or "left top" => 315f, _ => 180f,
-            };
+        if (first.StartsWith("to ", StringComparison.OrdinalIgnoreCase) || first.EndsWith("deg", StringComparison.OrdinalIgnoreCase) || first.EndsWith("turn", StringComparison.OrdinalIgnoreCase))
             args.RemoveAt(0);
-        }
-        else if (first.EndsWith("deg", StringComparison.OrdinalIgnoreCase) || first.EndsWith("turn", StringComparison.OrdinalIgnoreCase))
-        {
-            angle = Angle(first);
-            args.RemoveAt(0);
-        }
 
         var stops = new List<(float at, Color c)>();
         for (var i = 0; i < args.Count; i++)
@@ -392,75 +377,8 @@ internal static class StyleApplier
             var at = parts.Count > 1 && parts[1].EndsWith("%", StringComparison.Ordinal) ? Num(parts[1]) / 100f : (args.Count == 1 ? 0f : (float)i / (args.Count - 1));
             stops.Add((at, c));
         }
-        if (stops.Count == 0) return;
-        if (stops.Count == 1) { s.backgroundColor = stops[0].c; return; }
-
-        const int n = 64;
-        var sin = Mathf.Sin(angle * Mathf.Deg2Rad);
-        var cos = Mathf.Cos(angle * Mathf.Deg2Rad);
-        var axisAligned = Mathf.Abs(sin) < 0.01f || Mathf.Abs(cos) < 0.01f;
-
-        Texture2D tex;
-        Color[] pixels;
-        if (axisAligned)
-        {
-            var horizontal = Mathf.Abs(sin) > Mathf.Abs(cos);
-            // Texture x runs left to right; texture y runs bottom to top. CSS 90deg is "to
-            // right" and 180deg is "to bottom", so a vertical ramp is written inverted.
-            var flip = horizontal ? sin < 0f : cos < 0f;
-            tex = new Texture2D(horizontal ? n : 1, horizontal ? 1 : n, TextureFormat.RGBA32, mipChain: false);
-            pixels = new Color[n];
-            for (var i = 0; i < n; i++)
-            {
-                var t = (float)i / (n - 1);
-                if (flip) t = 1f - t;
-                pixels[i] = Sample(stops, t);
-            }
-        }
-        else
-        {
-            // Diagonal: project each texel onto the gradient line. CSS measures the angle
-            // clockwise from "to top"; the line is scaled so the corners land on 0 and 1.
-            // The texture is square and stretched to the element, so on a non-square box
-            // the angle follows the box's diagonal rather than the exact degree value.
-            tex = new Texture2D(n, n, TextureFormat.RGBA32, mipChain: false);
-            pixels = new Color[n * n];
-            var norm = Mathf.Abs(sin) + Mathf.Abs(cos);
-            for (var y = 0; y < n; y++)
-            {
-                for (var x = 0; x < n; x++)
-                {
-                    var u = (float)x / (n - 1) - 0.5f;
-                    var w = (float)y / (n - 1) - 0.5f;
-                    var t = 0.5f + (u * sin + w * cos) / norm;
-                    pixels[y * n + x] = Sample(stops, Mathf.Clamp01(t));
-                }
-            }
-        }
-        tex.wrapMode = TextureWrapMode.Clamp;
-        tex.filterMode = FilterMode.Bilinear;
-        tex.name = "css gradient";
-        tex.SetPixels(pixels);
-        tex.Apply(false, true);
-        s.backgroundImage = new StyleBackground(tex);
-        s.backgroundSize = new BackgroundSize(new Length(100, LengthUnit.Percent), new Length(100, LengthUnit.Percent));
-        s.backgroundRepeat = new BackgroundRepeat(Repeat.NoRepeat, Repeat.NoRepeat);
-        s.backgroundColor = Color.clear;
-    }
-
-    private static Color Sample(List<(float at, Color c)> stops, float t)
-    {
-        if (t <= stops[0].at) return stops[0].c;
-        for (var i = 1; i < stops.Count; i++)
-        {
-            if (t <= stops[i].at)
-            {
-                var span = stops[i].at - stops[i - 1].at;
-                var k = span <= 0f ? 1f : (t - stops[i - 1].at) / span;
-                return Color.Lerp(stops[i - 1].c, stops[i].c, k);
-            }
-        }
-        return stops[stops.Count - 1].c;
+        // the emitter draws the gradient from the CSS record; the box keeps no colour of its own
+        s.backgroundColor = stops.Count == 1 ? stops[0].c : Color.clear;
     }
 
     private static List<string> SplitTopLevelCommas(string v)
@@ -554,12 +472,12 @@ internal static class StyleApplier
 
     /// <summary>Unit context for em, rem, vw and vh: set per element by the cascade, per page by the renderer.</summary>
     /// A translation worker reads the values the game thread had when its job started (OffThread.Job).
-    internal static float EmSize { get => OffThread.Active ? OffThread.Job.EmSize : _emSize; set => _emSize = value; }
-    internal static float RootFontSize { get => OffThread.Active ? OffThread.Job.RootFontSize : _rootFontSize; set => _rootFontSize = value; }
+    internal static float EmSize { get => OffThread.Active ? OffThread.Job.EmSize : _emSize; set { if (OffThread.Active) OffThread.Job.EmSize = value; else _emSize = value; } }
+    internal static float RootFontSize { get => OffThread.Active ? OffThread.Job.RootFontSize : _rootFontSize; set { if (OffThread.Active) OffThread.Job.RootFontSize = value; else _rootFontSize = value; } }
     /// <summary>color-scheme: dark seen in the cascade; light-dark() picks its second value then.</summary>
-    internal static bool ColorSchemeDark { get => OffThread.Active ? OffThread.Job.ColorSchemeDark : _colorSchemeDark; set => _colorSchemeDark = value; }
-    internal static float ViewportW { get => OffThread.Active ? OffThread.Job.ViewportW : _viewportW; set => _viewportW = value; }
-    internal static float ViewportH { get => OffThread.Active ? OffThread.Job.ViewportH : _viewportH; set => _viewportH = value; }
+    internal static bool ColorSchemeDark { get => OffThread.Active ? OffThread.Job.ColorSchemeDark : _colorSchemeDark; set { if (OffThread.Active) OffThread.Job.ColorSchemeDark = value; else _colorSchemeDark = value; } }
+    internal static float ViewportW { get => OffThread.Active ? OffThread.Job.ViewportW : _viewportW; set { if (OffThread.Active) OffThread.Job.ViewportW = value; else _viewportW = value; } }
+    internal static float ViewportH { get => OffThread.Active ? OffThread.Job.ViewportH : _viewportH; set { if (OffThread.Active) OffThread.Job.ViewportH = value; else _viewportH = value; } }
     private static float _emSize = 16f, _rootFontSize = 16f, _viewportW = 460f, _viewportH = 460f;
     private static bool _colorSchemeDark;
 

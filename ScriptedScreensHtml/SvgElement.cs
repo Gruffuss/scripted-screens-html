@@ -40,7 +40,7 @@ internal sealed class SvgShape
 
     private void BeginBlend(List<float> next)
     {
-        var now = Time.time;
+        var now = OffThread.Now;
         if (_lastSet >= 0f)
             _blendSeconds = Mathf.Clamp(now - _lastSet, 0.05f, 1.5f);
         _lastSet = now;
@@ -83,7 +83,7 @@ internal sealed class SvgShape
 }
 
 /// <summary>
-/// Inline <c>&lt;svg&gt;</c>: a VisualElement that draws its shapes with Painter2D, scaled
+/// Inline <c>&lt;svg&gt;</c>: an element holding its shapes for the emitter, scaled
 /// from the viewBox to its own rect. Supports polyline, polygon, line, rect, circle,
 /// ellipse and a path subset (M L H V C Q Z, absolute and relative). Fill, stroke,
 /// stroke-width, opacity, fill-opacity, stroke-opacity, stroke-linecap, stroke-linejoin,
@@ -96,10 +96,6 @@ internal sealed class SvgElement : VisualElement
     public Rect ViewBox = new(0, 0, 100, 100);
     public bool Stretch;
 
-    public SvgElement()
-    {
-        generateVisualContent += Paint;
-    }
 
     /// <summary>True while any shape is interpolating; the surface repaints it per frame.</summary>
     public bool Blending
@@ -115,191 +111,9 @@ internal sealed class SvgElement : VisualElement
         }
     }
 
-    private void Paint(MeshGenerationContext ctx)
-    {
-        var p = ctx.painter2D;
-        var rect = contentRect;
-        if (rect.width <= 0f || rect.height <= 0f || ViewBox.width <= 0f || ViewBox.height <= 0f)
-            return;
-
-        float sx, sy, ox, oy;
-        if (Stretch)
-        {
-            sx = rect.width / ViewBox.width;
-            sy = rect.height / ViewBox.height;
-            ox = rect.x;
-            oy = rect.y;
-        }
-        else
-        {
-            var s = Mathf.Min(rect.width / ViewBox.width, rect.height / ViewBox.height);
-            sx = sy = s;
-            ox = rect.x + (rect.width - ViewBox.width * s) * 0.5f;
-            oy = rect.y + (rect.height - ViewBox.height * s) * 0.5f;
-        }
-
-        Vector2 Map(float x, float y) => new(ox + (x - ViewBox.x) * sx, oy + (y - ViewBox.y) * sy);
-        var strokeScale = (sx + sy) * 0.5f;
-
-        foreach (var shape in Shapes)
-        {
-            var opacity = Num(shape.Attr("opacity"), 1f);
-            var hasFill = TryPaint(shape.Attr("fill"), shape.Tag == "line" || shape.Tag == "polyline" ? "none" : "black", Num(shape.Attr("fill-opacity"), 1f) * opacity, out var fill);
-            var hasStroke = TryPaint(shape.Attr("stroke"), "none", Num(shape.Attr("stroke-opacity"), 1f) * opacity, out var stroke);
-            if (!hasFill && !hasStroke)
-                continue;
-
-            p.BeginPath();
-            var closed = BuildPath(p, shape, Map);
-            if (closed)
-                p.ClosePath();
-
-            if (hasFill)
-            {
-                p.fillColor = fill;
-                p.Fill();
-            }
-            if (hasStroke)
-            {
-                p.strokeColor = stroke;
-                p.lineWidth = Num(shape.Attr("stroke-width"), 1f) * strokeScale;
-                p.lineCap = shape.Attr("stroke-linecap") switch { "round" => LineCap.Round, _ => LineCap.Butt };
-                p.lineJoin = shape.Attr("stroke-linejoin") switch { "round" => LineJoin.Round, "bevel" => LineJoin.Bevel, _ => LineJoin.Miter };
-                p.Stroke();
-            }
-        }
-    }
-
-    /// <summary>Emit the shape's geometry; returns true when the path should be closed.</summary>
-    private static bool BuildPath(Painter2D p, SvgShape shape, Func<float, float, Vector2> map)
-    {
-        switch (shape.Tag)
-        {
-            case "line":
-                p.MoveTo(map(Num(shape.Attr("x1"), 0), Num(shape.Attr("y1"), 0)));
-                p.LineTo(map(Num(shape.Attr("x2"), 0), Num(shape.Attr("y2"), 0)));
-                return false;
-
-            case "polyline":
-            case "polygon":
-            {
-                var pts = shape.CurrentPoints(Time.time);
-                for (var i = 0; i + 1 < pts.Count; i += 2)
-                {
-                    var v = map(pts[i], pts[i + 1]);
-                    if (i == 0) p.MoveTo(v); else p.LineTo(v);
-                }
-                return shape.Tag == "polygon";
-            }
-
-            case "rect":
-            {
-                var x = Num(shape.Attr("x"), 0); var y = Num(shape.Attr("y"), 0);
-                var w = Num(shape.Attr("width"), 0); var h = Num(shape.Attr("height"), 0);
-                var r = Num(shape.Attr("rx"), Num(shape.Attr("ry"), 0));
-                if (r <= 0f)
-                {
-                    p.MoveTo(map(x, y)); p.LineTo(map(x + w, y)); p.LineTo(map(x + w, y + h)); p.LineTo(map(x, y + h));
-                }
-                else
-                {
-                    r = Mathf.Min(r, Mathf.Min(w, h) * 0.5f);
-                    p.MoveTo(map(x + r, y));
-                    p.ArcTo(map(x + w, y), map(x + w, y + h), RadiusPx(r, map));
-                    p.ArcTo(map(x + w, y + h), map(x, y + h), RadiusPx(r, map));
-                    p.ArcTo(map(x, y + h), map(x, y), RadiusPx(r, map));
-                    p.ArcTo(map(x, y), map(x + w, y), RadiusPx(r, map));
-                }
-                return true;
-            }
-
-            case "circle":
-            case "ellipse":
-            {
-                var cx = Num(shape.Attr("cx"), 0); var cy = Num(shape.Attr("cy"), 0);
-                var rx = shape.Tag == "circle" ? Num(shape.Attr("r"), 0) : Num(shape.Attr("rx"), 0);
-                var ry = shape.Tag == "circle" ? rx : Num(shape.Attr("ry"), 0);
-                // Painter2D.Arc is circular; an ellipse is approximated with 4 cubic beziers.
-                const float k = 0.5522847f;
-                p.MoveTo(map(cx + rx, cy));
-                p.BezierCurveTo(map(cx + rx, cy + ry * k), map(cx + rx * k, cy + ry), map(cx, cy + ry));
-                p.BezierCurveTo(map(cx - rx * k, cy + ry), map(cx - rx, cy + ry * k), map(cx - rx, cy));
-                p.BezierCurveTo(map(cx - rx, cy - ry * k), map(cx - rx * k, cy - ry), map(cx, cy - ry));
-                p.BezierCurveTo(map(cx + rx * k, cy - ry), map(cx + rx, cy - ry * k), map(cx + rx, cy));
-                return true;
-            }
-
-            case "path":
-                return PathData(p, shape.Attr("d") ?? string.Empty, map);
-        }
-        return false;
-    }
-
     private static float RadiusPx(float r, Func<float, float, Vector2> map)
     {
         return Vector2.Distance(map(0, 0), map(r, 0));
-    }
-
-    /// <summary>M L H V C Q Z (and lowercase relative). Returns whether Z closed the last subpath.</summary>
-    private static bool PathData(Painter2D p, string d, Func<float, float, Vector2> map)
-    {
-        var tokens = Tokenize(d);
-        var i = 0;
-        var cmd = 'M';
-        float cx = 0, cy = 0, startX = 0, startY = 0;
-        var closed = false;
-
-        float Next() => i < tokens.Count ? tokens[i++].number : 0f;
-
-        while (i < tokens.Count)
-        {
-            if (tokens[i].command != '\0')
-                cmd = tokens[i++].command;
-            var rel = char.IsLower(cmd);
-            switch (char.ToUpperInvariant(cmd))
-            {
-                case 'M':
-                {
-                    var x = Next(); var y = Next();
-                    if (rel) { x += cx; y += cy; }
-                    p.MoveTo(map(x, y)); cx = x; cy = y; startX = x; startY = y;
-                    cmd = rel ? 'l' : 'L'; // implicit lineto after moveto
-                    closed = false;
-                    break;
-                }
-                case 'L':
-                {
-                    var x = Next(); var y = Next();
-                    if (rel) { x += cx; y += cy; }
-                    p.LineTo(map(x, y)); cx = x; cy = y;
-                    break;
-                }
-                case 'H': { var x = Next(); if (rel) x += cx; p.LineTo(map(x, cy)); cx = x; break; }
-                case 'V': { var y = Next(); if (rel) y += cy; p.LineTo(map(cx, y)); cy = y; break; }
-                case 'C':
-                {
-                    var x1 = Next(); var y1 = Next(); var x2 = Next(); var y2 = Next(); var x = Next(); var y = Next();
-                    if (rel) { x1 += cx; y1 += cy; x2 += cx; y2 += cy; x += cx; y += cy; }
-                    p.BezierCurveTo(map(x1, y1), map(x2, y2), map(x, y)); cx = x; cy = y;
-                    break;
-                }
-                case 'Q':
-                {
-                    var x1 = Next(); var y1 = Next(); var x = Next(); var y = Next();
-                    if (rel) { x1 += cx; y1 += cy; x += cx; y += cy; }
-                    p.QuadraticCurveTo(map(x1, y1), map(x, y)); cx = x; cy = y;
-                    break;
-                }
-                case 'Z':
-                    p.ClosePath(); cx = startX; cy = startY; closed = true;
-                    break;
-                default:
-                    // Unsupported command (A, S, T): skip its numbers.
-                    while (i < tokens.Count && tokens[i].command == '\0') i++;
-                    break;
-            }
-        }
-        return closed;
     }
 
     private static List<(char command, float number)> Tokenize(string d)

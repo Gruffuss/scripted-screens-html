@@ -2,6 +2,8 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UIElements;
 
+using IStyle = ScriptedScreensHtml.ElementStyle;
+
 namespace ScriptedScreensHtml;
 
 /// <summary>

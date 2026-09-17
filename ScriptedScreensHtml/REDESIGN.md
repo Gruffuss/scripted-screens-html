@@ -93,5 +93,29 @@ script's results, keyframe runners and data binding (UI Toolkit writes).
 Frame time cannot show differences this size: identical runs differ by up to 1 ms. Compare the
 per-part timings.
 
+## Our own layout engine (started 2026-09-17)
+
+The page's remaining game-thread work (0.25 ms per console per frame, and consoles come by the
+ten) is UI Toolkit's: its layout is native and game-thread only, so script results, animation
+steps and data binding all had to be written into it there. The plan replaces it:
+
+1. **Engine** (done): Yoga.Net vendored under `Yoga/` for netstandard2.1 with its per-layout
+   garbage removed (48 KB per incremental layout of a 200-node tree -> 0.1 KB; its own layout
+   tests pass against the copy). `TextMeasure` ports TextMeshPro's width and line-break
+   arithmetic over face data copied once per face on the game thread (`FaceCopy`), so text is
+   measured with the data the vector mod draws with; allocation-free, tested headless.
+2. **Drop-in elements** (built): `Dom.cs`/`DomStyle.cs` give the part of UI Toolkit's API the mod
+   uses (`style`, `resolvedStyle`, `layout`, `Children()`, the geometry callback,
+   `MeasureTextSize`) over Yoga, with UI Toolkit's initial values and inheritance. The layout
+   pass runs the geometry callbacks (grid, line boxes, baselines, mixed calc) until they stop
+   writing, inside one call. UI Toolkit's document, panel settings and texture are gone.
+3. **Side by side**: every test page's layout dump from the UI Toolkit build (the reference)
+   against the same page with our engine; boxes matched by tree position.
+4. **Everything on the page's worker**: script results, Lua data, clicks, hover, animations,
+   transitions, layout and translation in one job per page per frame; the game thread passes in
+   time and input and hands the scene to the vector mod.
+5. **Measure**: three HTML consoles, focused, minutes; the target is ~0.02 ms per console per
+   frame on the game thread.
+
 Diagnostics line additions: `main N ms/frame, awake N frames, sent: N structures M patches (K values), J in-place`,
 a `frames over 25 ms` line, and `new structure ... first difference` lines explaining each structure send.
