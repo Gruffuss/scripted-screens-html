@@ -282,8 +282,9 @@ function duck(on) {
   if (on && g.y > 0) g.vy = Math.min(g.vy, -900); // fast fall, as in the original
 }
 
-field.addEventListener('click', jump);
-$('jumpBtn').addEventListener('click', jump);
+// a jump starts on the press, not on the release a click waits for
+field.addEventListener('mousedown', jump);
+$('jumpBtn').addEventListener('mousedown', jump);
 $('duckBtn').addEventListener('mousedown', () => duck(true));
 $('duckBtn').addEventListener('mouseup', () => duck(false));
 $('duckBtn').addEventListener('mouseleave', () => duck(false));
