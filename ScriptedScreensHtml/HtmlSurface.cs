@@ -229,20 +229,32 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         var now = _frameNow;
         OffThread.Job = _frameGlobals;
+        var b0 = Allocated();
         lock (CascadeGate)
         {
             StepPage(now);
             if (!_dirty || _content == null || _panel == null || _built == null)
+            {
+                _allocStep += Allocated() - b0;
                 return null;
+            }
             _dirty = false;
+            var b1 = Allocated();
             var t0 = Clock.Elapsed.TotalMilliseconds;
             _panel.Layout(_frameSize.x, _frameSize.y);
+            var b2 = Allocated();
             var t1 = Clock.Elapsed.TotalMilliseconds;
             OffThread.Capture(_content, _built, _boxes, _boxScratch);
             _lastLayoutMs = t1 - t0;
             _lastCopyMs = Clock.Elapsed.TotalMilliseconds - t1;
+            _allocStep += b1 - b0;
+            _allocLayout += b2 - b1;
+            _allocCopy += Allocated() - b2;
         }
-        return Translate(_frameSize, now, _frameGlobals, _frameDiagnostics, worker: true);
+        var b3 = Allocated();
+        var result = Translate(_frameSize, now, _frameGlobals, _frameDiagnostics, worker: true);
+        _allocTranslate += Allocated() - b3;
+        return result;
     }
 
     /// <summary>Queued input and data, the script's writes, animation steps and transitions.</summary>
@@ -703,9 +715,11 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
                 $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
                 + $"(layout {page._lastLayoutMs:0.00} + copy {page._lastCopyMs:0.00}, translate {page._lastTranslateMs:0.0}; page thread {page._workerMsTotal / ReportIntervalSeconds:0.0} ms/s; game thread waited {page._heldMs:0.00} ms), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
-                + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}");
+                + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}"
+                + $", allocated per emit: step {page._allocStep / 1024f / Mathf.Max(1, emits):0} KB, layout {page._allocLayout / 1024f / Mathf.Max(1, emits):0} KB, copy {page._allocCopy / 1024f / Mathf.Max(1, emits):0} KB, translate {page._allocTranslate / 1024f / Mathf.Max(1, emits):0} KB, send {page._allocSend / 1024f / Mathf.Max(1, emits):0} KB (of translate: emit {page._allocEmit / 1024f / Mathf.Max(1, emits):0} KB, split {page._allocSplit / 1024f / Mathf.Max(1, emits):0} KB)");
             page._dScript = page._dAnim = page._dTween = page._dDom = page._dOther = 0;
             page._structureSends = page._patchSends = page._patchSlots = page._morphs = 0;
+            page._allocStep = page._allocLayout = page._allocCopy = page._allocTranslate = page._allocSend = page._allocEmit = page._allocSplit = 0;
             page._updateTicks = 0; page._awakeCount = 0; page._translateMsTotal = 0; page._heldMs = 0; page._workerMsTotal = 0;
         }
     }
@@ -731,6 +745,21 @@ internal sealed class HtmlSurface : MonoBehaviour
     private readonly Dictionary<VisualElement, OffThread.Box> _boxes = new();
     private readonly List<VisualElement> _boxScratch = new();
     private double _lastCopyMs;
+    // bytes allocated per phase since the last diagnostics line: where a frame's garbage comes from
+    private long _allocStep, _allocLayout, _allocCopy, _allocTranslate, _allocSend, _allocEmit, _allocSplit;
+    // Mono does not implement the per-thread counter (it answers 0), so fall back to the heap
+    // total: noisier, since other threads allocate too, but a frame here allocates megabytes.
+    private static bool _perThreadAlloc = true;
+    private static long Allocated()
+    {
+        if (_perThreadAlloc)
+        {
+            var n = System.GC.GetAllocatedBytesForCurrentThread();
+            if (n > 0) return n;
+            _perThreadAlloc = false;
+        }
+        return System.GC.GetTotalMemory(false);
+    }
 
     /// <summary>Waits for the page thread's frame and hands its result on, before the game thread touches the page. Game thread.</summary>
     private void Hold()
@@ -793,9 +822,13 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             _tweens.Diff(_content!, _built!, now);
             if (_lastTemplate == null) _tweens.Epoch = now;
+            var ea = Allocated();
             var output = VectorEmitter.Emit(_built!, _content!, layout.x, layout.y, _tweens, now, ScrollSet);
+            _allocEmit += Allocated() - ea;
             r.Output = output;
+            var sa = Allocated();
             var template = SceneSlots.Split(output.Scene, _slotScratch, _slotPrefix);
+            _allocSplit += Allocated() - sa;
             if (template == _lastTemplate)
             {
                 _lastScene = output.Scene;
@@ -910,6 +943,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogInfo(r.Why);
         if (!IsCurrent)
             return;
+        var bs = Allocated();
         ApplyExternals(output.Externals);
         if (State is not SS.BoardState state)
             return;
@@ -927,6 +961,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                 new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Patch }, null, snap: true);
             _patchSends++;
             _patchSlots += r.Patch.Length;
+            _allocSend += Allocated() - bs;
             return;
         }
         _structureSends++;

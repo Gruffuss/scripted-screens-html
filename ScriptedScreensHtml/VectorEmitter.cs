@@ -58,11 +58,35 @@ internal static class VectorEmitter
         /// <summary>Positioned elements with a z-index, emitted after everything else at the root in z order: a stacking context across parents.</summary>
         public List<(VisualElement ve, Vector2 parentPos, int z)> Deferred = new();
         public bool EmittingDeferred;
+        /// <summary>The scene text is assembled here, and child lists are borrowed from these: a page
+        /// emits every frame, so nothing here is allocated again once the first frame has run.</summary>
+        public readonly StringBuilder Scene = new(8192);
+        private readonly Stack<List<VisualElement>> _children = new();
+        private readonly Stack<List<(int z, int i, VisualElement c)>> _sorting = new();
+        private readonly Stack<Dictionary<string, string>> _records = new();
+
+        public List<VisualElement> RentChildren() => _children.Count > 0 ? _children.Pop() : new List<VisualElement>();
+        public void Return(List<VisualElement> list) { list.Clear(); _children.Push(list); }
+        public List<(int z, int i, VisualElement c)> RentSorting() => _sorting.Count > 0 ? _sorting.Pop() : new List<(int, int, VisualElement)>();
+        public void Return(List<(int z, int i, VisualElement c)> list) { list.Clear(); _sorting.Push(list); }
+        public Dictionary<string, string> RentRecord() => _records.Count > 0 ? _records.Pop() : new Dictionary<string, string>(StringComparer.Ordinal);
+        public void Return(Dictionary<string, string> record) { record.Clear(); _records.Push(record); }
+
+        public void Reset(HtmlRenderer.Result built, Tweens? tweens, float now, Dictionary<string, (float offset, int version)>? scrollSet, float pageW, float pageH)
+        {
+            Body.Clear(); Defs.Clear(); Scene.Clear(); Reported.Clear(); Deferred.Clear();
+            Built = built; Tw = tweens; Now = now; ScrollSet = scrollSet; PageW = pageW; PageH = pageH;
+            Ids = 0; EmittingDeferred = false; ScrollTop = float.NaN; ScrollH = 0f; ScrollRange = 0f; SvgScale = 1f;
+            Out = new Output();
+        }
     }
+
+    [ThreadStatic] private static Ctx? _ctx;
 
     public static Output Emit(HtmlRenderer.Result built, VisualElement root, float designW, float designH, Tweens? tweens = null, float now = 0f, Dictionary<string, (float offset, int version)>? scrollSet = null)
     {
-        var ctx = new Ctx { Built = built, Tw = tweens, Now = now, ScrollSet = scrollSet, PageW = designW, PageH = designH };
+        var ctx = _ctx ??= new Ctx();
+        ctx.Reset(built, tweens, now, scrollSet, designW, designH);
         var inv = CultureInfo.InvariantCulture;
         EmitElement(ctx, root, Vector2.zero, 0);
         if (ctx.Deferred.Count > 0)
@@ -72,7 +96,7 @@ internal static class VectorEmitter
             foreach (var (dve, dpos, _) in ctx.Deferred)
                 EmitElement(ctx, dve, dpos, 1);
         }
-        var sb = new StringBuilder();
+        var sb = ctx.Scene;
         sb.Append("SCENE w=").Append(designW.ToString("0.##", inv)).Append(" h=").Append(designH.ToString("0.##", inv)).Append(" fit=stretch\n");
         if (ctx.Defs.Length > 0)
             sb.Append("DEFS {\n").Append(ctx.Defs).Append("}\n");
@@ -505,8 +529,10 @@ internal static class VectorEmitter
             {
                 var outer = (ctx.ScrollTop, ctx.ScrollH, ctx.ScrollRange);
                 if (!float.IsNaN(scrollTop)) { ctx.ScrollTop = scrollTop; ctx.ScrollH = h; ctx.ScrollRange = Mathf.Max(0f, scrollCh - h); }
-                foreach (var child in ByZIndex(ctx, ve))
+                var children = ByZIndex(ctx, ve);
+                foreach (var child in children)
                     EmitElement(ctx, child, new Vector2(x, y), depth + groups);
+                ctx.Return(children);
                 if (!float.IsNaN(scrollTop)) EmitScrollbar(ctx, ve, css, x, y, w, h, scrollCh, indent + "  ");
                 (ctx.ScrollTop, ctx.ScrollH, ctx.ScrollRange) = outer;
                 break;
@@ -572,7 +598,7 @@ internal static class VectorEmitter
     /// <summary>Children in paint order: z-index ascending, document order within a value.</summary>
     private static List<VisualElement> ByZIndex(Ctx ctx, VisualElement ve)
     {
-        var list = new List<(int z, int i, VisualElement c)>();
+        var list = ctx.RentSorting();
         var i = 0;
         foreach (var child in ve.Children())
         {
@@ -582,8 +608,9 @@ internal static class VectorEmitter
             list.Add((z, i++, child));
         }
         list.Sort((a, b) => a.z != b.z ? a.z.CompareTo(b.z) : a.i.CompareTo(b.i));
-        var result = new List<VisualElement>(list.Count);
+        var result = ctx.RentChildren();
         foreach (var e in list) result.Add(e.c);
+        ctx.Return(list);
         return result;
     }
 
@@ -1346,7 +1373,11 @@ internal static class VectorEmitter
             {
                 if (css.ContainsKey(name) || (merged != null && merged.ContainsKey(name))) continue;
                 if (!pc.TryGetValue(name, out var v)) continue;
-                merged ??= new Dictionary<string, string>(css, StringComparer.Ordinal);
+                if (merged == null)
+                {
+                    merged = ctx.RentRecord();
+                    foreach (var own in css) merged[own.Key] = own.Value;
+                }
                 merged[name] = v;
             }
         }
@@ -1359,6 +1390,7 @@ internal static class VectorEmitter
         var text = label.text ?? string.Empty;
         if (text.Length == 0)
             return;
+        var ownCss = css;
         css = WithInherited(ctx, label, css);
         if (css.TryGetValue("text-transform", out var tt))
             text = Transform(text, tt.Trim().ToLowerInvariant());
@@ -1596,6 +1628,7 @@ internal static class VectorEmitter
             EmitEmphasis(ctx, css, rs, text, emphasis, x, y, w, h, indent);
         if (drawDeco)
             EmitDecoration(ctx, label, deco, rs, ox, y, ow, h, centre, right, indent);
+        if (!ReferenceEquals(css, ownCss)) ctx.Return(css);
     }
 
     private struct Deco

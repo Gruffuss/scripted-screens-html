@@ -16,6 +16,11 @@ namespace ScriptedScreensHtml;
 /// Pure text work, no Unity: tested headless. DEFS (gradients, clips) and the SCENE line stay
 /// literal, since the vector mod reads them once. Arrays (radii, shadows, points) stay literal:
 /// a change there is a structure change.
+///
+/// A page emits every frame, so this runs at frame rate and allocates nothing once warm: it reads
+/// the scene in place (no substrings), builds into one reused buffer, and keeps the slot names, the
+/// template and the text and colour values it made last time, handing the same instances back while
+/// they still match. Garbage here showed up as a stutter every few seconds.
 /// </remarks>
 internal static class SceneSlots
 {
@@ -40,11 +45,52 @@ internal static class SceneSlots
     /// <summary>Two-number pairs the vector mod reads item by item, each item a number or an expression.</summary>
     private static readonly HashSet<string> PairKeys = new(StringComparer.Ordinal) { "t", "s", "a" };
 
+    /// <summary>What one token produced last time: its key, its slot name, and the names of its parts.</summary>
+    private sealed class Token
+    {
+        public string Key = string.Empty;
+        public string Name = string.Empty;
+        public List<string>? Parts;
+    }
+
+    /// <summary>Per page thread: the buffer, the template and the names and values of the last split.</summary>
+    private sealed class Memory
+    {
+        public readonly StringBuilder Builder = new(4096);
+        public string Prefix = string.Empty;
+        public string? Template;
+        public readonly List<List<Token>> Lines = new();
+        public readonly Dictionary<string, Value> Last = new(StringComparer.Ordinal);
+
+        public void Reset(string prefix)
+        {
+            Prefix = prefix;
+            Template = null;
+            Lines.Clear();
+            Last.Clear();
+        }
+
+        public Token TokenAt(int line, int index)
+        {
+            while (Lines.Count <= line) Lines.Add(new List<Token>());
+            var tokens = Lines[line];
+            while (tokens.Count <= index) tokens.Add(new Token());
+            return tokens[index];
+        }
+    }
+
+    [ThreadStatic] private static Memory? _memory;
+
     /// <summary>The template and the values its slots name, in order.</summary>
     public static string Split(string scene, Dictionary<string, Value> values, string prefix = "L")
     {
         values.Clear();
-        var sb = new StringBuilder(scene.Length + scene.Length / 4);
+        var memory = _memory ??= new Memory();
+        if (!string.Equals(memory.Prefix, prefix, StringComparison.Ordinal))
+            memory.Reset(prefix);
+
+        var sb = memory.Builder;
+        sb.Clear();
         var line = 0;
         var defsDepth = 0;
         var start = 0;
@@ -52,75 +98,80 @@ internal static class SceneSlots
         {
             var end = scene.IndexOf('\n', start);
             if (end < 0) end = scene.Length;
-            var text = scene.Substring(start, end - start);
-            var trimmed = text.TrimStart();
+            var text = start;
+            while (text < end && scene[text] == ' ') text++;
             if (defsDepth > 0)
             {
                 // inside DEFS: literal; track braces to find its end
-                foreach (var c in text) { if (c == '{') defsDepth++; else if (c == '}') defsDepth--; }
-                sb.Append(text);
+                for (var i = start; i < end; i++) { if (scene[i] == '{') defsDepth++; else if (scene[i] == '}') defsDepth--; }
+                sb.Append(scene, start, end - start);
             }
-            else if (trimmed.StartsWith("DEFS", StringComparison.Ordinal))
+            else if (Starts(scene, text, end, "DEFS"))
             {
-                foreach (var c in text) if (c == '{') defsDepth++; else if (c == '}') defsDepth--;
-                sb.Append(text);
+                for (var i = start; i < end; i++) { if (scene[i] == '{') defsDepth++; else if (scene[i] == '}') defsDepth--; }
+                sb.Append(scene, start, end - start);
             }
-            else if (trimmed.Length == 0 || trimmed[0] == '}' || trimmed[0] == '#' || trimmed.StartsWith("SCENE", StringComparison.Ordinal))
+            else if (text >= end || scene[text] == '}' || scene[text] == '#' || Starts(scene, text, end, "SCENE"))
             {
-                sb.Append(text);
+                sb.Append(scene, start, end - start);
             }
             else
             {
-                SlotLine(text, line, sb, values, prefix);
+                SlotLine(scene, start, end, line, sb, values, memory);
             }
             if (end < scene.Length) sb.Append('\n');
             line++;
             start = end + 1;
         }
-        return sb.ToString();
+
+        // the same template as last time is handed back as the same string: the caller compares it
+        // by reference and equality, and an unchanged page then allocates nothing here
+        if (memory.Template != null && Same(sb, memory.Template))
+            return memory.Template;
+        memory.Template = sb.ToString();
+        return memory.Template;
     }
 
-    private static void SlotLine(string text, int line, StringBuilder sb, Dictionary<string, Value> values, string prefix)
+    private static void SlotLine(string scene, int from, int to, int line, StringBuilder sb, Dictionary<string, Value> values, Memory memory)
     {
-        var i = 0;
+        var i = from;
         // indent and op
-        while (i < text.Length && text[i] == ' ') sb.Append(text[i++]);
-        while (i < text.Length && text[i] != ' ') sb.Append(text[i++]);
-        while (i < text.Length)
+        while (i < to && scene[i] == ' ') sb.Append(scene[i++]);
+        while (i < to && scene[i] != ' ') sb.Append(scene[i++]);
+        var index = 0;
+        while (i < to)
         {
-            if (text[i] == ' ') { sb.Append(' '); i++; continue; }
+            if (scene[i] == ' ') { sb.Append(' '); i++; continue; }
             // one token: key=value, a bare flag, or the opening brace
-            var eq = -1;
             var j = i;
-            while (j < text.Length && text[j] != ' ' && text[j] != '=') j++;
-            if (j < text.Length && text[j] == '=') eq = j;
-            if (eq < 0)
+            while (j < to && scene[j] != ' ' && scene[j] != '=') j++;
+            if (j >= to || scene[j] != '=')
             {
-                sb.Append(text, i, j - i);
+                sb.Append(scene, i, j - i);
                 i = j;
                 continue;
             }
-            var key = text.Substring(i, eq - i);
-            var vStart = eq + 1;
-            var vEnd = ValueEnd(text, vStart);
-            var raw = text.Substring(vStart, vEnd - vStart);
-            sb.Append(key).Append('=');
-            sb.Append(SlotValue(key, raw, line, values, prefix));
+            var keyStart = i;
+            var keyEnd = j;
+            var vStart = j + 1;
+            var vEnd = ValueEnd(scene, vStart, to);
+            sb.Append(scene, keyStart, keyEnd - keyStart).Append('=');
+            SlotValue(scene, keyStart, keyEnd, vStart, vEnd, line, index++, sb, values, memory);
             i = vEnd;
         }
     }
 
     /// <summary>End of a value: a quoted string (with \" escapes), a bracketed array, or up to the next space.</summary>
-    private static int ValueEnd(string text, int i)
+    private static int ValueEnd(string text, int i, int to)
     {
-        if (i < text.Length && text[i] == '"')
+        if (i < to && text[i] == '"')
         {
             i++;
-            while (i < text.Length && text[i] != '"') { if (text[i] == '\\') i++; i++; }
-            return Math.Min(text.Length, i + 1);
+            while (i < to && text[i] != '"') { if (text[i] == '\\') i++; i++; }
+            return Math.Min(to, i + 1);
         }
         var depth = 0;
-        while (i < text.Length)
+        while (i < to)
         {
             var c = text[i];
             if (c == '[') depth++;
@@ -131,80 +182,104 @@ internal static class SceneSlots
         return i;
     }
 
-    private static string SlotValue(string key, string raw, int line, Dictionary<string, Value> values, string prefix)
+    private static void SlotValue(string scene, int keyStart, int keyEnd, int rawStart, int rawEnd,
+                                  int line, int index, StringBuilder sb, Dictionary<string, Value> values, Memory memory)
     {
-        if (raw.Length == 0) return raw;
-        var quoted = raw.Length >= 2 && raw[0] == '"' && raw[raw.Length - 1] == '"';
-        var body = quoted ? raw.Substring(1, raw.Length - 2) : raw;
-        var name = prefix + line.ToString(CultureInfo.InvariantCulture) + "_" + Safe(key);
+        if (rawEnd <= rawStart) return;
+        var quoted = rawEnd - rawStart >= 2 && scene[rawStart] == '"' && scene[rawEnd - 1] == '"';
+        var bodyStart = quoted ? rawStart + 1 : rawStart;
+        var bodyEnd = quoted ? rawEnd - 1 : rawEnd;
+        var token = memory.TokenAt(line, index);
+        if (!Is(scene, keyStart, keyEnd, token.Key))
+        {
+            token.Key = scene.Substring(keyStart, keyEnd - keyStart);
+            token.Name = memory.Prefix + line.ToString(CultureInfo.InvariantCulture) + "_" + Safe(token.Key);
+            token.Parts?.Clear();
+        }
+        var name = token.Name;
 
-        if (body.Length > 0 && body[0] == '=')
+        if (bodyEnd > bodyStart && scene[bodyStart] == '=')
         {
-            var expr = SlotNumbers(body, name, values);
-            return quoted ? "\"" + expr + "\"" : expr;
+            if (quoted) sb.Append('"');
+            SlotNumbers(scene, bodyStart, bodyEnd, token, sb, values);
+            if (quoted) sb.Append('"');
+            return;
         }
-        if (key == "text" && quoted)
+        if (quoted && Is(scene, keyStart, keyEnd, "text"))
         {
-            values[name] = new Value(Unescape(body));
-            return "\"$" + name + "\"";
+            values[name] = Keep(name, Unescaped(scene, bodyStart, bodyEnd, memory.Last.TryGetValue(name, out var had) ? had.Text : null), memory);
+            sb.Append('"').Append('$').Append(name).Append('"');
+            return;
         }
-        if (NumberKeys.Contains(key) && float.TryParse(body, NumberStyles.Float, CultureInfo.InvariantCulture, out var n))
+        if (In(NumberKeys, scene, keyStart, keyEnd)
+            && float.TryParse(scene.AsSpan(bodyStart, bodyEnd - bodyStart), NumberStyles.Float, CultureInfo.InvariantCulture, out var n))
         {
             values[name] = new Value(n);
-            return "$" + name;
+            sb.Append('$').Append(name);
+            return;
         }
-        if (ColourKeys.Contains(key) && body.Length > 1 && body[0] == '#')
+        if (In(ColourKeys, scene, keyStart, keyEnd) && bodyEnd - bodyStart > 1 && scene[bodyStart] == '#')
         {
-            values[name] = new Value(body);
-            return "$" + name;
+            var previous = memory.Last.TryGetValue(name, out var was) ? was.Text : null;
+            var colour = previous != null && Is(scene, bodyStart, bodyEnd, previous) ? previous : scene.Substring(bodyStart, bodyEnd - bodyStart);
+            values[name] = Keep(name, colour, memory);
+            sb.Append('$').Append(name);
+            return;
         }
-        if (PairKeys.Contains(key) && !quoted && raw.Length > 2 && raw[0] == '[' && raw[raw.Length - 1] == ']' && raw.IndexOf('[', 1) < 0)
+        if (In(PairKeys, scene, keyStart, keyEnd) && !quoted && rawEnd - rawStart > 2
+            && scene[rawStart] == '[' && scene[rawEnd - 1] == ']' && scene.IndexOf('[', rawStart + 1, rawEnd - rawStart - 1) < 0)
         {
             // a group's translate, scale and anchor: an element moved by a script changes values, not the structure
-            var items = raw.Substring(1, raw.Length - 2).Split(',');
-            var sb = new StringBuilder(raw.Length + 16).Append('[');
-            for (var k = 0; k < items.Length; k++)
+            sb.Append('[');
+            var part = 0;
+            var i = rawStart + 1;
+            var last = rawEnd - 1;
+            while (i <= last)
             {
-                if (k > 0) sb.Append(',');
-                if (float.TryParse(items[k], NumberStyles.Float, CultureInfo.InvariantCulture, out var item))
+                var comma = i;
+                while (comma < last && scene[comma] != ',') comma++;
+                if (part > 0) sb.Append(',');
+                if (float.TryParse(scene.AsSpan(i, comma - i), NumberStyles.Float, CultureInfo.InvariantCulture, out var item))
                 {
-                    var slot = name + "_" + k.ToString(CultureInfo.InvariantCulture);
+                    var slot = Part(token, part, name);
                     values[slot] = new Value(item);
                     sb.Append('$').Append(slot);
                 }
-                else sb.Append(items[k]);
+                else sb.Append(scene, i, comma - i);
+                part++;
+                i = comma + 1;
             }
-            return sb.Append(']').ToString();
+            sb.Append(']');
+            return;
         }
-        return raw;
+        sb.Append(scene, rawStart, rawEnd - rawStart);
     }
 
     /// <summary>Every number literal in an expression becomes a slot; identifiers (i1, hash2, $names) are left alone.</summary>
-    private static string SlotNumbers(string expr, string name, Dictionary<string, Value> values)
+    private static void SlotNumbers(string expr, int from, int to, Token token, StringBuilder sb, Dictionary<string, Value> values)
     {
-        var sb = new StringBuilder(expr.Length + 16);
         var k = 0;
-        var i = 0;
-        while (i < expr.Length)
+        var i = from;
+        while (i < to)
         {
             var c = expr[i];
-            var prev = i > 0 ? expr[i - 1] : ' ';
-            var startsNumber = (char.IsDigit(c) || (c == '.' && i + 1 < expr.Length && char.IsDigit(expr[i + 1])))
+            var prev = i > from ? expr[i - 1] : ' ';
+            var startsNumber = (char.IsDigit(c) || (c == '.' && i + 1 < to && char.IsDigit(expr[i + 1])))
                                && !(char.IsLetterOrDigit(prev) || prev == '_' || prev == '$' || prev == '.');
             // a unary minus belongs to the number: `t--0.02` and `t-1.5` are the same template, `t-$a`
-            var signed = c == '-' && i + 1 < expr.Length && (char.IsDigit(expr[i + 1]) || expr[i + 1] == '.')
-                         && (i == 0 || "+-*/(,=<>!&|?:".IndexOf(prev) >= 0);
+            var signed = c == '-' && i + 1 < to && (char.IsDigit(expr[i + 1]) || expr[i + 1] == '.')
+                         && (i == from || "+-*/(,=<>!&|?:".IndexOf(prev) >= 0);
             if (!startsNumber && !signed) { sb.Append(c); i++; continue; }
             var j = signed ? i + 1 : i;
-            while (j < expr.Length && (char.IsDigit(expr[j]) || expr[j] == '.')) j++;
-            if (j < expr.Length && (expr[j] == 'e' || expr[j] == 'E') && j + 1 < expr.Length && (char.IsDigit(expr[j + 1]) || ((expr[j + 1] == '-' || expr[j + 1] == '+') && j + 2 < expr.Length && char.IsDigit(expr[j + 2]))))
+            while (j < to && (char.IsDigit(expr[j]) || expr[j] == '.')) j++;
+            if (j < to && (expr[j] == 'e' || expr[j] == 'E') && j + 1 < to && (char.IsDigit(expr[j + 1]) || ((expr[j + 1] == '-' || expr[j + 1] == '+') && j + 2 < to && char.IsDigit(expr[j + 2]))))
             {
                 j += 2;
-                while (j < expr.Length && char.IsDigit(expr[j])) j++;
+                while (j < to && char.IsDigit(expr[j])) j++;
             }
-            if (float.TryParse(expr.Substring(i, j - i), NumberStyles.Float, CultureInfo.InvariantCulture, out var n))
+            if (float.TryParse(expr.AsSpan(i, j - i), NumberStyles.Float, CultureInfo.InvariantCulture, out var n))
             {
-                var slot = name + "_" + (k++).ToString(CultureInfo.InvariantCulture);
+                var slot = Part(token, k++, token.Name);
                 values[slot] = new Value(n);
                 sb.Append('$').Append(slot);
             }
@@ -214,7 +289,90 @@ internal static class SceneSlots
             }
             i = j;
         }
+    }
+
+    /// <summary>The name of a token's nth part, made once and kept.</summary>
+    private static string Part(Token token, int index, string name)
+    {
+        token.Parts ??= new List<string>(4);
+        while (token.Parts.Count <= index)
+            token.Parts.Add(name + "_" + token.Parts.Count.ToString(CultureInfo.InvariantCulture));
+        return token.Parts[index];
+    }
+
+    /// <summary>Remembers a text or colour value, so the next split can hand back the same string.</summary>
+    private static Value Keep(string name, string text, Memory memory)
+    {
+        var value = new Value(text);
+        memory.Last[name] = value;
+        return value;
+    }
+
+    /// <summary>The unescaped text, or <paramref name="previous"/> itself when it already says the same.</summary>
+    private static string Unescaped(string scene, int from, int to, string? previous)
+    {
+        if (previous != null && UnescapedIs(scene, from, to, previous)) return previous;
+        var sb = new StringBuilder(to - from);
+        for (var i = from; i < to; i++)
+        {
+            if (scene[i] == '\\' && i + 1 < to)
+            {
+                var n = scene[++i];
+                sb.Append(n == 'n' ? '\n' : n);
+            }
+            else sb.Append(scene[i]);
+        }
         return sb.ToString();
+    }
+
+    private static bool UnescapedIs(string scene, int from, int to, string other)
+    {
+        var k = 0;
+        for (var i = from; i < to; i++)
+        {
+            char c;
+            if (scene[i] == '\\' && i + 1 < to)
+            {
+                var n = scene[++i];
+                c = n == 'n' ? '\n' : n;
+            }
+            else c = scene[i];
+            if (k >= other.Length || other[k++] != c) return false;
+        }
+        return k == other.Length;
+    }
+
+    /// <summary>The range is exactly this word.</summary>
+    private static bool Is(string scene, int from, int to, string word)
+    {
+        if (to - from != word.Length) return false;
+        for (var i = 0; i < word.Length; i++)
+            if (scene[from + i] != word[i]) return false;
+        return true;
+    }
+
+    /// <summary>The range begins with this word.</summary>
+    private static bool Starts(string scene, int from, int to, string word)
+    {
+        if (to - from < word.Length) return false;
+        for (var i = 0; i < word.Length; i++)
+            if (scene[from + i] != word[i]) return false;
+        return true;
+    }
+
+    private static bool In(HashSet<string> set, string scene, int from, int to)
+    {
+        foreach (var key in set)
+            if (key.Length == to - from && Is(scene, from, to, key)) return true;
+        return false;
+    }
+
+    private static bool Same(StringBuilder sb, string other)
+    {
+        if (sb.Length != other.Length) return false;
+        for (var i = 0; i < other.Length; i++)
+            if (sb[i] != other[i]) return false;
+        return true;
     }
 
     private static string Safe(string key)

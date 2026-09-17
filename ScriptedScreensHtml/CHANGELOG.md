@@ -25,6 +25,9 @@ Newest first. The workshop page is a short overview; this file has the full hist
   the re-cascade and win over the rules, as the style attribute does.
 - Writing the same `element.style`, class or text again changes nothing, so a page whose script
   rewrites unchanged values every frame is not laid out and translated again.
+- A page that emits every frame makes far less garbage: the scene's template split reads the scene
+  in place and keeps its buffer, names and values; the emitter keeps its buffers and lists. Collections
+  are what a stuttering console feels, and they came every second or two with a few animated pages.
 - A script's `element.style.setProperty('--name', ...)` declares the custom property on the
   element and re-runs the rules that read it with `var()`, as a browser does.
 - A number with `tabular-nums` set on an ancestor keeps one width while it counts; the width pass
