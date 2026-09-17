@@ -1000,6 +1000,14 @@ internal static class VectorEmitter
                     continue;
                 }
             }
+            if (c >= 0x80 && cur != null && TextMeasure.ScriptDigit(c, out var digit, out var sub) && !OffThread.Has(cur, c, false) && OffThread.Has(cur, digit, false))
+            {
+                // a subscript the face lacks: its own digit, lowered and smaller, not another face's glyph
+                sb ??= new StringBuilder(text, 0, i, text.Length + 40);
+                if (inRun) { sb.Append("</font>"); inRun = false; }
+                sb.Append(sub ? "<sub>" : "<sup>").Append(digit).Append(sub ? "</sub>" : "</sup>");
+                continue;
+            }
             var missing = false;
             if (c >= 0x80 && !char.IsSurrogate(c) && cur != null && !OffThread.Has(cur, c, false))
                 missing = OffThread.Has(FallbackFace, c, true); // the face's own fallback chain counts, and a dynamic atlas adds on request

@@ -203,6 +203,23 @@ internal static class TextMeasure
         return result;
     }
 
+    /// <summary>
+    /// A subscript or superscript digit (₂, ⁴, ²) as its plain digit. A face without the script
+    /// glyph draws the plain digit with sub/sup instead of another typeface's heavier glyph.
+    /// </summary>
+    internal static bool ScriptDigit(uint c, out char digit, out bool sub)
+    {
+        sub = c >= 0x2080 && c <= 0x2089;
+        digit = '\0';
+        if (sub) digit = (char)('0' + (c - 0x2080));
+        else if (c == 0x2070) digit = '0';
+        else if (c == 0x00B9) digit = '1';
+        else if (c == 0x00B2) digit = '2';
+        else if (c == 0x00B3) digit = '3';
+        else if (c >= 0x2074 && c <= 0x2079) digit = (char)('0' + (c - 0x2070));
+        return digit != '\0';
+    }
+
     private static bool Resolve(FaceData face, uint unicode, out FaceData owner, out FaceData.Glyph glyph, int depth = 0)
     {
         if (face.Chars.TryGetValue(unicode, out glyph)) { owner = face; return true; }
@@ -282,7 +299,16 @@ internal static class TextMeasure
             if (code == 13) continue;
             FaceData owner;
             FaceData.Glyph glyph;
-            if (code is 10 or 11 or 8232 or 8233 or 8203 or 8288)
+            var scale = t.ScaleMul;
+            if (!t.Face.Chars.ContainsKey(code) && ScriptDigit(code, out var digit, out var sub) && t.Face.Chars.TryGetValue(digit, out glyph))
+            {
+                // the emitter draws it as the face's own digit under sub/sup
+                owner = t.Face;
+                var s = sub ? t.Face.SubSize : t.Face.SupSize;
+                scale *= s > 0f ? s : 1f;
+                code = digit;
+            }
+            else if (code is 10 or 11 or 8232 or 8233 or 8203 or 8288)
             {
                 // line breaks and zero-width characters: no glyph, no advance
                 owner = t.Face;
@@ -297,7 +323,7 @@ internal static class TextMeasure
             }
             units.Add(new Unit
             {
-                Code = code, Face = owner, Glyph = glyph, FontSize = t.Size, FontScaleMultiplier = t.ScaleMul,
+                Code = code, Face = owner, Glyph = glyph, FontSize = t.Size, FontScaleMultiplier = scale,
                 CSpace = t.CSpace, MSpace = t.MSpace, Bold = t.Bold > 0, NoBreak = t.NoBreak > 0,
             });
         }

@@ -298,6 +298,9 @@ void TestTextMeasure()
     Check(Near(r.Width, 20f), $"text: colour and underline tags take no width ({r.Width})");
     r = M("<zzz>", style);
     Check(Near(r.Width, 50f), $"text: an unknown tag is text ({r.Width})");
+    face.Chars['2'] = new FaceData.Glyph { Index = g++, Advance = 50f, Scale = 1f };
+    r = M("a₂", style);
+    Check(Near(r.Width, 15f), $"text: a subscript the face lacks is its own digit at subscript size ({r.Width})");
     var before = GC.GetAllocatedBytesForCurrentThread();
     for (var k = 0; k < 1000; k++) M("<b>Room</b> pressure <size=80%>kPa</size> and more words", wrap, 60f);
     var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
