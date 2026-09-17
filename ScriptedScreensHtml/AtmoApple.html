@@ -416,7 +416,7 @@ function renderConfig() {
       + '<span style="flex:1;min-width:0;font-size:12px;font-weight:600;line-height:16px;white-space:nowrap;text-align:right;color:' + (b ? INK2 : ORANGE_INK) + '">' + (b || 'Not bound') + '</span></div>';
   }).join('');
   const group = (title, g, first) => '<span style="font-size:14px;font-weight:600;line-height:20px;letter-spacing:.02em;color:var(--label2);padding:' + (first ? '0 8px' : '2px 8px 0') + '">' + title + '</span><div style="flex:none;display:flex;flex-direction:column;border-radius:28px;overflow:hidden;background:var(--card)">' + rows(g) + '</div>';
-  const bindMask = 'linear-gradient(' + (st.bindAtStart === false ? 'rgba(0,0,0,.2) 0,#000 8%,' : '#000 0,') + (st.bindAtEnd ? '#000 100%)' : '#000 92%,rgba(0,0,0,.2) 100%)');
+  const bindMask = listMask(st.bindAtStart !== false, !!st.bindAtEnd);
   const candidates = sel.devs.map((dv, i, arr) => {
     const on = bound[sel.key] === dv.name;
     const taken = !on && Object.keys(bound).some((k) => bound[k] === dv.name);
@@ -453,6 +453,10 @@ function applyTheme() {
   root.setAttribute('data-accent', st.accent || props.startAccent);
 }
 let lastTab = null;
+// the fade at a list's top or bottom shows there is more to scroll to
+function listMask(atStart, atEnd) {
+  return 'linear-gradient(' + (atStart ? '#000 0,' : 'rgba(0,0,0,.2) 0,#000 8%,') + (atEnd ? '#000 100%)' : '#000 92%,rgba(0,0,0,.2) 100%)');
+}
 function render(structural) {
   const v = values();
   renderHeader(v);
@@ -461,16 +465,24 @@ function render(structural) {
   acts = [];
   renderTabs();
   const screen = document.getElementById('screen');
+  // replacing the markup makes new scroll boxes at the top; keep where the reader scrolled to
+  const kept = {};
+  if (st.tab === lastTab) ['log', 'bindList'].forEach((id) => { const el = document.getElementById(id); if (el) kept[id] = el.scrollTop; });
   screen.innerHTML = st.tab === 'atmo' ? renderAtmo(v) : st.tab === 'supply' ? renderSupply(v) : st.tab === 'filter' ? renderFilter(v) : st.tab === 'alarm' ? renderAlarm(v) : renderConfig();
   const bound = document.querySelectorAll('[data-act]');
   for (let i = 0; i < bound.length; i++) {
     const el = bound[i], idx = Number(el.getAttribute('data-act'));
     el.addEventListener('click', () => acts[idx]());
   }
+  Object.keys(kept).forEach((id) => { const el = document.getElementById(id); if (el) el.scrollTop = kept[id]; });
   const list = document.getElementById('bindList');
   if (list) list.addEventListener('scroll', () => {
+    // only the fade changes: re-rendering here would put the list back at the top
     const end = list.scrollTop + list.clientHeight >= list.scrollHeight - 2, start = list.scrollTop <= 2;
-    if (end !== !!st.bindAtEnd || start !== (st.bindAtStart !== false)) { st.bindAtEnd = end; st.bindAtStart = start; render(true); }
+    if (end !== !!st.bindAtEnd || start !== (st.bindAtStart !== false)) {
+      st.bindAtEnd = end; st.bindAtStart = start;
+      list.style.maskImage = listMask(start, end);
+    }
   });
   lastTab = st.tab;
 }

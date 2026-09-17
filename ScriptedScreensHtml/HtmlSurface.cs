@@ -454,19 +454,21 @@ internal sealed class HtmlSurface : MonoBehaviour
     private void EmitNowLocked()
     {
         Hold();
-        // The remembered Lua data first: bound here, and its event queued for the script before
-        // the script's frames, or the capture shows the page's starting state.
+        // As in a browser: the page script loads and draws, then the remembered Lua data
+        // arrives, then the script's frames. A data event before the script has run finds no
+        // handler; bound values applied while it still runs are drawn over by its first render.
+        if (_script != null && _scriptPending)
+        {
+            _scriptPending = false;
+            _script.Run(_built?.Script ?? string.Empty);
+            _script.RunSynchronously(Time.time, _byId, 2000); // waits for the run, applies its render
+        }
         DrainInbox();
         // A capture builds and copies the page in one call. The script gets a few frames
         // first (its load work, a short timer, an animation frame), each waited for, so the
         // capture shows what the script drew rather than the bare markup.
         if (_script != null)
         {
-            if (_scriptPending)
-            {
-                _scriptPending = false;
-                _script.Run(_built?.Script ?? string.Empty);
-            }
             var w0 = Clock.Elapsed.TotalMilliseconds;
             var timedOut = 0;
             for (var k = 0; k < 6; k++)
