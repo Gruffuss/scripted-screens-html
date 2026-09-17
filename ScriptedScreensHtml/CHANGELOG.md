@@ -25,6 +25,8 @@ Newest first. The workshop page is a short overview; this file has the full hist
   the re-cascade and win over the rules, as the style attribute does.
 - Writing the same `element.style`, class or text again changes nothing, so a page whose script
   rewrites unchanged values every frame is not laid out and translated again.
+- A frame's style, text and class writes from a page script are handed over as one piece of work
+  instead of one each, and a property name is spelled as CSS spells it once, not per write.
 - Numbers and colours are written straight into the scene buffer instead of one string each: a
   frame writes thousands of them.
 - A page that emits every frame makes far less garbage: the scene's template split reads the scene

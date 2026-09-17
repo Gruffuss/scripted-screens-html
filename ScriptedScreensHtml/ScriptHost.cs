@@ -583,7 +583,53 @@ internal sealed class ScriptHost : IDisposable
             ScriptedScreensHtmlPlugin.Log?.LogInfo("js: " + msg);
     }
 
-    private void SetStyle(string id, string prop, string value)
+    // A frame's style, text and class writes go into one list with one piece of queued work, not a
+    // closure each: a page animating at frame rate makes dozens per frame, and that garbage was felt
+    // as a stutter every few seconds. Reads still wait for them (Sync), so order is unchanged.
+    private readonly List<(byte kind, string id, string a, string b)> _ops = new();
+    private int _opsIndex;
+    private bool _opsQueued;
+    private readonly ConcurrentDictionary<string, string> _cssNames = new(StringComparer.Ordinal);
+
+    private void QueueOp(byte kind, string id, string a, string b)
+    {
+        lock (_ops)
+        {
+            _ops.Add((kind, id, a, b));
+            if (_opsQueued) return;
+            _opsQueued = true;
+        }
+        Write(ApplyOps);
+    }
+
+    /// <summary>Main thread: the frame's queued writes, in the order the script made them.</summary>
+    private void ApplyOps()
+    {
+        while (true)
+        {
+            (byte kind, string id, string a, string b) op;
+            lock (_ops)
+            {
+                if (_opsIndex >= _ops.Count)
+                {
+                    _ops.Clear();
+                    _opsIndex = 0;
+                    _opsQueued = false;
+                    return;
+                }
+                op = _ops[_opsIndex++];
+            }
+            switch (op.kind)
+            {
+                case 0: ApplyStyle(op.id, op.a, op.b); break;
+                case 1: ApplyText(op.id, op.a); break;
+                default: ApplyClass(op.id, op.a); break;
+            }
+        }
+    }
+
+    /// <summary>style.someProperty as CSS spells it, made once per name.</summary>
+    private static string CssName(string prop)
     {
         var sb = new StringBuilder(prop.Length + 4);
         foreach (var ch in prop)
@@ -591,8 +637,17 @@ internal sealed class ScriptHost : IDisposable
             if (char.IsUpper(ch)) { sb.Append('-'); sb.Append(char.ToLowerInvariant(ch)); }
             else sb.Append(ch);
         }
-        var css = sb.ToString();
-        Write(() =>
+        return sb.ToString();
+    }
+
+    private void SetStyle(string id, string prop, string value)
+    {
+        QueueOp(0, id, _cssNames.GetOrAdd(prop, CssName), value);
+    }
+
+    private void ApplyStyle(string id, string css, string value)
+    {
+        var trimmed = value.Trim();   // the same value, trimmed once
         {
             var ve = _find(id);
             if (ve == null) return;
@@ -603,11 +658,11 @@ internal sealed class ScriptHost : IDisposable
                 if (_findNode(id) is not { } target) return;
                 // kept with the element's other script styles, so the re-cascade below does not put
                 // the stylesheet's own value back over it
-                if (value.Trim().Length == 0) { target.ScriptStyle?.Remove(css); target.Vars?.Remove(css); }
+                if (trimmed.Length == 0) { target.ScriptStyle?.Remove(css); target.Vars?.Remove(css); }
                 else
                 {
-                    (target.ScriptStyle ??= new Dictionary<string, string>(StringComparer.Ordinal))[css] = value.Trim();
-                    (target.Vars ??= new Dictionary<string, string>(StringComparer.Ordinal))[css] = value.Trim();
+                    (target.ScriptStyle ??= new Dictionary<string, string>(StringComparer.Ordinal))[css] = trimmed;
+                    (target.Vars ??= new Dictionary<string, string>(StringComparer.Ordinal))[css] = trimmed;
                 }
                 _built?.Reclass(ve, target.Attr("class") ?? string.Empty);
                 _onLayoutAttr?.Invoke();
@@ -621,9 +676,9 @@ internal sealed class ScriptHost : IDisposable
                 // style.animation = "...": the shorthand parsed as the cascade parses it, a runner started (or stopped) for the element
                 var record0 = _built.CssOf(ve);
                 // the same value again changes nothing (a browser does not restart a running animation for it)
-                if (record0.TryGetValue(css, out var had) ? string.Equals(had, value.Trim(), StringComparison.Ordinal) : value.Trim().Length == 0)
+                if (record0.TryGetValue(css, out var had) ? string.Equals(had, trimmed, StringComparison.Ordinal) : trimmed.Length == 0)
                     return;
-                if (value.Trim().Length == 0) record0.Remove(css); else record0[css] = value.Trim();
+                if (trimmed.Length == 0) record0.Remove(css); else record0[css] = trimmed;
                 var spec = new AnimationSpec();
                 foreach (var kv in record0) if (kv.Key.StartsWith("animation", StringComparison.Ordinal)) HtmlRenderer.ApplyAnimationDeclaration(spec, new CssDeclaration(kv.Key, kv.Value));
                 if (_runningAnimations.TryGetValue(ve, out var oldHandle)) { _cancelAnimation?.Invoke(oldHandle); _runningAnimations.Remove(ve); }
@@ -637,31 +692,30 @@ internal sealed class ScriptHost : IDisposable
                 // (gradients, clips, masks, shadows, motion paths...): a script write lands there too, as
                 // it would in a browser's computed style
                 var record = _built.CssOf(ve);
-                if (value.Trim().Length == 0) record.Remove(css); else record[css] = value.Trim();
+                if (trimmed.Length == 0) record.Remove(css); else record[css] = trimmed;
             }
             // kept on the node as a browser keeps it in the style attribute: a re-cascade applies it again
             if (_findNode(id) is { } styled)
             {
-                if (value.Trim().Length == 0) styled.ScriptStyle?.Remove(css);
-                else (styled.ScriptStyle ??= new Dictionary<string, string>(StringComparer.Ordinal))[css] = value.Trim();
+                if (trimmed.Length == 0) styled.ScriptStyle?.Remove(css);
+                else (styled.ScriptStyle ??= new Dictionary<string, string>(StringComparer.Ordinal))[css] = trimmed;
             }
-        });
+        }
     }
 
-    private void SetText(string id, string text)
+    private void SetText(string id, string text) => QueueOp(1, id, text, string.Empty);
+
+    private void ApplyText(string id, string text)
     {
-        Write(() =>
+        var ve = _find(id);
+        var label = ve != null ? HtmlSurface.TextTargetFor(ve, id) : null;
+        if (label != null)
+            label.text = text;
+        if (_findNode(id) is { } node && !node.IsText)
         {
-            var ve = _find(id);
-            var label = ve != null ? HtmlSurface.TextTargetFor(ve, id) : null;
-            if (label != null)
-                label.text = text;
-            if (_findNode(id) is { } node && !node.IsText)
-            {
-                node.Children.Clear();
-                node.Children.Add(new HtmlNode { Text = text, Parent = node });
-            }
-        });
+            node.Children.Clear();
+            node.Children.Add(new HtmlNode { Text = text, Parent = node });
+        }
     }
 
     /// <summary>Set by the surface: innerHTML applied in place when the markup keeps the shape (REDESIGN step 3); false = rebuild.</summary>
@@ -742,12 +796,14 @@ internal sealed class ScriptHost : IDisposable
         if (_attrCache.TryGetValue(id + "\n" + "class", out var had) && had == cls)
             return;
         _attrCache[id + "\n" + "class"] = cls;
-        Write(() =>
-        {
-            var ve = _find(id);
-            if (ve != null)
-                _setClass(ve, cls);
-        });
+        QueueOp(2, id, cls, string.Empty);
+    }
+
+    private void ApplyClass(string id, string cls)
+    {
+        var ve = _find(id);
+        if (ve != null)
+            _setClass(ve, cls);
     }
 
     private string? GetAttr(string id, string name)
