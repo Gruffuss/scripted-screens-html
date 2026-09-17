@@ -23,7 +23,7 @@ local page = [==[
   :root {
     --sky-top: #0b1020;
     --sky-bottom: #1d1630;
-    --ground: #b8583a;
+    --ground-col: #b8583a;
     --ground-dark: #7c3624;
     --ink: #f3e9dc;
     --dim: #a89c8f;
@@ -38,10 +38,11 @@ local page = [==[
   html, body { margin: 0; background: #05070d; }
   body { font-family: Barlow, "Segoe UI", Arial, sans-serif; color: var(--ink); }
 
-  #app { position: relative; width: 800px; height: 800px; overflow: hidden; margin: 0 auto;
+  #app { position: relative; width: 800px; height: 100vh; overflow: hidden; margin: 0 auto;
+    display: flex; flex-direction: column;
     background: linear-gradient(180deg, var(--sky-top), var(--sky-bottom)); user-select: none; }
 
-  header { position: absolute; left: 0; top: 0; width: 800px; height: 90px; padding: 22px 32px;
+  header { flex: none; width: 800px; padding: 22px 32px;
     display: flex; align-items: center; justify-content: space-between; }
   .title { font-family: "Barlow Condensed", Barlow, sans-serif; font-weight: 700; font-size: 34px; letter-spacing: 0.08em; }
   .title span { color: var(--suit); }
@@ -51,7 +52,8 @@ local page = [==[
   #score.flash { color: var(--suit); }
 
   /* the playfield: everything that moves lives here */
-  #field { position: absolute; left: 0; top: 90px; width: 800px; height: 520px; overflow: hidden; cursor: pointer; }
+  /* the playfield takes the height the header and controls leave */
+  #field { flex: none; position: relative; width: 800px; overflow: hidden; cursor: pointer; }
   .star { position: absolute; width: 3px; height: 3px; border-radius: 50%; background: #ffffff; }
   #planet { position: absolute; left: 560px; top: 30px; width: 120px; height: 120px; border-radius: 50%;
     background: linear-gradient(135deg, #7fb2d9, #2d4f7a); box-shadow: 0 0 30px rgba(127, 178, 217, 0.35); }
@@ -70,8 +72,8 @@ local page = [==[
   .dome .lamp { position: absolute; left: 42px; bottom: 60px; width: 6px; height: 6px; border-radius: 50%; background: var(--alarm); }
 
   #groundLine { position: absolute; left: 0; top: 440px; width: 800px; height: 80px;
-    background: linear-gradient(180deg, var(--ground), var(--ground-dark)); border-top: 3px solid #e07a52; }
-  .pebble { position: absolute; top: 452px; height: 4px; border-radius: 2px; background: #8e422c; }
+    background: linear-gradient(180deg, var(--ground-col), var(--ground-dark)); border-top: 3px solid #e07a52; }
+  .pebble { position: absolute; height: 4px; border-radius: 2px; background: #8e422c; }
 
   /* the Stationeer */
   #player { position: absolute; left: 0; top: 0; width: 60px; height: 80px; }
@@ -118,8 +120,7 @@ local page = [==[
   .ob.drone .c { left: 22px; top: 12px; width: 8px; height: 8px; border-radius: 50%; background: var(--alarm); }
 
   /* bottom controls */
-  #controls { position: absolute; left: 0; top: 610px; width: 800px; height: 190px; padding: 24px 32px;
-    display: flex; gap: 24px; }
+  #controls { flex: none; width: 800px; height: 190px; padding: 24px 32px; display: flex; gap: 24px; }
   .pad { flex: 1; border-radius: 22px; display: flex; flex-direction: column; align-items: center; justify-content: center;
     font-family: "Barlow Condensed", Barlow, sans-serif; font-weight: 700; font-size: 40px; letter-spacing: 0.1em; cursor: pointer; }
   .pad small { font-family: Barlow, sans-serif; font-weight: 400; font-size: 16px; letter-spacing: 0.04em; color: var(--dim); margin-top: 4px; }
@@ -129,12 +130,23 @@ local page = [==[
   #duckBtn:active, #duckBtn.held { background: #563e5d; }
 
   /* messages over the field */
-  #overlay { position: absolute; left: 0; top: 90px; width: 800px; height: 440px; display: flex; flex-direction: column;
+  #overlay { position: absolute; left: 0; top: 0; right: 0; bottom: 80px; display: flex; flex-direction: column;
     align-items: center; justify-content: center; opacity: 1; pointer-events: none; }
   #overlay .big { font-family: "Barlow Condensed", Barlow, sans-serif; font-weight: 700; font-size: 64px; letter-spacing: 0.08em; }
   #overlay .small { font-size: 22px; color: var(--dim); margin-top: 6px; }
   #overlay.hidden { opacity: 0; }
   #overlay.over .big { color: var(--alarm); }
+
+  /* a wide console (2x1) has half the height: a slimmer header, shorter pads, no hints */
+  :root[data-short=""] header { padding: 10px 24px; }
+  :root[data-short=""] .title { font-size: 24px; }
+  :root[data-short=""] .scores { font-size: 22px; gap: 18px; }
+  :root[data-short=""] .scores .lbl { font-size: 14px; margin-right: 5px; }
+  :root[data-short=""] #controls { height: 72px; padding: 8px 24px; gap: 16px; }
+  :root[data-short=""] .pad { font-size: 26px; border-radius: 14px; }
+  :root[data-short=""] .pad small { display: none; }
+  :root[data-short=""] #overlay .big { font-size: 40px; }
+  :root[data-short=""] #overlay .small { font-size: 17px; }
 </style>
 </head>
 <body>
@@ -181,10 +193,14 @@ local page = [==[
 // Stationeer Run: an endless runner. Everything that moves is a fixed set of elements moved with
 // transforms, so a frame only changes numbers. Physics is in seconds, so it plays the same at any
 // frame rate.
-const GROUND = 440;          // top of the ground in field pixels
+// The playfield's height depends on the console's shape, so the ground line, the jump and the
+// scenery are sized from it once the page has been laid out (fit() below).
+let GROUND = 440;            // top of the ground in field pixels
+let FIELD_H = 520;
+let K = 1;                   // scenery scale against the square console the art was drawn for
+let JUMP_V = 900;
 const PLAYER_X = 90;
 const GRAVITY = 2600;
-const JUMP_V = 900;
 const START_SPEED = 380;
 const MAX_SPEED = 950;
 const POOL = 4;
@@ -193,11 +209,12 @@ const $ = (id) => document.getElementById(id);
 const field = $('field'), player = $('player');
 const scoreEl = $('score'), hiEl = $('hi'), overlay = $('overlay');
 
-// scenery, built once
-(function scenery() {
+// scenery, rebuilt whenever the field's height is known
+function scenery() {
+  const sky = Math.max(60, GROUND - 40);
   let s = '';
   for (let i = 0; i < 40; i++) {
-    const x = (i * 197) % 800, y = (i * 83) % 300, o = 0.3 + ((i * 37) % 7) / 10;
+    const x = (i * 197) % 800, y = (i * 83) % sky, o = 0.3 + ((i * 37) % 7) / 10;
     s += '<div class="star" style="left:' + x + 'px;top:' + y + 'px;opacity:' + o.toFixed(2) + '"></div>';
   }
   $('stars').innerHTML = s;
@@ -209,24 +226,41 @@ const scoreEl = $('score'), hiEl = $('hi'), overlay = $('overlay');
     }
     $(id).innerHTML = r;
   };
-  ridge('ridgeFar', 8, 70, 220, 3);
-  ridge('ridgeNear', 6, 40, 260, 7);
+  ridge('ridgeFar', 8, Math.round(70 * K), 220, 3);
+  ridge('ridgeNear', 6, Math.round(40 * K), 260, 7);
   let d = '';
   for (let i = 0; i < 2; i++)
     d += '<div class="dome" style="left:' + (300 + i * 800) + 'px;top:' + GROUND + 'px"><div class="cap"></div><div class="base"></div><div class="lamp"></div></div>';
   $('domes').innerHTML = d;
   let p = '';
   for (let i = 0; i < 14; i++)
-    p += '<div class="pebble" id="pb' + i + '" style="width:' + (8 + (i * 7) % 20) + 'px;top:' + (452 + (i * 13) % 50) + 'px"></div>';
+    p += '<div class="pebble" id="pb' + i + '" style="width:' + (8 + (i * 7) % 20) + 'px;top:' + (GROUND + 12 + (i * 13) % Math.max(12, FIELD_H - GROUND - 18)) + 'px"></div>';
   $('pebbles').innerHTML = p;
   let o = '';
   for (let i = 0; i < POOL; i++)
     o += '<div class="ob canister" id="ob' + i + '"><div class="a"></div><div class="b"></div><div class="c"></div></div>';
   $('obstacles').innerHTML = o;
-})();
+}
+
+// the console's shape: the ground sits a band above the bottom, and a jump clears the tallest
+// obstacle without leaving the sky. A short, wide console also gets the compact header and pads.
+let fitted = false;
+function fit(height) {
+  FIELD_H = height;
+  K = Math.max(0.5, Math.min(1, height / 520));
+  const band = Math.round(Math.max(34, Math.min(80, height * 0.2)));
+  GROUND = height - band;
+  $('groundLine').style.top = GROUND + 'px';
+  $('groundLine').style.height = band + 'px';
+  overlay.style.bottom = band + 'px';
+  JUMP_V = Math.sqrt(2 * GRAVITY * Math.max(86, Math.min(160, height * 0.45)));
+  scenery();
+  obs.forEach((o) => { o.active = false; o.x = -200; });
+  fitted = true;
+}
 
 const obs = [];
-for (let i = 0; i < POOL; i++) obs.push({ el: $('ob' + i), active: false, x: -200, y: 0, w: 0, h: 0, kind: 'canister' });
+for (let i = 0; i < POOL; i++) obs.push({ id: 'ob' + i, get el() { return $(this.id); }, active: false, x: -200, y: 0, w: 0, h: 0, kind: 'canister' });
 const KINDS = {
   canister: { w: 26, h: 60, fly: false },
   twin:     { w: 50, h: 52, fly: false },
@@ -302,6 +336,7 @@ function spawn() {
   slot.w = k.w; slot.h = k.h;
   slot.x = 820;
   // drones fly at head height (duck) or low (jump); ground things sit on the ground
+  // drone heights are the crouching Stationeer's, not the console's: one to duck under, one to jump
   slot.y = k.fly ? (Math.random() < 0.5 ? GROUND - 70 : GROUND - 34) : GROUND - k.h;
   slot.el.className = 'ob ' + kind;
   slot.miss = g.demo && Math.random() < 0.03; // the autopilot fumbles now and then
@@ -434,8 +469,19 @@ function frame(t) {
   draw();
   requestAnimationFrame(frame);
 }
+// The console's shape decides the layout: a wide one (2x1) is half as tall as a square one, so
+// the header and the pads go compact and the playfield keeps the rest. Their heights are the ones
+// the stylesheet gives them, so the playfield needs no measuring.
+(function shape() {
+  const h = window.innerHeight || 800;
+  const short = h < 560;
+  document.documentElement.setAttribute('data-short', short ? '' : 'no');
+  $('app').style.height = h + 'px';
+  const field_h = Math.max(120, Math.round(h - (short ? 49 : 90) - (short ? 72 : 190)));
+  field.style.height = field_h + 'px';
+  fit(field_h);
+})();
 reset(true);
-draw();
 requestAnimationFrame(frame);
 </script>
 </body>
