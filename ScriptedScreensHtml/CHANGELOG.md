@@ -1,11 +1,12 @@
 # ScriptedScreens Html changelog
 
-Newest first. The workshop page carries only the latest releases; this file has all of them.
+Newest first. The workshop page is a short overview; this file has the full history.
 
 ## 0.2.0
 
-- A page's translation to the vector scene runs on a worker thread; the game thread lays the page
-  out, copies the values the translation reads and hands the result to the vector mod.
+- Pages are laid out by a layout engine inside the mod instead of Unity's UI Toolkit, and each
+  page runs its script, animations and layout on a thread of its own. The game thread only
+  hands finished scenes to the vector mod.
 - Pages are laid out with the faces the Fonts mod and the game registered, mirrored by name; the
   mod reads no font files and knows no font folders (a Workshop install names mod folders by item
   id, and player fonts live where the Fonts mod keeps them). A face registered later is picked up

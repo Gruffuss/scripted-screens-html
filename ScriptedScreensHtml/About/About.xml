@@ -5,86 +5,39 @@
 	<Version>0.2.0.0</Version>
 	<Description>
 [h1]ScriptedScreens Html[/h1]
-[i]Client-side only. Nothing on disk is modified.[/i]
+[i]Write a console screen as a web page. Client-side only.[/i]
 
-Write a console screen as a web page. Adds an [b]html[/b] element type to ScriptedScreens surfaces: give it an HTML document with CSS and, if you like, JavaScript, and the page is drawn on the console by ScriptedScreens Vector as crisp geometry at any distance, in real typefaces. A page that does not change costs the game nothing per frame.
+Adds an [b]html[/b] element to ScriptedScreens consoles: give it HTML, CSS and, if you like, JavaScript, and ScriptedScreens Vector draws it as sharp geometry at any size, in real game fonts. A page written from browser habit works as written.
 
-[code]ui:element({ id = "screen", type = "html", rect = { unit = "px", x = 0, y = 0, w = 460, h = 460 },
-  props = { src = [[&lt;html&gt;&lt;head&gt;&lt;style&gt;body { background: #0B1622; color: #E4F1F7; font-family: Barlow; padding: 16px }
-  h1 { color: #38BDF8 }&lt;/style&gt;&lt;/head&gt;&lt;body&gt;&lt;h1&gt;Hello, base&lt;/h1&gt;&lt;p&gt;A web page on a console.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;]] } })[/code]
-
-[h2]Why you want it[/h2]
-Far more people can write HTML and CSS than a drawing API, and a page written from browser habit works: flexbox and grid, gradients of every kind, shadows, borders, transforms, transitions and keyframes, scrolling boxes with the wheel, inline SVG, forms, tables, lists, counters, custom properties, media queries against the design width. Lay the page out for one design width and it scales to any console.
-
-[h2]The page changes on data, motion is free[/h2]
-Keep the page static and send values from Lua through a second, tiny element that names the page. Values bind by element id: a string becomes text, a table becomes CSS, a boolean shows or hides, a number array becomes a live graph. Elements persist, so a CSS [b]transition[/b] animates the change and nothing in Lua runs per frame.
-
-[code]data:set_props({ data = { temp = "293 K", bar = { width = "62%" }, alarm = pressure > 500, hist = history } })[/code]
-
-Transitions, keyframes and scroll-driven animations are compiled to expressions the Vector mod evaluates on a worker thread. Inline SVG goes further: any attribute may be an expression over time, instance and your data, so a tank surface ripples on the client with one number sent a second.
-
-[h2]Controls and scripts[/h2]
+[h2]Highlights[/h2]
 [list]
-[*] Buttons and anything with onclick report to Lua's on_click with the element id; hover, active and focus styles work
-[*] Inputs, ranges, selects, checkboxes and radios report to on_change as "name=value"
-[*] Images, video and audio are ScriptedScreens' own elements, so URLs the game can fetch work
-[*] A page script runs on a worker thread with the DOM you expect: querySelector, createElement, innerHTML, classList, events, timers, localStorage, a full 2D canvas drawn as vector paths, modules imported from a URL
-[*] Fonts are the ones the Fonts mod ships, by family and weight: Barlow, Barlow SemiBold, Barlow Condensed, the game's own faces, monospace
+[*] Flexbox and grid, gradients, shadows, borders, transforms, inline SVG, forms and tables
+[*] Live values from Lua bind by element id: text, CSS, show/hide or a live graph
+[*] CSS transitions and keyframes animate on the client, with no per-frame Lua
+[*] Buttons, inputs, sliders and selects report back to your Lua script
+[*] Page scripts get the DOM you expect: querySelector, innerHTML, events, timers, a 2D canvas
+[*] Every page runs on its own thread, so the game thread barely notices it
 [/list]
 
 [h2]Getting started[/h2]
-Everything is in the mod folder ([i]Documents/My Games/Stationeers/mods/ScriptedScreensHtml[/i]):
-[list]
-[*] [b]examples/[/b] -- six numbered scripts that each run on paste: a styled page with a table, live data, controls, an SVG tank, a script-built table, and a complete gas monitor
-[*] [b]mockups/[/b] -- three complete regulator consoles written as ordinary web pages, in three design styles, each with five screens
-[*] [b]QUICKSTART.md[/b] -- a one-page brief with a page and data element that run as written, and a checklist
-[*] [b]README.md[/b] -- the authoring guide: the html element, live data, controls, CSS, fonts, SVG and scripts
-[*] [b]SUPPORT.md[/b] -- everything seen working on a console, what is accepted without effect, and the short list still being finished
-[*] [b]CHANGELOG.md[/b] -- the full release history
-[/list]
-The same files are [url=https://github.com/Gruffuss/scripted-screens-html/tree/main/ScriptedScreensHtml]on GitHub[/url].
+The mod folder holds six examples that run on paste, three complete console mockups, a one-page QUICKSTART.md, the guide (README.md), the support list (SUPPORT.md) and the release history (CHANGELOG.md), also [url=https://github.com/Gruffuss/scripted-screens-html/tree/main/ScriptedScreensHtml]on GitHub[/url]. With StationeersLua installed, AI editors can read and search the same docs through its MCP server.
 
-[h2]AI editor support (MCP)[/h2]
-With [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3659911735]StationeersLua[/url] installed, an AI editor connected to its MCP server gets everything it needs to write console pages:
+[h2]What's new in 0.2.0[/h2]
 [list]
-[*] [b]stationeers://html/index[/b] -- a brief written for AI: when to use the element, a page and data element that run as written, a checklist of the mistakes that fail silently, a symptom-to-cause table, and a map of every other page
-[*] the guide and SUPPORT.md, one searchable page per section (search scope [b]html[/b]), the changelog and all six examples
-[*] the three console mockups as whole pages, in a search scope of their own ([b]html-mockups[/b]) so their CSS does not crowd the answers
+[*] Pages lay out and animate on their own threads with a built-in layout engine
+[*] More pages written for a browser render as written: fonts, subscripts, layered backgrounds
+[*] Docs, examples and mockups for AI editors through StationeersLua's MCP server
 [/list]
-The editor checks its work with StationeersLua's own tools: capture_scripted_screen for a picture of the console, get_chip_errors for the script. Nothing changes without StationeersLua; the mod works the same.
-
-[h2]Notes[/h2]
-[list]
-[*] Per-pixel effects (blur, backdrop-filter, blend modes) are accepted and do nothing: the page is geometry, not pixels
-[*] A page has no network of its own; stylesheets, scripts and modules are fetched from http(s) URLs when the page loads, data comes from Lua
-[*] A magenta frame means the Vector mod refused part of the scene; the reason is in the log. Turn on Diagnostics in the settings for per-page cost lines and the exact scene text
-[/list]
-
-[h2]Changelog[/h2]
-[b]0.2.0[/b]
-[list]
-[*] [b]MCP support for AI editors.[/b] With StationeersLua's MCP server, the mod publishes a brief written for AI editors (stationeers://html/index), the guide and SUPPORT.md split into searchable sections (scope [b]html[/b]), the changelog, the six examples, and three whole-console mockups (scope [b]html-mockups[/b]).
-[*] QUICKSTART.md, CHANGELOG.md, examples/ and mockups/ ship in the mod folder.
-[*] Pages written from browser habit render as written in more cases: text beside an element inside a flex or grid box, the font shorthand's family and weight, real bold and condensed faces in layout, subscripts and symbols a face lacks, layered backgrounds with position and size, tabular digits, flex gaps after innerHTML, and an undefined var() dropped as a browser drops it.
-[*] Faster pages: a script re-rendering its page no longer waits a frame per element, and Diagnostics names every cause of a redraw.
-[/list]
-[b]0.1.0[/b]
-[list]
-[*] First release: HTML, CSS and JavaScript pages on ScriptedScreens consoles, drawn through ScriptedScreens Vector.
-[/list]
-Older releases: [b]CHANGELOG.md[/b] in the mod folder, or [url=https://github.com/Gruffuss/scripted-screens-html/blob/main/ScriptedScreensHtml/CHANGELOG.md]on GitHub[/url].
-
-[h2]Source[/h2]
-[url=https://github.com/Gruffuss/scripted-screens-html]github.com/Gruffuss/scripted-screens-html[/url] — MIT licensed. Issues and pull requests welcome.
+Full history: [url=https://github.com/Gruffuss/scripted-screens-html/blob/main/ScriptedScreensHtml/CHANGELOG.md]CHANGELOG.md[/url].
 
 [h2]Requirements[/h2]
 [list]
-[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3666779631]ScriptedScreens[/url] — [b]required[/b]; load before this mod
-[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3787517570]ScriptedScreens Vector[/url] — [b]required[/b]; draws the page
-[*] [url=https://github.com/Gruffuss/scripted-screens-fonts]ScriptedScreens Fonts[/url] — [b]required[/b]; the typefaces
-[*] [url=https://github.com/StationeersLaunchPad/StationeersLaunchPad]StationeersLaunchPad[/url]
-[*] [url=https://github.com/BepInEx/BepInEx]BepInEx 5.x[/url]
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3666779631]ScriptedScreens[/url] (required)
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3787517570]ScriptedScreens Vector[/url] (required, draws the page)
+[*] [url=https://github.com/Gruffuss/scripted-screens-fonts]ScriptedScreens Fonts[/url] (required, the typefaces)
+[*] [url=https://github.com/StationeersLaunchPad/StationeersLaunchPad]StationeersLaunchPad[/url] with [url=https://github.com/BepInEx/BepInEx]BepInEx 5.x[/url]
 [/list]
+Source: [url=https://github.com/Gruffuss/scripted-screens-html]github.com/Gruffuss/scripted-screens-html[/url] (MIT).
 	</Description>
 	<WorkshopHandle>0</WorkshopHandle>
 	<Tags>

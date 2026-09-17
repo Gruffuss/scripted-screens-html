@@ -7,7 +7,7 @@ browser.** Anything a browser page does that fails here is a defect, not a conve
 the two lists at the end say what is still being finished.
 
 ```
-HTML + CSS  →  parse, cascade  →  UI Toolkit lays the boxes out (layout only; grid and inline flow are ours)
+HTML + CSS  →  parse, cascade  →  the mod's own layout engine lays the boxes out (flexbox, grid, inline flow)
             →  the emitter translates the laid-out boxes to the vector mod's scene text
             →  the vector mod draws geometry off-thread, text in the Fonts mod's faces
 JS          →  Jint on a worker thread; DOM writes land on the main thread and re-run the translation

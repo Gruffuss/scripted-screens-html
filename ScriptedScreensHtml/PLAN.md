@@ -87,7 +87,7 @@ vector list (items 7–12) and the emitter writes the form given there.
 | `writing-mode: vertical-rl/lr` | the label in `G r=90/-90`; emitter only |
 | `vertical-align: sub/super/middle` on inline text | TMP `<sub>`, `<sup>`, `<voffset>`; emitter only |
 | `text-align: justify` | `T align=justified` (vector 4) |
-| `float: left/right`, `clear` | layout: the parent becomes a wrapping row, the float first or last with auto margin. Not text flowing around a box; a real float needs an inline formatting context, which UI Toolkit does not have |
+| `float: left/right`, `clear` | layout: the parent becomes a wrapping row, the float first or last with auto margin. Not text flowing around a box; a real float needs an inline formatting context, which the layout engine does not have |
 | `display: inline-block`, `contents`, `table*` | layout mapping |
 | `columns` | a wrapping row of equal columns filled in order |
 | `aspect-ratio` | height from width on layout, and the reverse |
