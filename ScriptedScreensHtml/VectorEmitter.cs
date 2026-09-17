@@ -139,7 +139,7 @@ internal static class VectorEmitter
             var backdrop = new Color(0f, 0f, 0f, 0.1f);
             if ((bd.TryGetValue("background", out var bdc) || bd.TryGetValue("background-color", out bdc)) && StyleApplier.TryColor(bdc, out var bcol)) backdrop = bcol;
             if (bd.TryGetValue("opacity", out var bdo)) backdrop.a *= StyleApplier.Num(bdo);
-            ctx.Body.Append(indent).Append("R x=0 y=0 w=").Append(F(ctx.PageW)).Append(" h=").Append(F(ctx.PageH)).Append(" f=").Append(Hex(backdrop)).Append('\n');
+            ctx.Body.Append(indent).Append("R x=0 y=0 w=").AppendNum(ctx.PageW).Append(" h=").AppendNum(ctx.PageH).Append(" f=").AppendHex(backdrop).Append('\n');
             ctx.Out.Nodes++;
         }
 
@@ -176,7 +176,7 @@ internal static class VectorEmitter
             // until it would leave the viewport top, then pins `top` below it. sy is the
             // container's scroll offset, so the lift is max(0, (viewportTop + top + sy) - y).
             var top = css.TryGetValue("top", out var t) ? StyleApplier.Num(t) : 0f;
-            ctx.Body.Append(indent).Append("G t=[0,\"=max(0,").Append(F(ctx.ScrollTop + top - y)).Append("+sy)\"] {\n");
+            ctx.Body.Append(indent).Append("G t=[0,\"=max(0,").AppendNum(ctx.ScrollTop + top - y).Append("+sy)\"] {\n");
             groups++;
         }
         if (tw != null && (Mathf.Abs(tw.From.Rect.x - tw.To.Rect.x) > 0.01f || Mathf.Abs(tw.From.Rect.y - tw.To.Rect.y) > 0.01f))
@@ -194,7 +194,7 @@ internal static class VectorEmitter
         if (css.TryGetValue("transform", out var tcss) && StyleApplier.NeedsMatrix(tcss) && Matrix(tcss, css, x, y, w, h) is { } m)
         {
             // skew(), matrix(), 3D: the whole list composed into one matrix about the origin (vector requirement 13)
-            ctx.Body.Append(indent).Append("G m=[").Append(F(m[0])).Append(',').Append(F(m[1])).Append(',').Append(F(m[2])).Append(',').Append(F(m[3])).Append(',').Append(F(m[4])).Append(',').Append(F(m[5])).Append("] {\n");
+            ctx.Body.Append(indent).Append("G m=[").AppendNum(m[0]).Append(',').AppendNum(m[1]).Append(',').AppendNum(m[2]).Append(',').AppendNum(m[3]).Append(',').AppendNum(m[4]).Append(',').AppendNum(m[5]).Append("] {\n");
             groups++;
         }
         if (css.TryGetValue("filter", out var fcss) && Filters(ctx, fcss, out var filterAttrs, out var filterShadow) && filterAttrs.Length > 0)
@@ -240,7 +240,7 @@ internal static class VectorEmitter
             if (cornerPath != null && tw == null && bg.a > 0.002f && (bgCss == null || !bgCss.Contains("gradient(")) && UrlOf(bgCss ?? string.Empty) == null)
             {
                 // corner-shape: the box outline as a path with bevelled, scooped or notched corners
-                ctx.Body.Append(indent).Append(cornerPath).Append(" f=").Append(Hex(bg)).Append(shadowOf(css, filterShadow)).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Body.Append(indent).Append(cornerPath).Append(" f=").AppendHex(bg).Append(shadowOf(css, filterShadow)).Append(NodeId(ctx, ve)).Append('\n');
                 ctx.Out.Nodes++;
                 bg = Color.clear;
             }
@@ -267,8 +267,8 @@ internal static class VectorEmitter
                 }
                 if (baseC.a > 0.002f)
                 {
-                    ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                        .Append(Radius(rs, w, h)).Append(" f=").Append(Hex(baseC)).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                    ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                        .Append(Radius(rs, w, h)).Append(" f=").AppendHex(baseC).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
                     ctx.Out.Nodes++;
                 }
                 // CSS paints the first layer on top: emitted last
@@ -285,7 +285,7 @@ internal static class VectorEmitter
                         GradientBox(ctx, gradient, x + lx, y + ly, lw, lh, F(lw), F(lh), rs, indent, ve, xform, string.Empty);
                     else if (gradient.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) && RadialDef(ctx, gradient) is { } lrid)
                     {
-                        ctx.Body.Append(indent).Append("R x=").Append(F(x + lx)).Append(" y=").Append(F(y + ly)).Append(" w=").Append(F(lw)).Append(" h=").Append(F(lh))
+                        ctx.Body.Append(indent).Append("R x=").AppendNum(x + lx).Append(" y=").AppendNum(y + ly).Append(" w=").AppendNum(lw).Append(" h=").AppendNum(lh)
                             .Append(" f=@").Append(lrid).Append('\n');
                         ctx.Out.Nodes++;
                     }
@@ -296,8 +296,8 @@ internal static class VectorEmitter
                 // background-image: url(): the colour (if any) under an IMG node (vector requirement 9)
                 if (bg.a > 0.002f)
                 {
-                    ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                        .Append(Radius(rs, w, h)).Append(" f=").Append(Hex(bg)).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                    ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                        .Append(Radius(rs, w, h)).Append(" f=").AppendHex(bg).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
                     ctx.Out.Nodes++;
                 }
                 // background-origin: padding-box (the default, inside the border), content-box, or border-box
@@ -312,8 +312,8 @@ internal static class VectorEmitter
             {
                 // A colour transition: a two-stop ramp sampled over the tween's clock (vector requirement 1)
                 var gid = "tw" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-                ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[[0,").Append(Hex(tw.From.Bg)).Append("],[1,").Append(Hex(bg)).Append("]]\n");
-                ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[[0,").AppendHex(tw.From.Bg).Append("],[1,").AppendHex(bg).Append("]]\n");
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
                     .Append(Radius(rs, w, h)).Append(" f=@").Append(gid).Append(" fat==").Append(tw.P).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
                 ctx.Out.Nodes++;
             }
@@ -323,13 +323,13 @@ internal static class VectorEmitter
             }
             else if (bgCss != null && bgCss.StartsWith("conic-gradient", StringComparison.OrdinalIgnoreCase) && ConicDef(ctx, bgCss) is { } cid)
             {
-                ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
                     .Append(Radius(rs, w, h)).Append(" f=@").Append(cid).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (bgCss != null && bgCss.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) && RadialDef(ctx, bgCss) is { } rid)
             {
-                ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
                     .Append(Radius(rs, w, h)).Append(" f=@").Append(rid).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
                 ctx.Out.Nodes++;
             }
@@ -337,20 +337,20 @@ internal static class VectorEmitter
             // structure does not change with the colour; the vector mod skips invisible shapes itself
             else if (bg.a > 0.002f || css.ContainsKey("background-color") || (css.TryGetValue("background", out var bgDecl) && StyleApplier.TryColor(bgDecl.Trim(), out _)))
             {
-                ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                    .Append(Radius(rs, w, h)).Append(" f=").Append(Hex(bg)).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                    .Append(Radius(rs, w, h)).Append(" f=").AppendHex(bg).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (IsButton(ctx, ve))
             {
-                ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
                     .Append(Radius(rs, w, h)).Append(" f=#00000001").Append(NodeId(ctx, ve)).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (shadow.Length > 0)
             {
                 // A shadow under a transparent box still casts: an invisible fill carries it.
-                ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(ws).Append(" h=").Append(hs)
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
                     .Append(Radius(rs, w, h)).Append(" f=#00000001").Append(shadow).Append('\n');
                 ctx.Out.Nodes++;
             }
@@ -359,9 +359,9 @@ internal static class VectorEmitter
             {
                 // Outside the border box, offset by outline-offset, stroke centred on its path.
                 var od = ooff + ow * 0.5f;
-                ctx.Body.Append(indent).Append("R x=").Append(F(x - od)).Append(" y=").Append(F(y - od))
-                    .Append(" w=").Append(F(w + 2f * od)).Append(" h=").Append(F(h + 2f * od))
-                    .Append(Radius(rs, w + 2f * od, h + 2f * od, od)).Append(" f=none s=").Append(Hex(oc)).Append(" sw=").Append(F(ow))
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x - od).Append(" y=").AppendNum(y - od)
+                    .Append(" w=").AppendNum(w + 2f * od).Append(" h=").AppendNum(h + 2f * od)
+                    .Append(Radius(rs, w + 2f * od, h + 2f * od, od)).Append(" f=none s=").AppendHex(oc).Append(" sw=").AppendNum(ow)
                     .Append('\n');
                 ctx.Out.Nodes++;
             }
@@ -383,7 +383,7 @@ internal static class VectorEmitter
             }
             else if (cornerPath != null && tw == null && bw > 0.01f && sameWidth && sameColour && bstyle == "solid")
             {
-                ctx.Body.Append(indent).Append(CornerPath(css, rs, x + bw * 0.5f, y + bw * 0.5f, w - bw, h - bw)).Append(" f=none s=").Append(Hex(rs.borderTopColor)).Append(" sw=").Append(F(bw)).Append('\n');
+                ctx.Body.Append(indent).Append(CornerPath(css, rs, x + bw * 0.5f, y + bw * 0.5f, w - bw, h - bw)).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(bw).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (mixed && rounded && RoundedSides(styles, rs, out var ringWidth, out var ringColours))
@@ -406,8 +406,8 @@ internal static class VectorEmitter
                 var third = bw / 3f;
                 foreach (var inset in new[] { third * 0.5f, bw - third * 0.5f })
                 {
-                    ctx.Body.Append(indent).Append("R x=").Append(F(x + inset)).Append(" y=").Append(F(y + inset)).Append(" w=").Append(F(w - 2f * inset)).Append(" h=").Append(F(h - 2f * inset))
-                        .Append(Radius(rs, w, h, -inset)).Append(" f=none s=").Append(Hex(rs.borderTopColor)).Append(" sw=").Append(F(third)).Append('\n');
+                    ctx.Body.Append(indent).Append("R x=").AppendNum(x + inset).Append(" y=").AppendNum(y + inset).Append(" w=").AppendNum(w - 2f * inset).Append(" h=").AppendNum(h - 2f * inset)
+                        .Append(Radius(rs, w, h, -inset)).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(third).Append('\n');
                     ctx.Out.Nodes++;
                 }
             }
@@ -433,10 +433,10 @@ internal static class VectorEmitter
             {
                 // A stroke is centred on its path: inset by half the width so it stays inside the box.
                 var half = bw * 0.5f;
-                ctx.Body.Append(indent).Append("R x=").Append(F(x + half)).Append(" y=").Append(F(y + half))
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x + half).Append(" y=").AppendNum(y + half)
                     .Append(" w=").Append(tw != null ? tw.Lerp(tw.From.Rect.width - bw, w - bw) : F(w - bw))
                     .Append(" h=").Append(tw != null ? tw.Lerp(tw.From.Rect.height - bw, h - bw) : F(h - bw))
-                    .Append(Radius(rs, w, h, -half)).Append(" f=none s=").Append(Hex(rs.borderTopColor)).Append(" sw=").Append(F(bw)).Append(Dash(css, bw)).Append('\n');
+                    .Append(Radius(rs, w, h, -half)).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(bw).Append(Dash(css, bw)).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (bw > 0.01f || rs.borderRightWidth > 0.01f || rs.borderBottomWidth > 0.01f || rs.borderLeftWidth > 0.01f)
@@ -468,10 +468,10 @@ internal static class VectorEmitter
                 }
                 ch += rs.paddingBottom;
                 ctx.Body.Append(indent).Append("SC id=").Append(string.IsNullOrEmpty(ve.name) ? "scroll" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture) : ve.name)
-                    .Append(" x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h))
-                    .Append(" ch=").Append(F(Mathf.Max(ch, h))).Append(Radius(rs, w, h));
+                    .Append(" x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
+                    .Append(" ch=").AppendNum(Mathf.Max(ch, h)).Append(Radius(rs, w, h));
                 if (ctx.ScrollSet != null && !string.IsNullOrEmpty(ve.name) && ctx.ScrollSet.TryGetValue(ve.name, out var ss))
-                    ctx.Body.Append(" so=").Append(F(ss.offset)).Append(" sov=").Append(ss.version); // applied once per version (vector requirement 7)
+                    ctx.Body.Append(" so=").AppendNum(ss.offset).Append(" sov=").Append(ss.version); // applied once per version (vector requirement 7)
                 ctx.Body.Append(" {\n");
                 ctx.Out.Nodes++;
                 groups++;
@@ -482,8 +482,8 @@ internal static class VectorEmitter
             {
                 var id = "clip" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
                 var margin = css.TryGetValue("overflow-clip-margin", out var ocm) ? StyleApplier.Num(ocm) : 0f;  // the clip box grown by overflow-clip-margin
-                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x - margin)).Append(" y=").Append(F(y - margin))
-                    .Append(" w=").Append(F(w + 2f * margin)).Append(" h=").Append(F(h + 2f * margin)).Append(Radius(rs, w + 2f * margin, h + 2f * margin)).Append(" }\n");
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x - margin).Append(" y=").AppendNum(y - margin)
+                    .Append(" w=").AppendNum(w + 2f * margin).Append(" h=").AppendNum(h + 2f * margin).Append(Radius(rs, w + 2f * margin, h + 2f * margin)).Append(" }\n");
                 ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
                 groups++;
             }
@@ -511,7 +511,7 @@ internal static class VectorEmitter
                 // vertical text: the label rotated about the box centre, its box swapped
                 var cx = x + w * 0.5f; var cy = y + h * 0.5f;
                 var angle = string.Equals(wm.Trim(), "sideways-lr", StringComparison.OrdinalIgnoreCase) ? -90f : 90f;
-                ctx.Body.Append(indent).Append("G a=[").Append(F(cx)).Append(',').Append(F(cy)).Append("] r=").Append(F(angle)).Append(" {\n");
+                ctx.Body.Append(indent).Append("G a=[").AppendNum(cx).Append(',').AppendNum(cy).Append("] r=").AppendNum(angle).Append(" {\n");
                 EmitText(ctx, label, css, cx - h * 0.5f, cy - w * 0.5f, h, w, indent + "  ");
                 ctx.Body.Append(indent).Append("}\n");
                 break;
@@ -587,11 +587,11 @@ internal static class VectorEmitter
     private static void Arc(Ctx ctx, string indent, float bw, Color c, Vector2 from, float r0, Vector2 a, Vector2 b, float r1, Vector2 to)
     {
         if (c.a <= 0.002f) return;
-        var d = new StringBuilder("M ").Append(F(from.x)).Append(' ').Append(F(from.y));
-        if (r0 > 0.01f) d.Append(" A ").Append(F(r0)).Append(' ').Append(F(r0)).Append(" 0 0 1 ").Append(F(a.x)).Append(' ').Append(F(a.y));
-        d.Append(" L ").Append(F(b.x)).Append(' ').Append(F(b.y));
-        if (r1 > 0.01f) d.Append(" A ").Append(F(r1)).Append(' ').Append(F(r1)).Append(" 0 0 1 ").Append(F(to.x)).Append(' ').Append(F(to.y));
-        ctx.Body.Append(indent).Append("P d=\"").Append(d).Append("\" f=none s=").Append(Hex(c)).Append(" sw=").Append(F(bw)).Append(" cap=butt\n");
+        var d = new StringBuilder("M ").AppendNum(from.x).Append(' ').AppendNum(from.y);
+        if (r0 > 0.01f) d.Append(" A ").AppendNum(r0).Append(' ').AppendNum(r0).Append(" 0 0 1 ").AppendNum(a.x).Append(' ').AppendNum(a.y);
+        d.Append(" L ").AppendNum(b.x).Append(' ').AppendNum(b.y);
+        if (r1 > 0.01f) d.Append(" A ").AppendNum(r1).Append(' ').AppendNum(r1).Append(" 0 0 1 ").AppendNum(to.x).Append(' ').AppendNum(to.y);
+        ctx.Body.Append(indent).Append("P d=\"").Append(d).Append("\" f=none s=").AppendHex(c).Append(" sw=").AppendNum(bw).Append(" cap=butt\n");
         ctx.Out.Nodes++;
     }
 
@@ -618,7 +618,7 @@ internal static class VectorEmitter
     {
         if (w <= 0.01f || h <= 0.01f || c.a <= 0.002f)
             return;
-        ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h)).Append(" f=").Append(Hex(c)).Append('\n');
+        ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).Append(" f=").AppendHex(c).Append('\n');
         ctx.Out.Nodes++;
     }
 
@@ -781,7 +781,7 @@ internal static class VectorEmitter
         var sx = new StringBuilder(); var sy = new StringBuilder(); var sr = new StringBuilder();
         var prev = Sample(pts, Mathf.Clamp(tw.From.Offset, 0f, total));
         var prevAngle = prev.along;
-        sx.Append('=').Append(F(ox + prev.p.x)); sy.Append('=').Append(F(oy + prev.p.y)); sr.Append('=').Append(F(autoTurn * prevAngle + extra));
+        sx.Append('=').AppendNum(ox + prev.p.x); sy.Append('=').AppendNum(oy + prev.p.y); sr.Append('=').AppendNum(autoTurn * prevAngle + extra);
         for (var k = 0; k < K; k++)
         {
             var dk = Mathf.Lerp(tw.From.Offset, tw.To.Offset, (k + 1f) / K);
@@ -790,9 +790,9 @@ internal static class VectorEmitter
             while (angle - prevAngle > 180f) angle -= 360f;
             while (angle - prevAngle < -180f) angle += 360f;
             var step = "clamp(" + tw.P + "*" + K + "-" + k + ",0,1)";
-            if (Mathf.Abs(cur.p.x - prev.p.x) > 0.01f) sx.Append("+(").Append(F(cur.p.x - prev.p.x)).Append(")*").Append(step);
-            if (Mathf.Abs(cur.p.y - prev.p.y) > 0.01f) sy.Append("+(").Append(F(cur.p.y - prev.p.y)).Append(")*").Append(step);
-            if (autoTurn != 0f && Mathf.Abs(angle - prevAngle) > 0.01f) sr.Append("+(").Append(F(angle - prevAngle)).Append(")*").Append(step);
+            if (Mathf.Abs(cur.p.x - prev.p.x) > 0.01f) sx.Append("+(").AppendNum(cur.p.x - prev.p.x).Append(")*").Append(step);
+            if (Mathf.Abs(cur.p.y - prev.p.y) > 0.01f) sy.Append("+(").AppendNum(cur.p.y - prev.p.y).Append(")*").Append(step);
+            if (autoTurn != 0f && Mathf.Abs(angle - prevAngle) > 0.01f) sr.Append("+(").AppendNum(angle - prevAngle).Append(")*").Append(step);
             prev = cur; prevAngle = angle;
         }
         place.Ex = sx.ToString(); place.Ey = sy.ToString();
@@ -904,14 +904,14 @@ internal static class VectorEmitter
 
         public string Group()
         {
-            var sb = new StringBuilder("G a=[").Append(F(Ax)).Append(',').Append(F(Ay)).Append(']');
+            var sb = new StringBuilder("G a=[").AppendNum(Ax).Append(',').AppendNum(Ay).Append(']');
             if (_offset?.Ex != null)
             {
                 // the distance tween: the CSS translate/rotate as numbers plus the path expressions.
                 // ponytail: a transform tween running at the same time is emitted at its end state
-                sb.Append(" t=[\"").Append(_offset.Ex).Append('+').Append(F(Tx - _ox)).Append("\",\"").Append(_offset.Ey).Append('+').Append(F(Ty - _oy)).Append("\"]");
+                sb.Append(" t=[\"").Append(_offset.Ex).Append('+').AppendNum(Tx - _ox).Append("\",\"").Append(_offset.Ey).Append('+').AppendNum(Ty - _oy).Append("\"]");
                 sb.Append(" r=").Append(_offset.Er != null ? "\"" + _offset.Er + "+" + F(R - _or) + "\"" : F(R));
-                if (Sx != 1f || Sy != 1f) sb.Append(" s=[").Append(F(Sx)).Append(',').Append(F(Sy)).Append(']');
+                if (Sx != 1f || Sy != 1f) sb.Append(" s=[").AppendNum(Sx).Append(',').AppendNum(Sy).Append(']');
                 return sb.ToString();
             }
             if (_tw != null)
@@ -922,9 +922,9 @@ internal static class VectorEmitter
                 sb.Append(" s=[\"").Append(_tw.Lerp(f.Scale.x, Sx)).Append("\",\"").Append(_tw.Lerp(f.Scale.y, Sy)).Append("\"]");
                 return sb.ToString();
             }
-            if (Tx != 0f || Ty != 0f) sb.Append(" t=[").Append(F(Tx)).Append(',').Append(F(Ty)).Append(']');
-            if (R != 0f) sb.Append(" r=").Append(F(R));
-            if (Sx != 1f || Sy != 1f) sb.Append(" s=[").Append(F(Sx)).Append(',').Append(F(Sy)).Append(']');
+            if (Tx != 0f || Ty != 0f) sb.Append(" t=[").AppendNum(Tx).Append(',').AppendNum(Ty).Append(']');
+            if (R != 0f) sb.Append(" r=").AppendNum(R);
+            if (Sx != 1f || Sy != 1f) sb.Append(" s=[").AppendNum(Sx).Append(',').AppendNum(Sy).Append(']');
             return sb.ToString();
         }
 
@@ -971,7 +971,7 @@ internal static class VectorEmitter
             if (!hasColour) colour.a = 1f;
             while (nums.Count < 4) nums.Add(0f);
             if (sb.Length > 0) sb.Append(',');
-            sb.Append('[').Append(F(nums[0])).Append(',').Append(F(nums[1])).Append(',').Append(F(nums[2])).Append(',').Append(F(nums[3])).Append(',').Append(Hex(colour));
+            sb.Append('[').AppendNum(nums[0]).Append(',').AppendNum(nums[1]).Append(',').AppendNum(nums[2]).Append(',').AppendNum(nums[3]).Append(',').AppendHex(colour);
             if (inset) sb.Append(",inset"); // vector requirement 2 / 3
             sb.Append(']');
             count++;
@@ -1170,11 +1170,11 @@ internal static class VectorEmitter
         }
         if (stops.Count < 2) return null;
         var id = "rad" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-        ctx.Defs.Append("  GR id=").Append(id).Append(" units=bbox cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" r=").Append(F(r)).Append(" stops=[");
+        ctx.Defs.Append("  GR id=").Append(id).Append(" units=bbox cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" r=").AppendNum(r).Append(" stops=[");
         for (var i = 0; i < stops.Count; i++)
         {
             if (i > 0) ctx.Defs.Append(',');
-            ctx.Defs.Append('[').Append(F(stops[i].at)).Append(',').Append(Hex(stops[i].c)).Append(']');
+            ctx.Defs.Append('[').AppendNum(stops[i].at).Append(',').AppendHex(stops[i].c).Append(']');
         }
         ctx.Defs.Append("]\n");
         return id;
@@ -1209,7 +1209,7 @@ internal static class VectorEmitter
             for (var i = 1; i < stops.Count; i++) flat &= stops[i].c == stops[0].c;
             if (flat)
             {
-                ctx.Body.Append(indent).Append('R').Append(rect).Append(" f=").Append(Hex(stops[0].c)).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Body.Append(indent).Append('R').Append(rect).Append(" f=").AppendHex(stops[0].c).Append(NodeId(ctx, ve)).Append('\n');
                 ctx.Out.Nodes++;
                 return;
             }
@@ -1249,7 +1249,7 @@ internal static class VectorEmitter
             {
                 var p = xf != null ? xf.Apply(poly[i]) : poly[i];
                 if (i > 0) ctx.Defs.Append(',');
-                ctx.Defs.Append(F(p.x)).Append(',').Append(F(p.y));
+                ctx.Defs.AppendNum(p.x).Append(',').AppendNum(p.y);
             }
             ctx.Defs.Append("] }\n");
 
@@ -1301,12 +1301,12 @@ internal static class VectorEmitter
     {
         var ax = 0.5f - dx; var ay = 0.5f - dy;
         var bx = 0.5f + dx; var by = 0.5f + dy;
-        ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").Append(F(ax + (bx - ax) * p0)).Append(" y1=").Append(F(ay + (by - ay) * p0))
-            .Append(" x2=").Append(F(ax + (bx - ax) * p1)).Append(" y2=").Append(F(ay + (by - ay) * p1)).Append(" stops=[");
+        ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").AppendNum(ax + (bx - ax) * p0).Append(" y1=").AppendNum(ay + (by - ay) * p0)
+            .Append(" x2=").AppendNum(ax + (bx - ax) * p1).Append(" y2=").AppendNum(ay + (by - ay) * p1).Append(" stops=[");
         for (var i = 0; i < stops.Count; i++)
         {
             if (i > 0) ctx.Defs.Append(',');
-            ctx.Defs.Append('[').Append(F(stops[i].at)).Append(',').Append(Hex(stops[i].c)).Append(']');
+            ctx.Defs.Append('[').AppendNum(stops[i].at).Append(',').AppendHex(stops[i].c).Append(']');
         }
         ctx.Defs.Append("]\n");
     }
@@ -1446,11 +1446,11 @@ internal static class VectorEmitter
             w += slack;
         }
         var sb = new StringBuilder();
-        sb.Append(indent).Append("T x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h));
+        sb.Append(indent).Append("T x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h);
         var textAt = sb.Length;
         sb.Append(" text=\"").Append(text).Append('"');
         string? labelFace = null;
-        sb.Append(" size=").Append(F(rs.fontSize));
+        sb.Append(" size=").AppendNum(rs.fontSize);
         // glyphs the face lacks (Barlow has no subscript digits, no gear) come from the game's own face, as a browser falls back;
         // an inner font tag's face counts for its span
         {
@@ -1477,11 +1477,11 @@ internal static class VectorEmitter
         else if (ttw != null && !Tweens.Snap.NearColour(ttw.From.Fg, rs.color))
         {
             var gid = "tw" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-            ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[[0,").Append(Hex(ttw.From.Fg)).Append("],[1,").Append(Hex(rs.color)).Append("]]\n");
+            ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[[0,").AppendHex(ttw.From.Fg).Append("],[1,").AppendHex(rs.color).Append("]]\n");
             sb.Append(" f=@").Append(gid).Append(" fat==").Append(ttw.P);
         }
         else
-            sb.Append(" f=").Append(Hex(rs.color));
+            sb.Append(" f=").AppendHex(rs.color);
         var first = string.Empty;
         var fs = rs.unityFontStyleAndWeight;
         var wantBold = fs == FontStyle.Bold || fs == FontStyle.BoldAndItalic;
@@ -1528,7 +1528,7 @@ internal static class VectorEmitter
             // an em value is read as a bare number times this label's font size (Num would resolve it against the cascade's em)
             var lsv = ls.Trim();
             var px = lsv.EndsWith("em", StringComparison.OrdinalIgnoreCase) && float.TryParse(lsv.Substring(0, lsv.Length - 2), NumberStyles.Float, CultureInfo.InvariantCulture, out var emv) ? emv * rs.fontSize : StyleApplier.Num(lsv);
-            if (px != 0f) sb.Append(" cspace=").Append(F(px / rs.fontSize * 100f));
+            if (px != 0f) sb.Append(" cspace=").AppendNum(px / rs.fontSize * 100f);
         }
         // text-align-last: the last line's alignment, which for a single-line label is the line
         var lastAlign = !wraps && css.TryGetValue("text-align-last", out var tal) ? tal.Trim().ToLowerInvariant() : null;
@@ -1573,8 +1573,8 @@ internal static class VectorEmitter
         if (fl.Count > 0)
         {
             var attrs = new StringBuilder();
-            if (fl.TryGetValue("color", out var flc) && StyleApplier.TryColor(flc, out var flcol)) attrs.Append(" f=").Append(Hex(flcol));
-            if (fl.TryGetValue("font-size", out var fls)) attrs.Append(" size=").Append(F(fls.EndsWith("em", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(fls) * rs.fontSize : fls.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(fls) / 100f * rs.fontSize : StyleApplier.Num(fls)));
+            if (fl.TryGetValue("color", out var flc) && StyleApplier.TryColor(flc, out var flcol)) attrs.Append(" f=").AppendHex(flcol);
+            if (fl.TryGetValue("font-size", out var fls)) attrs.Append(" size=").AppendNum(fls.EndsWith("em", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(fls) * rs.fontSize : fls.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(fls) / 100f * rs.fontSize : StyleApplier.Num(fls));
             if (fl.TryGetValue("font-weight", out var flw) && (flw == "bold" || flw == "bolder" || (StyleApplier.IsNumber(flw) && StyleApplier.Num(flw) >= 600))) attrs.Append(" weight=bold");
             if (fl.TryGetValue("font-family", out var flf) && flf.Split(',')[0].Trim().Trim('"', '\'') is { Length: > 0 } flFace)
             {
@@ -1588,7 +1588,7 @@ internal static class VectorEmitter
                 {
                     // rewrite the text attribute: rich tags around the whole (single) line
                     var open = new StringBuilder(); var close = new StringBuilder();
-                    if (fl.TryGetValue("color", out var c1) && StyleApplier.TryColor(c1, out var col1)) { open.Append("<color=").Append(Hex(col1)).Append('>'); close.Insert(0, "</color>"); }
+                    if (fl.TryGetValue("color", out var c1) && StyleApplier.TryColor(c1, out var col1)) { open.Append("<color=").AppendHex(col1).Append('>'); close.Insert(0, "</color>"); }
                     if (fl.TryGetValue("font-size", out var s1)) { open.Append("<size=").Append(s1.Trim()).Append('>'); close.Insert(0, "</size>"); }
                     if (attrs.ToString().Contains("weight=bold")) { open.Append("<b>"); close.Insert(0, "</b>"); }
                     var marker = " text=\"";
@@ -1604,7 +1604,7 @@ internal static class VectorEmitter
             var mult = v.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(v) / rs.fontSize
                      : v.EndsWith("em", StringComparison.OrdinalIgnoreCase) || v.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(v) / (v.EndsWith("%", StringComparison.Ordinal) ? 100f : 1f)
                      : StyleApplier.Num(v);
-            if (mult > 0f && v != "normal") sb.Append(" lh=").Append(F(mult));
+            if (mult > 0f && v != "normal") sb.Append(" lh=").AppendNum(mult);
         }
         sb.Append(NodeId(ctx, label)).Append('\n');
         // glyphs the face lacks (Barlow has no subscript digits, no gear) come from the game's own face, as a browser
@@ -1706,16 +1706,16 @@ internal static class VectorEmitter
             {
                 // a quadratic wave, half a period per segment, amplitude one thickness
                 var period = Mathf.Max(2f, t * 4f);
-                var sb = new StringBuilder("P d=\"M").Append(F(left)).Append(' ').Append(F(ly));
+                var sb = new StringBuilder("P d=\"M").AppendNum(left).Append(' ').AppendNum(ly);
                 var n = Mathf.Min(400, Mathf.CeilToInt(tw / (period * 0.5f)));
                 for (var i = 0; i < n; i++)
                 {
                     var x0 = left + i * period * 0.5f;
                     var x1 = Mathf.Min(left + tw, x0 + period * 0.5f);
                     var cy = ly + (i % 2 == 0 ? -1f : 1f) * t * 2f;
-                    sb.Append(" Q").Append(F((x0 + x1) * 0.5f)).Append(' ').Append(F(cy)).Append(' ').Append(F(x1)).Append(' ').Append(F(ly));
+                    sb.Append(" Q").AppendNum((x0 + x1) * 0.5f).Append(' ').AppendNum(cy).Append(' ').AppendNum(x1).Append(' ').AppendNum(ly);
                 }
-                sb.Append("\" f=none s=").Append(Hex(colour)).Append(" sw=").Append(F(t)).Append('\n');
+                sb.Append("\" f=none s=").AppendHex(colour).Append(" sw=").AppendNum(t).Append('\n');
                 ctx.Body.Append(indent).Append(sb);
                 ctx.Out.Nodes++;
             }
@@ -1729,7 +1729,7 @@ internal static class VectorEmitter
 
     private static void Stroke(Ctx ctx, string indent, float x1, float y1, float x2, float y2, float width, Color c, string extra)
     {
-        ctx.Body.Append(indent).Append("L p=[").Append(F(x1)).Append(',').Append(F(y1)).Append(',').Append(F(x2)).Append(',').Append(F(y2)).Append("] s=").Append(Hex(c)).Append(" sw=").Append(F(width)).Append(extra).Append('\n');
+        ctx.Body.Append(indent).Append("L p=[").AppendNum(x1).Append(',').AppendNum(y1).Append(',').AppendNum(x2).Append(',').AppendNum(y2).Append("] s=").AppendHex(c).Append(" sw=").AppendNum(width).Append(extra).Append('\n');
         ctx.Out.Nodes++;
     }
 
@@ -1833,7 +1833,7 @@ internal static class VectorEmitter
             oy = y + (h - vb.height * s) * 0.5f;
         }
         var id = "svg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h)).Append(Radius(OffThread.Of(svg), w, h)).Append(" }\n");
+        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).Append(Radius(OffThread.Of(svg), w, h)).Append(" }\n");
 
         // Uniform fit: one scaled group. Non-uniform (preserveAspectRatio="none" on a box of
         // another shape): the scale is baked into every coordinate instead, so a stroke keeps
@@ -2029,10 +2029,10 @@ internal static class VectorEmitter
                     var vb = shape.Owner.ViewBox;
                     var count = Mathf.Max(2, (int)StyleApplier.Num(shape.Attr("__n") ?? "2"));
                     sb.Append(shape.Tag == "polygon" ? "YS" : "LS").Append(" n=").Append(count.ToString(CultureInfo.InvariantCulture));
-                    sb.Append(" x==").Append(F(fit.Px(vb.x))).Append('+').Append(F(fit.Sx * vb.width / (count - 1))).Append("*i");
+                    sb.Append(" x==").AppendNum(fit.Px(vb.x)).Append('+').AppendNum(fit.Sx * vb.width / (count - 1)).Append("*i");
                     sb.Append(" y=").Append(fit.Y("=$" + bound + "[i]"));
                     if (shape.Tag == "polygon")
-                        sb.Append(" y2=").Append(F(fit.Py(vb.y + vb.height)));
+                        sb.Append(" y2=").AppendNum(fit.Py(vb.y + vb.height));
                 }
                 else if (n != null)
                 {
@@ -2222,8 +2222,8 @@ internal static class VectorEmitter
             var vx = fit.Bake ? fit.Px(pts[i].x) : pts[i].x;
             var vy = fit.Bake ? fit.Py(pts[i].y) : pts[i].y;
             var scale = k * (fit.Bake ? (fit.Sx + fit.Sy) * 0.5f : 1f);
-            ctx.Body.Append(indent).Append("G a=[0,0] t=[").Append(F(vx)).Append(',').Append(F(vy)).Append("] r=").Append(F(rot)).Append(" s=[").Append(F(scale)).Append(',').Append(F(scale)).Append("] {\n");
-            ctx.Body.Append(indent).Append("  G t=[").Append(F(-refX)).Append(',').Append(F(-refY)).Append("] {\n");
+            ctx.Body.Append(indent).Append("G a=[0,0] t=[").AppendNum(vx).Append(',').AppendNum(vy).Append("] r=").AppendNum(rot).Append(" s=[").AppendNum(scale).Append(',').AppendNum(scale).Append("] {\n");
+            ctx.Body.Append(indent).Append("  G t=[").AppendNum(-refX).Append(',').AppendNum(-refY).Append("] {\n");
             foreach (var child in marker.Children)
                 EmitShape(ctx, child, indent + "    ", prefix, new Fit(0f, 0f, 1f, 1f, null));
             ctx.Body.Append(indent).Append("  }\n").Append(indent).Append("}\n");
@@ -2262,7 +2262,7 @@ internal static class VectorEmitter
         var top = baseline is "middle" or "central" ? by - ps * 0.6f : baseline is "hanging" or "text-before-edge" ? by : by - ps * 0.95f;
         var esc = text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", string.Empty).Replace("\n", "\\n");
         if (float.TryParse(esc.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out _)) esc = "<noparse>" + esc + "</noparse>";
-        sb.Append("T x=").Append(F(left)).Append(" y=").Append(F(top)).Append(" w=").Append(F(width)).Append(" h=").Append(F(height)).Append(" text=\"").Append(esc).Append("\" size=").Append(F(ps));
+        sb.Append("T x=").AppendNum(left).Append(" y=").AppendNum(top).Append(" w=").AppendNum(width).Append(" h=").AppendNum(height).Append(" text=\"").Append(esc).Append("\" size=").AppendNum(ps);
         var fill = shape.Attr("fill") ?? "black";
         sb.Append(" f=").Append(Paint(fill, prefix));
         var fo = Mul(shape.Attr("fill-opacity"), opacity);
@@ -2276,7 +2276,7 @@ internal static class VectorEmitter
         if (weight == "bold" || weight == "bolder" || (StyleApplier.IsNumber(weight) && StyleApplier.Num(weight) >= 600)) sb.Append(" weight=bold");
         if (anchor == "middle") sb.Append(" align=center"); else if (anchor == "end") sb.Append(" align=right");
         sb.Append(" valign=top");
-        if (shape.Attr("letter-spacing") is { } ls && ps > 0f) sb.Append(" cspace=").Append(F(StyleApplier.Num(ls) / size * 100f));
+        if (shape.Attr("letter-spacing") is { } ls && ps > 0f) sb.Append(" cspace=").AppendNum(StyleApplier.Num(ls) / size * 100f);
         if (shape.Attr("id") is { } sid) sb.Append(" id=").Append(sid);
     }
 
@@ -2297,7 +2297,7 @@ internal static class VectorEmitter
             if (parts.Length < 2 || !StyleApplier.TryColor(parts[1], out var c)) continue;
             if (parts.Length > 2 && parts[2].Length > 0) c.a *= StyleApplier.Num(parts[2]);
             if (count > 0) stops.Append(',');
-            stops.Append('[').Append(F(Fraction(parts[0]))).Append(',').Append(Hex(c)).Append(']');
+            stops.Append('[').AppendNum(Fraction(parts[0])).Append(',').AppendHex(c).Append(']');
             count++;
         }
         if (count == 0) return;
@@ -2307,15 +2307,15 @@ internal static class VectorEmitter
         {
             var cx = g.Attr("cx") ?? "50%"; var cy = g.Attr("cy") ?? "50%"; var r = g.Attr("r") ?? "50%";
             ctx.Defs.Append("  GR id=").Append(prefix).Append(id).Append(units)
-                .Append(" cx=").Append(F(Fraction(cx))).Append(" cy=").Append(F(Fraction(cy))).Append(" r=").Append(F(Fraction(r)));
-            if (g.Attr("fx") != null) ctx.Defs.Append(" fx=").Append(F(Fraction(g.Attr("fx")!)));
-            if (g.Attr("fy") != null) ctx.Defs.Append(" fy=").Append(F(Fraction(g.Attr("fy")!)));
+                .Append(" cx=").AppendNum(Fraction(cx)).Append(" cy=").AppendNum(Fraction(cy)).Append(" r=").AppendNum(Fraction(r));
+            if (g.Attr("fx") != null) ctx.Defs.Append(" fx=").AppendNum(Fraction(g.Attr("fx")!));
+            if (g.Attr("fy") != null) ctx.Defs.Append(" fy=").AppendNum(Fraction(g.Attr("fy")!));
         }
         else
         {
             ctx.Defs.Append("  GL id=").Append(prefix).Append(id).Append(units)
-                .Append(" x1=").Append(F(Fraction(g.Attr("x1") ?? "0"))).Append(" y1=").Append(F(Fraction(g.Attr("y1") ?? "0")))
-                .Append(" x2=").Append(F(Fraction(g.Attr("x2") ?? "100%"))).Append(" y2=").Append(F(Fraction(g.Attr("y2") ?? "0")));
+                .Append(" x1=").AppendNum(Fraction(g.Attr("x1") ?? "0")).Append(" y1=").AppendNum(Fraction(g.Attr("y1") ?? "0"))
+                .Append(" x2=").AppendNum(Fraction(g.Attr("x2") ?? "100%")).Append(" y2=").AppendNum(Fraction(g.Attr("y2") ?? "0"));
         }
         ctx.Defs.Append(" stops=[").Append(stops).Append("]\n");
     }
@@ -2422,13 +2422,13 @@ internal static class VectorEmitter
             var r = size * 0.5f - sw * 0.5f;
             if (on)
             {
-                ctx.Body.Append(indent).Append("C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(size * 0.5f)).Append(" ry=").Append(F(size * 0.5f)).Append(" f=").Append(Hex(accent)).Append('\n');
-                ctx.Body.Append(indent).Append("C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(size * 0.2f)).Append(" ry=").Append(F(size * 0.2f)).Append(" f=#FFFFFF\n");
+                ctx.Body.Append(indent).Append("C cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" rx=").AppendNum(size * 0.5f).Append(" ry=").AppendNum(size * 0.5f).Append(" f=").AppendHex(accent).Append('\n');
+                ctx.Body.Append(indent).Append("C cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" rx=").AppendNum(size * 0.2f).Append(" ry=").AppendNum(size * 0.2f).Append(" f=#FFFFFF\n");
                 ctx.Out.Nodes += 2;
             }
             else
             {
-                ctx.Body.Append(indent).Append("C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(r)).Append(" ry=").Append(F(r)).Append(" f=none s=").Append(Hex(ink)).Append(" sw=").Append(F(sw)).Append('\n');
+                ctx.Body.Append(indent).Append("C cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" rx=").AppendNum(r).Append(" ry=").AppendNum(r).Append(" f=none s=").AppendHex(ink).Append(" sw=").AppendNum(sw).Append('\n');
                 ctx.Out.Nodes++;
             }
             return;
@@ -2436,15 +2436,15 @@ internal static class VectorEmitter
         var rx = Mathf.Max(0f, rs.borderTopLeftRadius > 0.01f ? rs.borderTopLeftRadius : size * 0.18f);
         if (on)
         {
-            ctx.Body.Append(indent).Append("R x=").Append(F(left)).Append(" y=").Append(F(top)).Append(" w=").Append(F(size)).Append(" h=").Append(F(size)).Append(" rx=").Append(F(rx)).Append(" f=").Append(Hex(accent)).Append('\n');
+            ctx.Body.Append(indent).Append("R x=").AppendNum(left).Append(" y=").AppendNum(top).Append(" w=").AppendNum(size).Append(" h=").AppendNum(size).Append(" rx=").AppendNum(rx).Append(" f=").AppendHex(accent).Append('\n');
             // The tick: two strokes from the left third, down to the bottom, up to the top right.
             var d = "M" + F(left + size * 0.24f) + " " + F(top + size * 0.52f) + " L" + F(left + size * 0.43f) + " " + F(top + size * 0.72f) + " L" + F(left + size * 0.78f) + " " + F(top + size * 0.3f);
-            ctx.Body.Append(indent).Append("P d=\"").Append(d).Append("\" f=none s=#FFFFFF sw=").Append(F(Mathf.Max(1.2f, size * 0.13f))).Append(" cap=round join=round\n");
+            ctx.Body.Append(indent).Append("P d=\"").Append(d).Append("\" f=none s=#FFFFFF sw=").AppendNum(Mathf.Max(1.2f, size * 0.13f)).Append(" cap=round join=round\n");
             ctx.Out.Nodes += 2;
         }
         else
         {
-            ctx.Body.Append(indent).Append("R x=").Append(F(left + sw * 0.5f)).Append(" y=").Append(F(top + sw * 0.5f)).Append(" w=").Append(F(size - sw)).Append(" h=").Append(F(size - sw)).Append(" rx=").Append(F(Mathf.Max(0f, rx - sw * 0.5f))).Append(" f=none s=").Append(Hex(ink)).Append(" sw=").Append(F(sw)).Append('\n');
+            ctx.Body.Append(indent).Append("R x=").AppendNum(left + sw * 0.5f).Append(" y=").AppendNum(top + sw * 0.5f).Append(" w=").AppendNum(size - sw).Append(" h=").AppendNum(size - sw).Append(" rx=").AppendNum(Mathf.Max(0f, rx - sw * 0.5f)).Append(" f=none s=").AppendHex(ink).Append(" sw=").AppendNum(sw).Append('\n');
             ctx.Out.Nodes++;
         }
     }
@@ -2475,18 +2475,18 @@ internal static class VectorEmitter
         }
         var track = rs.backgroundColor.a > 0.002f ? rs.backgroundColor : new Color(0.14f, 0.19f, 0.29f);
         var rx = rs.borderTopLeftRadius > 0.01f ? rs.borderTopLeftRadius : h * 0.5f;
-        ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h)).Append(Radius(rs, w, h)).Append(rs.borderTopLeftRadius > 0.01f ? string.Empty : " rx=" + F(rx)).Append(" f=").Append(Hex(track)).Append('\n');
+        ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).Append(Radius(rs, w, h)).Append(rs.borderTopLeftRadius > 0.01f ? string.Empty : " rx=" + F(rx)).Append(" f=").AppendHex(track).Append('\n');
         ctx.Out.Nodes++;
         if (float.IsNaN(value) && control == "progress")
         {
             // indeterminate: a third of the bar sliding back and forth
-            ctx.Body.Append(indent).Append("R x==").Append(F(x)).Append('+').Append(F(w * 0.67f)).Append("*(0.5-0.5*cos(t*3)) y=").Append(F(y)).Append(" w=").Append(F(w * 0.33f)).Append(" h=").Append(F(h)).Append(" rx=").Append(F(rx)).Append(" f=").Append(Hex(accent)).Append('\n');
+            ctx.Body.Append(indent).Append("R x==").AppendNum(x).Append('+').AppendNum(w * 0.67f).Append("*(0.5-0.5*cos(t*3)) y=").AppendNum(y).Append(" w=").AppendNum(w * 0.33f).Append(" h=").AppendNum(h).Append(" rx=").AppendNum(rx).Append(" f=").AppendHex(accent).Append('\n');
             ctx.Out.Nodes++;
             return;
         }
         if (frac > 0.001f)
         {
-            ctx.Body.Append(indent).Append("R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(Mathf.Max(h, w * frac))).Append(" h=").Append(F(h)).Append(" rx=").Append(F(rx)).Append(" f=").Append(Hex(accent)).Append('\n');
+            ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(Mathf.Max(h, w * frac)).Append(" h=").AppendNum(h).Append(" rx=").AppendNum(rx).Append(" f=").AppendHex(accent).Append('\n');
             ctx.Out.Nodes++;
         }
     }
@@ -2533,8 +2533,8 @@ internal static class VectorEmitter
         }
         string Str(int idx) => idx >= 0 && idx < strings.Count ? strings[idx] : string.Empty;
         string Ind() => indent + new string(' ', groups * 2);
-        void MoveTo(float px, float py) { var p = P(px, py); path.Append('M').Append(F(p.x)).Append(' ').Append(F(p.y)).Append(' '); curX = px; curY = py; startX = px; startY = py; hasCurrent = true; }
-        void LineTo(float px, float py) { if (!hasCurrent) { MoveTo(px, py); return; } var p = P(px, py); path.Append('L').Append(F(p.x)).Append(' ').Append(F(p.y)).Append(' '); curX = px; curY = py; }
+        void MoveTo(float px, float py) { var p = P(px, py); path.Append('M').AppendNum(p.x).Append(' ').AppendNum(p.y).Append(' '); curX = px; curY = py; startX = px; startY = py; hasCurrent = true; }
+        void LineTo(float px, float py) { if (!hasCurrent) { MoveTo(px, py); return; } var p = P(px, py); path.Append('L').AppendNum(p.x).Append(' ').AppendNum(p.y).Append(' '); curX = px; curY = py; }
         void ArcSeg(float cx, float cy, float rx, float ry, float rot, float a0, float a1, bool ccw)
         {
             // canvas arc: a line from the current point to the arc start, then the arc; a full turn is two halves
@@ -2561,7 +2561,7 @@ internal static class VectorEmitter
                 var prx = rx * sx * Mathf.Sqrt(Mathf.Abs(m[0] * m[3] - m[1] * m[2]));
                 var pry = ry * sy * Mathf.Sqrt(Mathf.Abs(m[0] * m[3] - m[1] * m[2]));
                 var large = Mathf.Abs(delta / steps) > Mathf.PI ? 1 : 0;
-                path.Append('A').Append(F(prx)).Append(' ').Append(F(pry)).Append(' ').Append(F(rot * Mathf.Rad2Deg)).Append(' ').Append(large).Append(' ').Append(ccw ? 0 : 1).Append(' ').Append(F(pe.x)).Append(' ').Append(F(pe.y)).Append(' ');
+                path.Append('A').AppendNum(prx).Append(' ').AppendNum(pry).Append(' ').AppendNum(rot * Mathf.Rad2Deg).Append(' ').Append(large).Append(' ').Append(ccw ? 0 : 1).Append(' ').AppendNum(pe.x).Append(' ').AppendNum(pe.y).Append(' ');
                 curX = e.x; curY = e.y;
             }
         }
@@ -2579,24 +2579,24 @@ internal static class VectorEmitter
                     var colon = st.IndexOf(':');
                     if (colon < 0 || !StyleApplier.TryColor(st.Substring(colon + 1), out var sc)) continue;
                     if (stops.Length > 0) stops.Append(',');
-                    stops.Append('[').Append(F(StyleApplier.Num(st.Substring(0, colon)))).Append(',').Append(Hex(sc)).Append(']');
+                    stops.Append('[').AppendNum(StyleApplier.Num(st.Substring(0, colon))).Append(',').AppendHex(sc).Append(']');
                 }
                 var id = "cg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
                 float N(int i) => i < parts.Length && float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : 0f;
                 if (s[1] == 'L')
                 {
                     var a = P(N(1), N(2)); var b = P(N(3), N(4));
-                    ctx.Defs.Append("  GL id=").Append(id).Append(" x1=").Append(F(a.x)).Append(" y1=").Append(F(a.y)).Append(" x2=").Append(F(b.x)).Append(" y2=").Append(F(b.y)).Append(" stops=[").Append(stops).Append("]\n");
+                    ctx.Defs.Append("  GL id=").Append(id).Append(" x1=").AppendNum(a.x).Append(" y1=").AppendNum(a.y).Append(" x2=").AppendNum(b.x).Append(" y2=").AppendNum(b.y).Append(" stops=[").Append(stops).Append("]\n");
                 }
                 else if (s[1] == 'R')
                 {
                     var c1 = P(N(4), N(5)); var f0 = P(N(1), N(2));
-                    ctx.Defs.Append("  GR id=").Append(id).Append(" cx=").Append(F(c1.x)).Append(" cy=").Append(F(c1.y)).Append(" r=").Append(F(N(6) * Scale())).Append(" fx=").Append(F(f0.x)).Append(" fy=").Append(F(f0.y)).Append(" stops=[").Append(stops).Append("]\n");
+                    ctx.Defs.Append("  GR id=").Append(id).Append(" cx=").AppendNum(c1.x).Append(" cy=").AppendNum(c1.y).Append(" r=").AppendNum(N(6) * Scale()).Append(" fx=").AppendNum(f0.x).Append(" fy=").AppendNum(f0.y).Append(" stops=[").Append(stops).Append("]\n");
                 }
                 else
                 {
                     var c1 = P(N(1), N(2));
-                    ctx.Defs.Append("  GC id=").Append(id).Append(" cx=").Append(F(c1.x)).Append(" cy=").Append(F(c1.y)).Append(" a=").Append(F(N(3) * Mathf.Rad2Deg)).Append(" stops=[").Append(stops).Append("]\n");
+                    ctx.Defs.Append("  GC id=").Append(id).Append(" cx=").AppendNum(c1.x).Append(" cy=").AppendNum(c1.y).Append(" a=").AppendNum(N(3) * Mathf.Rad2Deg).Append(" stops=[").Append(stops).Append("]\n");
                 }
                 return "@" + id;
             }
@@ -2619,7 +2619,7 @@ internal static class VectorEmitter
             var k = Scale();
             var parts = dash.Split(',');
             var sb = new StringBuilder(" dash=[");
-            for (var i = 0; i < parts.Length; i++) { if (i > 0) sb.Append(','); sb.Append(F(StyleApplier.Num(parts[i]) * k)); }
+            for (var i = 0; i < parts.Length; i++) { if (i > 0) sb.Append(','); sb.AppendNum(StyleApplier.Num(parts[i]) * k); }
             return sb.Append(']').ToString();
         }
         static string Cap(float c) => c switch { 2 => "round", 1 => "square", _ => "butt" };
@@ -2653,9 +2653,9 @@ internal static class VectorEmitter
             if (italic) esc = "<i>" + esc + "</i>";
             if (float.TryParse(esc.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out _)) esc = "<noparse>" + esc + "</noparse>";
             var sb = new StringBuilder(Ind());
-            sb.Append("T x=").Append(F(left)).Append(" y=").Append(F(top)).Append(" w=").Append(F(width)).Append(" h=").Append(F(ps * 1.25f)).Append(" text=\"").Append(esc).Append("\" size=").Append(F(ps));
+            sb.Append("T x=").AppendNum(left).Append(" y=").AppendNum(top).Append(" w=").AppendNum(width).Append(" h=").AppendNum(ps * 1.25f).Append(" text=\"").Append(esc).Append("\" size=").AppendNum(ps);
             if (stroke.Length > 0) sb.Append(" f=").Append(stroke); else sb.Append(" f=").Append(fill);
-            if (alpha < 0.999f) sb.Append(" fo=").Append(F(alpha));
+            if (alpha < 0.999f) sb.Append(" fo=").AppendNum(alpha);
             if (family.Length > 0 && !IsGeneric(family)) sb.Append(" font=\"").Append(FontLibrary.ResolveFace(family)).Append('"');
             else if (family.Length > 0 && StyleApplier.MapGeneric(family) is { } g) sb.Append(" font=\"").Append(g).Append('"');
             if (bold && !NamedWeight(family)) sb.Append(" weight=bold");
@@ -2665,7 +2665,7 @@ internal static class VectorEmitter
             // the transform's rotation turns the label about its anchor, the way a T rotates with its group (translate and scale are already in p and ps)
             var rot = Mathf.Atan2(m[1], m[0]) * Mathf.Rad2Deg;
             if (Mathf.Abs(rot) > 0.01f)
-                ctx.Body.Append(Ind()).Append("G a=[").Append(F(p.x)).Append(',').Append(F(p.y)).Append("] r=").Append(F(rot)).Append(" { ").Append(sb.ToString().TrimStart()).Append(" }\n");
+                ctx.Body.Append(Ind()).Append("G a=[").AppendNum(p.x).Append(',').AppendNum(p.y).Append("] r=").AppendNum(rot).Append(" { ").Append(sb.ToString().TrimStart()).Append(" }\n");
             else
                 ctx.Body.Append(sb).Append('\n');
             ctx.Out.Nodes++;
@@ -2684,14 +2684,14 @@ internal static class VectorEmitter
                 {
                     if (!hasCurrent) MoveTo(cmds[i], cmds[i + 1]);
                     var c1 = P(cmds[i], cmds[i + 1]); var e = P(cmds[i + 2], cmds[i + 3]);
-                    path.Append('Q').Append(F(c1.x)).Append(' ').Append(F(c1.y)).Append(' ').Append(F(e.x)).Append(' ').Append(F(e.y)).Append(' ');
+                    path.Append('Q').AppendNum(c1.x).Append(' ').AppendNum(c1.y).Append(' ').AppendNum(e.x).Append(' ').AppendNum(e.y).Append(' ');
                     curX = cmds[i + 2]; curY = cmds[i + 3]; i += 4; break;
                 }
                 case CanvasElement.OpCubicTo:
                 {
                     if (!hasCurrent) MoveTo(cmds[i], cmds[i + 1]);
                     var c1 = P(cmds[i], cmds[i + 1]); var c2 = P(cmds[i + 2], cmds[i + 3]); var e = P(cmds[i + 4], cmds[i + 5]);
-                    path.Append('C').Append(F(c1.x)).Append(' ').Append(F(c1.y)).Append(' ').Append(F(c2.x)).Append(' ').Append(F(c2.y)).Append(' ').Append(F(e.x)).Append(' ').Append(F(e.y)).Append(' ');
+                    path.Append('C').AppendNum(c1.x).Append(' ').AppendNum(c1.y).Append(' ').AppendNum(c2.x).Append(' ').AppendNum(c2.y).Append(' ').AppendNum(e.x).Append(' ').AppendNum(e.y).Append(' ');
                     curX = cmds[i + 4]; curY = cmds[i + 5]; i += 6; break;
                 }
                 case CanvasElement.OpArc: ArcSeg(cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 2], 0f, cmds[i + 3], cmds[i + 4], cmds[i + 5] > 0.5f); i += 6; break;
@@ -2702,7 +2702,7 @@ internal static class VectorEmitter
                     if (path.Length > 0)
                     {
                         ctx.Body.Append(Ind()).Append("P d=\"").Append(path.ToString().TrimEnd()).Append("\" f=").Append(fill);
-                        if (alpha < 0.999f) ctx.Body.Append(" fo=").Append(F(alpha));
+                        if (alpha < 0.999f) ctx.Body.Append(" fo=").AppendNum(alpha);
                         if (rule == "evenodd") ctx.Body.Append(" fr=evenodd");
                         ctx.Body.Append(shadow).Append('\n');
                         ctx.Out.Nodes++;
@@ -2714,8 +2714,8 @@ internal static class VectorEmitter
                     var col = Paint((int)cmds[i], out _); var alpha = cmds[i + 1]; var lw = cmds[i + 2] * Scale(); var cap = Cap(cmds[i + 3]); var join = Join(cmds[i + 4]); i += 5;
                     if (path.Length > 0)
                     {
-                        ctx.Body.Append(Ind()).Append("P d=\"").Append(path.ToString().TrimEnd()).Append("\" f=none s=").Append(col).Append(" sw=").Append(F(Mathf.Max(0.5f, lw))).Append(" cap=").Append(cap).Append(" join=").Append(join);
-                        if (alpha < 0.999f) ctx.Body.Append(" so=").Append(F(alpha));
+                        ctx.Body.Append(Ind()).Append("P d=\"").Append(path.ToString().TrimEnd()).Append("\" f=none s=").Append(col).Append(" sw=").AppendNum(Mathf.Max(0.5f, lw)).Append(" cap=").Append(cap).Append(" join=").Append(join);
+                        if (alpha < 0.999f) ctx.Body.Append(" so=").AppendNum(alpha);
                         ctx.Body.Append(DashAttr(lw)).Append(shadow).Append('\n');
                         ctx.Out.Nodes++;
                     }
@@ -2735,16 +2735,16 @@ internal static class VectorEmitter
                     {
                         var a = P(rx, ry); var b = P(rx + rw, ry + rh);
                         var left = Mathf.Min(a.x, b.x); var top = Mathf.Min(a.y, b.y);
-                        ctx.Body.Append(Ind()).Append("R x=").Append(F(left)).Append(" y=").Append(F(top)).Append(" w=").Append(F(Mathf.Abs(b.x - a.x))).Append(" h=").Append(F(Mathf.Abs(b.y - a.y)));
+                        ctx.Body.Append(Ind()).Append("R x=").AppendNum(left).Append(" y=").AppendNum(top).Append(" w=").AppendNum(Mathf.Abs(b.x - a.x)).Append(" h=").AppendNum(Mathf.Abs(b.y - a.y));
                     }
                     else
                     {
                         var p0 = P(rx, ry); var p1 = P(rx + rw, ry); var p2 = P(rx + rw, ry + rh); var p3 = P(rx, ry + rh);
-                        ctx.Body.Append(Ind()).Append("Y p=[").Append(F(p0.x)).Append(',').Append(F(p0.y)).Append(',').Append(F(p1.x)).Append(',').Append(F(p1.y)).Append(',').Append(F(p2.x)).Append(',').Append(F(p2.y)).Append(',').Append(F(p3.x)).Append(',').Append(F(p3.y)).Append(']');
+                        ctx.Body.Append(Ind()).Append("Y p=[").AppendNum(p0.x).Append(',').AppendNum(p0.y).Append(',').AppendNum(p1.x).Append(',').AppendNum(p1.y).Append(',').AppendNum(p2.x).Append(',').AppendNum(p2.y).Append(',').AppendNum(p3.x).Append(',').AppendNum(p3.y).Append(']');
                     }
-                    if (isStroke) ctx.Body.Append(" f=none s=").Append(col).Append(" sw=").Append(F(Mathf.Max(0.5f, lw))).Append(" cap=").Append(cap).Append(" join=").Append(join).Append(DashAttr(lw));
+                    if (isStroke) ctx.Body.Append(" f=none s=").Append(col).Append(" sw=").AppendNum(Mathf.Max(0.5f, lw)).Append(" cap=").Append(cap).Append(" join=").Append(join).Append(DashAttr(lw));
                     else ctx.Body.Append(" f=").Append(col);
-                    if (alpha < 0.999f) ctx.Body.Append(isStroke ? " so=" : " fo=").Append(F(alpha));
+                    if (alpha < 0.999f) ctx.Body.Append(isStroke ? " so=" : " fo=").AppendNum(alpha);
                     ctx.Body.Append(shadow).Append('\n');
                     ctx.Out.Nodes++;
                     break;
@@ -2754,7 +2754,7 @@ internal static class VectorEmitter
                     // ponytail: the tangent arc as a quadratic through the corner; right for the rounded corners it is used for
                     if (!hasCurrent) MoveTo(cmds[i], cmds[i + 1]);
                     var c1 = P(cmds[i], cmds[i + 1]); var e = P(cmds[i + 2], cmds[i + 3]);
-                    path.Append('Q').Append(F(c1.x)).Append(' ').Append(F(c1.y)).Append(' ').Append(F(e.x)).Append(' ').Append(F(e.y)).Append(' ');
+                    path.Append('Q').AppendNum(c1.x).Append(' ').AppendNum(c1.y).Append(' ').AppendNum(e.x).Append(' ').AppendNum(e.y).Append(' ');
                     curX = cmds[i + 2]; curY = cmds[i + 3]; i += 5; break;
                 }
                 case CanvasElement.OpRect:
@@ -2802,8 +2802,8 @@ internal static class VectorEmitter
                     var src = Str((int)cmds[i]); var dx = cmds[i + 1]; var dy = cmds[i + 2]; var dw = cmds[i + 3]; var dh = cmds[i + 4]; var alpha = cmds[i + 5]; i += 6;
                     if (src.Length == 0 || dw <= 0f || dh <= 0f) break;
                     var a = P(dx, dy); var b = P(dx + dw, dy + dh);
-                    ctx.Body.Append(Ind()).Append("IMG x=").Append(F(Mathf.Min(a.x, b.x))).Append(" y=").Append(F(Mathf.Min(a.y, b.y))).Append(" w=").Append(F(Mathf.Abs(b.x - a.x))).Append(" h=").Append(F(Mathf.Abs(b.y - a.y))).Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=fill");
-                    if (alpha < 0.999f) ctx.Body.Append(" o=").Append(F(alpha));
+                    ctx.Body.Append(Ind()).Append("IMG x=").AppendNum(Mathf.Min(a.x, b.x)).Append(" y=").AppendNum(Mathf.Min(a.y, b.y)).Append(" w=").AppendNum(Mathf.Abs(b.x - a.x)).Append(" h=").AppendNum(Mathf.Abs(b.y - a.y)).Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=fill");
+                    if (alpha < 0.999f) ctx.Body.Append(" o=").AppendNum(alpha);
                     ctx.Body.Append('\n');
                     ctx.Out.Nodes++;
                     break;
@@ -2825,7 +2825,7 @@ internal static class VectorEmitter
                     var rx = cmds[i]; var ry = cmds[i + 1]; var rw = cmds[i + 2]; var rh = cmds[i + 3]; i += 4;
                     var a = P(rx, ry); var b = P(rx + rw, ry + rh);
                     var under = css.TryGetValue("background-color", out var bgc) && StyleApplier.TryColor(bgc, out var bc) ? bc : new Color(0.043f, 0.086f, 0.133f);
-                    ctx.Body.Append(Ind()).Append("R x=").Append(F(Mathf.Min(a.x, b.x))).Append(" y=").Append(F(Mathf.Min(a.y, b.y))).Append(" w=").Append(F(Mathf.Abs(b.x - a.x))).Append(" h=").Append(F(Mathf.Abs(b.y - a.y))).Append(" f=").Append(Hex(under)).Append('\n');
+                    ctx.Body.Append(Ind()).Append("R x=").AppendNum(Mathf.Min(a.x, b.x)).Append(" y=").AppendNum(Mathf.Min(a.y, b.y)).Append(" w=").AppendNum(Mathf.Abs(b.x - a.x)).Append(" h=").AppendNum(Mathf.Abs(b.y - a.y)).Append(" f=").AppendHex(under).Append('\n');
                     ctx.Out.Nodes++;
                     break;
                 }
@@ -2847,9 +2847,9 @@ internal static class VectorEmitter
     {
         var f = fit switch { "cover" => "cover", "contain" or "scale-down" => "contain", _ => "fill" };
         src = HtmlRenderer.ResolveUrl(src, ctx.Built);
-        ctx.Body.Append(indent).Append("IMG x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h))
+        ctx.Body.Append(indent).Append("IMG x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
             .Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=").Append(f).Append(Radius(rs, w, h));
-        if (rs.opacity < 0.999f) ctx.Body.Append(" o=").Append(F(rs.opacity));
+        if (rs.opacity < 0.999f) ctx.Body.Append(" o=").AppendNum(rs.opacity);
         ctx.Body.Append(nodeId).Append('\n');
         ctx.Out.Nodes++;
     }
@@ -2880,8 +2880,8 @@ internal static class VectorEmitter
         var size = rs.fontSize * 0.5f;
         var dy = under ? rs.fontSize * 0.6f : -rs.fontSize * 0.6f;
         var line = new StringBuilder(indent);
-        line.Append("T x=").Append(F(x)).Append(" y=").Append(F(y + dy)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h))
-            .Append(" text=\"").Append(marks).Append("\" size=").Append(F(size)).Append(" f=").Append(Hex(colour)).Append(" valign=middle");
+        line.Append("T x=").AppendNum(x).Append(" y=").AppendNum(y + dy).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
+            .Append(" text=\"").Append(marks).Append("\" size=").AppendNum(size).Append(" f=").AppendHex(colour).Append(" valign=middle");
         if (css.TryGetValue("text-align", out var ta)) { var t = ta.Trim(); if (t == "center") line.Append(" align=center"); else if (t is "right" or "end") line.Append(" align=right"); }
         ctx.Body.Append(line).Append('\n');
         ctx.Out.Nodes++;
@@ -2962,12 +2962,12 @@ internal static class VectorEmitter
             var at = parts.Length > 1 ? (parts[1].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[1]) / 100f : StyleApplier.Num(parts[1]) / 360f) : (args.Count <= 1 ? 0f : (float)n / (args.Count - 1)); // unpositioned stops spread evenly, as CSS does
             if (n > 0 && at < lastAt) at = lastAt;
             if (stops.Length > 0) stops.Append(',');
-            stops.Append('[').Append(F(at)).Append(',').Append(Hex(c)).Append(']');
+            stops.Append('[').AppendNum(at).Append(',').AppendHex(c).Append(']');
             lastAt = at; n++;
         }
         if (n < 2) return null;
         var id = "conic" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-        ctx.Defs.Append("  GC id=").Append(id).Append(" units=bbox cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" a=").Append(F(from)).Append(" stops=[").Append(stops).Append("]\n");
+        ctx.Defs.Append("  GC id=").Append(id).Append(" units=bbox cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" a=").AppendNum(from).Append(" stops=[").Append(stops).Append("]\n");
         return id;
     }
 
@@ -3052,7 +3052,7 @@ internal static class VectorEmitter
                 shift = "+mod(t*" + F(delta / spec.Duration) + "+" + F(period * 1000f) + "," + F(period) + ")";
         }
         var id = "stripes" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x)).Append(" y=").Append(F(y)).Append(" w=").Append(F(w)).Append(" h=").Append(F(h)).Append(Radius(rs, w, h)).Append(" }\n");
+        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).Append(Radius(rs, w, h)).Append(" }\n");
         ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
         var count = Mathf.CeilToInt(span / period) + 2;
         var origin = (horizontal ? x : y) - period; // one period before the box so a shift never shows a gap
@@ -3061,10 +3061,10 @@ internal static class VectorEmitter
             if (s1 - s0 < 0.01f || c.a <= 0.002f) continue;
             ctx.Body.Append(indent).Append("  RP n=").Append(count.ToString(CultureInfo.InvariantCulture)).Append(" { R ");
             if (horizontal)
-                ctx.Body.Append("x==").Append(F(origin + s0)).Append("+i*").Append(F(period)).Append(shift).Append(" y=").Append(F(y)).Append(" w=").Append(F(s1 - s0)).Append(" h=").Append(F(h));
+                ctx.Body.Append("x==").AppendNum(origin + s0).Append("+i*").AppendNum(period).Append(shift).Append(" y=").AppendNum(y).Append(" w=").AppendNum(s1 - s0).Append(" h=").AppendNum(h);
             else
-                ctx.Body.Append("x=").Append(F(x)).Append(" y==").Append(F(origin + s0)).Append("+i*").Append(F(period)).Append(shift).Append(" w=").Append(F(w)).Append(" h=").Append(F(s1 - s0));
-            ctx.Body.Append(" f=").Append(Hex(c)).Append(" }\n");
+                ctx.Body.Append("x=").AppendNum(x).Append(" y==").AppendNum(origin + s0).Append("+i*").AppendNum(period).Append(shift).Append(" w=").AppendNum(w).Append(" h=").AppendNum(s1 - s0);
+            ctx.Body.Append(" f=").AppendHex(c).Append(" }\n");
             ctx.Out.Nodes++;
         }
         ctx.Body.Append(indent).Append("}\n");
@@ -3137,12 +3137,12 @@ internal static class VectorEmitter
             // corner along the horizontal one: (ax,ay) is where it arrives, (bx,by) where it leaves.
             var ax = alongTop ? cx + dx * r : cx; var ay = alongTop ? cy : cy + dy * r;
             var bx = alongTop ? cx : cx + dx * r; var by = alongTop ? cy + dy * r : cy;
-            if (r <= 0.01f || shape == "square") { sb.Append(first ? "M" : " L").Append(F(cx)).Append(' ').Append(F(cy)); return; }
+            if (r <= 0.01f || shape == "square") { sb.Append(first ? "M" : " L").AppendNum(cx).Append(' ').AppendNum(cy); return; }
             switch (shape)
             {
-                case "bevel": sb.Append(first ? "M" : " L").Append(F(ax)).Append(' ').Append(F(ay)).Append(" L").Append(F(bx)).Append(' ').Append(F(by)); break;
-                case "notch": sb.Append(first ? "M" : " L").Append(F(ax)).Append(' ').Append(F(ay)).Append(" L").Append(F(cx + dx * r)).Append(' ').Append(F(cy + dy * r)).Append(" L").Append(F(bx)).Append(' ').Append(F(by)); break;
-                default: sb.Append(first ? "M" : " L").Append(F(ax)).Append(' ').Append(F(ay)).Append(" A").Append(F(r)).Append(' ').Append(F(r)).Append(" 0 0 0 ").Append(F(bx)).Append(' ').Append(F(by)); break; // scoop: concave arc
+                case "bevel": sb.Append(first ? "M" : " L").AppendNum(ax).Append(' ').AppendNum(ay).Append(" L").AppendNum(bx).Append(' ').AppendNum(by); break;
+                case "notch": sb.Append(first ? "M" : " L").AppendNum(ax).Append(' ').AppendNum(ay).Append(" L").AppendNum(cx + dx * r).Append(' ').AppendNum(cy + dy * r).Append(" L").AppendNum(bx).Append(' ').AppendNum(by); break;
+                default: sb.Append(first ? "M" : " L").AppendNum(ax).Append(' ').AppendNum(ay).Append(" A").AppendNum(r).Append(' ').AppendNum(r).Append(" 0 0 0 ").AppendNum(bx).Append(' ').AppendNum(by); break; // scoop: concave arc
             }
         }
         // clockwise from the top-left corner: TL arrives from the left side going up, leaves along the top
@@ -3212,15 +3212,15 @@ internal static class VectorEmitter
             var gid = "bimg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
             var cx = x + w * 0.5f; var cy = y + h * 0.5f;
             var hx = Mathf.Sin(rad) * len * 0.5f; var hy = -Mathf.Cos(rad) * len * 0.5f;
-            ctx.Defs.Append("  GL id=").Append(gid).Append(" x1=").Append(F(cx - hx)).Append(" y1=").Append(F(cy - hy)).Append(" x2=").Append(F(cx + hx)).Append(" y2=").Append(F(cy + hy)).Append(" stops=[");
-            for (var i = 0; i < stops.Count; i++) { if (i > 0) ctx.Defs.Append(','); ctx.Defs.Append('[').Append(F(stops[i].at)).Append(',').Append(Hex(stops[i].c)).Append(']'); }
+            ctx.Defs.Append("  GL id=").Append(gid).Append(" x1=").AppendNum(cx - hx).Append(" y1=").AppendNum(cy - hy).Append(" x2=").AppendNum(cx + hx).Append(" y2=").AppendNum(cy + hy).Append(" stops=[");
+            for (var i = 0; i < stops.Count; i++) { if (i > 0) ctx.Defs.Append(','); ctx.Defs.Append('[').AppendNum(stops[i].at).Append(',').AppendHex(stops[i].c).Append(']'); }
             ctx.Defs.Append("]\n");
             // one stroke when the widths agree, four gradient-filled sides otherwise
             if (Mathf.Approximately(bw[0], bw[1]) && Mathf.Approximately(bw[0], bw[2]) && Mathf.Approximately(bw[0], bw[3]))
             {
                 var half = bw[0] * 0.5f;
-                ctx.Body.Append(indent).Append("R x=").Append(F(x + half)).Append(" y=").Append(F(y + half)).Append(" w=").Append(F(w - bw[0])).Append(" h=").Append(F(h - bw[0]))
-                    .Append(" f=none s=@").Append(gid).Append(" sw=").Append(F(bw[0])).Append('\n');
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x + half).Append(" y=").AppendNum(y + half).Append(" w=").AppendNum(w - bw[0]).Append(" h=").AppendNum(h - bw[0])
+                    .Append(" f=none s=@").Append(gid).Append(" sw=").AppendNum(bw[0]).Append('\n');
                 ctx.Out.Nodes++;
             }
             else
@@ -3229,7 +3229,7 @@ internal static class VectorEmitter
                 foreach (var (sx, sy, sw, sh) in sides)
                 {
                     if (sw <= 0.01f || sh <= 0.01f) continue;
-                    ctx.Body.Append(indent).Append("R x=").Append(F(sx)).Append(" y=").Append(F(sy)).Append(" w=").Append(F(sw)).Append(" h=").Append(F(sh)).Append(" f=@").Append(gid).Append('\n');
+                    ctx.Body.Append(indent).Append("R x=").AppendNum(sx).Append(" y=").AppendNum(sy).Append(" w=").AppendNum(sw).Append(" h=").AppendNum(sh).Append(" f=@").Append(gid).Append('\n');
                     ctx.Out.Nodes++;
                 }
             }
@@ -3253,8 +3253,8 @@ internal static class VectorEmitter
         void Img(float ix, float iy, float iw, float ih, float ua, float va, float ub, float vb)
         {
             if (iw <= 0.01f || ih <= 0.01f || ub <= ua || vb <= va) return;
-            ctx.Body.Append(indent).Append("IMG x=").Append(F(ix)).Append(" y=").Append(F(iy)).Append(" w=").Append(F(iw)).Append(" h=").Append(F(ih))
-                .Append(" src=\"").Append(url.Replace("\"", string.Empty)).Append("\" fit=fill uv=[").Append(F(ua)).Append(',').Append(F(va)).Append(',').Append(F(ub)).Append(',').Append(F(vb)).Append("]\n");
+            ctx.Body.Append(indent).Append("IMG x=").AppendNum(ix).Append(" y=").AppendNum(iy).Append(" w=").AppendNum(iw).Append(" h=").AppendNum(ih)
+                .Append(" src=\"").Append(url.Replace("\"", string.Empty)).Append("\" fit=fill uv=[").AppendNum(ua).Append(',').AppendNum(va).Append(',').AppendNum(ub).Append(',').AppendNum(vb).Append("]\n");
             ctx.Out.Nodes++;
         }
         var t0 = bw[0]; var r0 = bw[1]; var b0 = bw[2]; var l0 = bw[3];
@@ -3347,11 +3347,11 @@ internal static class VectorEmitter
         var k = 1f + (h - thumbH) / range;
         if (track.a > 0.002f)
         {
-            ctx.Body.Append(indent).Append("R x=").Append(F(x + w - width)).Append(" y==").Append(F(y)).Append("+sy w=").Append(F(width)).Append(" h=").Append(F(h)).Append(" f=").Append(Hex(track)).Append('\n');
+            ctx.Body.Append(indent).Append("R x=").AppendNum(x + w - width).Append(" y==").AppendNum(y).Append("+sy w=").AppendNum(width).Append(" h=").AppendNum(h).Append(" f=").AppendHex(track).Append('\n');
             ctx.Out.Nodes++;
         }
-        ctx.Body.Append(indent).Append("R x=").Append(F(x + w - width + 1f)).Append(" y==").Append(F(y)).Append("+sy*").Append(F(k)).Append(" w=").Append(F(width - 2f)).Append(" h=").Append(F(thumbH))
-            .Append(" rx=").Append(F(Mathf.Min(radius, (width - 2f) * 0.5f))).Append(" f=").Append(Hex(thumb)).Append('\n');
+        ctx.Body.Append(indent).Append("R x=").AppendNum(x + w - width + 1f).Append(" y==").AppendNum(y).Append("+sy*").AppendNum(k).Append(" w=").AppendNum(width - 2f).Append(" h=").AppendNum(thumbH)
+            .Append(" rx=").AppendNum(Mathf.Min(radius, (width - 2f) * 0.5f)).Append(" f=").AppendHex(thumb).Append('\n');
         ctx.Out.Nodes++;
     }
 
@@ -3461,7 +3461,7 @@ internal static class VectorEmitter
             }
             return "=" + expr;
         }
-        var sb = new StringBuilder("G a=[").Append(F(x + w * 0.5f)).Append(',').Append(F(y + h * 0.5f)).Append(']');
+        var sb = new StringBuilder("G a=[").AppendNum(x + w * 0.5f).Append(',').AppendNum(y + h * 0.5f).Append(']');
         var op = Piece(k => k.o);
         if (op != "1") sb.Append(" o=").Append(Quote(op));
         var txe = Piece(k => k.tx); var tye = Piece(k => k.ty);
@@ -3512,7 +3512,7 @@ internal static class VectorEmitter
     {
         if (width <= 0.01f || c.a <= 0.002f || style is "none" or "hidden")
             return;
-        ctx.Body.Append(indent).Append("L p=[").Append(F(x1)).Append(',').Append(F(y1)).Append(',').Append(F(x2)).Append(',').Append(F(y2)).Append("] s=").Append(Hex(c)).Append(" sw=").Append(F(width)).Append(DashFor(style, width)).Append('\n');
+        ctx.Body.Append(indent).Append("L p=[").AppendNum(x1).Append(',').AppendNum(y1).Append(',').AppendNum(x2).Append(',').AppendNum(y2).Append("] s=").AppendHex(c).Append(" sw=").AppendNum(width).Append(DashFor(style, width)).Append('\n');
         ctx.Out.Nodes++;
     }
 
@@ -3530,21 +3530,21 @@ internal static class VectorEmitter
             float Amount() => a.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(a) / 100f : StyleApplier.Num(a);
             switch (name)
             {
-                case "brightness": sb.Append(" bri=").Append(F(Amount())); break;
-                case "contrast": sb.Append(" con=").Append(F(Amount())); break;
-                case "saturate": sb.Append(" sat=").Append(F(Amount())); break;
-                case "grayscale": sb.Append(" gray=").Append(F(Amount())); break;
-                case "sepia": sb.Append(" sep=").Append(F(Amount())); break;
-                case "invert": sb.Append(" inv=").Append(F(Amount())); break;
-                case "hue-rotate": sb.Append(" hue=").Append(F(StyleApplier.Num(a))); break;
-                case "opacity": sb.Append(" o=").Append(F(Amount())); break;
+                case "brightness": sb.Append(" bri=").AppendNum(Amount()); break;
+                case "contrast": sb.Append(" con=").AppendNum(Amount()); break;
+                case "saturate": sb.Append(" sat=").AppendNum(Amount()); break;
+                case "grayscale": sb.Append(" gray=").AppendNum(Amount()); break;
+                case "sepia": sb.Append(" sep=").AppendNum(Amount()); break;
+                case "invert": sb.Append(" inv=").AppendNum(Amount()); break;
+                case "hue-rotate": sb.Append(" hue=").AppendNum(StyleApplier.Num(a)); break;
+                case "opacity": sb.Append(" o=").AppendNum(Amount()); break;
                 case "drop-shadow":
                 {
                     var parts = string.Join(" ", args).Split(' ', StringSplitOptions.RemoveEmptyEntries);
                     var nums = new List<float>(); var colour = new Color(0, 0, 0, 1);
                     foreach (var p in parts) { if (StyleApplier.TryColor(p, out var c)) colour = c; else nums.Add(StyleApplier.Num(p)); }
                     while (nums.Count < 3) nums.Add(0f);
-                    sh.Append('[').Append(F(nums[0])).Append(',').Append(F(nums[1])).Append(',').Append(F(nums[2])).Append(",0,").Append(Hex(colour)).Append(']');
+                    sh.Append('[').AppendNum(nums[0]).Append(',').AppendNum(nums[1]).Append(',').AppendNum(nums[2]).Append(",0,").AppendHex(colour).Append(']');
                     break;
                 }
                 case "blur":
@@ -3578,7 +3578,7 @@ internal static class VectorEmitter
             {
                 var q = xform.Apply(p);
                 if (sb.Length > 0) sb.Append(',');
-                sb.Append(F(q.x)).Append(',').Append(F(q.y));
+                sb.AppendNum(q.x).Append(',').AppendNum(q.y);
             }
             ctx.Defs.Append("  CP id=").Append(id).Append(" { Y p=[").Append(sb).Append(']').Append(rule).Append(" }\n");
             return id;
@@ -3602,8 +3602,8 @@ internal static class VectorEmitter
                     rx0 = x + l; ry0 = y + t; rw = Mathf.Max(0f, r - l); rh = Mathf.Max(0f, b - t);
                 }
                 if (xform != null) return Through(new List<Vector2> { new(rx0, ry0), new(rx0 + rw, ry0), new(rx0 + rw, ry0 + rh), new(rx0, ry0 + rh) });
-                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(rx0)).Append(" y=").Append(F(ry0)).Append(" w=").Append(F(rw)).Append(" h=").Append(F(rh));
-                if (radius > 0f) ctx.Defs.Append(" rx=").Append(F(radius));
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(rx0).Append(" y=").AppendNum(ry0).Append(" w=").AppendNum(rw).Append(" h=").AppendNum(rh);
+                if (radius > 0f) ctx.Defs.Append(" rx=").AppendNum(radius);
                 ctx.Defs.Append(" }\n");
                 return id;
             }
@@ -3617,8 +3617,8 @@ internal static class VectorEmitter
                 var b = sides.Length > 2 ? Along(sides[2], h) : t;
                 var l = sides.Length > 3 ? Along(sides[3], w) : r;
                 if (xform != null) return Through(new List<Vector2> { new(x + l, y + t), new(x + w - r, y + t), new(x + w - r, y + h - b), new(x + l, y + h - b) });
-                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").Append(F(x + l)).Append(" y=").Append(F(y + t)).Append(" w=").Append(F(Mathf.Max(0f, w - l - r))).Append(" h=").Append(F(Mathf.Max(0f, h - t - b)));
-                if (radius > 0f) ctx.Defs.Append(" rx=").Append(F(radius));
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x + l).Append(" y=").AppendNum(y + t).Append(" w=").AppendNum(Mathf.Max(0f, w - l - r)).Append(" h=").AppendNum(Mathf.Max(0f, h - t - b));
+                if (radius > 0f) ctx.Defs.Append(" rx=").AppendNum(radius);
                 ctx.Defs.Append(" }\n");
                 return id;
             }
@@ -3647,7 +3647,7 @@ internal static class VectorEmitter
                     for (var k = 0; k < 32; k++) { var a = k / 32f * 2f * Mathf.PI; ring.Add(new Vector2(cx + rx * Mathf.Cos(a), cy + ry * Mathf.Sin(a))); }
                     return Through(ring);
                 }
-                ctx.Defs.Append("  CP id=").Append(id).Append(" { C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(rx)).Append(" ry=").Append(F(ry)).Append(" }\n");
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { C cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" rx=").AppendNum(rx).Append(" ry=").AppendNum(ry).Append(" }\n");
                 return id;
             }
             case "polygon":
@@ -3660,7 +3660,7 @@ internal static class VectorEmitter
                     if (xy.Length < 2) continue;
                     if (pts.Length > 0) pts.Append(',');
                     poly.Add(new Vector2(x + Along(xy[0], w), y + Along(xy[1], h)));
-                    pts.Append(F(x + Along(xy[0], w))).Append(',').Append(F(y + Along(xy[1], h)));
+                    pts.AppendNum(x + Along(xy[0], w)).Append(',').AppendNum(y + Along(xy[1], h));
                 }
                 if (pts.Length == 0) return null;
                 if (xform != null) return Through(poly);
@@ -3714,11 +3714,11 @@ internal static class VectorEmitter
         var dy = -Mathf.Cos(rad) * len * 0.5f / h;
         var cx = bx + bw * 0.5f; var cy = by + bh * 0.5f;
         var id = "mask" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-        ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").Append(F(cx - dx)).Append(" y1=").Append(F(cy - dy)).Append(" x2=").Append(F(cx + dx)).Append(" y2=").Append(F(cy + dy)).Append(" stops=[");
+        ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").AppendNum(cx - dx).Append(" y1=").AppendNum(cy - dy).Append(" x2=").AppendNum(cx + dx).Append(" y2=").AppendNum(cy + dy).Append(" stops=[");
         for (var i = 0; i < g.stops.Count; i++)
         {
             if (i > 0) ctx.Defs.Append(',');
-            ctx.Defs.Append('[').Append(F(g.stops[i].at)).Append(',').Append(Hex(g.stops[i].c)).Append(']');
+            ctx.Defs.Append('[').AppendNum(g.stops[i].at).Append(',').AppendHex(g.stops[i].c).Append(']');
         }
         ctx.Defs.Append("]\n");
         return id;
@@ -3790,19 +3790,19 @@ internal static class VectorEmitter
         switch (shape)
         {
             case "tri-right":
-                ctx.Body.Append(indent).Append("P d=\"M").Append(F(cx - r * 0.6f)).Append(' ').Append(F(cy - r)).Append(" L").Append(F(cx + r * 0.8f)).Append(' ').Append(F(cy)).Append(" L").Append(F(cx - r * 0.6f)).Append(' ').Append(F(cy + r)).Append(" Z\" f=").Append(Hex(colour)).Append('\n');
+                ctx.Body.Append(indent).Append("P d=\"M").AppendNum(cx - r * 0.6f).Append(' ').AppendNum(cy - r).Append(" L").AppendNum(cx + r * 0.8f).Append(' ').AppendNum(cy).Append(" L").AppendNum(cx - r * 0.6f).Append(' ').AppendNum(cy + r).Append(" Z\" f=").AppendHex(colour).Append('\n');
                 break;
             case "tri-down":
-                ctx.Body.Append(indent).Append("P d=\"M").Append(F(cx - r)).Append(' ').Append(F(cy - r * 0.6f)).Append(" L").Append(F(cx + r)).Append(' ').Append(F(cy - r * 0.6f)).Append(" L").Append(F(cx)).Append(' ').Append(F(cy + r * 0.8f)).Append(" Z\" f=").Append(Hex(colour)).Append('\n');
+                ctx.Body.Append(indent).Append("P d=\"M").AppendNum(cx - r).Append(' ').AppendNum(cy - r * 0.6f).Append(" L").AppendNum(cx + r).Append(' ').AppendNum(cy - r * 0.6f).Append(" L").AppendNum(cx).Append(' ').AppendNum(cy + r * 0.8f).Append(" Z\" f=").AppendHex(colour).Append('\n');
                 break;
             case "square":
-                ctx.Body.Append(indent).Append("R x=").Append(F(cx - r)).Append(" y=").Append(F(cy - r)).Append(" w=").Append(F(2f * r)).Append(" h=").Append(F(2f * r)).Append(" f=").Append(Hex(colour)).Append('\n');
+                ctx.Body.Append(indent).Append("R x=").AppendNum(cx - r).Append(" y=").AppendNum(cy - r).Append(" w=").AppendNum(2f * r).Append(" h=").AppendNum(2f * r).Append(" f=").AppendHex(colour).Append('\n');
                 break;
             case "circle":
-                ctx.Body.Append(indent).Append("C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(r - 0.5f)).Append(" ry=").Append(F(r - 0.5f)).Append(" f=none s=").Append(Hex(colour)).Append(" sw=1\n");
+                ctx.Body.Append(indent).Append("C cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" rx=").AppendNum(r - 0.5f).Append(" ry=").AppendNum(r - 0.5f).Append(" f=none s=").AppendHex(colour).Append(" sw=1\n");
                 break;
             default:
-                ctx.Body.Append(indent).Append("C cx=").Append(F(cx)).Append(" cy=").Append(F(cy)).Append(" rx=").Append(F(r)).Append(" ry=").Append(F(r)).Append(" f=").Append(Hex(colour)).Append('\n');
+                ctx.Body.Append(indent).Append("C cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" rx=").AppendNum(r).Append(" ry=").AppendNum(r).Append(" f=").AppendHex(colour).Append('\n');
                 break;
         }
         ctx.Out.Nodes++;
@@ -3885,6 +3885,47 @@ internal static class VectorEmitter
         var a = Mathf.RoundToInt(Mathf.Clamp01(c.a) * 255f);
         var s = "#" + r.ToString("X2", CultureInfo.InvariantCulture) + g.ToString("X2", CultureInfo.InvariantCulture) + b.ToString("X2", CultureInfo.InvariantCulture);
         return a >= 255 ? s : s + a.ToString("X2", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Writes a number the way <c>F</c> formats it ("0.##"), straight into the buffer. A frame writes
+    /// thousands of numbers, and a string each would be most of a page's garbage.
+    /// </summary>
+    private static StringBuilder AppendNum(this StringBuilder sb, float v)
+    {
+        if (float.IsNaN(v) || float.IsInfinity(v)) return sb.Append(v.ToString("0.##", CultureInfo.InvariantCulture));
+        if (v < 0f) { sb.Append('-'); v = -v; }
+        var hundredths = (long)(v * 100.0 + 0.5);   // "0.##": two decimals, halves away from zero
+        var whole = hundredths / 100;
+        var rest = (int)(hundredths % 100);
+        AppendLong(sb, whole);
+        if (rest == 0) return sb;
+        sb.Append('.').Append((char)('0' + rest / 10));
+        if (rest % 10 != 0) sb.Append((char)('0' + rest % 10));
+        return sb;
+    }
+
+    private static void AppendLong(StringBuilder sb, long v)
+    {
+        if (v >= 10) AppendLong(sb, v / 10);
+        sb.Append((char)('0' + (int)(v % 10)));
+    }
+
+    /// <summary>The colour as #RRGGBB or #RRGGBBAA, straight into the buffer.</summary>
+    private static StringBuilder AppendHex(this StringBuilder sb, Color c)
+    {
+        sb.Append('#');
+        Byte2(sb, c.r); Byte2(sb, c.g); Byte2(sb, c.b);
+        var a = Mathf.RoundToInt(Mathf.Clamp01(c.a) * 255f);
+        if (a < 255) Byte2(sb, c.a);
+        return sb;
+    }
+
+    private static void Byte2(StringBuilder sb, float channel)
+    {
+        var v = Mathf.RoundToInt(Mathf.Clamp01(channel) * 255f);
+        const string hex = "0123456789ABCDEF";
+        sb.Append(hex[(v >> 4) & 0xF]).Append(hex[v & 0xF]);
     }
 
     private static string F(float v)

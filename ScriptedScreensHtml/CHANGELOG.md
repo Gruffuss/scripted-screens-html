@@ -25,6 +25,8 @@ Newest first. The workshop page is a short overview; this file has the full hist
   the re-cascade and win over the rules, as the style attribute does.
 - Writing the same `element.style`, class or text again changes nothing, so a page whose script
   rewrites unchanged values every frame is not laid out and translated again.
+- Numbers and colours are written straight into the scene buffer instead of one string each: a
+  frame writes thousands of them.
 - A page that emits every frame makes far less garbage: the scene's template split reads the scene
   in place and keeps its buffer, names and values; the emitter keeps its buffers and lists. Collections
   are what a stuttering console feels, and they came every second or two with a few animated pages.
