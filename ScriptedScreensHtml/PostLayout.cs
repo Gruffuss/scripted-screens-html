@@ -17,6 +17,7 @@ internal static class PostLayout
     /// <summary>Style writes by the layout passes (grid placement, mixed calc, line boxes, baselines, aspect ratio):
     /// the surface holds its emit while a frame's layout is still settling, as a browser paints only a settled layout.</summary>
     internal static int LayoutWrites;
+    private static readonly char[] Digits = "0123456789".ToCharArray();
 
     public static void Attach(HtmlRenderer.Result built)
     {
@@ -45,12 +46,16 @@ internal static class PostLayout
         }
         // font-variant-numeric: tabular-nums: the emitter draws digits in cells of the widest digit; the
         // layout measures them proportionally, so a sibling after the number would overlap it. The label's
-        // min-width is its natural width plus what the cells add.
+        // min-width is the width of its text in those cells.
         foreach (var kv in built.NodeOf)
         {
             if (kv.Key is not Label tl || kv.Value.IsText || built.TabularAttached.Contains(tl)) continue;
             var own = built.CssOf(tl);
-            if (!own.TryGetValue("font-variant-numeric", out var fvn) || !fvn.Contains("tabular") || own.ContainsKey("width")) continue;
+            // inherited, as the emitter reads it: a page sets tabular-nums on the row, not on each number
+            string? fvn = null;
+            for (var e = (VisualElement?)tl; e != null && fvn == null; e = e.parent)
+                if (built.CssOf(e).TryGetValue("font-variant-numeric", out var found)) fvn = found;
+            if (fvn == null || !fvn.Contains("tabular") || own.ContainsKey("width")) continue;
             built.TabularAttached.Add(tl);
             var lbl = tl;
             string? lastText = null;
@@ -60,18 +65,18 @@ internal static class PostLayout
                 var t = lbl.text ?? string.Empty;
                 if (t.Length == 0 || t == lastText) return;
                 lastText = t;
-                var plain = System.Text.RegularExpressions.Regex.Replace(t, "<[^>]*>", string.Empty);
-                var maxW = 0f; var widths = new float[10];
+                // The box is the text measured with every digit as the widest one: it depends on how many
+                // digits there are, not which, so a counter keeps one width while it counts (a width that
+                // followed the digits changed a pass late and wrapped the number under its label for a frame).
+                if (System.Text.RegularExpressions.Regex.Replace(t, "<[^>]*>", string.Empty).IndexOfAny(Digits) < 0) return;
+                var widest = '0'; var maxW = 0f;
                 for (var d = 0; d < 10; d++)
                 {
-                    widths[d] = lbl.MeasureTextSize(((char)('0' + d)).ToString(), 0f, VisualElement.MeasureMode.Undefined, 0f, VisualElement.MeasureMode.Undefined).x;
-                    maxW = Mathf.Max(maxW, widths[d]);
+                    var dw = lbl.MeasureTextSize(((char)('0' + d)).ToString(), 0f, VisualElement.MeasureMode.Undefined, 0f, VisualElement.MeasureMode.Undefined).x;
+                    if (dw > maxW) { maxW = dw; widest = (char)('0' + d); }
                 }
-                var extra = 0f;
-                foreach (var ch in plain) if (ch >= '0' && ch <= '9') extra += maxW - widths[ch - '0'];
-                if (extra <= 0.5f) return;
-                var natural = lbl.MeasureTextSize(t, 0f, VisualElement.MeasureMode.Undefined, 0f, VisualElement.MeasureMode.Undefined).x;
-                var min = natural + extra;
+                var cells = System.Text.RegularExpressions.Regex.Replace(t, "<[^>]*>|[0-9]", m => m.Length == 1 ? widest.ToString() : m.Value);
+                var min = lbl.MeasureTextSize(cells, 0f, VisualElement.MeasureMode.Undefined, 0f, VisualElement.MeasureMode.Undefined).x;
                 if (Differs(lbl.style.minWidth, min)) { lbl.style.minWidth = min; LayoutWrites++; }
             }
             tl.RegisterCallback<GeometryChangedEvent>(_ => TabularWidth());
