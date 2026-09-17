@@ -1,4 +1,4 @@
--- HtmlTest8.lua -- Batch E: <canvas> as vector paths. Push to the 3x3 console (586);
+-- HtmlTest8.lua -- Batch E: <canvas> as vector paths. Push to a 3x3 console;
 -- design width 640. Three canvases:
 --
 --   static    a gauge drawn once at load: arcs, gradient fill, text, dashed stroke, clip,

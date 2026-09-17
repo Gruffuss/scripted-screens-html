@@ -1,4 +1,4 @@
--- HtmlTest17.lua -- which property makes the Hardsuit header status vanish: the same label under one property each. 3x3 (586).
+-- HtmlTest17.lua -- which property makes the Hardsuit header status vanish: the same label under one property each. a 3x3 console.
 local ui = ss.ui.surface("main")
 ss.ui.activate("main")
 local size = ui:size()

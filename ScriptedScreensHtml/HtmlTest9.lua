@@ -1,5 +1,5 @@
 -- HtmlTest9.lua -- Batch F1: SVG as a browser reads it, and tabular numbers. Push to the
--- 3x3 console (586); design width 640. Each row names what it checks.
+-- 3x3 console; design width 640. Each row names what it checks.
 --
 --   text      <text>/<tspan> with text-anchor, dominant-baseline, font-size in viewBox units
 --   css       shapes styled by stylesheet rules (class, tag, :nth-child) and inline style

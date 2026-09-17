@@ -1,4 +1,4 @@
--- HtmlTest6.lua -- Batch D: the script DOM. Push to the 3x3 console (586); design width 640.
+-- HtmlTest6.lua -- Batch D: the script DOM. Push to a 3x3 console; design width 640.
 -- The page script runs a list of checks at load and prints PASS/FAIL per item into the
 -- page, so a capture is the verdict. Click "run again" to repeat after the page settled.
 --

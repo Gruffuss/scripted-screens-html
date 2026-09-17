@@ -1,5 +1,5 @@
 -- HtmlTest3.lua -- web habits: markup and CSS written the way a browser page is written,
--- no vector or ScriptedScreens knowledge. Push to the 3x3 console (586); design width 640.
+-- no vector or ScriptedScreens knowledge. Push to a 3x3 console; design width 640.
 --
 --   table     thead/tbody, th, colspan, cells coloured by an attribute selector
 --   list      ul with square markers, ol numbered, a link inside an item

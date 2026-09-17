@@ -1,4 +1,4 @@
--- HtmlTest4.lua -- Batch A: cascade and value correctness. Push to the 3x3 console (586);
+-- HtmlTest4.lua -- Batch A: cascade and value correctness. Push to a 3x3 console;
 -- design width 640. Each row names what it proves.
 --
 --   sizing    content-box (the CSS default) vs border-box: same width, different boxes

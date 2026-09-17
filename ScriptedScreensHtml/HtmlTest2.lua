@@ -1,5 +1,5 @@
 -- HtmlTest2.lua -- the second probe page: everything the layout, paint, elements and DOM
--- batches added. Push to a 2x2 console (561). What to look for is in each block's heading.
+-- batches added. Push to a 2x2 console. What to look for is in each block's heading.
 --
 --   grid      a 3-column grid with gap, a spanning cell, nth-child striping, z-index overlap
 --   paint     radial gradient (see the CSS note on cost), dashed and dotted borders, box-shadow, underline/strike

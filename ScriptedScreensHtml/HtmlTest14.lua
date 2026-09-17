@@ -1,4 +1,4 @@
--- HtmlTest14.lua -- Batch H: every "build" row of COVERAGE.md. Push to the 3x3 console (586); design width 640.
+-- HtmlTest14.lua -- Batch H: every "build" row of COVERAGE.md. Push to a 3x3 console; design width 640.
 --
 --   units      three bars: 100Q (94px), 10cap (91px at 13px), 8ic (104px)
 --   colours    swatches: hwb, lab, lch, oklab, oklch, rgb(from ...) at half alpha, hsl(from red) hue +120 (green),

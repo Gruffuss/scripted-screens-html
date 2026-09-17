@@ -1,4 +1,4 @@
--- HtmlTest12.lua -- Batch F4: the rescued items. Push to the 3x3 console (586); design width 640.
+-- HtmlTest12.lua -- Batch F4: the rescued items. Push to a 3x3 console; design width 640.
 -- Each row names what it checks; rows that need a vector addition say which.
 --
 --   first      ::first-letter (big amber drop letter); ::first-line (blue first line of a wrapped paragraph, vector req 15)

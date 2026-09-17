@@ -62,7 +62,7 @@ timer no longer keeps the layout panel awake (it re-rendered the page off-screen
 the serializer kept dropping worker-assigned ids; internal attributes survive in-place updates;
 a script setting the same animation value no longer restarts it.
 
-Measured 2026-09-17, same restart, consoles 561 and 563 blank, 586 running each in turn:
+Measured 2026-09-17, same restart, the 2x2 and 1x1 consoles blank, the 3x3 console running each in turn:
 
 | | Lua regulator | HTML Apple page |
 |---|---|---|

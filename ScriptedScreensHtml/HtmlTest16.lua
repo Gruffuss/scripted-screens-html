@@ -1,4 +1,4 @@
--- HtmlTest16.lua -- which in-game faces carry the glyphs the Coldbench designs use: subscript digits (O₂ CH₄), the gear, minus, dots. 3x3 (586).
+-- HtmlTest16.lua -- which in-game faces carry the glyphs the Coldbench designs use: subscript digits (O₂ CH₄), the gear, minus, dots. a 3x3 console.
 local ui = ss.ui.surface("main")
 ss.ui.activate("main")
 local size = ui:size()

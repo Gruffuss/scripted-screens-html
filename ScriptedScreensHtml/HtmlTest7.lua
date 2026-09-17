@@ -1,4 +1,4 @@
--- HtmlTest7.lua -- Batch C: paint. Push to the 3x3 console (586); design width 640.
+-- HtmlTest7.lua -- Batch C: paint. Push to a 3x3 console; design width 640.
 -- Several rows need the vector additions in FOR-VECTOR-SESSION.md and show nothing (or
 -- the fallback) until they land; each row says which requirement it needs.
 --

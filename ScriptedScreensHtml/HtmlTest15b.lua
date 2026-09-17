@@ -1,4 +1,4 @@
--- HtmlTest15.lua -- the constructs of the Apple-style Atmo mockup (AtmoUi/ios) that did not work. Push to the 3x3 console (586); design width 806.
+-- HtmlTest15.lua -- the constructs of the Apple-style Atmo mockup (AtmoUi/ios) that did not work. Push to a 3x3 console; design width 806.
 --
 --   theme      the script sets data-mode="dark" on the root 300 ms after load: every var(--token) below re-resolves
 --              (panel, cards, label colours, the colour inside a sentence) - the capture must show the dark palette

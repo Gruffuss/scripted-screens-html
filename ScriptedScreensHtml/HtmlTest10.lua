@@ -1,4 +1,4 @@
--- HtmlTest10.lua -- Batch F2: the cascade. Push to the 3x3 console (586); design width 640.
+-- HtmlTest10.lua -- Batch F2: the cascade. Push to a 3x3 console; design width 640.
 -- Each row names what it checks; PASS is what a browser would show.
 --
 --   logical    margin-inline, padding-block, inset-inline-start, inline-size, border-start-end-radius

@@ -1,5 +1,5 @@
--- HtmlTest11.lua -- Batch F3: text, lists, tables, layout, script. Push to the 3x3 console
--- (586); design width 640. Each row names what it checks.
+-- HtmlTest11.lua -- Batch F3: text, lists, tables, layout, script. Push to a 3x3 console;
+-- design width 640. Each row names what it checks.
 --
 --   text      text-indent, word-break: break-all, line-clamp (2 lines, ellipsis), text-align-last
 --   counters  counter-reset/increment with counter() and counters() in ::before content

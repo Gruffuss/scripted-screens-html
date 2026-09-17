@@ -1,4 +1,4 @@
--- HtmlTest13.lua -- Batch G: the agreed list after COVERAGE.md. Push to the 3x3 console (586); design width 640.
+-- HtmlTest13.lua -- Batch G: the agreed list after COVERAGE.md. Push to a 3x3 console; design width 640.
 --
 --   start      @starting-style: the amber card fades and slides in on load; "add" inserts a pill that scales in
 --   backdrop   a modal <dialog> (open on load) dims the page behind it with its ::backdrop colour; "close" removes it

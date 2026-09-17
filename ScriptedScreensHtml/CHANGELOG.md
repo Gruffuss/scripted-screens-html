@@ -6,7 +6,11 @@ Newest first. The workshop page is a short overview; this file has the full hist
 
 - Pages are laid out by a layout engine inside the mod instead of Unity's UI Toolkit, and each
   page runs its script, animations and layout on a thread of its own. The game thread only
-  hands finished scenes to the vector mod.
+  hands finished scenes to the vector mod. The layout engine is Yoga (MIT); THIRD-PARTY-NOTICES.md
+  in the mod folder carries its licence and those of the JavaScript engine.
+- A page rebuilt for a screen capture runs its script to the first render, then gets the data Lua
+  sent, then a few frames, so the capture shows the page as its script draws it.
+- The Apple mockup keeps its lists' scroll positions when it redraws.
 - Pages are laid out with the faces the Fonts mod and the game registered, mirrored by name; the
   mod reads no font files and knows no font folders (a Workshop install names mod folders by item
   id, and player fonts live where the Fonts mod keeps them). A face registered later is picked up

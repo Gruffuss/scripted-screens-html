@@ -1,4 +1,4 @@
--- HtmlTest5.lua -- Batch B: HTML coverage. Push to the 3x3 console (586); design width 640.
+-- HtmlTest5.lua -- Batch B: HTML coverage. Push to a 3x3 console; design width 640.
 --
 --   inline    abbr, q, kbd, code, del/ins, cite, sup, entities
 --   blocks    blockquote, dl/dt/dd, figure/figcaption, fieldset/legend, pre
