@@ -20,7 +20,38 @@ internal static class VectorEmitter
 {
     internal sealed class Output
     {
-        public string Scene = string.Empty;
+        /// <summary>
+        /// The scene as characters, in a buffer the emitter keeps: the split reads it straight from
+        /// here, and only a structure that is actually being sent (or a dump) pays for a string.
+        /// A 10 KB scene was 20 KB of garbage a frame, made and thrown away without being read.
+        /// </summary>
+        public char[] Chars = System.Array.Empty<char>();
+        public int Length;
+
+        private string? _scene;
+
+        /// <summary>The scene as a string, made once when something needs one.</summary>
+        public string Scene => _scene ??= new string(Chars, 0, Length);
+
+        /// <summary>Back to empty, keeping the character buffer: one page's frame hands its result
+        /// to the surface and the next frame reuses this, exactly as the scene builder does.</summary>
+        internal void Reset()
+        {
+            Nodes = 0;
+            Warnings.Clear();
+            Externals.Clear();
+            Length = 0;
+            _scene = null;
+        }
+
+        internal void Take(StringBuilder built)
+        {
+            Length = built.Length;
+            if (Chars.Length < Length) Chars = new char[System.Math.Max(Length, Chars.Length * 2)];
+            built.CopyTo(0, Chars, 0, Length);
+            _scene = null;
+        }
+
         public int Nodes;
         public readonly List<string> Warnings = new();
         /// <summary>Boxes the vector layer does not draw: the surface places ScriptedScreens elements over them.</summary>
@@ -41,7 +72,7 @@ internal static class VectorEmitter
         public StringBuilder Defs = new();
         public HtmlRenderer.Result Built = null!;
         public int Ids;
-        public Output Out = new();
+        public readonly Output Out = new();
         public HashSet<string> Reported = new(StringComparer.Ordinal);
         public Tweens? Tw;
         public float Now;
@@ -83,7 +114,7 @@ internal static class VectorEmitter
             Body.Clear(); Defs.Clear(); Scene.Clear(); Reported.Clear(); Deferred.Clear();
             Built = built; Tw = tweens; Now = now; ScrollSet = scrollSet; PageW = pageW; PageH = pageH;
             Ids = 0; EmittingDeferred = false; ScrollTop = float.NaN; ScrollH = 0f; ScrollRange = 0f; SvgScale = 1f;
-            Out = new Output();
+            Out.Reset();
         }
     }
 
@@ -107,7 +138,7 @@ internal static class VectorEmitter
         if (ctx.Defs.Length > 0)
             sb.Append("DEFS {\n").Append(ctx.Defs).Append("}\n");
         sb.Append(ctx.Body);
-        ctx.Out.Scene = sb.ToString();
+        ctx.Out.Take(sb);
         return ctx.Out;
     }
 

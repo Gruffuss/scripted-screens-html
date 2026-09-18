@@ -81,8 +81,12 @@ internal static class SceneSlots
 
     [ThreadStatic] private static Memory? _memory;
 
-    /// <summary>The template and the values its slots name, in order.</summary>
+    /// <summary>The template and the values its slots name, in order. Convenience for tests and tools.</summary>
     public static string Split(string scene, Dictionary<string, Value> values, string prefix = "L")
+        => Split(scene.ToCharArray(), scene.Length, values, prefix);
+
+    /// <summary>The template and the values its slots name, in order.</summary>
+    public static string Split(char[] scene, int sceneLength, Dictionary<string, Value> values, string prefix = "L")
     {
         values.Clear();
         var memory = _memory ??= new Memory();
@@ -94,10 +98,10 @@ internal static class SceneSlots
         var line = 0;
         var defsDepth = 0;
         var start = 0;
-        while (start <= scene.Length)
+        while (start <= sceneLength)
         {
-            var end = scene.IndexOf('\n', start);
-            if (end < 0) end = scene.Length;
+            var end = Array.IndexOf(scene, '\n', start, sceneLength - start);
+            if (end < 0) end = sceneLength;
             var text = start;
             while (text < end && scene[text] == ' ') text++;
             if (defsDepth > 0)
@@ -106,20 +110,20 @@ internal static class SceneSlots
                 for (var i = start; i < end; i++) { if (scene[i] == '{') defsDepth++; else if (scene[i] == '}') defsDepth--; }
                 sb.Append(scene, start, end - start);
             }
-            else if (Starts(scene, text, end, "DEFS"))
+            else if (Starts(scene, sceneLength, text, end, "DEFS"))
             {
                 for (var i = start; i < end; i++) { if (scene[i] == '{') defsDepth++; else if (scene[i] == '}') defsDepth--; }
                 sb.Append(scene, start, end - start);
             }
-            else if (text >= end || scene[text] == '}' || scene[text] == '#' || Starts(scene, text, end, "SCENE"))
+            else if (text >= end || scene[text] == '}' || scene[text] == '#' || Starts(scene, sceneLength, text, end, "SCENE"))
             {
                 sb.Append(scene, start, end - start);
             }
             else
             {
-                SlotLine(scene, start, end, line, sb, values, memory);
+                SlotLine(scene, sceneLength, start, end, line, sb, values, memory);
             }
-            if (end < scene.Length) sb.Append('\n');
+            if (end < sceneLength) sb.Append('\n');
             line++;
             start = end + 1;
         }
@@ -132,7 +136,7 @@ internal static class SceneSlots
         return memory.Template;
     }
 
-    private static void SlotLine(string scene, int from, int to, int line, StringBuilder sb, Dictionary<string, Value> values, Memory memory)
+    private static void SlotLine(char[] scene, int sceneLength, int from, int to, int line, StringBuilder sb, Dictionary<string, Value> values, Memory memory)
     {
         var i = from;
         // indent and op
@@ -154,15 +158,15 @@ internal static class SceneSlots
             var keyStart = i;
             var keyEnd = j;
             var vStart = j + 1;
-            var vEnd = ValueEnd(scene, vStart, to);
+            var vEnd = ValueEnd(scene, sceneLength, vStart, to);
             sb.Append(scene, keyStart, keyEnd - keyStart).Append('=');
-            SlotValue(scene, keyStart, keyEnd, vStart, vEnd, line, index++, sb, values, memory);
+            SlotValue(scene, sceneLength, keyStart, keyEnd, vStart, vEnd, line, index++, sb, values, memory);
             i = vEnd;
         }
     }
 
     /// <summary>End of a value: a quoted string (with \" escapes), a bracketed array, or up to the next space.</summary>
-    private static int ValueEnd(string text, int i, int to)
+    private static int ValueEnd(char[] text, int sceneLength, int i, int to)
     {
         if (i < to && text[i] == '"')
         {
@@ -182,7 +186,7 @@ internal static class SceneSlots
         return i;
     }
 
-    private static void SlotValue(string scene, int keyStart, int keyEnd, int rawStart, int rawEnd,
+    private static void SlotValue(char[] scene, int sceneLength, int keyStart, int keyEnd, int rawStart, int rawEnd,
                                   int line, int index, StringBuilder sb, Dictionary<string, Value> values, Memory memory)
     {
         if (rawEnd <= rawStart) return;
@@ -190,9 +194,9 @@ internal static class SceneSlots
         var bodyStart = quoted ? rawStart + 1 : rawStart;
         var bodyEnd = quoted ? rawEnd - 1 : rawEnd;
         var token = memory.TokenAt(line, index);
-        if (!Is(scene, keyStart, keyEnd, token.Key))
+        if (!Is(scene, sceneLength, keyStart, keyEnd, token.Key))
         {
-            token.Key = scene.Substring(keyStart, keyEnd - keyStart);
+            token.Key = new string(scene, keyStart, keyEnd - keyStart);
             token.Name = memory.Prefix + line.ToString(CultureInfo.InvariantCulture) + "_" + Safe(token.Key);
             token.Parts?.Clear();
         }
@@ -201,33 +205,33 @@ internal static class SceneSlots
         if (bodyEnd > bodyStart && scene[bodyStart] == '=')
         {
             if (quoted) sb.Append('"');
-            SlotNumbers(scene, bodyStart, bodyEnd, token, sb, values);
+            SlotNumbers(scene, sceneLength, bodyStart, bodyEnd, token, sb, values);
             if (quoted) sb.Append('"');
             return;
         }
-        if (quoted && Is(scene, keyStart, keyEnd, "text"))
+        if (quoted && Is(scene, sceneLength, keyStart, keyEnd, "text"))
         {
-            values[name] = Keep(name, Unescaped(scene, bodyStart, bodyEnd, memory.Last.TryGetValue(name, out var had) ? had.Text : null), memory);
+            values[name] = Keep(name, Unescaped(scene, sceneLength, bodyStart, bodyEnd, memory.Last.TryGetValue(name, out var had) ? had.Text : null), memory);
             sb.Append('"').Append('$').Append(name).Append('"');
             return;
         }
-        if (In(NumberKeys, scene, keyStart, keyEnd)
-            && float.TryParse(scene.AsSpan(bodyStart, bodyEnd - bodyStart), NumberStyles.Float, CultureInfo.InvariantCulture, out var n))
+        if (In(NumberKeys, scene, sceneLength, keyStart, keyEnd)
+            && float.TryParse(new ReadOnlySpan<char>(scene, bodyStart, bodyEnd - bodyStart), NumberStyles.Float, CultureInfo.InvariantCulture, out var n))
         {
             values[name] = new Value(n);
             sb.Append('$').Append(name);
             return;
         }
-        if (In(ColourKeys, scene, keyStart, keyEnd) && bodyEnd - bodyStart > 1 && scene[bodyStart] == '#')
+        if (In(ColourKeys, scene, sceneLength, keyStart, keyEnd) && bodyEnd - bodyStart > 1 && scene[bodyStart] == '#')
         {
             var previous = memory.Last.TryGetValue(name, out var was) ? was.Text : null;
-            var colour = previous != null && Is(scene, bodyStart, bodyEnd, previous) ? previous : scene.Substring(bodyStart, bodyEnd - bodyStart);
+            var colour = previous != null && Is(scene, sceneLength, bodyStart, bodyEnd, previous) ? previous : new string(scene, bodyStart, bodyEnd - bodyStart);
             values[name] = Keep(name, colour, memory);
             sb.Append('$').Append(name);
             return;
         }
-        if (In(PairKeys, scene, keyStart, keyEnd) && !quoted && rawEnd - rawStart > 2
-            && scene[rawStart] == '[' && scene[rawEnd - 1] == ']' && scene.IndexOf('[', rawStart + 1, rawEnd - rawStart - 1) < 0)
+        if (In(PairKeys, scene, sceneLength, keyStart, keyEnd) && !quoted && rawEnd - rawStart > 2
+            && scene[rawStart] == '[' && scene[rawEnd - 1] == ']' && Array.IndexOf(scene, '[', rawStart + 1, rawEnd - rawStart - 1) < 0)
         {
             // a group's translate, scale and anchor: an element moved by a script changes values, not the structure
             sb.Append('[');
@@ -239,7 +243,7 @@ internal static class SceneSlots
                 var comma = i;
                 while (comma < last && scene[comma] != ',') comma++;
                 if (part > 0) sb.Append(',');
-                if (float.TryParse(scene.AsSpan(i, comma - i), NumberStyles.Float, CultureInfo.InvariantCulture, out var item))
+                if (float.TryParse(new ReadOnlySpan<char>(scene, i, comma - i), NumberStyles.Float, CultureInfo.InvariantCulture, out var item))
                 {
                     var slot = Part(token, part, name);
                     values[slot] = new Value(item);
@@ -256,7 +260,7 @@ internal static class SceneSlots
     }
 
     /// <summary>Every number literal in an expression becomes a slot; identifiers (i1, hash2, $names) are left alone.</summary>
-    private static void SlotNumbers(string expr, int from, int to, Token token, StringBuilder sb, Dictionary<string, Value> values)
+    private static void SlotNumbers(char[] expr, int sceneLength, int from, int to, Token token, StringBuilder sb, Dictionary<string, Value> values)
     {
         var k = 0;
         var i = from;
@@ -309,9 +313,9 @@ internal static class SceneSlots
     }
 
     /// <summary>The unescaped text, or <paramref name="previous"/> itself when it already says the same.</summary>
-    private static string Unescaped(string scene, int from, int to, string? previous)
+    private static string Unescaped(char[] scene, int sceneLength, int from, int to, string? previous)
     {
-        if (previous != null && UnescapedIs(scene, from, to, previous)) return previous;
+        if (previous != null && UnescapedIs(scene, sceneLength, from, to, previous)) return previous;
         var sb = new StringBuilder(to - from);
         for (var i = from; i < to; i++)
         {
@@ -325,7 +329,7 @@ internal static class SceneSlots
         return sb.ToString();
     }
 
-    private static bool UnescapedIs(string scene, int from, int to, string other)
+    private static bool UnescapedIs(char[] scene, int sceneLength, int from, int to, string other)
     {
         var k = 0;
         for (var i = from; i < to; i++)
@@ -343,7 +347,7 @@ internal static class SceneSlots
     }
 
     /// <summary>The range is exactly this word.</summary>
-    private static bool Is(string scene, int from, int to, string word)
+    private static bool Is(char[] scene, int sceneLength, int from, int to, string word)
     {
         if (to - from != word.Length) return false;
         for (var i = 0; i < word.Length; i++)
@@ -352,7 +356,7 @@ internal static class SceneSlots
     }
 
     /// <summary>The range begins with this word.</summary>
-    private static bool Starts(string scene, int from, int to, string word)
+    private static bool Starts(char[] scene, int sceneLength, int from, int to, string word)
     {
         if (to - from < word.Length) return false;
         for (var i = 0; i < word.Length; i++)
@@ -360,10 +364,10 @@ internal static class SceneSlots
         return true;
     }
 
-    private static bool In(HashSet<string> set, string scene, int from, int to)
+    private static bool In(HashSet<string> set, char[] scene, int sceneLength, int from, int to)
     {
         foreach (var key in set)
-            if (key.Length == to - from && Is(scene, from, to, key)) return true;
+            if (key.Length == to - from && Is(scene, sceneLength, from, to, key)) return true;
         return false;
     }
 

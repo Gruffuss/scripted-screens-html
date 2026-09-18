@@ -22,10 +22,28 @@ internal static class Js
         PostLayout.Attach(built);
     }
 
+    private static ScriptHost? _host;
+
+    /// <summary>Build the host and let the page's script populate the tree, before anything is measured.</summary>
+    internal static void Start(HtmlRenderer.Result built, Vector2 size)
+    {
+        if (string.IsNullOrWhiteSpace(built.Script)) return;
+        _host = Make(built, size);
+        _host.Run(built.Script);
+        for (var i = 0; i < 80; i++) { _host.RunSynchronously(i * 0.016f, built.ById, 500); _host.Pump(); }
+    }
+
     internal static void Run(HtmlRenderer.Result built, Panel panel, Vector2 size, int frames)
     {
         if (string.IsNullOrWhiteSpace(built.Script)) { Console.WriteLine("  (page has no script)"); return; }
 
+        var host = _host ?? Make(built, size);
+        RunWith(host, built, panel, size, frames);
+    }
+
+    private static ScriptHost Make(HtmlRenderer.Result built, Vector2 size)
+    {
+        ScriptedScreensHtmlPlugin.Log ??= new BenchLogger();
         var host = new ScriptHost(
             id => built.ById.TryGetValue(id, out var e) ? e : null,
             id => built.Shapes.TryGetValue(id, out var sh) ? sh : null,
@@ -56,7 +74,7 @@ internal static class Js
                     Attach(built);
                 }
             });
-        host.Attach(built, () => { }, size, (ve, frames, spec) => 0, h => { });
+        host.Attach(built, () => { }, size, (ve, f, spec) => 0, h => { });
         // the surface's in-place path: an innerHTML write whose structure matches updates the tree
         // rather than rebuilding it. Without this the bench measures only the slow path.
         host.TryMorph = (id, html) =>
@@ -71,9 +89,12 @@ internal static class Js
         };
 
         ScriptedScreensHtmlPlugin.Log ??= new BenchLogger();
-        host.Run(built.Script);
-        for (var i = 0; i < 60 && !host.Frame(i * 0.016f, built.ById, 200); i++) { }
-        for (var i = 0; i < 20; i++) { host.Frame(1f + i * 0.016f, built.ById, 200); host.Pump(); panel.Layout(size.x, size.y); }
+        return host;
+    }
+
+    private static void RunWith(ScriptHost host, HtmlRenderer.Result built, Panel panel, Vector2 size, int frames)
+    {
+        for (var i = 0; i < 20; i++) { host.RunSynchronously(1f + i * 0.016f, built.ById, 500); host.Pump(); panel.Layout(size.x, size.y); }
 
         var before = GC.GetTotalAllocatedBytes(precise: true);
         var sw = Stopwatch.StartNew();

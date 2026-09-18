@@ -920,11 +920,10 @@ internal sealed class HtmlSurface : MonoBehaviour
             _allocEmit += Allocated() - ea;
             r.Output = output;
             var sa = Allocated();
-            var template = SceneSlots.Split(output.Scene, _slotScratch, _slotPrefix);
+            var template = SceneSlots.Split(output.Chars, output.Length, _slotScratch, _slotPrefix);
             _allocSplit += Allocated() - sa;
             if (template == _lastTemplate)
             {
-                _lastScene = output.Scene;
                 List<SS.UiProp>? patch = null;
                 foreach (var kv in _slotScratch)
                 {
@@ -963,7 +962,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             // so the vector mod's table stays bounded.
             if (_lastTemplate != null)
                 _slotPrefix = _slotPrefix == "L" ? "M" : "L";
-            template = SceneSlots.Split(output.Scene, _slotScratch, _slotPrefix);
+            template = SceneSlots.Split(output.Chars, output.Length, _slotScratch, _slotPrefix);
             _tweens.Epoch = now;
             _lastScene = output.Scene;
             _lastTemplate = template;

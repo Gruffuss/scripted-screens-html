@@ -53,6 +53,9 @@ internal static class Program
         OffThread.Boxes = boxes;
         OffThread.Job = OffThread.Globals.Take();
 
+        var js = Environment.GetEnvironmentVariable("BENCH_JS") == "1";
+        if (js) Js.Start(built, size);
+
         // Warm up: first pass builds every cache the steady state then reuses.
         for (var i = 0; i < 5; i++) Once(panel, root, built, boxes, scratch, tweens, slots, size, i * 0.016f);
 
@@ -74,7 +77,7 @@ internal static class Program
         for (var k = 0; k < 4; k++)
             Console.WriteLine($"  {names[k],-7} {phases[k].bytes / (double)iterations,10:N0} B   {phases[k].ticks / (double)Stopwatch.Frequency * 1000.0 / iterations,7:F3} ms");
         File.WriteAllText("scene.txt", LastScene);
-        if (Environment.GetEnvironmentVariable("BENCH_JS") == "1") Js.Run(built, panel, size, iterations);
+        if (js) Js.Run(built, panel, size, iterations);
         if (Environment.GetEnvironmentVariable("BENCH_PARSE") == "1")
         {
             // what it costs merely to read the markup back, with no cascade and no tree: the floor
@@ -118,10 +121,10 @@ internal static class Program
         OffThread.Active = false;
 
         b0 = GC.GetAllocatedBytesForCurrentThread(); t0 = Stopwatch.GetTimestamp();
-        SceneSlots.Split(output.Scene, slots, "L");
+        SceneSlots.Split(output.Chars, output.Length, slots, "L");
         p[3] = (GC.GetAllocatedBytesForCurrentThread() - b0, Stopwatch.GetTimestamp() - t0);
 
-        LastSceneLength = output.Scene.Length;
+        LastSceneLength = output.Length;
         LastScene = output.Scene;
         return p;
     }
