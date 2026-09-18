@@ -24,6 +24,36 @@ internal static class VectorBridge
         }
     }
 
+    // ---- what the vector mod will actually draw ----
+    // A page only needs a frame the vector mod will rebuild: it culls off-screen surfaces and caps
+    // its rebuild rate, both from its own config, and its settings are the single source of truth.
+    // Read by reflection, like everything else here, so the two mods stay unlinked; if the fields
+    // are missing (an older vector mod) the defaults below are its documented ones.
+    private static PropertyInfo? _cull, _rateLod, _maxHz, _minHz, _fullPixels;
+    private static float _readAt = -999f;
+    private static bool _cullValue = true, _rateLodValue;
+    private static float _maxHzValue = 60f, _minHzValue = 15f, _fullPixelsValue = 220f;
+
+    /// <summary>The vector mod's culling and rate settings, re-read every few seconds (its config is live).</summary>
+    public static (bool cull, bool rateLod, float maxHz, float minHz, float fullPixels) Lod(float now)
+    {
+        Resolve();
+        if (now - _readAt >= 5f)
+        {
+            _readAt = now;
+            try
+            {
+                if (_cull != null) _cullValue = (bool)_cull.GetValue(null);
+                if (_rateLod != null) _rateLodValue = (bool)_rateLod.GetValue(null);
+                if (_maxHz != null) _maxHzValue = (float)_maxHz.GetValue(null);
+                if (_minHz != null) _minHzValue = (float)_minHz.GetValue(null);
+                if (_fullPixels != null) _fullPixelsValue = (float)_fullPixels.GetValue(null);
+            }
+            catch (Exception ex) { ScriptedScreensHtmlPlugin.Log?.LogWarning("html: reading the vector mod's LOD settings: " + ex.Message); }
+        }
+        return (_cullValue, _rateLodValue, _maxHzValue, _minHzValue, _fullPixelsValue);
+    }
+
     private static void Resolve()
     {
         if (_searched)
@@ -48,6 +78,19 @@ internal static class VectorBridge
                     ScriptedScreensHtmlPlugin.Log?.LogInfo("html: this vector mod does not report scroll offsets (needs 0.11.24); scroll events stay off");
             }
             catch (Exception ex) { ScriptedScreensHtmlPlugin.Log?.LogWarning("html: scroll report hook: " + ex.Message); }
+            try
+            {
+                var config = asm.GetType("ScriptedScreensVector.VectorConfig");
+                const BindingFlags any = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+                _cull = config?.GetProperty("CullOffScreen", any);
+                _rateLod = config?.GetProperty("RateLodEnabled", any);
+                _maxHz = config?.GetProperty("MaximumHz", any);
+                _minHz = config?.GetProperty("MinimumHz", any);
+                _fullPixels = config?.GetProperty("FullRatePixels", any);
+                if (_cull == null)
+                    ScriptedScreensHtmlPlugin.Log?.LogInfo("html: cannot read the vector mod's LOD settings; pages use its documented defaults");
+            }
+            catch (Exception ex) { ScriptedScreensHtmlPlugin.Log?.LogWarning("html: reading the vector mod's config: " + ex.Message); }
             break;
         }
         if (_postfix == null)

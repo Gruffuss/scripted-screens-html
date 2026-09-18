@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Measures one page's emit on .NET 8, where GC.GetAllocatedBytesForCurrentThread works
+       (Mono answers 0), so a change to the emitter can be priced without a game restart.
+       Absolute times do not transfer to Mono; allocation per emit does. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ScriptedScreensHtml.Bench</RootNamespace>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS0618;CS8618;CS8625;CA1416</NoWarn>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Managed>D:\SteamLibrary\steamapps\common\Stationeers\rocketstation_Data\Managed</Managed>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\ScriptedScreensHtml\Yoga\**\*.cs" />
+    <Compile Include="..\ScriptedScreensHtml\HtmlParser.cs" />
+    <Compile Include="..\ScriptedScreensHtml\CssParser.cs" />
+    <Compile Include="..\ScriptedScreensHtml\SceneSlots.cs" />
+    <Compile Include="..\ScriptedScreensHtml\TextMeasure.cs" />
+    <Compile Include="..\ScriptedScreensHtml\Dom.cs" />
+    <Compile Include="..\ScriptedScreensHtml\DomStyle.cs" />
+    <Compile Include="..\ScriptedScreensHtml\StyleApplier.cs" />
+    <Compile Include="..\ScriptedScreensHtml\HtmlRenderer.cs" />
+    <Compile Include="..\ScriptedScreensHtml\GridLayout.cs" />
+    <Compile Include="..\ScriptedScreensHtml\PostLayout.cs" />
+    <Compile Include="..\ScriptedScreensHtml\OffThread.cs" />
+    <Compile Include="..\ScriptedScreensHtml\SvgElement.cs" />
+    <Compile Include="..\ScriptedScreensHtml\CanvasElement.cs" />
+    <Compile Include="..\ScriptedScreensHtml\Animation.cs" />
+    <Compile Include="..\ScriptedScreensHtml\Tweens.cs" />
+    <Compile Include="..\ScriptedScreensHtml\VectorEmitter.cs" />
+    <Compile Include="..\ScriptedScreensHtml\ScriptHost.cs" />
+    <Compile Include="Js.cs" />
+    <Compile Include="Stubs.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Jint" Version="4.16.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(Managed)\UnityEngine.CoreModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.UIElementsModule"><HintPath>$(Managed)\UnityEngine.UIElementsModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.TextRenderingModule"><HintPath>$(Managed)\UnityEngine.TextRenderingModule.dll</HintPath></Reference>
+    <Reference Include="Unity.TextMeshPro"><HintPath>$(Managed)\Unity.TextMeshPro.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.TextCoreTextEngineModule"><HintPath>$(Managed)\UnityEngine.TextCoreTextEngineModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.TextCoreFontEngineModule"><HintPath>$(Managed)\UnityEngine.TextCoreFontEngineModule.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>

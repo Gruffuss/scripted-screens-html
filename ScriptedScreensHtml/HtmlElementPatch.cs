@@ -59,6 +59,12 @@ internal static class HtmlElementPatch
             if (!roots.TryGetValue(element.Id, out var host) || host == null)
                 return;
 
+            // The host ScriptedScreens gives us is the live one, so it must be active. A capture
+            // hides the host it replaces, and ScriptedScreens hands the same host back later; a page
+            // on a hidden host never gets another frame, which looked like the page freezing.
+            if (!host.activeSelf)
+                host.SetActive(true);
+
             // The fallback Image occupies the host's Graphic slot; clear rather than
             // destroy, ScriptedScreens re-adds it on every upsert.
             var fallback = host.GetComponent<Image>();

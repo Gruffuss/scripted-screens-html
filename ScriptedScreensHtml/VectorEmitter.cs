@@ -61,6 +61,12 @@ internal static class VectorEmitter
         /// <summary>The scene text is assembled here, and child lists are borrowed from these: a page
         /// emits every frame, so nothing here is allocated again once the first frame has run.</summary>
         public readonly StringBuilder Scene = new(8192);
+        /// <summary>One label's T line is assembled here and appended to the body: reused, since a page emits every frame.</summary>
+        public readonly StringBuilder Label = new(256);
+        /// <summary>The pseudo-elements any rule of this page styles, and what they were collected from: a page with no ::first-line rule must not probe every rule per label per frame.</summary>
+        public HashSet<string>? Pseudos;
+        public object? PseudosOf;
+        public int PseudosRules;
         private readonly Stack<List<VisualElement>> _children = new();
         private readonly Stack<List<(int z, int i, VisualElement c)>> _sorting = new();
         private readonly Stack<Dictionary<string, string>> _records = new();
@@ -121,7 +127,7 @@ internal static class VectorEmitter
         var w = layout.width;
         var h = layout.height;
         var css = ctx.Built.CssOf(ve);
-        var indent = new string(' ', depth * 2);
+        var indent = Indent(depth);
         var topNode = ctx.Built.NodeOf.TryGetValue(ve, out var dialogNode) ? dialogNode : null;
         var modal = topNode != null && topNode.Tag == "dialog" && topNode.Attr("data-modal") != null;
         var popoverOpen = topNode != null && topNode.Attr("popover") != null && topNode.Attr("data-popover-open") != null;
@@ -165,8 +171,8 @@ internal static class VectorEmitter
         // backface-visibility: hidden with a rotateX/rotateY past 90 degrees: the back of the card, not drawn
         if (css.TryGetValue("backface-visibility", out var bfv) && bfv.Trim() == "hidden" && css.TryGetValue("transform", out var bft) && BackfaceTurned(bft))
             return;
-        var ws = tw != null ? tw.Lerp(tw.From.Rect.width, w) : F(w);
-        var hs = tw != null ? tw.Lerp(tw.From.Rect.height, h) : F(h);
+        var ws = tw?.Lerp(tw.From.Rect.width, w);
+        var hs = tw?.Lerp(tw.From.Rect.height, h);
 
         // Wrappers: position, transform, opacity, clip. Each opens a G that is closed after children.
         var groups = 0;
@@ -240,7 +246,7 @@ internal static class VectorEmitter
             if (cornerPath != null && tw == null && bg.a > 0.002f && (bgCss == null || !bgCss.Contains("gradient(")) && UrlOf(bgCss ?? string.Empty) == null)
             {
                 // corner-shape: the box outline as a path with bevelled, scooped or notched corners
-                ctx.Body.Append(indent).Append(cornerPath).Append(" f=").AppendHex(bg).Append(shadowOf(css, filterShadow)).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Body.Append(indent).Append(cornerPath).Append(" f=").AppendHex(bg).Append(shadowOf(css, filterShadow)).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
                 bg = Color.clear;
             }
@@ -251,7 +257,7 @@ internal static class VectorEmitter
             if (bgCss != null && bgCss.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) bgCss = ExpandRepeating(bgCss, w, h);
             var shadow = (css.TryGetValue("box-shadow", out var shCss) ? Shadows(shCss) : string.Empty) + filterShadow;
             var imageUrl = bgCss != null ? UrlOf(bgCss) : null;
-            var layered = bgCss != null && imageUrl == null && bgCss.IndexOf("gradient(", StringComparison.OrdinalIgnoreCase) >= 0 && SplitTopLevelCommas(bgCss).Count > 1;
+            var layered = bgCss != null && imageUrl == null && bgCss.IndexOf("gradient(", StringComparison.OrdinalIgnoreCase) >= 0 && TopLevelCommas(bgCss) > 0;
             if (layered)
             {
                 // a layered background: the colour layer (last) is the base, each gradient layer sits at its own
@@ -267,8 +273,8 @@ internal static class VectorEmitter
                 }
                 if (baseC.a > 0.002f)
                 {
-                    ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                        .Append(Radius(rs, w, h)).Append(" f=").AppendHex(baseC).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                    ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
+                        .AppendRadius(rs, w, h).Append(" f=").AppendHex(baseC).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                     ctx.Out.Nodes++;
                 }
                 // CSS paints the first layer on top: emitted last
@@ -296,8 +302,8 @@ internal static class VectorEmitter
                 // background-image: url(): the colour (if any) under an IMG node (vector requirement 9)
                 if (bg.a > 0.002f)
                 {
-                    ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                        .Append(Radius(rs, w, h)).Append(" f=").AppendHex(bg).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                    ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
+                        .AppendRadius(rs, w, h).Append(" f=").AppendHex(bg).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                     ctx.Out.Nodes++;
                 }
                 // background-origin: padding-box (the default, inside the border), content-box, or border-box
@@ -313,45 +319,45 @@ internal static class VectorEmitter
                 // A colour transition: a two-stop ramp sampled over the tween's clock (vector requirement 1)
                 var gid = "tw" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
                 ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[[0,").AppendHex(tw.From.Bg).Append("],[1,").AppendHex(bg).Append("]]\n");
-                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                    .Append(Radius(rs, w, h)).Append(" f=@").Append(gid).Append(" fat==").Append(tw.P).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
+                    .AppendRadius(rs, w, h).Append(" f=@").Append(gid).Append(" fat==").Append(tw.P).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (bgCss != null && bgCss.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase))
             {
-                GradientBox(ctx, bgCss, x, y, w, h, ws, hs, rs, indent, ve, xform, shadow);
+                GradientBox(ctx, bgCss, x, y, w, h, ws ?? F(w), hs ?? F(h), rs, indent, ve, xform, shadow);
             }
             else if (bgCss != null && bgCss.StartsWith("conic-gradient", StringComparison.OrdinalIgnoreCase) && ConicDef(ctx, bgCss) is { } cid)
             {
-                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                    .Append(Radius(rs, w, h)).Append(" f=@").Append(cid).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
+                    .AppendRadius(rs, w, h).Append(" f=@").Append(cid).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (bgCss != null && bgCss.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) && RadialDef(ctx, bgCss) is { } rid)
             {
-                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                    .Append(Radius(rs, w, h)).Append(" f=@").Append(rid).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
+                    .AppendRadius(rs, w, h).Append(" f=@").Append(rid).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             // a declared background keeps its box when it turns transparent (a lamp going dark), so the
             // structure does not change with the colour; the vector mod skips invisible shapes itself
             else if (bg.a > 0.002f || css.ContainsKey("background-color") || (css.TryGetValue("background", out var bgDecl) && StyleApplier.TryColor(bgDecl.Trim(), out _)))
             {
-                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                    .Append(Radius(rs, w, h)).Append(" f=").AppendHex(bg).Append(shadow).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
+                    .AppendRadius(rs, w, h).Append(" f=").AppendHex(bg).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (IsButton(ctx, ve))
             {
-                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                    .Append(Radius(rs, w, h)).Append(" f=#00000001").Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
+                    .AppendRadius(rs, w, h).Append(" f=#00000001").AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (shadow.Length > 0)
             {
                 // A shadow under a transparent box still casts: an invisible fill carries it.
-                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").Append(ws).Append(" h=").Append(hs)
-                    .Append(Radius(rs, w, h)).Append(" f=#00000001").Append(shadow).Append('\n');
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
+                    .AppendRadius(rs, w, h).Append(" f=#00000001").Append(shadow).Append('\n');
                 ctx.Out.Nodes++;
             }
 
@@ -361,7 +367,7 @@ internal static class VectorEmitter
                 var od = ooff + ow * 0.5f;
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x - od).Append(" y=").AppendNum(y - od)
                     .Append(" w=").AppendNum(w + 2f * od).Append(" h=").AppendNum(h + 2f * od)
-                    .Append(Radius(rs, w + 2f * od, h + 2f * od, od)).Append(" f=none s=").AppendHex(oc).Append(" sw=").AppendNum(ow)
+                    .AppendRadius(rs, w + 2f * od, h + 2f * od, od).Append(" f=none s=").AppendHex(oc).Append(" sw=").AppendNum(ow)
                     .Append('\n');
                 ctx.Out.Nodes++;
             }
@@ -370,7 +376,7 @@ internal static class VectorEmitter
             var sameWidth = Mathf.Approximately(bw, rs.borderRightWidth) && Mathf.Approximately(bw, rs.borderBottomWidth) && Mathf.Approximately(bw, rs.borderLeftWidth);
             var sameColour = rs.borderTopColor == rs.borderRightColor && rs.borderTopColor == rs.borderBottomColor && rs.borderTopColor == rs.borderLeftColor;
             var rounded = rs.borderTopLeftRadius > 0.01f || rs.borderTopRightRadius > 0.01f || rs.borderBottomRightRadius > 0.01f || rs.borderBottomLeftRadius > 0.01f;
-            var styles = new[] { SideStyle(css, "top", 0), SideStyle(css, "right", 1), SideStyle(css, "bottom", 2), SideStyle(css, "left", 3) };
+            var styles = SideStyles(css);
             var bstyle = styles[0];
             var mixed = styles[0] != styles[1] || styles[0] != styles[2] || styles[0] != styles[3];
             if (BorderImage(ctx, css, rs, x, y, w, h, indent))
@@ -407,7 +413,7 @@ internal static class VectorEmitter
                 foreach (var inset in new[] { third * 0.5f, bw - third * 0.5f })
                 {
                     ctx.Body.Append(indent).Append("R x=").AppendNum(x + inset).Append(" y=").AppendNum(y + inset).Append(" w=").AppendNum(w - 2f * inset).Append(" h=").AppendNum(h - 2f * inset)
-                        .Append(Radius(rs, w, h, -inset)).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(third).Append('\n');
+                        .AppendRadius(rs, w, h, -inset).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(third).Append('\n');
                     ctx.Out.Nodes++;
                 }
             }
@@ -436,7 +442,7 @@ internal static class VectorEmitter
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x + half).Append(" y=").AppendNum(y + half)
                     .Append(" w=").Append(tw != null ? tw.Lerp(tw.From.Rect.width - bw, w - bw) : F(w - bw))
                     .Append(" h=").Append(tw != null ? tw.Lerp(tw.From.Rect.height - bw, h - bw) : F(h - bw))
-                    .Append(Radius(rs, w, h, -half)).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(bw).Append(Dash(css, bw)).Append('\n');
+                    .AppendRadius(rs, w, h, -half).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(bw).Append(Dash(css, bw)).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (bw > 0.01f || rs.borderRightWidth > 0.01f || rs.borderBottomWidth > 0.01f || rs.borderLeftWidth > 0.01f)
@@ -469,7 +475,7 @@ internal static class VectorEmitter
                 ch += rs.paddingBottom;
                 ctx.Body.Append(indent).Append("SC id=").Append(string.IsNullOrEmpty(ve.name) ? "scroll" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture) : ve.name)
                     .Append(" x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
-                    .Append(" ch=").AppendNum(Mathf.Max(ch, h)).Append(Radius(rs, w, h));
+                    .Append(" ch=").AppendNum(Mathf.Max(ch, h)).AppendRadius(rs, w, h);
                 if (ctx.ScrollSet != null && !string.IsNullOrEmpty(ve.name) && ctx.ScrollSet.TryGetValue(ve.name, out var ss))
                     ctx.Body.Append(" so=").AppendNum(ss.offset).Append(" sov=").Append(ss.version); // applied once per version (vector requirement 7)
                 ctx.Body.Append(" {\n");
@@ -483,7 +489,7 @@ internal static class VectorEmitter
                 var id = "clip" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
                 var margin = css.TryGetValue("overflow-clip-margin", out var ocm) ? StyleApplier.Num(ocm) : 0f;  // the clip box grown by overflow-clip-margin
                 ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x - margin).Append(" y=").AppendNum(y - margin)
-                    .Append(" w=").AppendNum(w + 2f * margin).Append(" h=").AppendNum(h + 2f * margin).Append(Radius(rs, w + 2f * margin, h + 2f * margin)).Append(" }\n");
+                    .Append(" w=").AppendNum(w + 2f * margin).Append(" h=").AppendNum(h + 2f * margin).AppendRadius(rs, w + 2f * margin, h + 2f * margin).Append(" }\n");
                 ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
                 groups++;
             }
@@ -512,7 +518,7 @@ internal static class VectorEmitter
                 var cx = x + w * 0.5f; var cy = y + h * 0.5f;
                 var angle = string.Equals(wm.Trim(), "sideways-lr", StringComparison.OrdinalIgnoreCase) ? -90f : 90f;
                 ctx.Body.Append(indent).Append("G a=[").AppendNum(cx).Append(',').AppendNum(cy).Append("] r=").AppendNum(angle).Append(" {\n");
-                EmitText(ctx, label, css, cx - h * 0.5f, cy - w * 0.5f, h, w, indent + "  ");
+                EmitText(ctx, label, css, cx - h * 0.5f, cy - w * 0.5f, h, w, Indent(depth + 1));
                 ctx.Body.Append(indent).Append("}\n");
                 break;
             }
@@ -533,7 +539,7 @@ internal static class VectorEmitter
                 foreach (var child in children)
                     EmitElement(ctx, child, new Vector2(x, y), depth + groups);
                 ctx.Return(children);
-                if (!float.IsNaN(scrollTop)) EmitScrollbar(ctx, ve, css, x, y, w, h, scrollCh, indent + "  ");
+                if (!float.IsNaN(scrollTop)) EmitScrollbar(ctx, ve, css, x, y, w, h, scrollCh, Indent(depth + 1));
                 (ctx.ScrollTop, ctx.ScrollH, ctx.ScrollRange) = outer;
                 break;
             }
@@ -887,19 +893,26 @@ internal static class VectorEmitter
         public static Xform? From(VisualElement ve, Tweens.Tween? tw, float x, float y, float w, float h, OffsetPlace? offset = null)
         {
             var rs = OffThread.Of(ve);
-            var xf = new Xform
+            // Decided before anything is built: most elements have no transform at all, and this
+            // runs on every one of them on every frame.
+            var tx = rs.translate.x + (offset?.Dx ?? 0f);
+            var ty = rs.translate.y + (offset?.Dy ?? 0f);
+            var r = rs.rotate.angle.ToDegrees() + (offset?.Rot ?? 0f);
+            var sx = rs.scale.value.x;
+            var sy = rs.scale.value.y;
+            var running = tw != null && tw.From.TransformDiffers(tw.To) ? tw : null;
+            var identity = Mathf.Abs(tx) < 0.01f && Mathf.Abs(ty) < 0.01f && Mathf.Abs(r) < 0.01f
+                           && Mathf.Abs(sx - 1f) < 0.001f && Mathf.Abs(sy - 1f) < 0.001f;
+            if (identity && running == null && offset?.Ex == null)
+                return null;
+            return new Xform
             {
                 Ax = offset?.Ax ?? x + w * 0.5f, Ay = offset?.Ay ?? y + h * 0.5f,
-                Tx = rs.translate.x + (offset?.Dx ?? 0f), Ty = rs.translate.y + (offset?.Dy ?? 0f),
-                R = rs.rotate.angle.ToDegrees() + (offset?.Rot ?? 0f),
-                Sx = rs.scale.value.x, Sy = rs.scale.value.y,
+                Tx = tx, Ty = ty, R = r, Sx = sx, Sy = sy,
                 _ox = offset?.Dx ?? 0f, _oy = offset?.Dy ?? 0f, _or = offset?.Rot ?? 0f,
                 _offset = offset,
-                _tw = tw != null && tw.From.TransformDiffers(tw.To) ? tw : null,
+                _tw = running,
             };
-            var identity = Mathf.Abs(xf.Tx) < 0.01f && Mathf.Abs(xf.Ty) < 0.01f && Mathf.Abs(xf.R) < 0.01f
-                           && Mathf.Abs(xf.Sx - 1f) < 0.001f && Mathf.Abs(xf.Sy - 1f) < 0.001f;
-            return identity && xf._tw == null && offset?.Ex == null ? null : xf;
         }
 
         public string Group()
@@ -1023,13 +1036,17 @@ internal static class VectorEmitter
     /// such characters (outside tags, following the face of any inner font tag) take the game's own
     /// face. The text is scene-escaped rich text, so a quote inside a tag is a backslash and a quote.
     /// </summary>
+    /// <summary>The open &lt;font&gt; faces while scanning a label, reused: this runs twice per label per frame.</summary>
+    [ThreadStatic] private static List<string?>? _faceStack;
+
     internal static string GlyphFallback(string text, string? face)
     {
         var asset = face != null && !string.Equals(face, FallbackFace, StringComparison.OrdinalIgnoreCase) && OffThread.Face(face) ? face : null;
         if (asset == null && text.IndexOf("<font=", StringComparison.Ordinal) < 0) return text;
         StringBuilder? sb = null;
         var inRun = false;
-        var stack = new List<string?>();
+        var stack = _faceStack ??= new List<string?>();
+        stack.Clear();
         var cur = asset;
         for (var i = 0; i < text.Length; i++)
         {
@@ -1130,7 +1147,7 @@ internal static class VectorEmitter
     }
 
     /// <summary>border-style dashed/dotted (from the shorthand or the property) as a dash pattern in border widths.</summary>
-    private static string Dash(Dictionary<string, string> css, float bw) => DashFor(SideStyle(css, "top", 0), bw);
+    private static string Dash(Dictionary<string, string> css, float bw) => DashFor(SideStyle(css, 0), bw);
 
     /// <summary>
     /// radial-gradient([circle|ellipse] [size] [at x y,] stops): a GR def in bounding-box
@@ -1209,13 +1226,13 @@ internal static class VectorEmitter
             for (var i = 1; i < stops.Count; i++) flat &= stops[i].c == stops[0].c;
             if (flat)
             {
-                ctx.Body.Append(indent).Append('R').Append(rect).Append(" f=").AppendHex(stops[0].c).Append(NodeId(ctx, ve)).Append('\n');
+                ctx.Body.Append(indent).Append('R').Append(rect).Append(" f=").AppendHex(stops[0].c).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
                 return;
             }
             var gid = "grad" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
             GradientDefLine(ctx, gid, dx, dy, 0f, 1f, stops);
-            ctx.Body.Append(indent).Append('R').Append(rect).Append(" f=@").Append(gid).Append(NodeId(ctx, ve)).Append('\n');
+            ctx.Body.Append(indent).Append('R').Append(rect).Append(" f=@").Append(gid).AppendNodeId(ctx, ve).Append('\n');
             ctx.Out.Nodes++;
             return;
         }
@@ -1312,7 +1329,23 @@ internal static class VectorEmitter
     }
 
     /// <summary>CSS linear-gradient(...) to an angle and positioned stops. Null when unusable.</summary>
+    /// <summary>
+    /// Parsed gradients by declaration. A gradient's angle and stops depend on nothing but the
+    /// text, and the same three declarations were parsed again on every frame. Callers read the
+    /// stop list and must not change it.
+    /// </summary>
+    private static readonly Dictionary<string, (float angle, List<(float at, Color c)> stops)?> Gradients = new(StringComparer.Ordinal);
+
     private static (float angle, List<(float at, Color c)> stops)? ParseGradient(string css)
+    {
+        lock (Gradients)
+            if (Gradients.TryGetValue(css, out var hit)) return hit;
+        var made = ParseGradientInner(css);
+        lock (Gradients) Gradients[css] = made;
+        return made;
+    }
+
+    private static (float angle, List<(float at, Color c)> stops)? ParseGradientInner(string css)
     {
         var open = css.IndexOf('(');
         var close = css.LastIndexOf(')');
@@ -1393,7 +1426,7 @@ internal static class VectorEmitter
         var ownCss = css;
         css = WithInherited(ctx, label, css);
         if (css.TryGetValue("text-transform", out var tt))
-            text = Transform(text, tt.Trim().ToLowerInvariant());
+            text = Transform(text, Lower(tt));
         // text-indent: TextMeshPro's line-indent is the first line of each paragraph, which
         // is the block's first line for a label. word-break: break-all lets a line break
         // between any two characters: a zero-width space after each one outside tags.
@@ -1445,7 +1478,8 @@ internal static class VectorEmitter
             else if (right) x -= slack;
             w += slack;
         }
-        var sb = new StringBuilder();
+        var sb = ctx.Label;
+        sb.Clear();
         sb.Append(indent).Append("T x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h);
         var textAt = sb.Length;
         sb.Append(" text=\"").Append(text).Append('"');
@@ -1487,28 +1521,18 @@ internal static class VectorEmitter
         var wantBold = fs == FontStyle.Bold || fs == FontStyle.BoldAndItalic;
         if (css.TryGetValue("font-family", out var family))
         {
-            // The first real family, else what the first generic stands for here.
-            string? generic = null;
-            foreach (var raw in family.Split(','))
-            {
-                var name = raw.Trim().Trim('"', '\'');
-                if (name.Length == 0) continue;
-                if (IsGeneric(name)) { generic ??= StyleApplier.MapGeneric(name); continue; }
-                first = name;
-                break;
-            }
-            if (first.Length == 0 && generic != null) first = generic;
+            first = FirstFamily(family);
             if (first.Length > 0 && !NamedWeight(first))
             {
                 // A weight or stretch the family has as a real face beats a synthetic one:
                 // Barlow ships Thin..Black and Condensed, and TextMeshPro's synthetic bold
                 // only widens glyphs.
-                if (css.TryGetValue("font-stretch", out var stretch) && stretch.IndexOf("condensed", StringComparison.OrdinalIgnoreCase) >= 0 && OffThread.Library(first + " Condensed"))
-                    first += " Condensed";
+                if (css.TryGetValue("font-stretch", out var stretch) && stretch.IndexOf("condensed", StringComparison.OrdinalIgnoreCase) >= 0 && OffThread.Library(Join(first, "Condensed")))
+                    first = Join(first, "Condensed");
                 var weight = WeightFace(css, wantBold);
-                if (weight != null && OffThread.Library(first + " " + weight))
+                if (weight != null && OffThread.Library(Join(first, weight)))
                 {
-                    first += " " + weight;
+                    first = Join(first, weight);
                     wantBold = false;
                 }
             }
@@ -1531,7 +1555,7 @@ internal static class VectorEmitter
             if (px != 0f) sb.Append(" cspace=").AppendNum(px / rs.fontSize * 100f);
         }
         // text-align-last: the last line's alignment, which for a single-line label is the line
-        var lastAlign = !wraps && css.TryGetValue("text-align-last", out var tal) ? tal.Trim().ToLowerInvariant() : null;
+        var lastAlign = !wraps && css.TryGetValue("text-align-last", out var tal) ? Lower(tal) : null;
         if (lastAlign is "center") sb.Append(" align=center");
         else if (lastAlign is "right" or "end") sb.Append(" align=right");
         else if (lastAlign is "left" or "start") { }
@@ -1606,7 +1630,7 @@ internal static class VectorEmitter
                      : StyleApplier.Num(v);
             if (mult > 0f && v != "normal") sb.Append(" lh=").AppendNum(mult);
         }
-        sb.Append(NodeId(ctx, label)).Append('\n');
+        sb.AppendNodeId(ctx, label).Append('\n');
         // glyphs the face lacks (Barlow has no subscript digits, no gear) come from the game's own face, as a browser
         // falls back; an inner font tag's face counts for its span. Tabular digits take the face's widest digit as
         // their cell, as the font's own tabular figures would. The text attribute is found by search: earlier
@@ -1670,7 +1694,7 @@ internal static class VectorEmitter
             }
         }
         if (css.TryGetValue("text-decoration-line", out var tl)) Lines(tl);
-        if (css.TryGetValue("text-decoration-style", out var ts)) d.style = ts.Trim().ToLowerInvariant();
+        if (css.TryGetValue("text-decoration-style", out var ts)) d.style = Lower(ts);
         if (css.TryGetValue("text-decoration-color", out var tc) && StyleApplier.TryColor(tc, out var col)) d.colour = col;
         if (css.TryGetValue("text-decoration-thickness", out var tt) && tt.Trim() is not ("auto" or "from-font")) d.thickness = StyleApplier.Num(tt);
         if (css.TryGetValue("text-underline-offset", out var to) && to.Trim() != "auto") d.offset = StyleApplier.Num(to);
@@ -1780,7 +1804,7 @@ internal static class VectorEmitter
 
     internal static string? WeightFace(string w, bool bold)
     {
-        var v = w.Trim().ToLowerInvariant();
+        var v = Lower(w);
         if (v == "bold" || v == "bolder") return "Bold";
         if (v == "lighter") return "Light";
         if (!StyleApplier.IsNumber(v)) return bold ? "Bold" : null;
@@ -1833,7 +1857,7 @@ internal static class VectorEmitter
             oy = y + (h - vb.height * s) * 0.5f;
         }
         var id = "svg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).Append(Radius(OffThread.Of(svg), w, h)).Append(" }\n");
+        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).AppendRadius(OffThread.Of(svg), w, h).Append(" }\n");
 
         // Uniform fit: one scaled group. Non-uniform (preserveAspectRatio="none" on a box of
         // another shape): the scale is baked into every coordinate instead, so a stroke keeps
@@ -2367,12 +2391,29 @@ internal static class VectorEmitter
 
     // ---------------------------------------------------------------- paint helpers
 
+    private static StringBuilder AppendRadius(this StringBuilder sb, OffThread.Box rs, float w, float h, float inset = 0f)
+    {
+        if (!Radii(rs, w, h, inset, out var tl, out var tr, out var br, out var bl)) return sb;
+        if (Mathf.Approximately(tl, tr) && Mathf.Approximately(tl, br) && Mathf.Approximately(tl, bl))
+            return sb.Append(" rx=").AppendNum(tl);
+        return sb.Append(" rx=[").AppendNum(tl).Append(',').AppendNum(tr).Append(',').AppendNum(br).Append(',').AppendNum(bl).Append(']');
+    }
+
     private static string Radius(OffThread.Box rs, float w, float h, float inset = 0f)
     {
-        var tl = rs.borderTopLeftRadius;
-        var tr = rs.borderTopRightRadius;
-        var br = rs.borderBottomRightRadius;
-        var bl = rs.borderBottomLeftRadius;
+        if (!Radii(rs, w, h, inset, out var tl0, out var tr0, out var br0, out var bl0)) return string.Empty;
+        if (Mathf.Approximately(tl0, tr0) && Mathf.Approximately(tl0, br0) && Mathf.Approximately(tl0, bl0))
+            return " rx=" + F(tl0);
+        return " rx=[" + F(tl0) + "," + F(tr0) + "," + F(br0) + "," + F(bl0) + "]";
+    }
+
+    /// <summary>The four corner radii, CSS-clamped; false when the box is square.</summary>
+    private static bool Radii(OffThread.Box rs, float w, float h, float inset, out float tl, out float tr, out float br, out float bl)
+    {
+        tl = rs.borderTopLeftRadius;
+        tr = rs.borderTopRightRadius;
+        br = rs.borderBottomRightRadius;
+        bl = rs.borderBottomLeftRadius;
         // CSS: when adjacent radii overflow a side, all radii scale down together. A
         // rounded rect whose radius exceeds half its height is self-intersecting, and the
         // tessellator says so in the log for every frame of a bar growing from 0%.
@@ -2385,11 +2426,7 @@ internal static class VectorEmitter
         tr = Mathf.Max(0f, tr * f + inset);
         br = Mathf.Max(0f, br * f + inset);
         bl = Mathf.Max(0f, bl * f + inset);
-        if (tl <= 0.01f && tr <= 0.01f && br <= 0.01f && bl <= 0.01f)
-            return string.Empty;
-        if (Mathf.Approximately(tl, tr) && Mathf.Approximately(tl, br) && Mathf.Approximately(tl, bl))
-            return " rx=" + F(tl);
-        return " rx=[" + F(tl) + "," + F(tr) + "," + F(br) + "," + F(bl) + "]";
+        return !(tl <= 0.01f && tr <= 0.01f && br <= 0.01f && bl <= 0.01f);
     }
 
     /// <summary>
@@ -2475,7 +2512,7 @@ internal static class VectorEmitter
         }
         var track = rs.backgroundColor.a > 0.002f ? rs.backgroundColor : new Color(0.14f, 0.19f, 0.29f);
         var rx = rs.borderTopLeftRadius > 0.01f ? rs.borderTopLeftRadius : h * 0.5f;
-        ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).Append(Radius(rs, w, h)).Append(rs.borderTopLeftRadius > 0.01f ? string.Empty : " rx=" + F(rx)).Append(" f=").AppendHex(track).Append('\n');
+        ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).AppendRadius(rs, w, h).Append(rs.borderTopLeftRadius > 0.01f ? string.Empty : " rx=" + F(rx)).Append(" f=").AppendHex(track).Append('\n');
         ctx.Out.Nodes++;
         if (float.IsNaN(value) && control == "progress")
         {
@@ -2848,7 +2885,7 @@ internal static class VectorEmitter
         var f = fit switch { "cover" => "cover", "contain" or "scale-down" => "contain", _ => "fill" };
         src = HtmlRenderer.ResolveUrl(src, ctx.Built);
         ctx.Body.Append(indent).Append("IMG x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
-            .Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=").Append(f).Append(Radius(rs, w, h));
+            .Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=").Append(f).AppendRadius(rs, w, h);
         if (rs.opacity < 0.999f) ctx.Body.Append(" o=").AppendNum(rs.opacity);
         ctx.Body.Append(nodeId).Append('\n');
         ctx.Out.Nodes++;
@@ -3052,7 +3089,7 @@ internal static class VectorEmitter
                 shift = "+mod(t*" + F(delta / spec.Duration) + "+" + F(period * 1000f) + "," + F(period) + ")";
         }
         var id = "stripes" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
-        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).Append(Radius(rs, w, h)).Append(" }\n");
+        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).AppendRadius(rs, w, h).Append(" }\n");
         ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
         var count = Mathf.CeilToInt(span / period) + 2;
         var origin = (horizontal ? x : y) - period; // one period before the box so a shift never shows a gap
@@ -3109,15 +3146,26 @@ internal static class VectorEmitter
     private static string shadowOf(Dictionary<string, string> css, string filterShadow) => (css.TryGetValue("box-shadow", out var s) ? Shadows(s) : string.Empty) + filterShadow;
 
     /// <summary>corner-shape: the box outline as a P with bevel, scoop or notch corners at the border radii; null for round/square.</summary>
+    /// <summary>Any corner-*-shape declaration at all. Asked first because every element asks
+    /// CornerPath every frame, and composing the nine property names to find none is a dozen
+    /// string allocations per element.</summary>
+    private static bool AnyCornerShape(Dictionary<string, string> css)
+    {
+        foreach (var kv in css)
+            if (kv.Key.StartsWith("corner-", StringComparison.Ordinal)) return true;
+        return false;
+    }
+
     private static string? CornerPath(Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, float h)
     {
+        if (!AnyCornerShape(css)) return null;  // round corners keep their rx and are drawn by the vector mod's own arcs
         // corner-shape takes one to four values (top-left, top-right, bottom-right, bottom-left, as
         // border-radius); corner-<side>-shape and corner-<corner>-shape override per corner
         var all = css.TryGetValue("corner-shape", out var cs) ? cs.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries) : Array.Empty<string>();
         string Nth(int i) => all.Length == 0 ? "round" : all.Length == 1 ? all[0] : all.Length == 2 ? all[i % 2] : all.Length == 3 ? (i == 3 ? all[1] : all[i]) : all[i];
         string ShapeFor(string corner, string sideA, string sideB, int i)
         {
-            if (css.TryGetValue("corner-" + corner + "-shape", out var v) || css.TryGetValue("corner-" + sideA + "-shape", out v) || css.TryGetValue("corner-" + sideB + "-shape", out v)) return v.Trim().ToLowerInvariant();
+            if (css.TryGetValue("corner-" + corner + "-shape", out var v) || css.TryGetValue("corner-" + sideA + "-shape", out v) || css.TryGetValue("corner-" + sideB + "-shape", out v)) return Lower(v);
             return Nth(i);
         }
         var sTL = ShapeFor("top-left", "top", "left", 0); var sTR = ShapeFor("top-right", "top", "right", 1);
@@ -3284,8 +3332,25 @@ internal static class VectorEmitter
     }
 
     /// <summary>The cascaded declarations of a pseudo-element of an element, for the ones with no generated node (scrollbars, first-line).</summary>
+    /// <summary>Read-only answer for a pseudo-element no rule mentions.</summary>
+    private static readonly Dictionary<string, string> NoPseudoCss = new(StringComparer.Ordinal);
+
     private static Dictionary<string, string> PseudoCss(Ctx ctx, VisualElement ve, string pseudo)
     {
+        // Which pseudo-elements the page styles at all, collected once per stylesheet: without
+        // this every label built a probe node and walked every rule, on every frame.
+        if (!ReferenceEquals(ctx.PseudosOf, ctx.Built) || ctx.PseudosRules != ctx.Built.Rules.Count)
+        {
+            var names = ctx.Pseudos ??= new HashSet<string>(StringComparer.Ordinal);
+            names.Clear();
+            foreach (var rule in ctx.Built.Rules)
+                foreach (var sel in rule.Selectors)
+                    if (sel.Chain[sel.Chain.Count - 1].PseudoElement is { } pe) names.Add(pe);
+            ctx.PseudosOf = ctx.Built;
+            ctx.PseudosRules = ctx.Built.Rules.Count;
+        }
+        if (!ctx.Pseudos!.Contains(pseudo)) return NoPseudoCss;
+
         var css = new Dictionary<string, string>(StringComparer.Ordinal);
         if (!ctx.Built.NodeOf.TryGetValue(ve, out var node)) return css;
         var probe = new HtmlNode { Tag = "span", Parent = node };
@@ -3475,26 +3540,61 @@ internal static class VectorEmitter
 
     private static string Quote(string v) => v.StartsWith("=", StringComparison.Ordinal) ? "\"" + v + "\"" : v;
 
-    private static string BorderStyle(Dictionary<string, string> css) => SideStyle(css, "top", 0);
+    private static string BorderStyle(Dictionary<string, string> css) => SideStyle(css, 0);
 
     private static bool IsBorderStyle(string p) => p is "solid" or "dashed" or "dotted" or "double" or "groove" or "ridge" or "inset" or "outset" or "none" or "hidden";
 
-    /// <summary>One side's border style: border-&lt;side&gt;-style, then the border-&lt;side&gt; shorthand, then border-style (1-4 values), then the border shorthand, else solid.</summary>
-    private static string SideStyle(Dictionary<string, string> css, string side, int index)
+    /// <summary>The property names per side, composed once: a page emits every frame, and
+    /// "border-" + side + "-style" is four string allocations per element per frame.</summary>
+    private static readonly string[] SideStyleKeys = { "border-top-style", "border-right-style", "border-bottom-style", "border-left-style" };
+    private static readonly string[] SideKeys = { "border-top", "border-right", "border-bottom", "border-left" };
+
+    /// <summary>The four sides' styles, into a buffer reused per thread: this runs on every element of every frame.</summary>
+    [ThreadStatic] private static string[]? _sideStyles;
+    private static string[] SideStyles(Dictionary<string, string> css)
     {
-        if (css.TryGetValue("border-" + side + "-style", out var own)) return own.Trim().ToLowerInvariant();
-        if (css.TryGetValue("border-" + side, out var sh))
-            foreach (var p in sh.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                if (IsBorderStyle(p)) return p;
+        var s = _sideStyles ??= new string[4];
+        for (var i = 0; i < 4; i++) s[i] = SideStyle(css, i);
+        return s;
+    }
+
+    /// <summary>One side's border style: border-&lt;side&gt;-style, then the border-&lt;side&gt; shorthand, then border-style (1-4 values), then the border shorthand, else solid.</summary>
+    private static string SideStyle(Dictionary<string, string> css, int index)
+    {
+        if (css.TryGetValue(SideStyleKeys[index], out var own)) return Lower(own);
+        if (css.TryGetValue(SideKeys[index], out var sh) && StyleWord(sh) is { } shw) return shw;
         if (css.TryGetValue("border-style", out var bs))
         {
-            var parts = bs.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var parts = Lower(bs).Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length > 0) return StyleApplier.SideOf(parts, index);
         }
-        if (css.TryGetValue("border", out var b))
-            foreach (var p in b.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                if (IsBorderStyle(p)) return p;
+        if (css.TryGetValue("border", out var b) && StyleWord(b) is { } bw) return bw;
         return "solid";
+    }
+
+    private static readonly string[] BorderStyleWords = { "solid", "dashed", "dotted", "double", "groove", "ridge", "inset", "outset", "none", "hidden" };
+
+    /// <summary>The style word in a border shorthand ("1px solid #333"), found without splitting
+    /// it: four sides of every element asked this on every frame, and each ask built an array.</summary>
+    private static string? StyleWord(string value)
+    {
+        var i = 0;
+        while (i < value.Length)
+        {
+            while (i < value.Length && value[i] == ' ') i++;
+            var start = i;
+            while (i < value.Length && value[i] != ' ') i++;
+            var len = i - start;
+            if (len == 0) continue;
+            foreach (var word in BorderStyleWords)
+            {
+                if (word.Length != len) continue;
+                var same = true;
+                for (var k = 0; k < len && same; k++) same = char.ToLowerInvariant(value[start + k]) == word[k];
+                if (same) return word;
+            }
+        }
+        return null;
     }
 
     private static string DashFor(string style, float bw)
@@ -3821,6 +3921,16 @@ internal static class VectorEmitter
         return " id=" + ve.name + (button ? " click=1" : string.Empty);
     }
 
+    /// <summary>The id (and click flag) straight into the buffer: most elements carry one, every frame.</summary>
+    private static StringBuilder AppendNodeId(this StringBuilder sb, Ctx ctx, VisualElement ve)
+    {
+        var button = IsButton(ctx, ve);
+        if (string.IsNullOrEmpty(ve.name) || (ve.name.StartsWith("__", StringComparison.Ordinal) && !button))
+            return sb;
+        sb.Append(" id=").Append(ve.name);
+        return button ? sb.Append(" click=1") : sb;
+    }
+
     private static bool IsButton(Ctx ctx, VisualElement ve)
     {
         return ctx.Built.NodeOf.TryGetValue(ve, out var node)
@@ -3891,6 +4001,9 @@ internal static class VectorEmitter
     /// Writes a number the way <c>F</c> formats it ("0.##"), straight into the buffer. A frame writes
     /// thousands of numbers, and a string each would be most of a page's garbage.
     /// </summary>
+    /// <summary>A tweened value is an expression string; anything else is the plain number.</summary>
+    private static StringBuilder AppendVal(this StringBuilder sb, string? expr, float v) => expr != null ? sb.Append(expr) : sb.AppendNum(v);
+
     private static StringBuilder AppendNum(this StringBuilder sb, float v)
     {
         if (float.IsNaN(v) || float.IsInfinity(v)) return sb.Append(v.ToString("0.##", CultureInfo.InvariantCulture));
@@ -3928,6 +4041,75 @@ internal static class VectorEmitter
         sb.Append(hex[(v >> 4) & 0xF]).Append(hex[v & 0xF]);
     }
 
+
+    /// <summary>
+    /// The first real family in a font-family list, else what its first generic stands for.
+    /// Cached because the answer depends only on the declaration, and every label asked it
+    /// again on every frame: a Split, a Trim per name, and a string for each.
+    /// </summary>
+    private static readonly Dictionary<string, string> FirstFamilies = new(StringComparer.Ordinal);
+    private static string FirstFamily(string family)
+    {
+        lock (FirstFamilies)
+            if (FirstFamilies.TryGetValue(family, out var hit)) return hit;
+        var first = string.Empty;
+        string? generic = null;
+        foreach (var raw in family.Split(','))
+        {
+            var name = raw.Trim().Trim('"', '\'');
+            if (name.Length == 0) continue;
+            if (IsGeneric(name)) { generic ??= StyleApplier.MapGeneric(name); continue; }
+            first = name;
+            break;
+        }
+        if (first.Length == 0 && generic != null) first = generic;
+        lock (FirstFamilies) FirstFamilies[family] = first;
+        return first;
+    }
+
+    /// <summary>"Barlow" + "SemiBold" = "Barlow SemiBold", made once per pair rather than per label per frame.</summary>
+    private static readonly Dictionary<(string, string), string> Joined = new();
+    private static string Join(string family, string suffix)
+    {
+        lock (Joined)
+        {
+            if (Joined.TryGetValue((family, suffix), out var hit)) return hit;
+            var made = family + " " + suffix;
+            Joined[(family, suffix)] = made;
+            return made;
+        }
+    }
+
+    /// <summary>
+    /// value.Trim().ToLowerInvariant(), cached by the declaration text: the same values are
+    /// read on every element on every frame, and each read allocated its own copy. Cleared
+    /// when it grows past a page's worth, so a script writing fresh values cannot fill it.
+    /// </summary>
+    private static readonly Dictionary<string, string> Lowered = new(StringComparer.Ordinal);
+    private static string Lower(string v)
+    {
+        lock (Lowered)
+        {
+            if (Lowered.TryGetValue(v, out var hit)) return hit;
+            if (Lowered.Count > 4096) Lowered.Clear();
+            var made = v.Trim().ToLowerInvariant();
+            Lowered[v] = made;
+            return made;
+        }
+    }
+
+    /// <summary>The indent for a depth, made once: every element wrote a fresh string of spaces per frame.</summary>
+    private static readonly List<string> Indents = new() { string.Empty };
+    private static string Indent(int depth)
+    {
+        if (depth < 0) depth = 0;
+        lock (Indents)
+        {
+            while (Indents.Count <= depth) Indents.Add(new string(' ', Indents.Count * 2));
+            return Indents[depth];
+        }
+    }
+
     private static string F(float v)
     {
         return v.ToString("0.##", CultureInfo.InvariantCulture);
@@ -3948,6 +4130,20 @@ internal static class VectorEmitter
             yield return (name, args);
             i = close + 1;
         }
+    }
+
+    /// <summary>Commas outside brackets, counted without splitting: the layered-background test asks this of every background, every frame.</summary>
+    private static int TopLevelCommas(string v)
+    {
+        var depth = 0;
+        var n = 0;
+        foreach (var c in v)
+        {
+            if (c == '(') depth++;
+            else if (c == ')') depth--;
+            else if (c == ',' && depth == 0) n++;
+        }
+        return n;
     }
 
     private static List<string> SplitTopLevelCommas(string v)

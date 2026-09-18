@@ -1,0 +1,7 @@
+bin/
+obj/
+out/
+probe/
+scene.txt
+scene_before.txt
+scene_after.txt

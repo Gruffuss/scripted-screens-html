@@ -16,6 +16,8 @@ internal static class HtmlConfig
     private static ConfigFile? _file;
     private static ConfigEntry<bool>? _diagnostics;
     private static ConfigEntry<bool>? _dumpScenes;
+    private static ConfigEntry<float>? _gcSliceMs;
+    private static ConfigEntry<bool>? _cullOffScreen;
 
     /// <summary>
     /// Per-page statistics every five seconds and the informational log lines (page built,
@@ -68,5 +70,32 @@ internal static class HtmlConfig
             "seconds while only values change. Development tool for reading exactly what the " +
             "translation produced; each file is overwritten, not appended. Leave it off for normal play.");
 
+        _cullOffScreen = _file.Bind(
+            "Performance", "CullOffScreen", true,
+            "Stop laying out, running and translating a page whose console nobody can see, and run " +
+            "it a couple of times a second instead so its clock, timers and data keep up; it emits " +
+            "at once when it comes back into view. This is about the work this mod does, not about " +
+            "what the vector mod draws, so it is independent of that mod's own CullOffScreen; " +
+            "a screen capture still translates the page there and then, so captures are unaffected. " +
+            "Turn it off if a page must keep running at full rate while out of sight.");
+
+        _gcSliceMs = _file.Bind(
+            "Performance", "GCTimeSliceMs", 0f,
+            "Experimental, and it changes a setting for the whole game, not just this mod. " +
+            "Stationeers runs Unity's incremental garbage collector with a 3 ms slice per frame " +
+            "(gc-max-time-slice in boot.config); when allocation outruns those slices the collector " +
+            "falls back to one long stop-the-world pause, which is the stutter you see every few " +
+            "seconds. A bigger slice gives it more room to keep up, at the cost of that much frame " +
+            "time while a collection is in progress. 0 leaves the game's own setting alone. " +
+            "Measured on Stationeers with one animated page: raising it to 8 ms changed nothing " +
+            "(14 of 43 five-second windows held a frame over 25 ms, the same as at 3 ms), so the " +
+            "pause is not the mark phase running out of slices. Kept because it costs nothing to " +
+            "leave off and the answer may differ on another machine or another build.");
     }
+
+    /// <summary>The incremental GC slice to ask Unity for, in milliseconds; 0 to leave the game's own.</summary>
+    internal static float GCTimeSliceMs => _gcSliceMs?.Value ?? 0f;
+
+    /// <summary>Whether a page whose console is out of view drops to a heartbeat.</summary>
+    internal static bool CullOffScreen => _cullOffScreen?.Value ?? true;
 }

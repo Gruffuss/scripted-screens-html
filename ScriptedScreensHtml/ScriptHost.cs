@@ -359,12 +359,20 @@ internal sealed class ScriptHost : IDisposable
         var origin = elements.TryGetValue("body", out var body) ? body.worldBound.position : UnityEngine.Vector2.zero;
         foreach (var kv in elements)
         {
+            // Written only when it moved: a concurrent dictionary allocates a node per set, and
+            // this runs over every element of the page on every frame while most of them sit still.
             var r = kv.Value.contentRect;
             if (!float.IsNaN(r.width) && !float.IsNaN(r.height))
-                _sizes[kv.Key] = (r.width, r.height);
+            {
+                var size = (r.width, r.height);
+                if (!_sizes.TryGetValue(kv.Key, out var wasSize) || wasSize != size) _sizes[kv.Key] = size;
+            }
             var wb = kv.Value.worldBound;
             if (!float.IsNaN(wb.width) && !float.IsNaN(wb.height))
-                _rects[kv.Key] = (wb.x - origin.x, wb.y - origin.y, wb.width, wb.height);
+            {
+                var rect = (wb.x - origin.x, wb.y - origin.y, wb.width, wb.height);
+                if (!_rects.TryGetValue(kv.Key, out var wasRect) || wasRect != rect) _rects[kv.Key] = rect;
+            }
         }
     }
 
@@ -1039,11 +1047,11 @@ function __ctx(id){
 }
 function __flushCanvases(){ for (var k in __canvases) { var c = __canvases[k]; if (c.__cmds.length) c.__flush(); } }
 
-var __textCache = {}, __htmlCache = {}, __styleCache = {}, __scrollCache = {};
+var __textCache = {}, __htmlCache = {}, __styleCache = {}, __scrollCache = {}, __styleProxies = {};
 // one element object per id, as a browser returns the same object for the same element (and building one is not cheap)
 var __elShims = {};
 // an element that leaves the page takes its cached state with it (an element added later under the same id starts clean)
-function __forget(id){ delete __elShims[id]; delete __styleCache[id]; delete __textCache[id]; delete __htmlCache[id]; }
+function __forget(id){ delete __elShims[id]; delete __styleCache[id]; delete __styleProxies[id]; delete __textCache[id]; delete __htmlCache[id]; }
 // ---- readiness: after the page script, as a browser fires them after parsing ----
 document_readyState = 'loading';
 function __ready(){
@@ -1151,19 +1159,22 @@ function Option(text, value, defaultSelected, selected){ var o = __detached('opt
 window.requestIdleCallback = function(fn){ return setTimeout(function(){ fn({ timeRemaining: function(){ return 10; }, didTimeout: false }); }, 1); }; window.cancelIdleCallback = clearTimeout;
 window.self = window; window.top = window; window.parent = window; window.frames = [];
 function __styleProxy(id){
+  var kept = __styleProxies[id];
+  if (kept) return kept;
   var cache = __styleCache[id] = __styleCache[id] || {};
   var target = {
-    setProperty: function(p, v){ p = __kebab(p); if (cache[p] === String(v)) return; cache[p] = String(v); __setStyle(id, p, String(v)); },
+    setProperty: function(p, v){ p = __kebab(p); var sv = String(v); if (cache[p] === sv) return; cache[p] = sv; __setStyle(id, p, sv); },
     getPropertyValue: function(p){ p = __kebab(p); return cache[p] !== undefined ? cache[p] : ''; },
     removeProperty: function(p){ p = __kebab(p); var old = cache[p]; delete cache[p]; __setStyle(id, p, ''); return old || ''; },
     get cssText(){ var s = ''; for (var k in cache) s += k + ': ' + cache[k] + '; '; return s.trim(); },
     set cssText(v){ String(v).split(';').forEach(function(d){ var i = d.indexOf(':'); if (i > 0) target.setProperty(d.slice(0, i).trim(), d.slice(i + 1).trim()); }); },
     get length(){ return Object.keys(cache).length; }
   };
-  return new Proxy(target, {
-    set: function(t, p, v){ if (p in t) { t[p] = v; return true; } var k = __kebab(String(p)); if (cache[k] === String(v)) return true; cache[k] = String(v); __setStyle(id, k, String(v)); return true; },
+  __styleProxies[id] = new Proxy(target, {
+    set: function(t, p, v){ if (p in t) { t[p] = v; return true; } var k = __kebab(p); var sv = String(v); if (cache[k] === sv) return true; cache[k] = sv; __setStyle(id, k, sv); return true; },
     get: function(t, p){ if (p in t) return t[p]; var k = __kebab(String(p)); return cache[k] !== undefined ? cache[k] : ''; }
   });
+  return __styleProxies[id];
 }
 // ---- Element.animate: the keyframe runner the page's CSS animations use ----
 function __toFrames(keyframes){
@@ -1269,7 +1280,7 @@ function __el(id){
     get style(){ return __styleProxy(id); },
     set textContent(v){ if (__textCache[id] === String(v) && __htmlCache[id] === undefined) return; __textCache[id] = String(v); delete __htmlCache[id]; __setText(id, String(v)); }, get textContent(){ return __textCache[id] !== undefined ? __textCache[id] : __textOf(id); },
     set innerText(v){ el.textContent = v; }, get innerText(){ return el.textContent; },
-    set innerHTML(v){ __htmlCache[id] = String(v); delete __textCache[id]; var gone = __setHtml(id, String(v)); if (gone) for (var gi = 0; gi < gone.length; gi++) { var g = gone[gi]; delete __elListeners[g]; delete __elHandlers[g]; delete __htmlCache[g]; delete __textCache[g]; delete __styleCache[g]; delete __elShims[g]; } }, get innerHTML(){ return __htmlCache[id] !== undefined ? __htmlCache[id] : __htmlOf(id, false); },
+    set innerHTML(v){ __htmlCache[id] = String(v); delete __textCache[id]; var gone = __setHtml(id, String(v)); if (gone) for (var gi = 0; gi < gone.length; gi++) { var g = gone[gi]; delete __elListeners[g]; delete __elHandlers[g]; delete __htmlCache[g]; delete __textCache[g]; delete __styleCache[g]; delete __styleProxies[g]; delete __elShims[g]; } }, get innerHTML(){ return __htmlCache[id] !== undefined ? __htmlCache[id] : __htmlOf(id, false); },
     get outerHTML(){ return __htmlOf(id, true); },
     get children(){ return __children(id).map(__el); }, get childNodes(){ return __children(id).map(__el); },
     get childElementCount(){ return __children(id).length; },
@@ -1348,7 +1359,8 @@ function __el(id){
 // to a live one, and forwards its writes by id from then on ----
 var __jsSeq = 0;
 function __escape(s){ return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/""/g, '&quot;'); }
-function __kebab(p){ return String(p).replace(/[A-Z]/g, function(m){ return '-' + m.toLowerCase(); }); }
+var __kebabCache = {};
+function __kebab(p){ var k = String(p); var hit = __kebabCache[k]; if (hit !== undefined) return hit; var out = k.replace(/[A-Z]/g, function(m){ return '-' + m.toLowerCase(); }); __kebabCache[k] = out; return out; }
 function __serialize(c, noIds){
   if (!c.__tag) return __escape(String(c.textContent || ''));
   if (c.__frag) return c.__html !== null ? c.__html : c.__children.map(function(x){ return __serialize(x, noIds); }).join('');

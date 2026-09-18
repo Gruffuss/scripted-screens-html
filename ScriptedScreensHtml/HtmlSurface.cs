@@ -142,10 +142,97 @@ internal sealed class HtmlSurface : MonoBehaviour
             _scriptPending = false;
             _script.Run(_built?.Script ?? string.Empty);
         }
-        if (_dirty || !_inbox.IsEmpty || _script != null || _animations.Count > 0 || _tweens.Any || AnySvgBlending())
+        // Off screen the vector mod culls its rebuild, so laying the page out, running its script
+        // frame and translating it produces nothing anyone sees - and it is the garbage that makes
+        // the game collect. A hidden page keeps a slow heartbeat (a browser throttles a background
+        // tab the same way) so its clock, timers and state carry on, and it emits at once when it
+        // comes back into view. Queued data and input still arrive on that heartbeat.
+        var lod = VectorBridge.Lod(Time.time);
+        var visible = IsOnScreen(out var screenWidth);
+        var onScreen = visible || !HtmlConfig.CullOffScreen;
+        _hiddenNow = !onScreen;
+        if (onScreen != _wasOnScreen)
+        {
+            _wasOnScreen = onScreen;
+            if (onScreen) { _dirty = true; _dOther++; }   // come back showing the current state, not the last one drawn
+        }
+        // A browser runs requestAnimationFrame at the display rate; this machine draws 73 frames a
+        // second, so a page was laying out, running its script and translating 73 times too. The
+        // vector mod rebuilds at most 60 Hz anyway, so the extra frames were never drawn.
+        // Half a frame of tolerance: a cap just under the display rate would otherwise only ever be
+        // met on every second frame (a 60 Hz cap on a 73 fps display ran the page at 36).
+        var due = onScreen
+            ? Time.time - _lastPageFrame >= FrameInterval(screenWidth, lod) - Time.unscaledDeltaTime * 0.5f
+            : Time.time - _lastHiddenFrame >= HiddenInterval;
+        if (due && (_dirty || !_inbox.IsEmpty || _script != null || _animations.Count > 0 || _tweens.Any || AnySvgBlending()))
+        {
+            if (!onScreen) _lastHiddenFrame = Time.time;
+            _lastPageFrame = Time.time;
             StartFrame(Time.time, LayoutSize());
+        }
         if (_awakeFrames > 0)
             _awakeFrames--;
+    }
+
+    /// <summary>How often a page that nobody can see still runs a frame.</summary>
+    private const float HiddenInterval = 0.5f;
+    private float _lastHiddenFrame;
+    private float _lastPageFrame;
+    /// <summary>Whether the last update found the console out of view (for the diagnostics line).</summary>
+    private bool _hiddenNow;
+    private bool _wasOnScreen = true;
+    private static Camera? _camera;
+
+    /// <summary>
+    /// Is any part of this console's screen in view? The same projection the vector mod culls its
+    /// rebuilds with, so the two agree about what is worth drawing. Unknown counts as visible: a
+    /// page that stops updating reads as a broken mod, while an extra frame only costs frames.
+    /// </summary>
+    /// <summary>Is any part of this console in view, and how wide is it on screen in display pixels (-1 unknown)?</summary>
+    private bool IsOnScreen(out float screenWidth)
+    {
+        screenWidth = -1f;
+        var canvas = GetComponentInParent<Canvas>();
+        if (canvas == null || canvas.renderMode == RenderMode.ScreenSpaceOverlay)
+            return true;
+        var camera = canvas.worldCamera != null ? canvas.worldCamera : (_camera != null ? _camera : _camera = Camera.main);
+        if (camera == null)
+            return true;
+
+        var rt = (RectTransform)transform;
+        var rect = rt.rect;
+        var minX = float.MaxValue; var minY = float.MaxValue;
+        var maxX = float.MinValue; var maxY = float.MinValue;
+        var anyInFront = false;
+        for (var i = 0; i < 4; i++)
+        {
+            var corner = new Vector3(i is 0 or 3 ? rect.xMin : rect.xMax, i is 0 or 1 ? rect.yMin : rect.yMax, 0f);
+            var projected = camera.WorldToScreenPoint(rt.TransformPoint(corner));
+            if (projected.z <= 0.01f) continue;
+            anyInFront = true;
+            minX = Mathf.Min(minX, projected.x); minY = Mathf.Min(minY, projected.y);
+            maxX = Mathf.Max(maxX, projected.x); maxY = Mathf.Max(maxY, projected.y);
+        }
+        if (!anyInFront)
+            return false;
+        screenWidth = maxX - minX;
+        const float margin = 64f;
+        return maxX >= -margin && minX <= Screen.width + margin && maxY >= -margin && minY <= Screen.height + margin;
+    }
+
+    /// <summary>
+    /// How often a page is worth running: whatever the vector mod will actually rebuild. Its cap
+    /// applies always; its distance curve only when its own rate LOD is on, with its threshold and
+    /// floor, so turning that off in its config gives full-rate pages again. Unknown size means
+    /// full rate, since a page that stops updating reads as a broken mod.
+    /// </summary>
+    private static float FrameInterval(float screenWidth, (bool cull, bool rateLod, float maxHz, float minHz, float fullPixels) lod)
+    {
+        var maxHz = Mathf.Max(1f, lod.maxHz);
+        if (!lod.rateLod || screenWidth < 0f || screenWidth >= lod.fullPixels)
+            return 1f / maxHz;
+        var t = Mathf.Sqrt(Mathf.Clamp01(screenWidth / Mathf.Max(1f, lod.fullPixels)));  // held up near the threshold, as the vector mod's curve is
+        return 1f / Mathf.Max(1f, Mathf.Lerp(lod.minHz, maxHz, t));
     }
 
     private bool AnySvgBlending()
@@ -713,7 +800,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             var emits = page._emits - page._emitsAtReport;
             page._emitsAtReport = page._emits;
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
-                $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
+                $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, {(page._hiddenNow ? "hidden, " : string.Empty)}last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
                 + $"(layout {page._lastLayoutMs:0.00} + copy {page._lastCopyMs:0.00}, translate {page._lastTranslateMs:0.0}; page thread {page._workerMsTotal / ReportIntervalSeconds:0.0} ms/s; game thread waited {page._heldMs:0.00} ms), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
                 + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}"
                 + $", allocated per emit: step {page._allocStep / 1024f / Mathf.Max(1, emits):0} KB, layout {page._allocLayout / 1024f / Mathf.Max(1, emits):0} KB, copy {page._allocCopy / 1024f / Mathf.Max(1, emits):0} KB, translate {page._allocTranslate / 1024f / Mathf.Max(1, emits):0} KB, send {page._allocSend / 1024f / Mathf.Max(1, emits):0} KB (of translate: emit {page._allocEmit / 1024f / Mathf.Max(1, emits):0} KB, split {page._allocSplit / 1024f / Mathf.Max(1, emits):0} KB)");
