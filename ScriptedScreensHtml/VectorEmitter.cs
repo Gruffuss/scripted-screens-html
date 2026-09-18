@@ -71,7 +71,31 @@ internal static class VectorEmitter
         public StringBuilder Body = new();
         public StringBuilder Defs = new();
         public HtmlRenderer.Result Built = null!;
+        /// <summary>
+        /// Def ids are minted per element: "grad7_2" is the second gradient of element 7, not the
+        /// ninth gradient of the page. A single counter made an element's text depend on how many
+        /// defs every earlier element happened to need, so one element gaining a gradient rewrote
+        /// every id after it - a new template, and a whole structure resent, for nothing.
+        /// </summary>
         public int Ids;
+        private int _element, _seq;
+
+        /// <summary>Mint this element's ids from now on; the caller restores what was current.</summary>
+        public (int element, int seq) Enter(int index)
+        {
+            var was = (_element, _seq);
+            _element = index;
+            _seq = 0;
+            return was;
+        }
+
+        public void Leave((int element, int seq) was) { _element = was.element; _seq = was.seq; }
+
+        public string NextId(string prefix)
+        {
+            var n = ++_seq;
+            return prefix + _element.ToString(CultureInfo.InvariantCulture) + "_" + n.ToString(CultureInfo.InvariantCulture);
+        }
         public readonly Output Out = new();
         public HashSet<string> Reported = new(StringComparer.Ordinal);
         public Tweens? Tw;
@@ -211,6 +235,9 @@ internal static class VectorEmitter
         // backface-visibility: hidden with a rotateX/rotateY past 90 degrees: the back of the card, not drawn
         if (css.TryGetValue("backface-visibility", out var bfv) && bfv.Trim() == "hidden" && css.TryGetValue("transform", out var bft) && BackfaceTurned(bft))
             return;
+        // From here on this element mints its own def ids and nothing returns early, so the
+        // restore below always runs.
+        var outerIds = ctx.Enter(ctx.Built.EmitIndexOf(ve));
         var ws = tw?.Lerp(tw.From.Rect.width, w);
         var hs = tw?.Lerp(tw.From.Rect.height, h);
 
@@ -357,7 +384,7 @@ internal static class VectorEmitter
             else if (tw != null && !Tweens.Snap.NearColour(tw.From.Bg, bg) && (tw.From.Bg.a > 0.002f || bg.a > 0.002f) && !(bgCss != null && bgCss.Contains("gradient(")))
             {
                 // A colour transition: a two-stop ramp sampled over the tween's clock (vector requirement 1)
-                var gid = "tw" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+                var gid = ctx.NextId("tw");
                 ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[[0,").AppendHex(tw.From.Bg).Append("],[1,").AppendHex(bg).Append("]]\n");
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
                     .AppendRadius(rs, w, h).Append(" f=@").Append(gid).Append(" fat==").Append(tw.P).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
@@ -513,7 +540,7 @@ internal static class VectorEmitter
                     ch = Mathf.Max(ch, cl.yMax + OffThread.Of(child).marginBottom);
                 }
                 ch += rs.paddingBottom;
-                ctx.Body.Append(indent).Append("SC id=").Append(string.IsNullOrEmpty(ve.name) ? "scroll" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture) : ve.name)
+                ctx.Body.Append(indent).Append("SC id=").Append(string.IsNullOrEmpty(ve.name) ? ctx.NextId("scroll") : ve.name)
                     .Append(" x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
                     .Append(" ch=").AppendNum(Mathf.Max(ch, h)).AppendRadius(rs, w, h);
                 if (ctx.ScrollSet != null && !string.IsNullOrEmpty(ve.name) && ctx.ScrollSet.TryGetValue(ve.name, out var ss))
@@ -526,7 +553,7 @@ internal static class VectorEmitter
             }
             else
             {
-                var id = "clip" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+                var id = ctx.NextId("clip");
                 var margin = css.TryGetValue("overflow-clip-margin", out var ocm) ? StyleApplier.Num(ocm) : 0f;  // the clip box grown by overflow-clip-margin
                 ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x - margin).Append(" y=").AppendNum(y - margin)
                     .Append(" w=").AppendNum(w + 2f * margin).Append(" h=").AppendNum(h + 2f * margin).AppendRadius(rs, w + 2f * margin, h + 2f * margin).Append(" }\n");
@@ -1226,7 +1253,7 @@ internal static class VectorEmitter
             stops.Add((pos, c));
         }
         if (stops.Count < 2) return null;
-        var id = "rad" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+        var id = ctx.NextId("rad");
         ctx.Defs.Append("  GR id=").Append(id).Append(" units=bbox cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" r=").AppendNum(r).Append(" stops=[");
         for (var i = 0; i < stops.Count; i++)
         {
@@ -1270,7 +1297,7 @@ internal static class VectorEmitter
                 ctx.Out.Nodes++;
                 return;
             }
-            var gid = "grad" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+            var gid = ctx.NextId("grad");
             GradientDefLine(ctx, gid, dx, dy, 0f, 1f, stops);
             ctx.Body.Append(indent).Append('R').Append(rect).Append(" f=@").Append(gid).AppendNodeId(ctx, ve).Append('\n');
             ctx.Out.Nodes++;
@@ -1300,7 +1327,7 @@ internal static class VectorEmitter
             if (seg < cuts.Count) poly = ClipHalfPlane(poly, nx, ny, (p1 - 0.5f) + nx * cx + ny * cy, false);
             if (poly.Count < 3) continue;
 
-            var cid = "cut" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+            var cid = ctx.NextId("cut");
             ctx.Defs.Append("  CP id=").Append(cid).Append(" { Y p=[");
             for (var i = 0; i < poly.Count; i++)
             {
@@ -1319,7 +1346,7 @@ internal static class VectorEmitter
             }
             else
             {
-                var gid = "grad" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+                var gid = ctx.NextId("grad");
                 var local = new List<(float at, Color c)>(part.Count);
                 foreach (var st in part) local.Add(((st.at - p0) / (p1 - p0), st.c));
                 GradientDefLine(ctx, gid, dx, dy, p0, p1, local);
@@ -1544,13 +1571,13 @@ internal static class VectorEmitter
             var (angle, stops) = textGrad.Value;
             var rad = angle * Mathf.Deg2Rad;
             var len = w * Mathf.Abs(Mathf.Sin(rad)) + h * Mathf.Abs(Mathf.Cos(rad));
-            var gid = "tg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+            var gid = ctx.NextId("tg");
             GradientDefLine(ctx, gid, Mathf.Sin(rad) * len * 0.5f / Mathf.Max(1f, w), -Mathf.Cos(rad) * len * 0.5f / Mathf.Max(1f, h), 0f, 1f, stops);
             sb.Append(" f=@").Append(gid);
         }
         else if (ttw != null && !Tweens.Snap.NearColour(ttw.From.Fg, rs.color))
         {
-            var gid = "tw" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+            var gid = ctx.NextId("tw");
             ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[[0,").AppendHex(ttw.From.Fg).Append("],[1,").AppendHex(rs.color).Append("]]\n");
             sb.Append(" f=@").Append(gid).Append(" fat==").Append(ttw.P);
         }
@@ -1896,7 +1923,7 @@ internal static class VectorEmitter
             ox = x + (w - vb.width * s) * 0.5f;
             oy = y + (h - vb.height * s) * 0.5f;
         }
-        var id = "svg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+        var id = ctx.NextId("svg");
         ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).AppendRadius(OffThread.Of(svg), w, h).Append(" }\n");
 
         // Uniform fit: one scaled group. Non-uniform (preserveAspectRatio="none" on a box of
@@ -2658,7 +2685,7 @@ internal static class VectorEmitter
                     if (stops.Length > 0) stops.Append(',');
                     stops.Append('[').AppendNum(StyleApplier.Num(st.Substring(0, colon))).Append(',').AppendHex(sc).Append(']');
                 }
-                var id = "cg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+                var id = ctx.NextId("cg");
                 float N(int i) => i < parts.Length && float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : 0f;
                 if (s[1] == 'L')
                 {
@@ -2867,7 +2894,7 @@ internal static class VectorEmitter
                     // clip(): the current path as a CP; the rest of this save level goes inside a clip group
                     i += 1;
                     if (path.Length == 0) break;
-                    var id = "cclip" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+                    var id = ctx.NextId("cclip");
                     ctx.Defs.Append("  CP id=").Append(id).Append(" { P d=\"").Append(path.ToString().TrimEnd()).Append("\" }\n");
                     ctx.Body.Append(Ind()).Append("G clip=").Append(id).Append(" {\n");
                     groups++;
@@ -3043,7 +3070,7 @@ internal static class VectorEmitter
             lastAt = at; n++;
         }
         if (n < 2) return null;
-        var id = "conic" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+        var id = ctx.NextId("conic");
         ctx.Defs.Append("  GC id=").Append(id).Append(" units=bbox cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" a=").AppendNum(from).Append(" stops=[").Append(stops).Append("]\n");
         return id;
     }
@@ -3128,7 +3155,7 @@ internal static class VectorEmitter
             if (found && Mathf.Abs(delta) > 0.01f)
                 shift = "+mod(t*" + F(delta / spec.Duration) + "+" + F(period * 1000f) + "," + F(period) + ")";
         }
-        var id = "stripes" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+        var id = ctx.NextId("stripes");
         ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).AppendRadius(rs, w, h).Append(" }\n");
         ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
         var count = Mathf.CeilToInt(span / period) + 2;
@@ -3297,7 +3324,7 @@ internal static class VectorEmitter
             var (angle, stops) = parsed.Value;
             var rad = angle * Mathf.Deg2Rad;
             var len = w * Mathf.Abs(Mathf.Sin(rad)) + h * Mathf.Abs(Mathf.Cos(rad));
-            var gid = "bimg" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+            var gid = ctx.NextId("bimg");
             var cx = x + w * 0.5f; var cy = y + h * 0.5f;
             var hx = Mathf.Sin(rad) * len * 0.5f; var hy = -Mathf.Cos(rad) * len * 0.5f;
             ctx.Defs.Append("  GL id=").Append(gid).Append(" x1=").AppendNum(cx - hx).Append(" y1=").AppendNum(cy - hy).Append(" x2=").AppendNum(cx + hx).Append(" y2=").AppendNum(cy + hy).Append(" stops=[");
@@ -3706,7 +3733,7 @@ internal static class VectorEmitter
         if (open < 0 || !v.EndsWith(")", StringComparison.Ordinal)) return null;
         var name = v.Substring(0, open).Trim().ToLowerInvariant();
         var inner = v.Substring(open + 1, v.Length - open - 2).Trim();
-        var id = "cpath" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+        var id = ctx.NextId("cpath");
         float Along(string s, float size) => s.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(s) / 100f * size : StyleApplier.Num(s);
         // Under a transform the def (scene space, like every CP) is the shape put through it, as a
         // polygon. ponytail: a tweened transform clips at its end position; inset radii are dropped.
@@ -3853,7 +3880,7 @@ internal static class VectorEmitter
         var dx = Mathf.Sin(rad) * len * 0.5f / w;
         var dy = -Mathf.Cos(rad) * len * 0.5f / h;
         var cx = bx + bw * 0.5f; var cy = by + bh * 0.5f;
-        var id = "mask" + (++ctx.Ids).ToString(CultureInfo.InvariantCulture);
+        var id = ctx.NextId("mask");
         ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").AppendNum(cx - dx).Append(" y1=").AppendNum(cy - dy).Append(" x2=").AppendNum(cx + dx).Append(" y2=").AppendNum(cy + dy).Append(" stops=[");
         for (var i = 0; i < g.stops.Count; i++)
         {

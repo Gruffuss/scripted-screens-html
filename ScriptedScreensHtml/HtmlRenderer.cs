@@ -113,6 +113,21 @@ internal static class HtmlRenderer
         /// <summary>Labels whose tabular-figure width pass is attached.</summary>
         internal readonly HashSet<VisualElement> TabularAttached = new();
         public readonly Dictionary<VisualElement, HtmlNode> NodeOf = new();
+
+        /// <summary>
+        /// A number per element, stable for as long as the element lives: what the emitter names its
+        /// defs after, so an element's ids do not move when a sibling gains or loses one.
+        /// </summary>
+        private readonly Dictionary<VisualElement, int> _emitIndex = new();
+        private int _emitIndexNext;
+
+        public int EmitIndexOf(VisualElement ve)
+        {
+            if (_emitIndex.TryGetValue(ve, out var index)) return index;
+            index = ++_emitIndexNext;
+            _emitIndex[ve] = index;
+            return index;
+        }
         public HtmlNode Document = new();
         /// <summary>display: grid containers, laid out by GridLayout once attached.</summary>
         public readonly List<VisualElement> Grids = new();
