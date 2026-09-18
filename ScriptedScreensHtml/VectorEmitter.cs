@@ -102,6 +102,15 @@ internal static class VectorEmitter
         private readonly Stack<List<(int z, int i, VisualElement c)>> _sorting = new();
         private readonly Stack<Dictionary<string, string>> _records = new();
 
+        /// <summary>One transform per depth of the walk: an element's own transform is finished with
+        /// before its children are emitted, and each level below takes the next one.</summary>
+        private readonly List<Xform> _xforms = new();
+        public Xform RentXform(int depth)
+        {
+            while (_xforms.Count <= depth) _xforms.Add(new Xform());
+            return _xforms[depth];
+        }
+
         public List<VisualElement> RentChildren() => _children.Count > 0 ? _children.Pop() : new List<VisualElement>();
         public void Return(List<VisualElement> list) { list.Clear(); _children.Push(list); }
         public List<(int z, int i, VisualElement c)> RentSorting() => _sorting.Count > 0 ? _sorting.Pop() : new List<(int, int, VisualElement)>();
@@ -226,8 +235,8 @@ internal static class VectorEmitter
         }
         // offset-path + offset-distance + offset-rotate: the box moved to its point on the path and turned along it
         var offset = css.TryGetValue("offset-path", out var opath) ? Offset(css, opath, ve, x, y, w, h, tw) : null;
-        var xform = Xform.From(ve, tw, x, y, w, h, offset);
-        if (xform != null) { ctx.Body.Append(indent).Append(xform.Group()).Append(" {\n"); groups++; }
+        var xform = Xform.From(ctx, depth, ve, tw, x, y, w, h, offset);
+        if (xform != null) { ctx.Body.Append(indent); xform.AppendTo(ctx.Body); ctx.Body.Append(" {\n"); groups++; }
         if (css.TryGetValue("transform", out var tcss) && StyleApplier.NeedsMatrix(tcss) && Matrix(tcss, css, x, y, w, h) is { } m)
         {
             // skew(), matrix(), 3D: the whole list composed into one matrix about the origin (vector requirement 13)
@@ -921,7 +930,7 @@ internal static class VectorEmitter
         private Tweens.Tween? _tw;
 
         /// <summary>The element's resolved transform (UI Toolkit has already applied the CSS), tweened if one is running.</summary>
-        public static Xform? From(VisualElement ve, Tweens.Tween? tw, float x, float y, float w, float h, OffsetPlace? offset = null)
+        public static Xform? From(Ctx ctx, int depth, VisualElement ve, Tweens.Tween? tw, float x, float y, float w, float h, OffsetPlace? offset = null)
         {
             var rs = OffThread.Of(ve);
             // Decided before anything is built: most elements have no transform at all, and this
@@ -936,19 +945,20 @@ internal static class VectorEmitter
                            && Mathf.Abs(sx - 1f) < 0.001f && Mathf.Abs(sy - 1f) < 0.001f;
             if (identity && running == null && offset?.Ex == null)
                 return null;
-            return new Xform
-            {
-                Ax = offset?.Ax ?? x + w * 0.5f, Ay = offset?.Ay ?? y + h * 0.5f,
-                Tx = tx, Ty = ty, R = r, Sx = sx, Sy = sy,
-                _ox = offset?.Dx ?? 0f, _oy = offset?.Dy ?? 0f, _or = offset?.Rot ?? 0f,
-                _offset = offset,
-                _tw = running,
-            };
+            var xf = ctx.RentXform(depth);
+            xf.Ax = offset?.Ax ?? x + w * 0.5f; xf.Ay = offset?.Ay ?? y + h * 0.5f;
+            xf.Tx = tx; xf.Ty = ty; xf.R = r; xf.Sx = sx; xf.Sy = sy;
+            xf._ox = offset?.Dx ?? 0f; xf._oy = offset?.Dy ?? 0f; xf._or = offset?.Rot ?? 0f;
+            xf._offset = offset;
+            xf._tw = running;
+            return xf;
         }
 
-        public string Group()
+        /// <summary>Writes the group straight into the scene: this runs on every element that has a
+        /// transform, and building a string for it was most of what an element's wrappers cost.</summary>
+        public void AppendTo(StringBuilder sb)
         {
-            var sb = new StringBuilder("G a=[").AppendNum(Ax).Append(',').AppendNum(Ay).Append(']');
+            sb.Append("G a=[").AppendNum(Ax).Append(',').AppendNum(Ay).Append(']');
             if (_offset?.Ex != null)
             {
                 // the distance tween: the CSS translate/rotate as numbers plus the path expressions.
@@ -956,7 +966,7 @@ internal static class VectorEmitter
                 sb.Append(" t=[\"").Append(_offset.Ex).Append('+').AppendNum(Tx - _ox).Append("\",\"").Append(_offset.Ey).Append('+').AppendNum(Ty - _oy).Append("\"]");
                 sb.Append(" r=").Append(_offset.Er != null ? "\"" + _offset.Er + "+" + F(R - _or) + "\"" : F(R));
                 if (Sx != 1f || Sy != 1f) sb.Append(" s=[").AppendNum(Sx).Append(',').AppendNum(Sy).Append(']');
-                return sb.ToString();
+                return;
             }
             if (_tw != null)
             {
@@ -964,12 +974,11 @@ internal static class VectorEmitter
                 sb.Append(" t=[\"").Append(_tw.Lerp(f.Translate.x + _ox, Tx)).Append("\",\"").Append(_tw.Lerp(f.Translate.y + _oy, Ty)).Append("\"]");
                 sb.Append(" r=").Append(_tw.Lerp(f.Rotate + _or, R));
                 sb.Append(" s=[\"").Append(_tw.Lerp(f.Scale.x, Sx)).Append("\",\"").Append(_tw.Lerp(f.Scale.y, Sy)).Append("\"]");
-                return sb.ToString();
+                return;
             }
             if (Tx != 0f || Ty != 0f) sb.Append(" t=[").AppendNum(Tx).Append(',').AppendNum(Ty).Append(']');
             if (R != 0f) sb.Append(" r=").AppendNum(R);
             if (Sx != 1f || Sy != 1f) sb.Append(" s=[").AppendNum(Sx).Append(',').AppendNum(Sy).Append(']');
-            return sb.ToString();
         }
 
         /// <summary>Scale, rotate, translate about the anchor: the vector G's order.</summary>
