@@ -472,6 +472,7 @@ internal sealed class ScriptHost : IDisposable
                 o.Strict(false);
             });
             _engine.SetValue("__log", new Action<string, string>(Log));
+            _engine.SetValue("__fixed", new Func<double, int, string>(JsNumber.ToFixed));
             _engine.SetValue("__has", new Func<string, bool>(id => { if (_structuralPending > 0) Sync(); return _find(id) != null || _findShape(id) != null; }));
             _engine.SetValue("__parseHtml", new Func<string, string>(html => TreeJson(HtmlParser.Parse(html)))); // DOMParser: the page parser, on the worker
             _engine.SetValue("__query", new Func<string, string[]>(sel => { Sync(); return _query(sel).ToArray(); }));
@@ -1051,7 +1052,7 @@ var __textCache = {}, __htmlCache = {}, __styleCache = {}, __scrollCache = {}, _
 // one element object per id, as a browser returns the same object for the same element (and building one is not cheap)
 var __elShims = {};
 // an element that leaves the page takes its cached state with it (an element added later under the same id starts clean)
-function __forget(id){ delete __elShims[id]; delete __styleCache[id]; delete __styleProxies[id]; delete __textCache[id]; delete __htmlCache[id]; }
+function __forget(id){ __hasCache = {}; delete __elShims[id]; delete __styleCache[id]; delete __styleProxies[id]; delete __textCache[id]; delete __htmlCache[id]; }
 // ---- readiness: after the page script, as a browser fires them after parsing ----
 document_readyState = 'loading';
 function __ready(){
@@ -1359,6 +1360,20 @@ function __el(id){
 // to a live one, and forwards its writes by id from then on ----
 var __jsSeq = 0;
 function __escape(s){ return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/""/g, '&quot;'); }
+// document.getElementById asked the host every time (measured: ~584 bytes of garbage a call,
+// and a page's frame does a handful). A positive answer is remembered until the page changes
+// its own structure; a miss is never remembered, so an id that does not exist yet still asks.
+var __hasCache = {};
+function __hasId(id){ if (__hasCache[id]) return true; var yes = __has(id); if (yes) __hasCache[id] = true; return yes; }
+(function(){
+  var raw = { appendHtml: __appendHtml, insertHtml: __insertHtml, setHtml: __setHtml, remove: __remove };
+  __appendHtml = function(a, b){ __hasCache = {}; return raw.appendHtml(a, b); };
+  __insertHtml = function(a, b, c){ __hasCache = {}; return raw.insertHtml(a, b, c); };
+  __setHtml = function(a, b){ __hasCache = {}; return raw.setHtml(a, b); };
+  __remove = function(a){ __hasCache = {}; return raw.remove(a); };
+})();
+var __toFixedSlow = Number.prototype.toFixed;
+Number.prototype.toFixed = function(d){ d = d === undefined ? 0 : (d | 0); return (d >= 0 && d <= 20) ? __fixed(Number(this), d) : __toFixedSlow.call(this, d); };
 var __kebabCache = {};
 function __kebab(p){ var k = String(p); var hit = __kebabCache[k]; if (hit !== undefined) return hit; var out = k.replace(/[A-Z]/g, function(m){ return '-' + m.toLowerCase(); }); __kebabCache[k] = out; return out; }
 function __serialize(c, noIds){
@@ -1505,7 +1520,7 @@ function __detached(tag){
   });
 }
 var document = {
-  getElementById: function(id){ return __has(id) ? __el(id) : null; },
+  getElementById: function(id){ return __hasId(id) ? __el(id) : null; },
   elementFromPoint: function(x, y){ var id = __elementAt(Number(x) || 0, Number(y) || 0); return id ? __el(id) : null; },
   elementsFromPoint: function(x, y){ var e = document.elementFromPoint(x, y); var out = []; while (e) { out.push(e); e = e.parentElement; } return out; },
   querySelectorAll: function(sel){ return __query(sel).map(__el); },

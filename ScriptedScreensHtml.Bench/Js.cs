@@ -13,6 +13,8 @@ namespace ScriptedScreensHtml.Bench;
 /// </summary>
 internal static class Js
 {
+    internal static long DomBytes, DomCalls, DomChars, PumpBytes, TickBytes, MorphBytes, Morphs;
+
     private static void Attach(HtmlRenderer.Result built)
     {
         foreach (var grid in built.Grids)
@@ -34,13 +36,15 @@ internal static class Js
             m => Console.WriteLine("  warn: " + m),
             (parentId, html) =>
             {
+                var b = GC.GetAllocatedBytesForCurrentThread();
                 if (built.ById.TryGetValue(parentId, out var p) && built.NodeOf.TryGetValue(p, out var pn))
                 {
                     HtmlRenderer.AppendFragment(p, pn, html, built);
                     Attach(built);
                 }
+                DomBytes += GC.GetAllocatedBytesForCurrentThread() - b; DomCalls++; DomChars += html.Length;
             },
-            id => { if (built.ById.TryGetValue(id, out var r)) HtmlRenderer.Remove(r, built); },
+            id => { var b = GC.GetAllocatedBytesForCurrentThread(); if (built.ById.TryGetValue(id, out var r)) HtmlRenderer.Remove(r, built); DomBytes += GC.GetAllocatedBytesForCurrentThread() - b; },
             (id, value) => { },
             id => { },
             (id, offset) => { },
@@ -53,6 +57,18 @@ internal static class Js
                 }
             });
         host.Attach(built, () => { }, size, (ve, frames, spec) => 0, h => { });
+        // the surface's in-place path: an innerHTML write whose structure matches updates the tree
+        // rather than rebuilding it. Without this the bench measures only the slow path.
+        host.TryMorph = (id, html) =>
+        {
+            var b = GC.GetAllocatedBytesForCurrentThread();
+            var ok = built.ById.TryGetValue(id, out var target)
+                     && built.NodeOf.TryGetValue(target, out var targetNode)
+                     && HtmlRenderer.Morph(target, targetNode, html, built, _ => { });
+            MorphBytes += GC.GetAllocatedBytesForCurrentThread() - b;
+            if (ok) { Morphs++; Attach(built); }
+            return ok;
+        };
 
         ScriptedScreensHtmlPlugin.Log ??= new BenchLogger();
         host.Run(built.Script);
@@ -65,12 +81,21 @@ internal static class Js
         for (var i = 0; i < frames; i++)
         {
             // one frame per iteration, so the per-frame figures do not depend on the rate gate
+            var tb = GC.GetTotalAllocatedBytes(precise: true);
             if (host.RunSynchronously(2f + i * 0.016f, built.ById, 2000)) ran++;
+            var pb = GC.GetTotalAllocatedBytes(precise: true);
+            TickBytes += pb - tb;
             host.Pump();
+            PumpBytes += GC.GetTotalAllocatedBytes(precise: true) - pb;
         }
         sw.Stop();
         var bytes = GC.GetTotalAllocatedBytes(precise: true) - before;
         Console.WriteLine($"  script  {bytes / (double)Math.Max(1, ran),10:N0} B   {sw.Elapsed.TotalMilliseconds / Math.Max(1, ran),7:F3} ms per frame ({ran} frames ran)");
+        Console.WriteLine($"          of that: script+timers {TickBytes / (double)Math.Max(1, ran),10:N0} B, applying writes {PumpBytes / (double)Math.Max(1, ran),10:N0} B");
+        if (Morphs > 0 || MorphBytes > 0)
+            Console.WriteLine($"          {Morphs} in-place morphs, {MorphBytes / Math.Max(1, Morphs),10:N0} B each");
+        if (DomCalls > 0)
+            Console.WriteLine($"          {DomCalls} innerHTML/append calls, {DomChars / DomCalls} chars each, {DomBytes / DomCalls,10:N0} B each (parse, cascade, tree)");
         host.Dispose();
     }
 }

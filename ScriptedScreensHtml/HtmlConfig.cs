@@ -11,13 +11,22 @@ namespace ScriptedScreensHtml;
 /// privately constructed file writes a valid .cfg that LaunchPad never shows. Values are
 /// read live, so editing the file takes effect without a restart.
 /// </remarks>
+/// <summary>Who decides whether a page out of view keeps running.</summary>
+internal enum CullChoice
+{
+    /// <summary>Whatever the vector mod does with its own rebuilds.</summary>
+    FollowVectorMod,
+    Always,
+    Never,
+}
+
 internal static class HtmlConfig
 {
     private static ConfigFile? _file;
     private static ConfigEntry<bool>? _diagnostics;
     private static ConfigEntry<bool>? _dumpScenes;
     private static ConfigEntry<float>? _gcSliceMs;
-    private static ConfigEntry<bool>? _cullOffScreen;
+    private static ConfigEntry<CullChoice>? _cullOffScreen;
 
     /// <summary>
     /// Per-page statistics every five seconds and the informational log lines (page built,
@@ -71,13 +80,13 @@ internal static class HtmlConfig
             "translation produced; each file is overwritten, not appended. Leave it off for normal play.");
 
         _cullOffScreen = _file.Bind(
-            "Performance", "CullOffScreen", true,
+            "Performance", "CullOffScreen", CullChoice.FollowVectorMod,
             "Stop laying out, running and translating a page whose console nobody can see, and run " +
             "it a couple of times a second instead so its clock, timers and data keep up; it emits " +
-            "at once when it comes back into view. This is about the work this mod does, not about " +
-            "what the vector mod draws, so it is independent of that mod's own CullOffScreen; " +
-            "a screen capture still translates the page there and then, so captures are unaffected. " +
-            "Turn it off if a page must keep running at full rate while out of sight.");
+            "at once when it comes back into view. A screen capture is unaffected either way: that " +
+            "path translates the page there and then. FollowVectorMod takes the answer from the " +
+            "vector mod's own CullOffScreen, since a page only needs a frame that mod will draw; " +
+            "Always and Never decide it here instead.");
 
         _gcSliceMs = _file.Bind(
             "Performance", "GCTimeSliceMs", 0f,
@@ -97,5 +106,5 @@ internal static class HtmlConfig
     internal static float GCTimeSliceMs => _gcSliceMs?.Value ?? 0f;
 
     /// <summary>Whether a page whose console is out of view drops to a heartbeat.</summary>
-    internal static bool CullOffScreen => _cullOffScreen?.Value ?? true;
+    internal static CullChoice CullOffScreen => _cullOffScreen?.Value ?? CullChoice.FollowVectorMod;
 }

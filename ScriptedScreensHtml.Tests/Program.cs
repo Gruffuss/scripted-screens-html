@@ -337,6 +337,26 @@ void TestSceneSlots()
     Check(Fill(ta, va) == a, $"slots: template plus values is the emitted scene\n{Fill(ta, va)}");
 }
 
+Console.WriteLine("JsNumber");
+{
+    // What a browser prints for each of these; the page script must not see anything else. The
+    // awkward ones are the exact midpoints (JS rounds them away from zero, .NET's "F" to even)
+    // and the values that only look like midpoints once multiplied (1.45 is 1.44999999999999995559).
+    var cases = new (double v, int d, string want)[]
+    {
+        (1.005, 2, "1.00"), (2.5, 0, "3"), (-1.5, 0, "-2"), (0.5, 0, "1"), (1.45, 1, "1.4"),
+        (-0.0001, 2, "-0.00"), (123.456, 2, "123.46"), (0.1, 5, "0.10000"), (9.995, 2, "9.99"),
+        (0.125, 2, "0.13"), (-0.125, 2, "-0.13"), (99.5, 0, "100"), (9.95, 1, "9.9"),
+        (0, 2, "0.00"), (1e21, 2, "1e+21"), (double.NaN, 2, "NaN"),
+        (double.PositiveInfinity, 1, "Infinity"), (double.NegativeInfinity, 1, "-Infinity"),
+    };
+    foreach (var (v, d, want) in cases)
+    {
+        var got = JsNumber.ToFixed(v, d);
+        Check(got == want, $"toFixed: ({v}).toFixed({d}) is \"{want}\"" + (got == want ? string.Empty : $" but was \"{got}\""));
+    }
+}
+
 if (args.Length > 0 && args[0] == "--probe2") { Probe2.Run(); return 0; }
 if (args.Length > 0 && args[0] == "--probe3") { Probe3.Run(); return 0; }
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");

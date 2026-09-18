@@ -75,6 +75,17 @@ internal static class Program
             Console.WriteLine($"  {names[k],-7} {phases[k].bytes / (double)iterations,10:N0} B   {phases[k].ticks / (double)Stopwatch.Frequency * 1000.0 / iterations,7:F3} ms");
         File.WriteAllText("scene.txt", LastScene);
         if (Environment.GetEnvironmentVariable("BENCH_JS") == "1") Js.Run(built, panel, size, iterations);
+        if (Environment.GetEnvironmentVariable("BENCH_PARSE") == "1")
+        {
+            // what it costs merely to read the markup back, with no cascade and no tree: the floor
+            // under an innerHTML update, morphed or not
+            HtmlParser.Parse(html);
+            var b0 = GC.GetAllocatedBytesForCurrentThread();
+            var sw2 = Stopwatch.StartNew();
+            for (var i = 0; i < 20; i++) HtmlParser.Parse(html);
+            sw2.Stop();
+            Console.WriteLine($"  parse   {(GC.GetAllocatedBytesForCurrentThread() - b0) / 20.0,10:N0} B   {sw2.Elapsed.TotalMilliseconds / 20,7:F3} ms for {html.Length} chars");
+        }
         return 0;
     }
 

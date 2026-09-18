@@ -149,7 +149,13 @@ internal sealed class HtmlSurface : MonoBehaviour
         // comes back into view. Queued data and input still arrive on that heartbeat.
         var lod = VectorBridge.Lod(Time.time);
         var visible = IsOnScreen(out var screenWidth);
-        var onScreen = visible || !HtmlConfig.CullOffScreen;
+        var cull = HtmlConfig.CullOffScreen switch
+        {
+            CullChoice.Always => true,
+            CullChoice.Never => false,
+            _ => lod.cull,   // a page only needs a frame the vector mod will draw
+        };
+        var onScreen = visible || !cull;
         _hiddenNow = !onScreen;
         if (onScreen != _wasOnScreen)
         {

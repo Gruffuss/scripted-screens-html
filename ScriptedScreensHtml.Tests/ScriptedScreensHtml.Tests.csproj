@@ -14,6 +14,7 @@
         <Compile Include="..\ScriptedScreensHtml\CssParser.cs" />
         <Compile Include="..\ScriptedScreensHtml\SceneSlots.cs" />
         <Compile Include="..\ScriptedScreensHtml\TextMeasure.cs" />
+        <Compile Include="..\ScriptedScreensHtml\JsNumber.cs" />
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />
         <Compile Include="Probe2.cs" />
