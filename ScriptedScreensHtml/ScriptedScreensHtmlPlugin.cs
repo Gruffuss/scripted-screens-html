@@ -44,6 +44,7 @@ public sealed class ScriptedScreensHtmlPlugin : ModBehaviour
                 HtmlConfig.Load(Config);
             Log.LogInfo(Config != null ? "Diagnostics settings registered with LaunchPad." : "No ConfigFile from LaunchPad; diagnostics stay off.");
             ReportGC();
+            if (HtmlConfig.ProbeV8) V8Probe.Run();
 
             _harmony = new Harmony(PluginInfo.PLUGIN_GUID);
             _harmony.PatchAll(typeof(HtmlElementPatch).Assembly);
@@ -61,6 +62,15 @@ public sealed class ScriptedScreensHtmlPlugin : ModBehaviour
     /// Unity's incremental collector is on; raising that slice was measured and changed nothing,
     /// and a mod has no business reaching further into a setting the whole game shares.
     /// </summary>
+    /// <summary>
+    /// The diagnostics heartbeat. A surface drives it too, but with every console blank there is no
+    /// surface and the heap line stops - which is exactly the reading needed to tell the game's own
+    /// allocation from ours. Costs a comparison per frame when diagnostics are off.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822:Mark members as static",
+        Justification = "Unity calls Update only on an instance method; making it static silently stops it running.")]
+    private void Update() => HtmlSurface.ReportIfDue();
+
     private static void ReportGC()
     {
         try

@@ -78,13 +78,37 @@ internal sealed class ScriptHost : IDisposable
     private volatile bool _rafPending;
     private readonly ManualResetEventSlim _frameFinished = new(true);
 
-    /// <summary>__hasPending: 2 an animation frame, 1 only timers, 0 nothing.</summary>
+    /// <summary>__pending: -1 an animation frame is queued, 0 nothing at all, otherwise the clock of the earliest timer in ms.</summary>
     private void SetPending(Jint.Native.JsValue pending)
     {
-        var level = pending.IsNumber() ? pending.AsNumber() : 0;
-        _hasPendingWork = level > 0;
-        _rafPending = level > 1;
+        var next = pending.IsNumber() ? pending.AsNumber() : 0;
+        _rafPending = next < 0;
+        _nextDueMs = next > 0 && next < int.MaxValue ? (int)next : int.MaxValue;
+        _hasPendingWork = next != 0;
+        _ticked = true;
     }
+
+    /// <summary>The clock the earliest timer is due at, ms, or int.MaxValue when none is.</summary>
+    private volatile int _nextDueMs = int.MaxValue;
+
+    /// <summary>Whether the script has run once, so "nothing pending" is an answer and not just ignorance.</summary>
+    private volatile bool _ticked;
+
+    /// <summary>
+    /// Has the script anything to do at this moment? A page whose animation-frame queue is empty and
+    /// whose timers are not yet due needs no frame at all, exactly as a browser runs none for it - and
+    /// that is nearly every frame for a page stepping a few times a second. Work queued in either
+    /// direction, a frame in flight, or a script that has not ticked once all count as yes, so the
+    /// answer fails toward running a frame rather than toward a console that quietly stops.
+    /// </summary>
+    /// <summary>Which clause of WantsFrame is answering, for the diagnostics line.</summary>
+    public string GateWhy() =>
+        $"ticked {_ticked}, busy {_busy}, requested {_frameRequested}, raf {_rafPending}, toEngine {!_toEngine.IsEmpty}, toMain {!_toMain.IsEmpty}, nextTimer {(_nextDueMs == int.MaxValue ? "none" : _nextDueMs.ToString())}";
+
+    public bool WantsFrame(float nowSeconds) =>
+        !_ticked || _busy || _frameRequested || _rafPending
+        || !_toEngine.IsEmpty || !_toMain.IsEmpty
+        || nowSeconds * 1000f >= _nextDueMs;
     private volatile bool _busy;
     private volatile float _frameNow;
     private float _lastFrameAt = -1f;
@@ -191,7 +215,7 @@ internal sealed class ScriptHost : IDisposable
             _engine!.Execute(script);
             _engine.Invoke("__ready");
             AfterRun();
-            if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: page script done, data handler {_hasDataHandler}, pending work {_hasPendingWork}");
+            if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: page script done, data handler {_hasDataHandler}, pending work {_hasPendingWork}, animation frame {_rafPending}, next timer {(_nextDueMs == int.MaxValue ? "none" : _nextDueMs + " ms")}");
         });
         _wake.Set();
     }
@@ -980,7 +1004,17 @@ function clearTimeout(id){ __timers = __timers.filter(function(t){ return t.id !
 var clearInterval = clearTimeout;
 function requestAnimationFrame(fn){ var id = __nextId++; __rafs.push({id:id, fn:fn}); return id; }
 function cancelAnimationFrame(id){ __rafs = __rafs.filter(function(r){ return r.id !== id; }); }
-function __hasPending(){ return __rafs.length > 0 ? 2 : __timers.length > 0 ? 1 : 0; }
+// What the page is waiting for, so the host can decide whether a frame is needed at all without
+// entering the engine: -1 an animation frame is queued (one per display frame, as a browser does),
+// 0 nothing whatsoever, otherwise the clock of the earliest timer. The list is walked in place - a
+// reduce or a map here would allocate on every tick of every page.
+function __pending(){
+  if (__rafs.length) return -1;
+  var next = 0, has = false;
+  for (var j = 0; j < __timers.length; j++) { var a = __timers[j].at; if (!has || a < next) { next = a; has = true; } }
+  return has ? (next < 1 ? 1 : next) : 0;   // 0 means nothing, so a timer already due reports 1
+}
+function __hasPending(){ return __pending(); }
 // Runs on every frame of every page, so it does nothing it does not have to: no new array for
 // an empty animation-frame queue, and the timer list is walked in place rather than filtered
 // (a filter is a closure and an array per tick, whether or not a page has a single timer).
@@ -997,7 +1031,7 @@ function __tick(now){
     try { t.fn.apply(null, t.args); } catch (e) { console.error(__errText(e)); }
   }
   if (__canvasCount) __flushCanvases();
-  return __rafs.length > 0 ? 2 : __timers.length > 0 ? 1 : 0;
+  return __pending();
 }
 
 // ---- events ----

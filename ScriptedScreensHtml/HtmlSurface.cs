@@ -43,6 +43,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal string DataElementId = string.Empty;
     private bool _dirty;
     private int _dScript, _dAnim, _dTween, _dDom, _dOther;   // dirty causes since the last diagnostics line
+    private int _gateSkips;   // frames the page was due for and wanted nothing from
     private string _lastScene = string.Empty;
     /// <summary>The structure the vector mod has (the scene with its values as $slots), and the values it was last sent.</summary>
     private string? _lastTemplate;
@@ -170,7 +171,13 @@ internal sealed class HtmlSurface : MonoBehaviour
         var due = onScreen
             ? Time.time - _lastPageFrame >= FrameInterval(screenWidth, lod) - Time.unscaledDeltaTime * 0.5f
             : Time.time - _lastHiddenFrame >= HiddenInterval;
-        if (due && (_dirty || !_inbox.IsEmpty || _script != null || _animations.Count > 0 || _tweens.Any || AnySvgBlending()))
+        // A page frame is worth running when something will come of it. Having a <script> is not that:
+        // a page stepping twice a second was laying out, ticking and translating on every display
+        // frame, and 96% of those frames produced a scene identical to the one before.
+        var wanted = _dirty || !_inbox.IsEmpty || (_script?.WantsFrame(Time.time) ?? false)
+                     || _animations.Count > 0 || _tweens.Any || AnySvgBlending();
+        if (due && !wanted) _gateSkips++;
+        if (due && wanted)
         {
             if (!onScreen) _lastHiddenFrame = Time.time;
             _lastPageFrame = Time.time;
@@ -240,6 +247,10 @@ internal sealed class HtmlSurface : MonoBehaviour
         var t = Mathf.Sqrt(Mathf.Clamp01(screenWidth / Mathf.Max(1f, lod.fullPixels)));  // held up near the threshold, as the vector mod's curve is
         return 1f / Mathf.Max(1f, Mathf.Lerp(lod.minHz, maxHz, t));
     }
+
+    /// <summary>What the gate sees right now, for the diagnostics line: which clause is holding frames back.</summary>
+    private string GateWhy() =>
+        $"dirty {_dirty}, inbox {!_inbox.IsEmpty}, script {(_script != null ? _script.GateWhy() : "none")}, runners {_animations.Count}, tweens {_tweens.Any}";
 
     private bool AnySvgBlending()
     {
@@ -784,7 +795,8 @@ internal sealed class HtmlSurface : MonoBehaviour
     private int _lastNodes;
     private int _lastChars;
 
-    private static void ReportIfDue()
+    /// <summary>Also driven by the plugin each frame, so the heap line keeps coming when no page exists: without a reading for "no consoles at all" there is no denominator for what a page costs.</summary>
+    internal static void ReportIfDue()
     {
         if (!HtmlConfig.Diagnostics)
             return;
@@ -808,9 +820,9 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
                 $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, {(page._hiddenNow ? "hidden, " : string.Empty)}last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
                 + $"(layout {page._lastLayoutMs:0.00} + copy {page._lastCopyMs:0.00}, translate {page._lastTranslateMs:0.0}; page thread {page._workerMsTotal / ReportIntervalSeconds:0.0} ms/s; game thread waited {page._heldMs:0.00} ms), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
-                + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}"
+                + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}, gate: {page._gateSkips} skipped, {page.GateWhy()}"
                 + $", allocated per emit: step {page._allocStep / 1024f / Mathf.Max(1, emits):0} KB, layout {page._allocLayout / 1024f / Mathf.Max(1, emits):0} KB, copy {page._allocCopy / 1024f / Mathf.Max(1, emits):0} KB, translate {page._allocTranslate / 1024f / Mathf.Max(1, emits):0} KB, send {page._allocSend / 1024f / Mathf.Max(1, emits):0} KB (of translate: emit {page._allocEmit / 1024f / Mathf.Max(1, emits):0} KB, split {page._allocSplit / 1024f / Mathf.Max(1, emits):0} KB)");
-            page._dScript = page._dAnim = page._dTween = page._dDom = page._dOther = 0;
+            page._dScript = page._dAnim = page._dTween = page._dDom = page._dOther = page._gateSkips = 0;
             page._structureSends = page._patchSends = page._patchSlots = page._morphs = 0;
             page._allocStep = page._allocLayout = page._allocCopy = page._allocTranslate = page._allocSend = page._allocEmit = page._allocSplit = 0;
             page._updateTicks = 0; page._awakeCount = 0; page._translateMsTotal = 0; page._heldMs = 0; page._workerMsTotal = 0;

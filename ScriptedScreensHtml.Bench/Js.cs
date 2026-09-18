@@ -33,6 +33,9 @@ internal static class Js
         for (var i = 0; i < 80; i++) { _host.RunSynchronously(i * 0.016f, built.ById, 500); _host.Pump(); }
     }
 
+    /// <summary>The surface's gate: has this page anything to do at all this frame?</summary>
+    internal static bool Wants(float now) => _host == null || _host.WantsFrame(now);
+
     /// <summary>One script frame, as the game runs one before each emit.</summary>
     internal static void Step(HtmlRenderer.Result built, float now)
     {

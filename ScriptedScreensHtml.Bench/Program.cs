@@ -61,20 +61,24 @@ internal static class Program
         // Warm up: first pass builds every cache the steady state then reuses.
         for (var i = 0; i < 5; i++) Once(panel, root, built, boxes, scratch, tweens, slots, size, i * 0.016f);
 
-        var phases = new (string name, long bytes, long ticks)[4];
-        var names = new[] { "layout", "capture", "emit", "split" };
+        var phases = new (string name, long bytes, long ticks)[5];
+        var names = new[] { "layout", "capture", "emit", "split", "script" };
         long totalBytes = 0;
         var sw = Stopwatch.StartNew();
+        var skipped = 0;
         for (var i = 0; i < iterations; i++)
         {
+            // the surface's own gate: a frame nobody needs is not run at all
+            if (SkipIdle && !Js.Wants(1f + i * 0.016f)) { skipped++; continue; }
             var before = GC.GetAllocatedBytesForCurrentThread();
             var p = Once(panel, root, built, boxes, scratch, tweens, slots, size, 1f + i * 0.016f);
             totalBytes += GC.GetAllocatedBytesForCurrentThread() - before;
-            for (var k = 0; k < 4; k++) { phases[k].bytes += p[k].bytes; phases[k].ticks += p[k].ticks; }
+            for (var k = 0; k < 5; k++) { phases[k].bytes += p[k].bytes; phases[k].ticks += p[k].ticks; }
         }
         sw.Stop();
 
         Console.WriteLine($"{iterations} emits, {built.ById.Count} ids, scene {LastSceneLength} chars");
+        if (SkipIdle) Console.WriteLine($"  gate    {skipped} of {iterations} frames skipped: the page wanted none ({100.0 * skipped / iterations:N0} %)");
         {
             int dirty = 0, kept = 0, total = 0;
             foreach (var b in boxes.Values) { total++; if (b.SubtreeChanged) dirty++; if (b.CacheBody != null) kept++; }
@@ -85,8 +89,10 @@ internal static class Program
         if (Verify) Console.WriteLine(Mismatches == 0 ? $"  PASS  cached and fresh emissions identical over {iterations} frames" : $"  FAIL  {Mismatches} of {iterations} frames differed");
         if (Frames > 0)
             Console.WriteLine($"  slots   {TotalSlots / Frames,10:N0} per frame, {ChangedSlots / (double)Math.Max(1, Frames),7:N1} changed ({100.0 * ChangedSlots / Math.Max(1, TotalSlots),4:N1} %)");
-        Console.WriteLine($"  total   {totalBytes / (double)iterations,10:N0} B   {sw.Elapsed.TotalMilliseconds / iterations,7:F3} ms per emit");
-        for (var k = 0; k < 4; k++)
+        if (Frames > 0)
+            Console.WriteLine($"  idle    {IdleFrames} of {Frames} frames produced a scene identical to the one before ({100.0 * IdleFrames / Frames:N0} %)");
+        Console.WriteLine($"  total   {totalBytes / (double)iterations,10:N0} B   {sw.Elapsed.TotalMilliseconds / iterations,7:F3} ms per display frame");
+        for (var k = 0; k < 5; k++)
             Console.WriteLine($"  {names[k],-7} {phases[k].bytes / (double)iterations,10:N0} B   {phases[k].ticks / (double)Stopwatch.Frequency * 1000.0 / iterations,7:F3} ms");
         File.WriteAllText("scene.txt", LastScene);
         if (js) Js.Run(built, panel, size, iterations);
@@ -106,10 +112,11 @@ internal static class Program
 
     private static int LastSceneLength;
     private static readonly bool Verify = Environment.GetEnvironmentVariable("BENCH_VERIFY") == "1";
+    private static readonly bool SkipIdle = Environment.GetEnvironmentVariable("BENCH_GATE") == "1";
     internal static int Mismatches;
     private const char Newline = (char)10;
     private static readonly Dictionary<string, SceneSlots.Value> Previous = new(StringComparer.Ordinal);
-    private static long TotalSlots, ChangedSlots, Frames;
+    private static long TotalSlots, ChangedSlots, Frames, IdleFrames;
     internal static string LastScene = string.Empty;
 
 
@@ -117,11 +124,15 @@ internal static class Program
         Dictionary<VisualElement, OffThread.Box> boxes, List<VisualElement> scratch, Tweens tweens,
         Dictionary<string, SceneSlots.Value> slots, Vector2 size, float now)
     {
-        var p = new (long bytes, long ticks)[4];
+        var p = new (long bytes, long ticks)[5];
         long b0, t0;
         // the page's own frame first, as in the game: without it the emitter is measured against a
-        // page that never moves, which is not the case anyone cares about
+        // page that never moves, which is not the case anyone cares about. Charged as its own phase
+        // so the script's share carries the SAME denominator as the emitter's - mixing a per-script-
+        // frame figure with a per-display-frame one is how a fictional total gets published.
+        b0 = GC.GetAllocatedBytesForCurrentThread(); t0 = Stopwatch.GetTimestamp();
         Js.Step(built, now);
+        p[4] = (GC.GetAllocatedBytesForCurrentThread() - b0, Stopwatch.GetTimestamp() - t0);
 
         b0 = GC.GetAllocatedBytesForCurrentThread(); t0 = Stopwatch.GetTimestamp();
         panel.Layout(size.x, size.y);
@@ -143,6 +154,7 @@ internal static class Program
         b0 = GC.GetAllocatedBytesForCurrentThread(); t0 = Stopwatch.GetTimestamp();
         SceneSlots.Split(output.Chars, output.Length, slots, "L");
         // how much of a frame's scene is the same as the last one's: the ceiling on any cache
+        var changedBefore = ChangedSlots;
         foreach (var kv in slots)
         {
             TotalSlots++;
@@ -150,6 +162,7 @@ internal static class Program
             Previous[kv.Key] = kv.Value;
         }
         Frames++;
+        if (ChangedSlots == changedBefore) IdleFrames++;   // this frame's scene is the last one's, value for value
         p[3] = (GC.GetAllocatedBytesForCurrentThread() - b0, Stopwatch.GetTimestamp() - t0);
 
         LastSceneLength = output.Length;

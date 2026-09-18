@@ -27,6 +27,7 @@ internal static class HtmlConfig
     private static ConfigEntry<bool>? _dumpScenes;
     private static ConfigEntry<CullChoice>? _cullOffScreen;
     private static ConfigEntry<bool>? _verifyEmitCache;
+    private static ConfigEntry<bool>? _probeV8;
 
     /// <summary>
     /// Per-page statistics every five seconds and the informational log lines (page built,
@@ -96,7 +97,16 @@ internal static class HtmlConfig
             "vector mod's own CullOffScreen, since a page only needs a frame that mod will draw; " +
             "Always and Never decide it here instead.");
 
+        _probeV8 = _file.Bind(
+            "Diagnostics", "ProbeV8", false,
+            "Once at startup, try to load ClearScript's V8 from the mod folder and report what a " +
+            "page frame costs the heap Unity collects. Does nothing unless ClearScript's DLLs have " +
+            "been copied in by hand, and nothing in the mod uses them either way. Development tool " +
+            "for deciding whether a JS engine with its own native heap is worth the dependency.");
     }
+
+    /// <summary>Whether to try loading ClearScript's V8 once at startup and report what it costs.</summary>
+    internal static bool ProbeV8 => _probeV8?.Value ?? false;
 
     /// <summary>Whether to re-translate each page once a second and check the reuse against it.</summary>
     internal static bool VerifyEmitCache => _verifyEmitCache?.Value ?? false;
