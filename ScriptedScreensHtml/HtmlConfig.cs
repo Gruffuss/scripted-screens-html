@@ -25,7 +25,6 @@ internal static class HtmlConfig
     private static ConfigFile? _file;
     private static ConfigEntry<bool>? _diagnostics;
     private static ConfigEntry<bool>? _dumpScenes;
-    private static ConfigEntry<float>? _gcSliceMs;
     private static ConfigEntry<CullChoice>? _cullOffScreen;
 
     /// <summary>
@@ -88,22 +87,7 @@ internal static class HtmlConfig
             "vector mod's own CullOffScreen, since a page only needs a frame that mod will draw; " +
             "Always and Never decide it here instead.");
 
-        _gcSliceMs = _file.Bind(
-            "Performance", "GCTimeSliceMs", 0f,
-            "Experimental, and it changes a setting for the whole game, not just this mod. " +
-            "Stationeers runs Unity's incremental garbage collector with a 3 ms slice per frame " +
-            "(gc-max-time-slice in boot.config); when allocation outruns those slices the collector " +
-            "falls back to one long stop-the-world pause, which is the stutter you see every few " +
-            "seconds. A bigger slice gives it more room to keep up, at the cost of that much frame " +
-            "time while a collection is in progress. 0 leaves the game's own setting alone. " +
-            "Measured on Stationeers with one animated page: raising it to 8 ms changed nothing " +
-            "(14 of 43 five-second windows held a frame over 25 ms, the same as at 3 ms), so the " +
-            "pause is not the mark phase running out of slices. Kept because it costs nothing to " +
-            "leave off and the answer may differ on another machine or another build.");
     }
-
-    /// <summary>The incremental GC slice to ask Unity for, in milliseconds; 0 to leave the game's own.</summary>
-    internal static float GCTimeSliceMs => _gcSliceMs?.Value ?? 0f;
 
     /// <summary>Whether a page whose console is out of view drops to a heartbeat.</summary>
     internal static CullChoice CullOffScreen => _cullOffScreen?.Value ?? CullChoice.FollowVectorMod;

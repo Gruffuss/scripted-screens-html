@@ -20,6 +20,7 @@
     <Compile Include="..\ScriptedScreensHtml\CssParser.cs" />
     <Compile Include="..\ScriptedScreensHtml\SceneSlots.cs" />
     <Compile Include="..\ScriptedScreensHtml\TextMeasure.cs" />
+    <Compile Include="..\ScriptedScreensHtml\JsNumber.cs" />
     <Compile Include="..\ScriptedScreensHtml\Dom.cs" />
     <Compile Include="..\ScriptedScreensHtml\DomStyle.cs" />
     <Compile Include="..\ScriptedScreensHtml\StyleApplier.cs" />

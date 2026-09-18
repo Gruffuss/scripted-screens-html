@@ -10,8 +10,21 @@ internal sealed class HtmlNode
 {
     public string? Tag;
     public string Text = string.Empty;
-    public readonly Dictionary<string, string> Attributes = new(StringComparer.OrdinalIgnoreCase);
-    public readonly List<HtmlNode> Children = new();
+
+    // Made on demand. Half the nodes of a page are text, which never has either, and a page that
+    // rebuilds through innerHTML parses its whole markup again two or three times a second: an
+    // empty dictionary and an empty list per node was most of what that cost.
+    private Dictionary<string, string>? _attributes;
+    private List<HtmlNode>? _children;
+
+    public Dictionary<string, string> Attributes => _attributes ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public List<HtmlNode> Children => _children ??= new List<HtmlNode>();
+
+    /// <summary>Reads that must not bring the collection into being.</summary>
+    public int AttributeCount => _attributes?.Count ?? 0;
+    public int ChildCount => _children?.Count ?? 0;
+    public bool HasChildren => _children != null && _children.Count > 0;
+
     public HtmlNode? Parent;
     /// <summary>Custom properties (--name) declared on this node; lookups walk up the tree.</summary>
     public Dictionary<string, string>? Vars;
@@ -22,7 +35,20 @@ internal sealed class HtmlNode
 
     public bool IsText => Tag == null;
 
-    public string? Attr(string name) => Attributes.TryGetValue(name, out var v) ? v : null;
+    /// <summary>Back to a blank node, keeping the capacity of any collections it already made.</summary>
+    internal void Reset()
+    {
+        Tag = null;
+        Text = string.Empty;
+        Parent = null;
+        Vars = null;
+        ScriptStyle = null;
+        Cascaded = null;
+        _attributes?.Clear();
+        _children?.Clear();
+    }
+
+    public string? Attr(string name) => _attributes != null && _attributes.TryGetValue(name, out var v) ? v : null;
 }
 
 /// <summary>
@@ -43,10 +69,88 @@ internal static class HtmlParser
         "style", "script",
     };
 
-    /// <summary>Parse to a synthetic root whose children are the document's top level.</summary>
-    public static HtmlNode Parse(string html, Action<string>? warn = null)
+    /// <summary>
+    /// The same strings come out of a parse over and over: every tag name, every class, and the
+    /// text of every element a page redraws without changing. This is a fixed-size cache keyed by
+    /// the characters themselves - a hit costs a hash and a compare, a miss costs the string it
+    /// would have cost anyway and overwrites whatever shared its slot. Bounded by construction, so
+    /// a page inventing new text every tick cannot grow it.
+    /// </summary>
+    private const int InternSlots = 8192;
+    [ThreadStatic] private static string[]? _intern;
+
+    private static string Intern(string source, int start, int length)
     {
-        var root = new HtmlNode { Tag = "#root" };
+        if (length == 0) return string.Empty;
+        var table = _intern ??= new string[InternSlots];
+        var hash = 17;
+        for (var i = 0; i < length; i++) hash = hash * 31 + source[start + i];
+        var slot = (hash & int.MaxValue) & (InternSlots - 1);
+        var hit = table[slot];
+        if (hit != null && hit.Length == length && string.CompareOrdinal(hit, 0, source, start, length) == 0)
+            return hit;
+        var made = source.Substring(start, length);
+        table[slot] = made;
+        return made;
+    }
+
+    /// <summary>The same, for text that had to be decoded or collapsed on the way out of a builder.</summary>
+    /// <summary>Lowercase, but only when it is not already: a tag name usually is, and ToLowerInvariant always makes a string.</summary>
+    private static string Lower(string v)
+    {
+        for (var i = 0; i < v.Length; i++)
+            if (char.IsUpper(v[i])) return v.ToLowerInvariant();
+        return v;
+    }
+
+    private static string Intern(StringBuilder built)
+    {
+        var length = built.Length;
+        if (length == 0) return string.Empty;
+        var table = _intern ??= new string[InternSlots];
+        var hash = 17;
+        for (var i = 0; i < length; i++) hash = hash * 31 + built[i];
+        var slot = (hash & int.MaxValue) & (InternSlots - 1);
+        var hit = table[slot];
+        if (hit != null && hit.Length == length)
+        {
+            var same = true;
+            for (var i = 0; i < length && same; i++) same = hit[i] == built[i];
+            if (same) return hit;
+        }
+        var made = built.ToString();
+        table[slot] = made;
+        return made;
+    }
+
+    /// <summary>
+    /// Nodes to reuse instead of allocating. A caller that throws its tree away every tick (the
+    /// in-place update of an innerHTML write) hands the same pool back each time, so a parse costs
+    /// the text it found and nothing else. Not thread-safe: one pool per caller.
+    /// </summary>
+    internal sealed class Pool
+    {
+        private readonly Stack<HtmlNode> _free = new();
+
+        internal HtmlNode Take() => _free.Count > 0 ? _free.Pop() : new HtmlNode();
+
+        /// <summary>Give a tree back, children and all. The nodes must not be referenced any more.</summary>
+        internal void Return(HtmlNode node)
+        {
+            for (var i = 0; i < node.ChildCount; i++) Return(node.Children[i]);
+            node.Reset();
+            _free.Push(node);
+        }
+    }
+
+    /// <summary>Parse to a synthetic root whose children are the document's top level.</summary>
+    public static HtmlNode Parse(string html, Action<string>? warn = null) => Parse(html, warn, null);
+
+    public static HtmlNode Parse(string html, Action<string>? warn, Pool? pool)
+    {
+        HtmlNode New() => pool != null ? pool.Take() : new HtmlNode();
+        var root = New();
+        root.Tag = "#root";
         var current = root;
         var i = 0;
         var text = new StringBuilder();
@@ -72,7 +176,7 @@ internal static class HtmlParser
                 kept = CollapseWhitespace(raw);
             if (kept.Length == 0)
                 return;
-            current.Children.Add(new HtmlNode { Text = kept, Parent = current });
+            { var t = New(); t.Text = kept; t.Parent = current; current.Children.Add(t); }
         }
 
         while (i < html.Length)
@@ -128,12 +232,12 @@ internal static class HtmlParser
             }
 
             FlushText();
-            var node = new HtmlNode { Parent = current };
+            var node = New(); node.Parent = current;
             i++;
             var start = i;
             while (i < html.Length && (char.IsLetterOrDigit(html[i]) || html[i] == '-' || html[i] == ':'))
                 i++;
-            node.Tag = html.Substring(start, i - start).ToLowerInvariant();
+            node.Tag = Lower(Intern(html, start, i - start));
 
             var selfClosing = false;
             while (i < html.Length)
@@ -156,7 +260,7 @@ internal static class HtmlParser
                 var nameStart = i;
                 while (i < html.Length && !char.IsWhiteSpace(html[i]) && html[i] != '=' && html[i] != '>' && html[i] != '/')
                     i++;
-                var attrName = html.Substring(nameStart, i - nameStart);
+                var attrName = Intern(html, nameStart, i - nameStart);
                 if (attrName.Length == 0)
                 {
                     i++;
@@ -175,7 +279,7 @@ internal static class HtmlParser
                         var end = html.IndexOf(quote, i + 1);
                         if (end < 0)
                             end = html.Length;
-                        value = html.Substring(i + 1, end - i - 1);
+                        value = Intern(html, i + 1, end - i - 1);
                         i = Math.Min(html.Length, end + 1);
                     }
                     else
@@ -183,7 +287,7 @@ internal static class HtmlParser
                         var vs = i;
                         while (i < html.Length && !char.IsWhiteSpace(html[i]) && html[i] != '>')
                             i++;
-                        value = html.Substring(vs, i - vs);
+                        value = Intern(html, vs, i - vs);
                     }
                 }
                 node.Attributes[attrName] = DecodeEntities(value);
@@ -196,7 +300,7 @@ internal static class HtmlParser
                 var closeTag = "</" + node.Tag;
                 var end = html.IndexOf(closeTag, i, StringComparison.OrdinalIgnoreCase);
                 var raw = end < 0 ? html.Substring(i) : html.Substring(i, end - i);
-                node.Children.Add(new HtmlNode { Text = raw, Parent = node });
+                { var t = New(); t.Text = raw; t.Parent = node; node.Children.Add(t); }
                 if (end < 0)
                 {
                     i = html.Length;

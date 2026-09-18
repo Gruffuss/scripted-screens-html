@@ -1281,7 +1281,7 @@ function __el(id){
     get style(){ return __styleProxy(id); },
     set textContent(v){ if (__textCache[id] === String(v) && __htmlCache[id] === undefined) return; __textCache[id] = String(v); delete __htmlCache[id]; __setText(id, String(v)); }, get textContent(){ return __textCache[id] !== undefined ? __textCache[id] : __textOf(id); },
     set innerText(v){ el.textContent = v; }, get innerText(){ return el.textContent; },
-    set innerHTML(v){ __htmlCache[id] = String(v); delete __textCache[id]; var gone = __setHtml(id, String(v)); if (gone) for (var gi = 0; gi < gone.length; gi++) { var g = gone[gi]; delete __elListeners[g]; delete __elHandlers[g]; delete __htmlCache[g]; delete __textCache[g]; delete __styleCache[g]; delete __styleProxies[g]; delete __elShims[g]; } }, get innerHTML(){ return __htmlCache[id] !== undefined ? __htmlCache[id] : __htmlOf(id, false); },
+    set innerHTML(v){ var sv = String(v); if (__htmlCache[id] === sv) return; __htmlCache[id] = sv; delete __textCache[id]; var gone = __setHtml(id, sv); if (gone) for (var gi = 0; gi < gone.length; gi++) { var g = gone[gi]; delete __elListeners[g]; delete __elHandlers[g]; delete __htmlCache[g]; delete __textCache[g]; delete __styleCache[g]; delete __styleProxies[g]; delete __elShims[g]; } }, get innerHTML(){ return __htmlCache[id] !== undefined ? __htmlCache[id] : __htmlOf(id, false); },
     get outerHTML(){ return __htmlOf(id, true); },
     get children(){ return __children(id).map(__el); }, get childNodes(){ return __children(id).map(__el); },
     get childElementCount(){ return __children(id).length; },

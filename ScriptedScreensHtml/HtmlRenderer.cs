@@ -2110,19 +2110,25 @@ internal static class HtmlRenderer
     /// </summary>
     internal static bool Morph(VisualElement parent, HtmlNode parentNode, string html, Result result, Action<VisualElement>? restyled)
     {
-        var frag = HtmlParser.Parse(html, _ => { });
+        var frag = HtmlParser.Parse(html, _ => { }, MorphPool);
         var why = SameShape(parentNode.Children, frag.Children, parentNode.Attr("id") ?? "?");
         if (why != null)
         {
             LastMorphMiss = why;
+            MorphPool.Return(frag);
             return false;
         }
         var changed = new HashSet<HtmlNode>();
         CopyInto(parentNode.Children, frag.Children, changed, result, restyled);
         if (changed.Count > 0)
             Relabel(parent, result, changed);
+        MorphPool.Return(frag);   // nothing below keeps a node of the fragment: the values were copied across
         return true;
     }
+
+    /// <summary>The fragment of an in-place update is parsed, compared, copied across and dropped: its nodes come back here.</summary>
+    [ThreadStatic] private static HtmlParser.Pool? _morphPool;
+    private static HtmlParser.Pool MorphPool => _morphPool ??= new HtmlParser.Pool();
 
     /// <summary>Why the last in-place update was refused (Diagnostics).</summary>
     internal static string? LastMorphMiss;
