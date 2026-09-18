@@ -100,9 +100,13 @@ internal sealed class KeyframeRunner
     /// <summary>The element's cascade record: the emitter reads offset-* from it, so keyframes write them there.</summary>
     private readonly Dictionary<string, string>? _record;
 
-    public KeyframeRunner(VisualElement ve, CssKeyframes frames, AnimationSpec spec, float now, Action<string>? warn, Dictionary<string, string>? record = null)
+    /// <summary>Told when this runner writes into the record, so the emitter knows the element changed.</summary>
+    private readonly Action<VisualElement>? _touch;
+
+    public KeyframeRunner(VisualElement ve, CssKeyframes frames, AnimationSpec spec, float now, Action<string>? warn, Dictionary<string, string>? record = null, Action<VisualElement>? touch = null)
     {
         _record = record;
+        _touch = touch;
         _ve = ve;
         _frames = frames;
         _spec = spec;
@@ -224,7 +228,7 @@ internal sealed class KeyframeRunner
         {
             StyleApplier.Apply(_ve, d, _warn);
             // the frame's values also go to the record the emitter reads (motion paths, gradients, masks...)
-            if (_record != null) _record[d.Name] = d.Value.Trim();
+            if (_record != null) { _record[d.Name] = d.Value.Trim(); _touch?.Invoke(_ve); }
         }
         Wrote = true;
     }

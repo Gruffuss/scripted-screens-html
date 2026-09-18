@@ -121,6 +121,21 @@ internal static class HtmlRenderer
         private readonly Dictionary<VisualElement, int> _emitIndex = new();
         private int _emitIndexNext;
 
+        /// <summary>
+        /// Elements whose style record, attributes or script styles changed since the last capture.
+        /// The emitter's cache is keyed on the element's resolved box, which catches everything the
+        /// engine resolves - but a record holds what it does not (shadows, gradients, clips, masks,
+        /// filters, letter spacing), so every write to one says so here. Read and cleared by
+        /// OffThread.Capture under the same lock that does the writing.
+        /// </summary>
+        internal readonly HashSet<VisualElement> Touched = new();
+        /// <summary>Elements whose change reaches their descendants too: an inherited property written straight into the record, where no re-cascade walks the subtree to report it.</summary>
+        internal readonly HashSet<VisualElement> TouchedDeep = new();
+
+        internal void Touch(VisualElement ve) => Touched.Add(ve);
+
+        internal void TouchSubtree(VisualElement ve) { Touched.Add(ve); TouchedDeep.Add(ve); }
+
         public int EmitIndexOf(VisualElement ve)
         {
             if (_emitIndex.TryGetValue(ve, out var index)) return index;
@@ -2638,6 +2653,7 @@ internal static class HtmlRenderer
 
     private static void ApplyStyles(VisualElement ve, HtmlNode node, List<CssRule> rules, Result result)
     {
+        result.Touch(ve);   // the record is about to be rewritten
         void Warn(string m) => result.Warnings.Add(m);
 
         // Matching rules by specificity then source order; inline last; !important

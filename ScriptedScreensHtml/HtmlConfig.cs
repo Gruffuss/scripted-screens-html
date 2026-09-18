@@ -26,6 +26,7 @@ internal static class HtmlConfig
     private static ConfigEntry<bool>? _diagnostics;
     private static ConfigEntry<bool>? _dumpScenes;
     private static ConfigEntry<CullChoice>? _cullOffScreen;
+    private static ConfigEntry<bool>? _verifyEmitCache;
 
     /// <summary>
     /// Per-page statistics every five seconds and the informational log lines (page built,
@@ -78,6 +79,14 @@ internal static class HtmlConfig
             "seconds while only values change. Development tool for reading exactly what the " +
             "translation produced; each file is overwritten, not appended. Leave it off for normal play.");
 
+        _verifyEmitCache = _file.Bind(
+            "Diagnostics", "VerifyEmitCache", false,
+            "Every second, translate the page a second time without reusing anything an element kept " +
+            "from the frame before, and log it if the two differ. The emitter reuses a subtree's text " +
+            "while nothing it reads has changed, which is what makes an animated page cheap; if it " +
+            "ever reuses text whose input it cannot see, a console shows something stale and nothing " +
+            "else would say so. Development tool: it doubles the translation cost while it is on.");
+
         _cullOffScreen = _file.Bind(
             "Performance", "CullOffScreen", CullChoice.FollowVectorMod,
             "Stop laying out, running and translating a page whose console nobody can see, and run " +
@@ -88,6 +97,9 @@ internal static class HtmlConfig
             "Always and Never decide it here instead.");
 
     }
+
+    /// <summary>Whether to re-translate each page once a second and check the reuse against it.</summary>
+    internal static bool VerifyEmitCache => _verifyEmitCache?.Value ?? false;
 
     /// <summary>Whether a page whose console is out of view drops to a heartbeat.</summary>
     internal static CullChoice CullOffScreen => _cullOffScreen?.Value ?? CullChoice.FollowVectorMod;

@@ -714,6 +714,7 @@ internal sealed class ScriptHost : IDisposable
                 if (record0.TryGetValue(css, out var had) ? string.Equals(had, trimmed, StringComparison.Ordinal) : trimmed.Length == 0)
                     return;
                 if (trimmed.Length == 0) record0.Remove(css); else record0[css] = trimmed;
+                _built.Touch(ve);
                 var spec = new AnimationSpec();
                 foreach (var kv in record0) if (kv.Key.StartsWith("animation", StringComparison.Ordinal)) HtmlRenderer.ApplyAnimationDeclaration(spec, new CssDeclaration(kv.Key, kv.Value));
                 if (_runningAnimations.TryGetValue(ve, out var oldHandle)) { _cancelAnimation?.Invoke(oldHandle); _runningAnimations.Remove(ve); }
@@ -728,6 +729,9 @@ internal sealed class ScriptHost : IDisposable
                 // it would in a browser's computed style
                 var record = _built.CssOf(ve);
                 if (trimmed.Length == 0) record.Remove(css); else record[css] = trimmed;
+                // The emitter's cache is keyed on the resolved box, which holds none of this. An
+                // inherited property reaches the descendants that read it off this record.
+                if (VectorEmitter.Inherits(css)) _built.TouchSubtree(ve); else _built.Touch(ve);
             }
             // kept on the node as a browser keeps it in the style attribute: a re-cascade applies it again
             if (_findNode(id) is { } styled)
@@ -875,6 +879,7 @@ internal sealed class ScriptHost : IDisposable
             if (node != null)
             {
                 node.Attributes[name] = value;
+                if (_find(id) is { } attred) _built?.Touch(attred);   // the emitter reads attributes the cascade never sees (data-marker, checked, src)
                 AfterAttribute(id, node, name);
                 RecascadeForAttribute(id, node, name);
             }

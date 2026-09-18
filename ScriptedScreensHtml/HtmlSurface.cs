@@ -875,6 +875,39 @@ internal sealed class HtmlSurface : MonoBehaviour
             work();
     }
 
+    private const char SceneNewline = (char)10;
+    private float _lastVerify;
+    private string? _verifyScene;
+
+    /// <summary>
+    /// Translates the page again without reusing anything kept from the frame before, and says so
+    /// if the two differ. The reuse is what makes an animated page cheap, and its failure - text
+    /// replayed for an element whose input the check cannot see - shows up as a console quietly
+    /// displaying the wrong thing. Once a second, and only when asked for.
+    /// </summary>
+    private void VerifyCache(VectorEmitter.Output output, Vector2 layout, float now)
+    {
+        if (!HtmlConfig.VerifyEmitCache || OffThread.Seconds - _lastVerify < 1f)
+            return;
+        _lastVerify = OffThread.Seconds;
+        var cached = new string(output.Chars, 0, output.Length);
+        VectorEmitter.NoCache = true;
+        try
+        {
+            var fresh = VectorEmitter.Emit(_built!, _content!, layout.x, layout.y, _tweens, now, ScrollSet);
+            _verifyScene = new string(fresh.Chars, 0, fresh.Length);
+        }
+        finally { VectorEmitter.NoCache = false; }
+        if (string.Equals(cached, _verifyScene, StringComparison.Ordinal))
+            return;
+        var a = cached.Split(SceneNewline);
+        var b = _verifyScene!.Split(SceneNewline);
+        var k = 0;
+        while (k < a.Length && k < b.Length && a[k] == b[k]) k++;
+        ScriptedScreensHtmlPlugin.Log?.LogWarning(
+            $"html \"{ElementId}\": the reused translation differs from a fresh one at line {k}. Reused: {(k < a.Length ? a[k] : "(end)")} | fresh: {(k < b.Length ? b[k] : "(end)")}");
+    }
+
     private double _heldMs;
     private float _lastPatchDump;
 
@@ -918,6 +951,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             var ea = Allocated();
             var output = VectorEmitter.Emit(_built!, _content!, layout.x, layout.y, _tweens, now, ScrollSet);
             _allocEmit += Allocated() - ea;
+            VerifyCache(output, layout, now);
             r.Output = output;
             var sa = Allocated();
             var template = SceneSlots.Split(output.Chars, output.Length, _slotScratch, _slotPrefix);
@@ -1430,7 +1464,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             Wake();
             return _animationSeq;
         }
-        var runner = new KeyframeRunner(ve, frames, spec, OffThread.Now, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), _built?.CssOf(ve));
+        var runner = new KeyframeRunner(ve, frames, spec, OffThread.Now, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), _built?.CssOf(ve), _built != null ? _built.Touch : null);
         _animations.Add(runner);
         _scriptAnimations[++_animationSeq] = runner;
         _awakeFrames = Mathf.Max(_awakeFrames, 2);
@@ -1813,7 +1847,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                 built.TimeAnimations[element] = (spec, OffThread.Now);
                 continue;
             }
-            _animations.Add(new KeyframeRunner(element, frames, spec, OffThread.Now, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), built.CssOf(element)));
+            _animations.Add(new KeyframeRunner(element, frames, spec, OffThread.Now, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m), built.CssOf(element), built.Touch));
         }
     }
 

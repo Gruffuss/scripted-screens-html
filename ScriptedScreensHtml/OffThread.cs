@@ -34,9 +34,33 @@ internal static class OffThread
     internal static float Seconds => (float)Clock.Elapsed.TotalSeconds;
 
     /// <summary>The resolved values the translator reads, copied from one element on the game thread.</summary>
+    /// <summary>Bookkeeping, not part of what the element looks like: excluded from <see cref="Box.Same"/>.</summary>
+    [AttributeUsage(AttributeTargets.Field)]
+    internal sealed class BookkeepingAttribute : Attribute { }
+
     internal sealed class Box
     {
-        public bool Seen;
+        [Bookkeeping] public bool Seen;
+        /// <summary>The twin this element's next read goes into, so a comparison needs no copying: on a change the two swap places.</summary>
+        [Bookkeeping] public Box? Other;
+
+        // ---- what the emitter wrote for this element and everything under it, to write again
+        // unchanged. Kept here because this is the one per-element, per-page store the page thread
+        // already has in hand. Cleared by the emitter, never by the capture.
+        [Bookkeeping] public char[]? CacheBody;
+        [Bookkeeping] public int CacheBodyLength;
+        [Bookkeeping] public char[]? CacheDefs;
+        [Bookkeeping] public int CacheDefsLength;
+        [Bookkeeping] public int CacheNodes;
+        [Bookkeeping] public Vector2 CacheParentPos;
+        [Bookkeeping] public int CacheDepth;
+        [Bookkeeping] public long CacheEpoch;
+        /// <summary>False when this subtree must not be reused: it produced externals, deferred elements, or something the comparison cannot see.</summary>
+        [Bookkeeping] public bool CacheUsable;
+        /// <summary>Something about this element changed since the last frame the emitter used.</summary>
+        [Bookkeeping] public bool Changed = true;
+        /// <summary>This element or something under it changed; cleared by the emitter when it rebuilds.</summary>
+        [Bookkeeping] public bool SubtreeChanged = true;
         public Rect layout;
         public DisplayStyle display;
         public UIVisibility visibility;
@@ -56,6 +80,37 @@ internal static class OffThread
         public Overflow overflow;
         /// <summary>A label's measured single-line width, for decoration lines; NaN when not measured.</summary>
         public float textWidth = float.NaN;
+        /// <summary>A label's text. Here rather than tracked at each writer: a label can change its
+        /// words without changing its box, and this way every writer is covered by the comparison.</summary>
+        public string? text;
+
+        /// <summary>
+        /// Every field that says what the element looks like, compared. Hand-written because the
+        /// language will not generate it for a class - and pinned by BoxSameCoversEveryField, which
+        /// reflects over the fields and fails if one of them is not compared here. Add a field and
+        /// the test tells you, rather than a page quietly showing last frame's paint.
+        /// </summary>
+        internal bool Same(Box o) =>
+            layout == o.layout
+            && display == o.display && visibility == o.visibility
+            && opacity.Equals(o.opacity) && fontSize.Equals(o.fontSize) && marginBottom.Equals(o.marginBottom)
+            && borderTopWidth.Equals(o.borderTopWidth) && borderRightWidth.Equals(o.borderRightWidth)
+            && borderBottomWidth.Equals(o.borderBottomWidth) && borderLeftWidth.Equals(o.borderLeftWidth)
+            && borderTopColor == o.borderTopColor && borderRightColor == o.borderRightColor
+            && borderBottomColor == o.borderBottomColor && borderLeftColor == o.borderLeftColor
+            && borderTopLeftRadius.Equals(o.borderTopLeftRadius) && borderTopRightRadius.Equals(o.borderTopRightRadius)
+            && borderBottomRightRadius.Equals(o.borderBottomRightRadius) && borderBottomLeftRadius.Equals(o.borderBottomLeftRadius)
+            && paddingTop.Equals(o.paddingTop) && paddingRight.Equals(o.paddingRight)
+            && paddingBottom.Equals(o.paddingBottom) && paddingLeft.Equals(o.paddingLeft)
+            && color == o.color && backgroundColor == o.backgroundColor
+            && whiteSpace == o.whiteSpace
+            && translate == o.translate
+            && scale.value == o.scale.value
+            && rotate.angle.value.Equals(o.rotate.angle.value) && rotate.angle.unit == o.rotate.angle.unit
+            && unityTextAlign == o.unityTextAlign && unityFontStyleAndWeight == o.unityFontStyleAndWeight
+            && overflow == o.overflow
+            && (textWidth.Equals(o.textWidth) || (float.IsNaN(textWidth) && float.IsNaN(o.textWidth)))
+            && string.Equals(text, o.text, StringComparison.Ordinal);
 
         internal void Read(VisualElement ve, bool measure)
         {
@@ -79,6 +134,7 @@ internal static class OffThread
             unityTextAlign = rs.unityTextAlign;
             unityFontStyleAndWeight = rs.unityFontStyleAndWeight;
             overflow = ve.style.overflow.value;
+            text = (ve as Label)?.text;
             textWidth = measure && ve is Label label
                 ? label.MeasureTextSize(label.text ?? string.Empty, 0f, VisualElement.MeasureMode.Undefined, 0f, VisualElement.MeasureMode.Undefined).x
                 : float.NaN;
@@ -109,21 +165,69 @@ internal static class OffThread
     internal static void Capture(VisualElement root, HtmlRenderer.Result built, Dictionary<VisualElement, Box> boxes, List<VisualElement> scratch)
     {
         foreach (var b in boxes.Values) b.Seen = false;
-        Walk(root, built, boxes);
+        Walk(root, built, boxes, built.Touched.Count > 0, false);
+        built.Touched.Clear();
+        built.TouchedDeep.Clear();
         if (scratch.Count > 0) scratch.Clear();
         foreach (var kv in boxes) if (!kv.Value.Seen) scratch.Add(kv.Key);
         foreach (var ve in scratch) boxes.Remove(ve);
         scratch.Clear();
     }
 
-    private static void Walk(VisualElement ve, HtmlRenderer.Result built, Dictionary<VisualElement, Box> boxes)
+    /// <summary>
+    /// Reads one element and its descendants, and says whether anything under here changed. The
+    /// read goes into the entry's twin and the two swap on a change, so nothing is copied and the
+    /// previous frame's values are still there to compare against. The flags are sticky: a frame
+    /// that captures without emitting must not lose the fact that something moved, so only the
+    /// emitter clears them, when it rebuilds that element.
+    /// </summary>
+    /// <param name="anyTouched">Whether anything reported a record change at all this frame.</param>
+    /// <param name="forcedFromAbove">An ancestor's record changed, so what this element inherits may have too.</param>
+    private static bool Walk(VisualElement ve, HtmlRenderer.Result built, Dictionary<VisualElement, Box> boxes, bool anyTouched, bool forcedFromAbove)
     {
+        // A record change on this element; a deep one also decides what its descendants inherit.
+        var touched = anyTouched && built.Touched.Contains(ve);
+        var deep = forcedFromAbove || (touched && built.TouchedDeep.Contains(ve));
+        var forced = touched || forcedFromAbove;
+        var measure = ve is Label && Decorated(built.CssOf(ve));
+        bool changed;
         if (!boxes.TryGetValue(ve, out var box))
+        {
             boxes[ve] = box = new Box();
+            box.Other = new Box { Other = box };
+            box.Read(ve, measure);
+            changed = true;
+        }
+        else
+        {
+            var spare = box.Other ??= new Box { Other = box };
+            spare.Read(ve, measure);
+            if (spare.Same(box))
+            {
+                changed = forced;
+            }
+            else
+            {
+                // the fresh read becomes the current one and the old becomes the spare
+                spare.Seen = box.Seen;
+                spare.CacheBody = box.CacheBody; spare.CacheBodyLength = box.CacheBodyLength;
+                spare.CacheDefs = box.CacheDefs; spare.CacheDefsLength = box.CacheDefsLength;
+                spare.CacheNodes = box.CacheNodes; spare.CacheParentPos = box.CacheParentPos;
+                spare.CacheDepth = box.CacheDepth; spare.CacheEpoch = box.CacheEpoch;
+                spare.CacheUsable = box.CacheUsable;
+                boxes[ve] = spare;
+                box = spare;
+                changed = true;
+            }
+        }
+        if (changed) { box.Changed = true; box.SubtreeChanged = true; }
         box.Seen = true;
-        box.Read(ve, measure: ve is Label && Decorated(built.CssOf(ve)));
+
+        var subtree = changed;
         foreach (var child in ve.Children())
-            Walk(child, built, boxes);
+            subtree |= Walk(child, built, boxes, anyTouched, deep);
+        if (subtree) box.SubtreeChanged = true;
+        return subtree;
     }
 
     private static bool Decorated(Dictionary<string, string> css)
@@ -169,6 +273,10 @@ internal static class OffThread
     private static readonly HashSet<(int kind, string name, char c)> Asked = new();
     private const float RetrySeconds = 5f;
 
+    /// <summary>Bumped whenever a font answer changes. A label's text depends on these, and they
+    /// arrive minutes after a page is built, so every cached emission is keyed on this number.</summary>
+    internal static volatile int FontEpoch;
+
     /// <summary>FontLibrary.Get(name) != null.</summary>
     internal static bool Library(string name)
     {
@@ -177,7 +285,7 @@ internal static class OffThread
                 return e.known;
         if (Active) { Ask(0, name, '\0'); return false; }
         var known = FontLibrary.Get(name) != null;
-        lock (FontGate) Libraries[name] = (known, Seconds);
+        lock (FontGate) { Libraries[name] = (known, Seconds); FontEpoch++; }
         return known;
     }
 
@@ -189,7 +297,7 @@ internal static class OffThread
                 return e.known;
         if (Active) { Ask(1, name, '\0'); return false; }
         var known = VectorEmitter.AssetOf(name) != null;
-        lock (FontGate) Faces[name] = (known, Seconds);
+        lock (FontGate) { Faces[name] = (known, Seconds); FontEpoch++; }
         return known;
     }
 
@@ -201,7 +309,7 @@ internal static class OffThread
                 return e.em;
         if (Active) { Ask(2, name, '\0'); return 0f; }
         var value = VectorEmitter.DigitEmOf(name);
-        lock (FontGate) Digits[name] = (value, Seconds);
+        lock (FontGate) { Digits[name] = (value, Seconds); FontEpoch++; }
         return value;
     }
 
@@ -215,7 +323,7 @@ internal static class OffThread
         if (Active) { Ask(viaFallbackChain ? 4 : 3, face, c); return !viaFallbackChain; }
         var asset = VectorEmitter.AssetOf(face);
         var value = asset != null && (viaFallbackChain ? asset.HasCharacter(c, true, true) : asset.HasCharacter(c));
-        lock (FontGate) Chars[(face, c)] = value;
+        lock (FontGate) { Chars[(face, c)] = value; FontEpoch++; }
         return value;
     }
 

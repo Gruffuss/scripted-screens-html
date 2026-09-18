@@ -113,6 +113,10 @@ internal static class VectorEmitter
         /// <summary>Positioned elements with a z-index, emitted after everything else at the root in z order: a stacking context across parents.</summary>
         public List<(VisualElement ve, Vector2 parentPos, int z)> Deferred = new();
         public bool EmittingDeferred;
+        /// <summary>What the page's own state hashes to this frame; a cached emission from another one is not reused.</summary>
+        public long Epoch;
+        /// <summary>Reused emissions this frame, and elements rebuilt: the diagnostics line reads these.</summary>
+        public int Reused, Rebuilt;
         /// <summary>The scene text is assembled here, and child lists are borrowed from these: a page
         /// emits every frame, so nothing here is allocated again once the first frame has run.</summary>
         public readonly StringBuilder Scene = new(8192);
@@ -153,10 +157,47 @@ internal static class VectorEmitter
 
     [ThreadStatic] private static Ctx? _ctx;
 
+    /// <summary>
+    /// Emit everything from scratch, ignoring what elements kept from last frame. The verify mode
+    /// emits a frame both ways and compares: if they differ, the cache is reusing text whose inputs
+    /// it cannot see, and a console would be showing something stale.
+    /// </summary>
+    [ThreadStatic] internal static bool NoCache;
+
+    /// <summary>Subtrees written from the last frame's characters, and elements rebuilt (diagnostics).</summary>
+    internal static int LastReused, LastRebuilt;
+    /// <summary>Why elements were rebuilt (diagnostics): changed, no cache yet, moved, deeper, another epoch, tweening.</summary>
+    internal static int WhyChanged, WhyNoCache, WhyMoved, WhyDepth, WhyEpoch, WhyTween;
+
+    /// <summary>
+    /// Everything an element's text depends on that is not the element: the page's em and root font
+    /// size, the viewport, the colour scheme, how many rules there are, the page size, the scroll
+    /// offsets a script set, and how many font answers have arrived. A cached emission made under a
+    /// different one of these is not reused.
+    /// </summary>
+    private static long EpochOf(Ctx ctx)
+    {
+        var g = OffThread.Job;
+        var h = 17L;
+        h = h * 31 + g.EmSize.GetHashCode();
+        h = h * 31 + g.RootFontSize.GetHashCode();
+        h = h * 31 + g.ViewportW.GetHashCode();
+        h = h * 31 + g.ViewportH.GetHashCode();
+        h = h * 31 + (g.ColorSchemeDark ? 1 : 0);
+        h = h * 31 + ctx.Built.Rules.Count;
+        h = h * 31 + ctx.PageW.GetHashCode();
+        h = h * 31 + ctx.PageH.GetHashCode();
+        h = h * 31 + OffThread.FontEpoch;
+        if (ctx.ScrollSet != null)
+            foreach (var kv in ctx.ScrollSet) h = h * 31 + kv.Value.version;
+        return h;
+    }
+
     public static Output Emit(HtmlRenderer.Result built, VisualElement root, float designW, float designH, Tweens? tweens = null, float now = 0f, Dictionary<string, (float offset, int version)>? scrollSet = null)
     {
         var ctx = _ctx ??= new Ctx();
         ctx.Reset(built, tweens, now, scrollSet, designW, designH);
+        ctx.Epoch = EpochOf(ctx);
         var inv = CultureInfo.InvariantCulture;
         EmitElement(ctx, root, Vector2.zero, 0);
         if (ctx.Deferred.Count > 0)
@@ -166,6 +207,8 @@ internal static class VectorEmitter
             foreach (var (dve, dpos, _) in ctx.Deferred)
                 EmitElement(ctx, dve, dpos, 1);
         }
+        LastReused = ctx.Reused;
+        LastRebuilt = ctx.Rebuilt;
         var sb = ctx.Scene;
         sb.Append("SCENE w=").Append(designW.ToString("0.##", inv)).Append(" h=").Append(designH.ToString("0.##", inv)).Append(" fit=stretch\n");
         if (ctx.Defs.Length > 0)
@@ -229,12 +272,38 @@ internal static class VectorEmitter
         }
 
         // A transition in flight: numbers below become expressions over t (Tweens.cs).
-        var tw = ctx.Tw?.Of(ve, ctx.Now);
         var scrollTop = float.NaN;
         var scrollCh = 0f;
         // backface-visibility: hidden with a rotateX/rotateY past 90 degrees: the back of the card, not drawn
         if (css.TryGetValue("backface-visibility", out var bfv) && bfv.Trim() == "hidden" && css.TryGetValue("transform", out var bft) && BackfaceTurned(bft))
             return;
+        // Nothing under here changed, and the page's own state is the same: write what this subtree
+        // wrote last time. The check is the element's resolved box (compared field by field, pinned
+        // by a test), everything a writer reported through Result.Touch, where the element sits
+        // (a parent that moved shifts our absolute coordinates) and how deep it is (the indent).
+        var tw = ctx.Tw?.Of(ve, ctx.Now);
+        if (!NoCache && rs.CacheUsable && !rs.SubtreeChanged && rs.CacheEpoch == ctx.Epoch && tw == null
+            && rs.CacheParentPos == parentPos && rs.CacheDepth == depth && rs.CacheBody != null)
+        {
+            ctx.Body.Append(rs.CacheBody, 0, rs.CacheBodyLength);
+            if (rs.CacheDefsLength > 0) ctx.Defs.Append(rs.CacheDefs, 0, rs.CacheDefsLength);
+            ctx.Out.Nodes += rs.CacheNodes;
+            ctx.Reused++;
+            return;
+        }
+        ctx.Rebuilt++;
+        if (rs.SubtreeChanged) WhyChanged++;
+        else if (!rs.CacheUsable || rs.CacheBody == null) WhyNoCache++;
+        else if (tw != null) WhyTween++;
+        else if (rs.CacheEpoch != ctx.Epoch) WhyEpoch++;
+        else if (rs.CacheParentPos != parentPos) WhyMoved++;
+        else if (rs.CacheDepth != depth) WhyDepth++;
+        var bodyFrom = ctx.Body.Length;
+        var defsFrom = ctx.Defs.Length;
+        var nodesFrom = ctx.Out.Nodes;
+        var externalsFrom = ctx.Out.Externals.Count;
+        var deferredFrom = ctx.Deferred.Count;
+
         // From here on this element mints its own def ids and nothing returns early, so the
         // restore below always runs.
         var outerIds = ctx.Enter(ctx.Built.EmitIndexOf(ve));
@@ -614,6 +683,34 @@ internal static class VectorEmitter
 
         for (var i = 0; i < groups; i++)
             ctx.Body.Append(indent).Append("}\n");
+        ctx.Leave(outerIds);
+
+        // Keep what this subtree wrote, to write again unchanged next frame. A subtree that produced
+        // an external element or put something in the top layer is not kept: those are side effects
+        // beside the text, and replaying the characters alone would lose them. Nor is one whose
+        // content the box comparison cannot see - an svg's shapes, a canvas's commands, a tween.
+        rs.SubtreeChanged = false;
+        rs.Changed = false;
+        rs.CacheUsable = ctx.Out.Externals.Count == externalsFrom && ctx.Deferred.Count == deferredFrom
+                         && ve is not SvgElement && ve is not CanvasElement && tw == null;
+        if (!rs.CacheUsable)
+            return;
+        rs.CacheBodyLength = Keep(ctx.Body, bodyFrom, ref rs.CacheBody);
+        rs.CacheDefsLength = Keep(ctx.Defs, defsFrom, ref rs.CacheDefs);
+        rs.CacheNodes = ctx.Out.Nodes - nodesFrom;
+        rs.CacheParentPos = parentPos;
+        rs.CacheDepth = depth;
+        rs.CacheEpoch = ctx.Epoch;
+    }
+
+    /// <summary>Copies what was appended since <paramref name="from"/> into a buffer the element keeps.</summary>
+    private static int Keep(StringBuilder sb, int from, ref char[]? into)
+    {
+        var length = sb.Length - from;
+        if (length <= 0) return 0;
+        if (into == null || into.Length < length) into = new char[System.Math.Max(length, 64)];
+        sb.CopyTo(from, into, 0, length);
+        return length;
     }
 
     /// <summary>Every side with a border is solid and of one width; the others draw nothing (their colour is clear).</summary>
@@ -1460,6 +1557,15 @@ internal static class VectorEmitter
     // ---------------------------------------------------------------- text
 
     /// <summary>Properties a browser inherits; a label reads them from the nearest ancestor that sets them.</summary>
+    /// <summary>The names in <see cref="InheritedText"/>, for callers that need to know whether a
+    /// property written on one element decides what its descendants show.</summary>
+    internal static bool Inherits(string property)
+    {
+        foreach (var name in InheritedText)
+            if (string.Equals(name, property, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
     private static readonly string[] InheritedText = { "font-family", "font-weight", "font-style", "font-variant-numeric", "letter-spacing", "word-spacing", "line-height", "text-transform", "text-align", "text-align-last", "white-space", "text-shadow", "text-emphasis-style", "text-emphasis-color", "text-emphasis-position", "font-variant-caps", "text-indent" };
 
     /// <summary>The label's record with the inherited text properties filled in from its ancestors (a copy only when something is added).</summary>

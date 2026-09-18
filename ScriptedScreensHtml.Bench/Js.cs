@@ -33,6 +33,14 @@ internal static class Js
         for (var i = 0; i < 80; i++) { _host.RunSynchronously(i * 0.016f, built.ById, 500); _host.Pump(); }
     }
 
+    /// <summary>One script frame, as the game runs one before each emit.</summary>
+    internal static void Step(HtmlRenderer.Result built, float now)
+    {
+        if (_host == null) return;
+        _host.RunSynchronously(now, built.ById, 2000);
+        _host.Pump();
+    }
+
     internal static void Run(HtmlRenderer.Result built, Panel panel, Vector2 size, int frames)
     {
         if (string.IsNullOrWhiteSpace(built.Script)) { Console.WriteLine("  (page has no script)"); return; }

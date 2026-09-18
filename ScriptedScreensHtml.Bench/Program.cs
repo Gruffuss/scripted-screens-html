@@ -26,6 +26,8 @@ internal static class Program
         var iterations = args.Length > 1 ? int.Parse(args[1]) : 300;
         if (!File.Exists(path)) { Console.Error.WriteLine($"no such file: {path}"); return 1; }
 
+        if (Check.Run() > 0) return 1;
+
         var text = File.ReadAllText(path);
         var html = path.EndsWith(".lua", StringComparison.OrdinalIgnoreCase) ? PageOf(text) : text;
         if (html == null) { Console.Error.WriteLine("no [[ <html... ]] page in that file"); return 1; }
@@ -73,6 +75,14 @@ internal static class Program
         sw.Stop();
 
         Console.WriteLine($"{iterations} emits, {built.ById.Count} ids, scene {LastSceneLength} chars");
+        {
+            int dirty = 0, kept = 0, total = 0;
+            foreach (var b in boxes.Values) { total++; if (b.SubtreeChanged) dirty++; if (b.CacheBody != null) kept++; }
+            Console.WriteLine($"  boxes   {total} total, {dirty} still marked changed after the last emit, {kept} holding cached text");
+        }
+        Console.WriteLine($"  why     changed {VectorEmitter.WhyChanged}, no cache {VectorEmitter.WhyNoCache}, tween {VectorEmitter.WhyTween}, epoch {VectorEmitter.WhyEpoch}, moved {VectorEmitter.WhyMoved}, depth {VectorEmitter.WhyDepth}");
+        Console.WriteLine($"  cache   {VectorEmitter.LastReused,5} subtrees reused, {VectorEmitter.LastRebuilt,4} elements rebuilt on the last frame");
+        if (Verify) Console.WriteLine(Mismatches == 0 ? $"  PASS  cached and fresh emissions identical over {iterations} frames" : $"  FAIL  {Mismatches} of {iterations} frames differed");
         if (Frames > 0)
             Console.WriteLine($"  slots   {TotalSlots / Frames,10:N0} per frame, {ChangedSlots / (double)Math.Max(1, Frames),7:N1} changed ({100.0 * ChangedSlots / Math.Max(1, TotalSlots),4:N1} %)");
         Console.WriteLine($"  total   {totalBytes / (double)iterations,10:N0} B   {sw.Elapsed.TotalMilliseconds / iterations,7:F3} ms per emit");
@@ -95,6 +105,9 @@ internal static class Program
     }
 
     private static int LastSceneLength;
+    private static readonly bool Verify = Environment.GetEnvironmentVariable("BENCH_VERIFY") == "1";
+    internal static int Mismatches;
+    private const char Newline = (char)10;
     private static readonly Dictionary<string, SceneSlots.Value> Previous = new(StringComparer.Ordinal);
     private static long TotalSlots, ChangedSlots, Frames;
     internal static string LastScene = string.Empty;
@@ -106,6 +119,9 @@ internal static class Program
     {
         var p = new (long bytes, long ticks)[4];
         long b0, t0;
+        // the page's own frame first, as in the game: without it the emitter is measured against a
+        // page that never moves, which is not the case anyone cares about
+        Js.Step(built, now);
 
         b0 = GC.GetAllocatedBytesForCurrentThread(); t0 = Stopwatch.GetTimestamp();
         panel.Layout(size.x, size.y);
@@ -137,6 +153,32 @@ internal static class Program
         p[3] = (GC.GetAllocatedBytesForCurrentThread() - b0, Stopwatch.GetTimestamp() - t0);
 
         LastSceneLength = output.Length;
+        if (Verify)
+        {
+            // the same frame emitted from scratch: anything the cache reused whose inputs it cannot
+            // see shows up here, and nowhere else until a player sees a stale console
+            var cached = new string(output.Chars, 0, output.Length);
+            OffThread.Active = true;   // as on a worker: no font questions may reach the engine
+            VectorEmitter.NoCache = true;
+            var fresh = VectorEmitter.Emit(built, root, size.x, size.y, tweens, now, null);
+            var plain = new string(fresh.Chars, 0, fresh.Length);
+            VectorEmitter.NoCache = false;
+            OffThread.Active = false;
+            if (!string.Equals(cached, plain, StringComparison.Ordinal))
+            {
+                Mismatches++;
+                if (Mismatches == 1)
+                {
+                    var a = cached.Split(Newline);
+                    var b = plain.Split(Newline);
+                    var k = 0;
+                    while (k < a.Length && k < b.Length && a[k] == b[k]) k++;
+                    Console.WriteLine($"  CACHE MISMATCH at line {k}");
+                    Console.WriteLine($"    cached: {(k < a.Length ? a[k] : "(end)")}");
+                    Console.WriteLine($"    fresh:  {(k < b.Length ? b[k] : "(end)")}");
+                }
+            }
+        }
         LastScene = output.Scene;
         return p;
     }
