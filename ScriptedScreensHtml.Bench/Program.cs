@@ -73,6 +73,8 @@ internal static class Program
         sw.Stop();
 
         Console.WriteLine($"{iterations} emits, {built.ById.Count} ids, scene {LastSceneLength} chars");
+        if (Frames > 0)
+            Console.WriteLine($"  slots   {TotalSlots / Frames,10:N0} per frame, {ChangedSlots / (double)Math.Max(1, Frames),7:N1} changed ({100.0 * ChangedSlots / Math.Max(1, TotalSlots),4:N1} %)");
         Console.WriteLine($"  total   {totalBytes / (double)iterations,10:N0} B   {sw.Elapsed.TotalMilliseconds / iterations,7:F3} ms per emit");
         for (var k = 0; k < 4; k++)
             Console.WriteLine($"  {names[k],-7} {phases[k].bytes / (double)iterations,10:N0} B   {phases[k].ticks / (double)Stopwatch.Frequency * 1000.0 / iterations,7:F3} ms");
@@ -93,6 +95,8 @@ internal static class Program
     }
 
     private static int LastSceneLength;
+    private static readonly Dictionary<string, SceneSlots.Value> Previous = new(StringComparer.Ordinal);
+    private static long TotalSlots, ChangedSlots, Frames;
     internal static string LastScene = string.Empty;
 
 
@@ -122,6 +126,14 @@ internal static class Program
 
         b0 = GC.GetAllocatedBytesForCurrentThread(); t0 = Stopwatch.GetTimestamp();
         SceneSlots.Split(output.Chars, output.Length, slots, "L");
+        // how much of a frame's scene is the same as the last one's: the ceiling on any cache
+        foreach (var kv in slots)
+        {
+            TotalSlots++;
+            if (!Previous.TryGetValue(kv.Key, out var was) || !was.Equals(kv.Value)) ChangedSlots++;
+            Previous[kv.Key] = kv.Value;
+        }
+        Frames++;
         p[3] = (GC.GetAllocatedBytesForCurrentThread() - b0, Stopwatch.GetTimestamp() - t0);
 
         LastSceneLength = output.Length;

@@ -472,7 +472,7 @@ internal sealed class ScriptHost : IDisposable
                 o.Strict(false);
             });
             _engine.SetValue("__log", new Action<string, string>(Log));
-            _engine.SetValue("__fixed", new Func<double, int, string>(JsNumber.ToFixed));
+            BindToFixed();
             _engine.SetValue("__has", new Func<string, bool>(id => { if (_structuralPending > 0) Sync(); return _find(id) != null || _findShape(id) != null; }));
             _engine.SetValue("__parseHtml", new Func<string, string>(html => TreeJson(HtmlParser.Parse(html)))); // DOMParser: the page parser, on the worker
             _engine.SetValue("__query", new Func<string, string[]>(sel => { Sync(); return _query(sel).ToArray(); }));
@@ -558,9 +558,12 @@ internal sealed class ScriptHost : IDisposable
         try { _engine?.Dispose(); } catch (Exception) { }
     }
 
+    internal static long TickBytes, TickCalls;
+
     private void RunFrame(float nowSeconds)
     {
         _busy = true;
+        var ab = GC.GetAllocatedBytesForCurrentThread();
         var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
@@ -569,6 +572,7 @@ internal sealed class ScriptHost : IDisposable
         }
         finally
         {
+            TickBytes += GC.GetAllocatedBytesForCurrentThread() - ab; TickCalls++;
             LastFrameMs = (float)((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
             _busy = false;
             _frameFinished.Set();
@@ -583,6 +587,28 @@ internal sealed class ScriptHost : IDisposable
     }
 
     // ---- callbacks from the script (worker thread): reads answer from snapshots, writes queue to main ----
+
+    /// <summary>
+    /// Number.prototype.toFixed, formatted by the host. Jint's own allocates in proportion to how
+    /// many digits the double really has, and a page animating from a clock never has round values:
+    /// measured at 59,602 bytes a frame for 25 calls against 4,216 here, and faster with it. Bound
+    /// as a function on the prototype rather than a JS wrapper, which cost half the saving again.
+    /// Digits outside 0..20 go back to the engine, so a page still sees the error a browser gives.
+    /// </summary>
+    private void BindToFixed()
+    {
+        var prototype = _engine!.Evaluate("Number.prototype").AsObject();
+        var native = prototype.Get("toFixed");
+        prototype.FastSetProperty("toFixed", new Jint.Runtime.Descriptors.PropertyDescriptor(
+            new Jint.Runtime.Interop.ClrFunction(_engine, "toFixed", (self, args) =>
+            {
+                var digits = args.Length > 0 && !args[0].IsUndefined() ? (int)Jint.Runtime.TypeConverter.ToNumber(args[0]) : 0;
+                if (digits < 0 || digits > 20)
+                    return native is Jint.Native.Function.Function fn ? fn.Call(self, args) : Jint.Native.JsValue.Undefined;
+                var value = self.IsNumber() ? self.AsNumber() : Jint.Runtime.TypeConverter.ToNumber(self);
+                return JsNumber.ToFixed(value, digits);
+            }), true, false, true));
+    }
 
     private void Log(string level, string msg)
     {
@@ -950,18 +976,23 @@ var clearInterval = clearTimeout;
 function requestAnimationFrame(fn){ var id = __nextId++; __rafs.push({id:id, fn:fn}); return id; }
 function cancelAnimationFrame(id){ __rafs = __rafs.filter(function(r){ return r.id !== id; }); }
 function __hasPending(){ return __rafs.length > 0 ? 2 : __timers.length > 0 ? 1 : 0; }
+// Runs on every frame of every page, so it does nothing it does not have to: no new array for
+// an empty animation-frame queue, and the timer list is walked in place rather than filtered
+// (a filter is a closure and an array per tick, whether or not a page has a single timer).
 function __tick(now){
   __now_ms = now;
-  var rafs = __rafs; __rafs = [];
-  for (var i = 0; i < rafs.length; i++) { try { rafs[i].fn(now); } catch (e) { console.error(__errText(e)); } }
-  var due = __timers.filter(function(t){ return t.at <= now; });
-  for (var j = 0; j < due.length; j++) {
-    var t = due[j];
-    if (t.every) t.at = now + t.every; else __timers = __timers.filter(function(x){ return x !== t; });
+  if (__rafs.length) {
+    var rafs = __rafs; __rafs = [];
+    for (var i = 0; i < rafs.length; i++) { try { rafs[i].fn(now); } catch (e) { console.error(__errText(e)); } }
+  }
+  for (var j = 0; j < __timers.length; j++) {
+    var t = __timers[j];
+    if (t.at > now) continue;
+    if (t.every) t.at = now + t.every; else { __timers.splice(j, 1); j--; }
     try { t.fn.apply(null, t.args); } catch (e) { console.error(__errText(e)); }
   }
-  __flushCanvases();
-  return __hasPending();
+  if (__canvasCount) __flushCanvases();
+  return __rafs.length > 0 ? 2 : __timers.length > 0 ? 1 : 0;
 }
 
 // ---- events ----
@@ -1043,9 +1074,10 @@ function __ctx(id){
   c.putImageData = function(){ console.warn('canvas: putImageData is not available in a geometry layer'); };
   c.createImageData = function(w,h){ return { data: new Uint8ClampedArray(0), width: w, height: h }; };
   c.__flush = function(){ __canvasFrame(id, c.__cmds, c.__cols, c.__cmds.length); c.__cmds = []; c.__cols = []; c.__colIdx = {}; };
-  __canvases[id] = c;
+  __canvases[id] = c; __canvasCount++;
   return c;
 }
+var __canvasCount = 0;
 function __flushCanvases(){ for (var k in __canvases) { var c = __canvases[k]; if (c.__cmds.length) c.__flush(); } }
 
 var __textCache = {}, __htmlCache = {}, __styleCache = {}, __scrollCache = {}, __styleProxies = {};
@@ -1372,8 +1404,6 @@ function __hasId(id){ if (__hasCache[id]) return true; var yes = __has(id); if (
   __setHtml = function(a, b){ __hasCache = {}; return raw.setHtml(a, b); };
   __remove = function(a){ __hasCache = {}; return raw.remove(a); };
 })();
-var __toFixedSlow = Number.prototype.toFixed;
-Number.prototype.toFixed = function(d){ d = d === undefined ? 0 : (d | 0); return (d >= 0 && d <= 20) ? __fixed(Number(this), d) : __toFixedSlow.call(this, d); };
 var __kebabCache = {};
 function __kebab(p){ var k = String(p); var hit = __kebabCache[k]; if (hit !== undefined) return hit; var out = k.replace(/[A-Z]/g, function(m){ return '-' + m.toLowerCase(); }); __kebabCache[k] = out; return out; }
 function __serialize(c, noIds){

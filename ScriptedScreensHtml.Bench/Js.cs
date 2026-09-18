@@ -96,6 +96,7 @@ internal static class Js
     {
         for (var i = 0; i < 20; i++) { host.RunSynchronously(1f + i * 0.016f, built.ById, 500); host.Pump(); panel.Layout(size.x, size.y); }
 
+        ScriptHost.TickBytes = ScriptHost.TickCalls = 0;
         var before = GC.GetTotalAllocatedBytes(precise: true);
         var sw = Stopwatch.StartNew();
         var ran = 0;
@@ -117,6 +118,8 @@ internal static class Js
             Console.WriteLine($"          {Morphs} in-place morphs, {MorphBytes / Math.Max(1, Morphs),10:N0} B each");
         if (DomCalls > 0)
             Console.WriteLine($"          {DomCalls} innerHTML/append calls, {DomChars / DomCalls} chars each, {DomBytes / DomCalls,10:N0} B each (parse, cascade, tree)");
+        if (ScriptHost.TickCalls > 0)
+            Console.WriteLine($"          inside the engine: {ScriptHost.TickBytes / (double)ScriptHost.TickCalls,10:N0} B per tick ({ScriptHost.TickCalls} ticks)");
         host.Dispose();
     }
 }
