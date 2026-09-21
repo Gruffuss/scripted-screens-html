@@ -25,7 +25,8 @@ gets compacted must be able to pick the rest up from here alone. So:
 | 0a | bench compiles `HtmlSurface.cs` + `VectorBridge.cs` | ☐ | — | — |
 | 0b | measurement window encloses `Diff` + `Capture` | ☐ | — | — |
 | 0c | stop labelling bench phases "main thread" | ☐ | — | — |
-| 0d | **ClearScript 7.5.1.1 native V8 loads under Mono** (gates 2-4) | ☐ | — | — |
+| 0d | **ClearScript 7.5.1.1 native V8 loads under Unity's Mono** (gates 2-4) | ☐ | — | — |
+| 0e | 7.4.5 → 7.5.1.1 crossing costs re-measured independently | ☑ | 3,096 B/frame | **344 B/frame** |
 | 1a | boxed `Children()` enumerator ×3 | ☐ | ~12 KB/f | — |
 | 1b | `WriteBatch` span scan, no `Split` | ☐ | 5,792 B/f | — |
 | 1c | `StyleApplier.Functions` in-place scanner | ☐ | ~3,000 B/f | — |
@@ -211,11 +212,29 @@ page that stopped animating — one agent hit precisely that and its allocation 
 The version bump is the single highest-ratio change available and everything after it depends on it.
 
 - Bump `Microsoft.ClearScript.V8` and `.Native.win-x64` from **7.4.5 → 7.5.1.1** (still
-  `netstandard2.1`). Measured: host→script call **1,520 → 160 B**, typed-array read **1,224 → 48 B**.
+  `netstandard2.1`).
+
+  **Re-measured here independently of the investigation that found it, on .NET 8, and it agrees to
+  the byte:**
+
+  | | 7.4.5 | 7.5.1.1 |
+  |---|---:|---:|
+  | host → script, 0 args | 1,520.1 B | **160.0 B** |
+  | host → script, 1 arg | 1,872.1 B | 296.3 B |
+  | `ITypedArray<double>.Read(64)` | 1,224.0 B | **48.0 B** |
+  | a whole frame: call + read 25 doubles | 3,096.1 B | **344.3 B** |
+
+  At 15 consoles and 52 fps that last row is **0.27 MB/s, 12% of the floor** — the engine side
+  alone clears the target. 7.4.5 was pinned arbitrarily on 2026-09-21 and is the sole reason V8
+  looked like a dead end; three of the four investigations measured only that version.
 - Switch pages to V8 with today's bindings. Measured end to end: `07-game` 40,761 → **~15,600
   B/frame**; `AtmoDark` 15,012 → **~5,580** (engine side 11,595 → 2,464).
-- `V8Engine.Invoke` currently goes through `MethodInfo.Invoke` with a fresh `object[]` — cache a
-  `ScriptObject` (200 B → 160 B; minor, but free).
+- ~~Cache a `ScriptObject` instead of `MethodInfo.Invoke`~~ — **struck: worth nothing on 7.5.1.1.**
+  Re-measured: `engine.Invoke(name, args)` and a cached `ScriptObject.InvokeAsFunction()` both cost
+  exactly 160 B there. It was worth 312 B on 7.4.5, which is where that advice came from.
+- **Pass the clock through the buffer, not as an argument.** Measured on 7.5.1.1: a 0-argument call
+  is 160 B, a 1-argument call is 296 B. Writing the frame time into slot 0 and calling with no
+  arguments makes a frame 160 + 48 = **208 B**.
 - **Delete `BindToFixed` and the `__fixed` shim on the V8 path.** They are Jint workarounds and cost
   ~69,000 B/frame under V8; V8's own `toFixed` allocates nothing managed.
 - **Never bind `Action<double>`** — measured **5,716 B per call**, the worst shape in the table.
