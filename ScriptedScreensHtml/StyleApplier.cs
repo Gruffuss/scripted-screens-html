@@ -368,20 +368,21 @@ internal static class StyleApplier
                     s.translate = new Translate(0, 0); s.rotate = new Rotate(0); s.scale = new Scale(Vector2.one);
                     break;
                 }
-                foreach (var fn in Functions(v))
+                // Scanned in place. This is the hot write of every animating page, and the iterator
+                // version made a name string, a lowercased copy, an argument array and a trimmed
+                // string per argument for a value that is only ever read as numbers.
+                var fn = new TransformScan(v.AsSpan());
+                while (fn.Next())
                 {
-                    var args = fn.args;
-                    switch (fn.name)
-                    {
-                        case "translate": s.translate = new Translate(Len(args[0]).value, args.Length > 1 ? Len(args[1]).value : new Length(0)); break;
-                        case "translatex": s.translate = new Translate(Len(args[0]).value, new Length(0)); break;
-                        case "translatey": s.translate = new Translate(new Length(0), Len(args[0]).value); break;
-                        case "rotate": s.rotate = new Rotate(Angle(args[0])); break;
-                        case "scale": s.scale = new Scale(new Vector2(Num(args[0]), args.Length > 1 ? Num(args[1]) : Num(args[0]))); break;
-                        case "scalex": s.scale = new Scale(new Vector2(Num(args[0]), 1)); break;
-                        case "scaley": s.scale = new Scale(new Vector2(1, Num(args[0]))); break;
-                        default: warn?.Invoke($"css: transform {fn.name}() not supported"); break;
-                    }
+                    var name = fn.Name;
+                    if (Same(name, "translate")) s.translate = new Translate(Len(fn.Arg(0)).value, fn.Count > 1 ? Len(fn.Arg(1)).value : new Length(0));
+                    else if (Same(name, "translatex")) s.translate = new Translate(Len(fn.Arg(0)).value, new Length(0));
+                    else if (Same(name, "translatey")) s.translate = new Translate(new Length(0), Len(fn.Arg(0)).value);
+                    else if (Same(name, "rotate")) s.rotate = new Rotate(Angle(fn.Arg(0)));
+                    else if (Same(name, "scale")) s.scale = new Scale(new Vector2(Num(fn.Arg(0)), Num(fn.Arg(fn.Count > 1 ? 1 : 0))));
+                    else if (Same(name, "scalex")) s.scale = new Scale(new Vector2(Num(fn.Arg(0)), 1));
+                    else if (Same(name, "scaley")) s.scale = new Scale(new Vector2(1, Num(fn.Arg(0))));
+                    else warn?.Invoke($"css: transform {name.ToString()}() not supported");
                 }
                 break;
             }
@@ -573,33 +574,57 @@ internal static class StyleApplier
         return Unit(v);
     }
 
-    private static float Unit(string v)
+    /// <summary>The unit suffix stripped by slicing, not by Substring: every Num() in the codebase came
+    /// through here and paid a string for the digits it was about to parse.</summary>
+    private static float Unit(ReadOnlySpan<char> v)
     {
         var scale = 1f;
-        if (v.EndsWith("px", StringComparison.OrdinalIgnoreCase)) v = v.Substring(0, v.Length - 2);
-        else if (v.EndsWith("%", StringComparison.Ordinal)) v = v.Substring(0, v.Length - 1);
-        else if (v.EndsWith("rem", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 3); scale = RootFontSize; }
-        else if (v.EndsWith("em", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize; }
-        else if (v.EndsWith("vw", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = ViewportW / 100f; }
-        else if (v.EndsWith("vh", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = ViewportH / 100f; }
-        else if (v.EndsWith("vmin", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = Mathf.Min(ViewportW, ViewportH) / 100f; }
-        else if (v.EndsWith("vmax", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = Mathf.Max(ViewportW, ViewportH) / 100f; }
-        else if (v.EndsWith("pt", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 4f / 3f; }
-        else if (v.EndsWith("pc", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 16f; }
-        else if (v.EndsWith("cm", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f / 2.54f; }
-        else if (v.EndsWith("mm", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f / 25.4f; }
-        else if (v.EndsWith("in", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = 96f; }
-        else if (v.EndsWith("cap", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 3); scale = EmSize * 0.7f; }  // ponytail: a typical cap height; the font's own is not exposed
-        else if (v.EndsWith("ic", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize; }          // ponytail: the ideographic advance is one em in CJK faces
-        else if (v.EndsWith("q", StringComparison.OrdinalIgnoreCase) && !v.EndsWith("sq", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 1); scale = 96f / 25.4f / 4f; }
-        else if (v.EndsWith("ch", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize * 0.5f; }   // the "0" of a text face is about half an em
-        else if (v.EndsWith("ex", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 2); scale = EmSize * 0.5f; }
-        else if (v.EndsWith("q", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 1); scale = 96f / 25.4f / 4f; }
-        else if (v.EndsWith("grad", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = 0.9f; }
-        else if (v.EndsWith("deg", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 3); }
-        else if (v.EndsWith("rad", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 3); scale = 180f / Mathf.PI; }
-        else if (v.EndsWith("turn", StringComparison.OrdinalIgnoreCase)) { v = v.Substring(0, v.Length - 4); scale = 360f; }
+        if (Ends(v, "px")) v = v.Slice(0, v.Length - 2);
+        else if (v.EndsWith("%".AsSpan(), StringComparison.Ordinal)) v = v.Slice(0, v.Length - 1);
+        else if (Ends(v, "rem")) { v = v.Slice(0, v.Length - 3); scale = RootFontSize; }
+        else if (Ends(v, "em")) { v = v.Slice(0, v.Length - 2); scale = EmSize; }
+        else if (Ends(v, "vw")) { v = v.Slice(0, v.Length - 2); scale = ViewportW / 100f; }
+        else if (Ends(v, "vh")) { v = v.Slice(0, v.Length - 2); scale = ViewportH / 100f; }
+        else if (Ends(v, "vmin")) { v = v.Slice(0, v.Length - 4); scale = Mathf.Min(ViewportW, ViewportH) / 100f; }
+        else if (Ends(v, "vmax")) { v = v.Slice(0, v.Length - 4); scale = Mathf.Max(ViewportW, ViewportH) / 100f; }
+        else if (Ends(v, "pt")) { v = v.Slice(0, v.Length - 2); scale = 4f / 3f; }
+        else if (Ends(v, "pc")) { v = v.Slice(0, v.Length - 2); scale = 16f; }
+        else if (Ends(v, "cm")) { v = v.Slice(0, v.Length - 2); scale = 96f / 2.54f; }
+        else if (Ends(v, "mm")) { v = v.Slice(0, v.Length - 2); scale = 96f / 25.4f; }
+        else if (Ends(v, "in")) { v = v.Slice(0, v.Length - 2); scale = 96f; }
+        else if (Ends(v, "cap")) { v = v.Slice(0, v.Length - 3); scale = EmSize * 0.7f; }  // ponytail: a typical cap height; the font's own is not exposed
+        else if (Ends(v, "ic")) { v = v.Slice(0, v.Length - 2); scale = EmSize; }          // ponytail: the ideographic advance is one em in CJK faces
+        else if (Ends(v, "q") && !Ends(v, "sq")) { v = v.Slice(0, v.Length - 1); scale = 96f / 25.4f / 4f; }
+        else if (Ends(v, "ch")) { v = v.Slice(0, v.Length - 2); scale = EmSize * 0.5f; }   // the "0" of a text face is about half an em
+        else if (Ends(v, "ex")) { v = v.Slice(0, v.Length - 2); scale = EmSize * 0.5f; }
+        else if (Ends(v, "q")) { v = v.Slice(0, v.Length - 1); scale = 96f / 25.4f / 4f; }
+        else if (Ends(v, "grad")) { v = v.Slice(0, v.Length - 4); scale = 0.9f; }
+        else if (Ends(v, "deg")) { v = v.Slice(0, v.Length - 3); }
+        else if (Ends(v, "rad")) { v = v.Slice(0, v.Length - 3); scale = 180f / Mathf.PI; }
+        else if (Ends(v, "turn")) { v = v.Slice(0, v.Length - 4); scale = 360f; }
         return float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f * scale : 0f;
+    }
+
+    private static bool Ends(ReadOnlySpan<char> v, string suffix) => v.EndsWith(suffix.AsSpan(), StringComparison.OrdinalIgnoreCase);
+
+    private static bool Same(ReadOnlySpan<char> v, string other) => v.Equals(other.AsSpan(), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Num/Len/Angle over a slice of a larger string. A value carrying '(' (calc, min, clamp,
+    /// a trigonometric function) needs the string paths and materialises there; a plain number does not.</summary>
+    private static float Num(ReadOnlySpan<char> v)
+    {
+        v = v.Trim();
+        return v.IndexOf('(') >= 0 ? Num(v.ToString()) : Unit(v);
+    }
+
+    private static StyleLength Len(ReadOnlySpan<char> v)
+    {
+        v = v.Trim();
+        if (v.IndexOf('(') >= 0) return Len(v.ToString());
+        if (Same(v, "auto")) return StyleKeyword.Auto;
+        if (Same(v, "initial") || Same(v, "unset")) return StyleKeyword.Initial;
+        if (v.EndsWith("%".AsSpan(), StringComparison.Ordinal)) return new Length(Unit(v), LengthUnit.Percent);
+        return new Length(Unit(v), LengthUnit.Pixel);
     }
 
     /// <summary>
@@ -795,13 +820,13 @@ internal static class StyleApplier
         };
     }
 
-    private static float Angle(string v)
+    private static float Angle(ReadOnlySpan<char> v)
     {
         v = v.Trim();
         float deg;
-        if (v.EndsWith("deg", StringComparison.OrdinalIgnoreCase)) deg = Num(v.Substring(0, v.Length - 3));
-        else if (v.EndsWith("rad", StringComparison.OrdinalIgnoreCase)) deg = Num(v.Substring(0, v.Length - 3)) * Mathf.Rad2Deg;
-        else if (v.EndsWith("turn", StringComparison.OrdinalIgnoreCase)) deg = Num(v.Substring(0, v.Length - 4)) * 360f;
+        if (Ends(v, "deg")) deg = Num(v.Slice(0, v.Length - 3));
+        else if (Ends(v, "rad")) deg = Num(v.Slice(0, v.Length - 3)) * Mathf.Rad2Deg;
+        else if (Ends(v, "turn")) deg = Num(v.Slice(0, v.Length - 4)) * 360f;
         else deg = Num(v);
         // A whole number of turns is the same rotation as none, and a transition to "the
         // same value" does nothing. Browsers animate rotate(360deg) as a full turn; shave
@@ -916,11 +941,69 @@ internal static class StyleApplier
         return list;
     }
 
-    /// <summary>A transform list the layout engine cannot represent (skew, matrix, 3D): the emitter takes it whole.</summary>
+    /// <summary>A transform list the layout engine cannot represent (skew, matrix, 3D): the emitter takes it whole.
+    /// Ordinal-ignore-case scans, not a lowercased copy: this runs per element per emit as well as per write.</summary>
     internal static bool NeedsMatrix(string transform)
     {
-        var t = transform.ToLowerInvariant();
-        return t.Contains("skew") || t.Contains("matrix") || t.Contains("3d") || t.Contains("rotatex") || t.Contains("rotatey") || t.Contains("rotatez") || t.Contains("perspective");
+        return Mentions(transform, "skew") || Mentions(transform, "matrix") || Mentions(transform, "3d")
+            || Mentions(transform, "rotatex") || Mentions(transform, "rotatey") || Mentions(transform, "rotatez")
+            || Mentions(transform, "perspective");
+
+        static bool Mentions(string t, string what) => t.IndexOf(what, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    /// <summary>
+    /// The same walk as <see cref="Functions"/>, in place: name and arguments as slices of the
+    /// declaration. Used where it runs per frame; the enumerable stays for the callers that want
+    /// strings back.
+    /// </summary>
+    private ref struct TransformScan
+    {
+        private readonly ReadOnlySpan<char> _v;
+        private int _i;
+        private ReadOnlySpan<char> _args;
+
+        public ReadOnlySpan<char> Name { get; private set; }
+        /// <summary>Comma-separated arguments, as CSS counts them: an empty list still has one (empty) argument.</summary>
+        public int Count { get; private set; }
+
+        public TransformScan(ReadOnlySpan<char> v)
+        {
+            _v = v;
+            _i = 0;
+            _args = default;
+            Name = default;
+            Count = 0;
+        }
+
+        public bool Next()
+        {
+            if (_i >= _v.Length) return false;
+            var rest = _v.Slice(_i);
+            var open = rest.IndexOf('(');
+            if (open < 0) return false;
+            var close = rest.Slice(open).IndexOf(')');
+            if (close < 0) return false;
+            Name = rest.Slice(0, open).Trim();
+            _args = rest.Slice(open + 1, close - 1);
+            _i += open + close + 1;
+            Count = 1;
+            for (var k = 0; k < _args.Length; k++) if (_args[k] == ',') Count++;
+            return true;
+        }
+
+        public ReadOnlySpan<char> Arg(int n)
+        {
+            var start = 0;
+            for (var k = 0; k <= _args.Length; k++)
+            {
+                if (k < _args.Length && _args[k] != ',') continue;
+                if (n == 0) return _args.Slice(start, k - start).Trim();
+                n--;
+                start = k + 1;
+            }
+            return ReadOnlySpan<char>.Empty;
+        }
     }
 
     internal static IEnumerable<(string name, string[] args)> Functions(string v)

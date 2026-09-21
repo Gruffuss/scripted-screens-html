@@ -244,6 +244,13 @@ internal sealed class Tweens
             var end = kv.Value.Start + kv.Value.Duration;
             if (end < soonest) soonest = end;
         }
+        // and the moment a finished tween's grace lapses: that frame is the one that writes its
+        // element back as plain numbers, so a page that has gone idle still has to run it.
+        foreach (var kv in _ended)
+        {
+            var end = Lapses(kv.Value);
+            if (end < soonest) soonest = end;
+        }
         return soonest <= now ? now : soonest;
     }
     public int Count => _live.Count;
@@ -254,6 +261,20 @@ internal sealed class Tweens
     public void Forget(VisualElement ve) { _shown.Remove(ve); _live.Remove(ve); _ended.Remove(ve); }
     private readonly Dictionary<VisualElement, Tween> _ended = new();
     private int _walked;
+
+    /// <summary>
+    /// How much longer a finished tween's expression is kept in the scene, as a multiple of its own
+    /// duration. Keeping it means a repeat - the next keyframe segment, the next tick of a bar with
+    /// a CSS transition - writes the same template and travels as a value patch instead of two
+    /// structure sends; that is why it is kept at all. Keeping it <em>forever</em> was the defect:
+    /// the emitter refuses to cache an element with a tween (VectorEmitter's CacheUsable), so an
+    /// element that had transitioned once re-wrote its expression strings on every frame for the
+    /// life of the page. After the grace the entry goes, Expire reports it, and the element is
+    /// emitted once with plain numbers and is cacheable again.
+    /// </summary>
+    private const float KeepEndedFor = 1f;
+
+    private static float Lapses(Tween t) => t.Start + t.Duration * (1f + KeepEndedFor);
 
     /// <summary>After layout, before emitting: start a tween for every element that changed and has a transition.</summary>
     /// <summary>transition-behavior: allow-discrete on these: a display: none write waits for the element's transition to end.</summary>
@@ -340,7 +361,7 @@ internal sealed class Tweens
     /// <summary>Drop finished tweens. True when any ended, so the scene can be re-emitted with plain numbers.</summary>
     public bool Expire(float now)
     {
-        if (_live.Count == 0)
+        if (_live.Count == 0 && _ended.Count == 0)
             return false;
         _scratch.Clear();
         foreach (var kv in _live)
@@ -356,7 +377,18 @@ internal sealed class Tweens
             lock (Shared) held = PendingHide.Remove(ve);
             if (held) ve.style.display = DisplayStyle.None; // the held-back display: none lands now
         }
-        return _scratch.Count > 0;
+        var ended = _scratch.Count > 0;
+
+        // The grace lapsed on a tween nothing followed: its element goes back to plain numbers and
+        // becomes cacheable. Reported like an ending tween, because the frame that writes those
+        // numbers is owed - without it the scene keeps the expression and nothing changes.
+        _scratch.Clear();
+        foreach (var kv in _ended)
+            if (Lapses(kv.Value) <= now)
+                _scratch.Add(kv.Key);
+        foreach (var ve in _scratch)
+            _ended.Remove(ve);
+        return ended || _scratch.Count > 0;
     }
 
     /// <summary>
@@ -416,6 +448,15 @@ internal sealed class Tweens
 
     private static readonly string[] LayoutProps = { "width", "height", "top", "left", "right", "bottom", "margin", "padding", "flex", "min-width", "min-height", "max-width", "max-height", "inset" };
 
+    /// <summary>A plain loop: the predicate this replaces closed over <c>prop</c>, so it was a display class and a fresh delegate per call.</summary>
+    private static bool IsLayoutProp(string prop)
+    {
+        foreach (var p in LayoutProps)
+            if (prop.StartsWith(p, StringComparison.Ordinal))
+                return true;
+        return false;
+    }
+
     private static (float dur, Easing ease, float delay) Timing(VisualElement ve, HtmlRenderer.Result built, in Snap prev, in Snap cur)
     {
         (float dur, Easing ease) o;
@@ -442,7 +483,7 @@ internal sealed class Tweens
                           || (opacity && prop == "opacity")
                           || (offset && (prop == "offset-distance" || prop == "offset"))
                           || (transform && (prop == "transform" || prop == "rotate" || prop == "translate" || prop == "scale"))
-                          || (layout && Array.Exists(LayoutProps, p => prop.StartsWith(p, StringComparison.Ordinal)));
+                          || (layout && IsLayoutProp(prop));
             if (!matches) continue;
             var dur = Seconds(parts[1]);
             var ease = Easing.Default;

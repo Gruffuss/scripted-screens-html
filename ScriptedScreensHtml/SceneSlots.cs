@@ -57,6 +57,8 @@ internal static class SceneSlots
     private sealed class Memory
     {
         public readonly StringBuilder Builder = new(4096);
+        /// <summary>Unescaping a changed text slot; Builder is busy holding the template. Grows, never shrinks.</summary>
+        public char[] Text = new char[256];
         public string Prefix = string.Empty;
         public string? Template;
         public readonly List<List<Token>> Lines = new();
@@ -211,7 +213,7 @@ internal static class SceneSlots
         }
         if (quoted && Is(scene, sceneLength, keyStart, keyEnd, "text"))
         {
-            values[name] = Keep(name, Unescaped(scene, sceneLength, bodyStart, bodyEnd, memory.Last.TryGetValue(name, out var had) ? had.Text : null), memory);
+            values[name] = Keep(name, Unescaped(scene, sceneLength, bodyStart, bodyEnd, memory.Last.TryGetValue(name, out var had) ? had.Text : null, memory), memory);
             sb.Append('"').Append('$').Append(name).Append('"');
             return;
         }
@@ -313,20 +315,26 @@ internal static class SceneSlots
     }
 
     /// <summary>The unescaped text, or <paramref name="previous"/> itself when it already says the same.</summary>
-    private static string Unescaped(char[] scene, int sceneLength, int from, int to, string? previous)
+    private static string Unescaped(char[] scene, int sceneLength, int from, int to, string? previous, Memory memory)
     {
         if (previous != null && UnescapedIs(scene, sceneLength, from, to, previous)) return previous;
-        var sb = new StringBuilder(to - from);
+        // A buffer the page thread keeps, so only the result string is new. A StringBuilder was
+        // tried first and is worse here: past its first chunk Clear() copies into a fresh array,
+        // which showed up as one frame in eight costing more than the allocating version did.
+        if (memory.Text.Length < to - from)
+            memory.Text = new char[Math.Max(to - from, memory.Text.Length * 2)];
+        var buffer = memory.Text;
+        var length = 0;
         for (var i = from; i < to; i++)
         {
             if (scene[i] == '\\' && i + 1 < to)
             {
                 var n = scene[++i];
-                sb.Append(n == 'n' ? '\n' : n);
+                buffer[length++] = n == 'n' ? '\n' : n;
             }
-            else sb.Append(scene[i]);
+            else buffer[length++] = scene[i];
         }
-        return sb.ToString();
+        return new string(buffer, 0, length);
     }
 
     private static bool UnescapedIs(char[] scene, int sceneLength, int from, int to, string other)

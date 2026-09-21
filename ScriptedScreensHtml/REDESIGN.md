@@ -40,7 +40,8 @@ difference is the fixed memory of the layout tree and the script engine.
 
 5. **Emit only what changed on our side too.** The emitter's per-element output is cached and
    rebuilt only for elements whose layout or record changed, so an update allocates next to
-   nothing on the HTML side.
+   nothing on the HTML side. **See "Step 5 in full" below** — the cache was built and the
+   structure still resends, because three things make the structure depend on a *value*.
 
 6. **The remaining leak.** Memory still climbs slowly with a rebuilding page after the
    2026-09-16 pruning; find and remove it (the counters are in the Diagnostics line).
@@ -53,7 +54,8 @@ difference is the fixed memory of the layout tree and the script engine.
 | 2 | done (vector 0.11.26 `snap`), all HTML payloads snap |
 | 3 | done, seen in game: 818 in-place updates in 3 min, no elements created per tick |
 | 4 | done for looping opacity/transform animations (CSS and script); finite ones keep the runner |
-| 5 | open: the emitter still writes the whole scene text on every change (6.8 emits/s, 0.47 ms/frame on the main thread) |
+| 5 | **open, and the cause is known (2026-09-21)** — the per-element cache exists, but the structure still resends 1-5 times a second on a script-driven page. Three bugs make the structure depend on a value; see below |
+| 7 | **conditional, and probably unnecessary** — see "Step 7". Jint's cost is per *script frame*; once step 5 lands a page writes values instead of rebuilding markup, and a realistic page ticks 2.4 times a second, not 70 |
 | 6 | memory flat over 3 min (2,105 -> 2,011 MB); garbage collections 10 per 3 min |
 
 Also fixed on the way: `overflow` no longer clips the element's own background, border and shadow
@@ -119,3 +121,136 @@ steps and data binding all had to be written into it there. The plan replaces it
 
 Diagnostics line additions: `main N ms/frame, awake N frames, sent: N structures M patches (K values), J in-place`,
 a `frames over 25 ms` line, and `new structure ... first difference` lines explaining each structure send.
+
+
+---
+
+## Step 5 in full (2026-09-21)
+
+`ALLOCATION-PLAN.md` was folded in here, because it was step 5 under another name and two
+documents would drift.
+
+### Why the structure still resends
+
+The Apple page sends 4 structures in 3 minutes. `examples/07-game.lua` sends **1-5 a second**, and
+the mod's own `new structure ... first difference` lines name all three causes:
+
+```
+"G a=[$M221_a_0,...] t=[$M221_t_0,...] {"   ->  "R x=$M221_x ... id=pb10"
+"box ... stops=[[0,#D8DDE3],[1,#8A949F]]"  ->  "box ... stops=[[0,#F1D36B],[1,#B08A1C]]"
+"GL id=grad113_1 units=bbox ..."           ->  "GL id=grad121_1 units=bbox ..."
+```
+
+| # | cause | fix |
+|---|---|---|
+| 5a | the `G` transform wrapper is dropped when `transform` reaches identity, so a **value** changes the **shape** of the text | emit the wrapper unconditionally for anything that can transform, identity as slot values |
+| 5b | gradient stops are template literals | stops become slots |
+| 5c | def ids come from a page-wide running counter, so a re-emit renumbers them | stable per element — `d3b9b1d` claims this and is in the tree, so find why it does not hold here |
+
+Until these land, the patch path built in step 1 only works for pages that happen not to trip them.
+
+### What the target looks like, from the Lua pages
+
+`CoolingUi/ColdbenchConsole.lua` and `ManufacturingUi/ManufacturingConsole.lua` already are what
+the emitter should produce. They are the specification:
+
+| | how the Lua does it |
+|---|---|
+| column layout | `cols(x, w, n, gap)` — arithmetic, **once, at build** |
+| a 20-minute history chart | one `YS` + one `LS`, `x==X+i*step`, `y==base-clamp($hevap[i],0,1)*h`. A new sample shifts the array; no new nodes |
+| a variable-length job list | `JOBROWS = 2` fixed slots; overflow becomes `"+N more ... see JOBS"` |
+| rows appearing/disappearing | `fo = "=clamp($jb2_3,0,1)*0.06"` — presence is opacity from a slot, never node insertion |
+| a real shape change | `lsig = concat{ #list, #MISSING, S.dim }` — a signature; rebuild only when it changes |
+| a theme | `use_space(vb)` re-points the design space and **the caller rebuilds**: "every rect on screen is in the old space". Skins share token names, resolved at build |
+
+So there is nothing HTML provides after the initial translation that the vector side cannot do.
+Layout is answered **once**, at compile, and is arithmetic thereafter. A CSS theme switch is a
+recompile, not a per-frame cascade.
+
+### Compile-time cost — done 2026-09-21, measured, scenes byte-identical
+
+These are now paid once per compile rather than per frame. Board kept so a half-finished pass is
+recoverable; **tick with the number, not the word**.
+
+| # | item | status | before | after |
+|---|---|---|---|---|
+| 1b | `WriteBatch` span scan, no `Split` | ☑ | claimed 5,792 | −2,530 script/f |
+| 1c | `StyleApplier.Functions` + `Unit` on spans | ☑ | claimed ~3,000 | **−5,501** script/f |
+| 1d | `NeedsMatrix` ordinal `IndexOf` | ☑ | 4.7% of strings | −1,332 script/f |
+| 1e | cached `Report` delegate | ☑ | 3.7% of strings | −1,510 script/f |
+| 1f | `_attrCache.Keys` hoisted out of its loop | ☑ | claimed 8.3% | −1,036 = **8.9%** of AtmoDark |
+| 1g | `_ended` grace period (not removal — removal costs 2 structure sends per repeat) | ☑ | 756 B/f emit | **277 B/f** |
+| 1h | SVG/canvas cacheable **+ frozen-gauge bug** | ☑ | 7,448 B/f | **32 B/f** |
+| 1i | `EmitText` computes its rect before writing | ☑ | 64 B/f | 0 |
+| 1j | `AppendNum`/`AppendNodeId` where they already existed | ☑ | 64-67 B/f | 0 |
+| 1k | `Keep()` doubles instead of exact-sizing | ☑ | **1,675 B/f** | 0 |
+| 1l | `Shadows()` cached by declaration | ☑ | 64 B/f | 0 |
+| 1m | `Tweens.cs:445` plain loop | ☑ | 881 B/f | 793 B/f |
+| 1n | `SceneSlots.Unescaped` grow-only `char[]` (a `StringBuilder` measured **worse**) | ☑ | 191 B/slot | **71 B** |
+| 1a | ~~boxed `Children()` enumerator~~ | struck | claimed ~12 KB/f | **0 — this mod has its own DOM (`Dom.cs:128`)** |
+| 1o | `FinishJob` / `ApplyExternals` / `VectorBridge` / pooled `UiProp[]` | ☐ | 4,792 B/f | — |
+| 1p | `_attrCache` keys composed at 4 call sites | ☐ | — | — |
+| 1q | `HtmlParser.Intern` is private, forcing ~12 duplicated lines | ☐ | — | — |
+| 1r | `EmitText` counts newlines after escaping them — `lines` is always 1 | ☐ | rendering defect | — |
+| 1s | `Tweens.Any` counts `_live` only → a finished transition replays once | ☐ | — | — |
+
+**Bench blind spots found on the way — fix before trusting another bench number:**
+
+| # | | |
+|---|---|---|
+| 0a | the bench does not compile `HtmlSurface.cs` or `VectorBridge.cs` | every pipeline total ever quoted from it excluded the bridge |
+| 0b | the allocation window opens *after* `Tweens.Diff` and `OffThread.Capture` | ~12 KB/frame invisible |
+| 0c | phases are labelled "main thread" in a single-threaded harness | page-thread work reported as game-thread |
+| 0f | the bench never calls `tweens.Expire(now)` | item 1g was invisible to it entirely |
+
+---
+
+## Step 7 — the page's own JavaScript (2026-09-21)
+
+**Do this last, and only if it is still needed.** Jint's cost is per *script frame* and
+proportional to what the script does. The 16 MB/s measured on AtmoDark is not Jint being slow — it
+is Jint building a 21 KB markup string that we then parse, morph, re-cascade and re-emit, which is
+exactly what step 5 deletes. A page that writes 25 doubles into slots 2.4 times a second costs
+almost nothing, whatever interprets it. **Measure a value-binding script after step 5 before
+building any of this.**
+
+The case that would still need it is a genuine per-frame game loop across many consoles
+(`examples/07-game.lua`, 70 script frames a second) — the stress page, not the product. And even
+there, motion that is a function of the clock should be compiled to an expression so the script
+does not run at all; only real game logic needs a tick.
+
+Measured over 15 consoles before step 5: a page with
+its `<script>` stripped costs the same as no page at all (2.1 vs 2.2 MB/s); the same page with its
+script costs 34.6.
+
+**The version was the whole story.** `Microsoft.ClearScript.V8` was pinned at **7.4.5** on
+2026-09-21, and every "V8 is too expensive" conclusion came from it. Re-measured on the same
+machine:
+
+| | 7.4.5 | **7.5.1.1** |
+|---|---:|---:|
+| host → script, 0 args | 1,520.1 B | **160.0 B** |
+| host → script, 1 arg | 1,872.1 B | 296.3 B |
+| `ITypedArray<double>.Read(64)` | 1,224.0 B | **48.0 B** |
+| a frame: call + read 25 doubles | 3,096.1 B | **344.3 B** |
+| JS writing a double into a shared `Float64Array` | — | **0.4 B** |
+
+At 15 consoles that last-but-one row is **0.27 MB/s against a 2.2 MB/s floor**, so:
+
+| | |
+|---|---|
+| 7a | bump ClearScript 7.4.5 → 7.5.1.1 (still `netstandard2.1`) |
+| 7b | pages on V8; **delete `BindToFixed` and the `__fixed` shim on that path** (Jint workarounds, ~69,000 B/frame under V8) |
+| 7c | the frame clock goes **in the buffer**, not as an argument (160 B vs 296 B) |
+| 7d | **never bind `Action<double>`** — 5,716 B per call, the worst shape measured |
+| 7e | `V8Engine.TryCreate` falls back to Jint with only a `LogWarning`, and stages the native DLL into `Path.GetTempPath()` — a long temp path exceeds `MAX_PATH` and the fallback is silent. An investigator measured a whole "V8" run before noticing it was Jint |
+| 7f | **verify 7.5.1.1's native V8 loads under Unity's Mono** — untested, gates all of step 7 |
+
+~~A hand-written P/Invoke layer~~ — struck. It measures 0.000 B and is the only route to literal
+zero, but over 7.5.1.1 it buys **0.16 MB/s across 15 consoles** for ~37 bindings rewritten against a
+C API and a failure mode where our own marshalling bug kills the game. It does not even avoid a
+native dependency; ClearScript ships native V8 regardless. Revisit only if step 7 lands materially
+worse than measured.
+
+**Not doing:** reducing emits/s (masking); out-of-process (needs a shipped `.exe`, refused);
+manual GC (a process-wide setting); another pure-C# engine (same heap).

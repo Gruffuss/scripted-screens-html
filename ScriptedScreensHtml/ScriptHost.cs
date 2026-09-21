@@ -402,8 +402,9 @@ internal sealed class ScriptHost : IDisposable
             _stale.Clear();
             foreach (var key in _rects.Keys) if (!elements.ContainsKey(key)) _stale.Add(key);
             foreach (var key in _stale) _rects.Remove(key);
-            foreach (var key in _attrCache.Keys)
+            foreach (var entry in _attrCache)   // not .Keys: that copies every key into a new array
             {
+                var key = entry.Key;
                 var nl = key.IndexOf('\n');
                 if (nl > 0 && !elements.ContainsKey(key.Substring(0, nl))) _attrCache.TryRemove(key, out _);
             }
@@ -532,14 +533,59 @@ internal sealed class ScriptHost : IDisposable
     /// </summary>
     private void WriteBatch(string batch)
     {
-        var p = batch.Split(Unit);
-        for (var i = 0; i + 3 < p.Length; i += 4)
-            switch (p[i])
+        // Scanned in place. Split made a string for every one of the ~120 fields plus the array,
+        // every frame, and three of the four fields in a group are the same characters as last
+        // frame: the kind is one char, the id and the property name come back interned. Only the
+        // value is new, and it is kept downstream anyway (the CSS record, the label, the cache).
+        var pos = 0;
+        while (pos < batch.Length)
+        {
+            var e0 = End(batch, pos);
+            if (e0 >= batch.Length) break;                  // a group short of its four fields
+            var s1 = e0 + 1; var e1 = End(batch, s1);
+            if (e1 >= batch.Length) break;
+            var s2 = e1 + 1; var e2 = End(batch, s2);
+            if (e2 >= batch.Length) break;
+            var s3 = e2 + 1; var e3 = End(batch, s3);
+            var kind = e0 - pos == 1 ? batch[pos] : '\0';
+            pos = e3 + 1;
+            switch (kind)
             {
-                case "s": SetStyle(p[i + 1], p[i + 2], p[i + 3]); break;
-                case "t": SetText(p[i + 1], p[i + 3]); break;
-                case "c": SetClass(p[i + 1], p[i + 3]); break;
+                case 's': SetStyle(Intern(batch, s1, e1 - s1), Intern(batch, s2, e2 - s2), batch.Substring(s3, e3 - s3)); break;
+                case 't': SetText(Intern(batch, s1, e1 - s1), batch.Substring(s3, e3 - s3)); break;
+                case 'c': SetClass(Intern(batch, s1, e1 - s1), batch.AsSpan(s3, e3 - s3)); break;
             }
+        }
+
+        static int End(string s, int from)
+        {
+            var i = s.IndexOf(Unit, from);
+            return i < 0 ? s.Length : i;
+        }
+    }
+
+    /// <summary>
+    /// Element ids and style property names, kept rather than re-made: a page writes the same ones
+    /// every frame. A fixed table indexed by the characters' own hash, so a miss costs the substring
+    /// it would have cost anyway and overwrites whatever shared its slot; it cannot grow. Only the
+    /// engine thread reaches this.
+    /// </summary>
+    private const int InternSlots = 2048;
+    private string[]? _interned;
+
+    private string Intern(string source, int start, int length)
+    {
+        if (length == 0) return string.Empty;
+        var table = _interned ??= new string[InternSlots];
+        var hash = 17;
+        for (var i = 0; i < length; i++) hash = hash * 31 + source[start + i];
+        var slot = (hash & int.MaxValue) & (InternSlots - 1);
+        var hit = table[slot];
+        if (hit != null && hit.Length == length && string.CompareOrdinal(hit, 0, source, start, length) == 0)
+            return hit;
+        var made = source.Substring(start, length);
+        table[slot] = made;
+        return made;
     }
 
     private const char Unit = '\u0001';
@@ -821,7 +867,7 @@ internal sealed class ScriptHost : IDisposable
             }
             // var()/env() in a script's value resolve against the element, as the cascade would
             if (HtmlRenderer.HasFn(value) && _findNode(id) is { } vnode) value = HtmlRenderer.ResolveVars(value, vnode);
-            if (!css.StartsWith("animation", StringComparison.Ordinal)) StyleApplier.Apply(ve, new CssDeclaration(css, value), Report);
+            if (!css.StartsWith("animation", StringComparison.Ordinal)) StyleApplier.Apply(ve, new CssDeclaration(css, value), _reportTo ??= Report);
             if (_built != null && css.StartsWith("animation", StringComparison.Ordinal))
             {
                 // style.animation = "...": the shorthand parsed as the cascade parses it, a runner started (or stopped) for the element
@@ -893,9 +939,21 @@ internal sealed class ScriptHost : IDisposable
         // shape names its elements the same way and can be applied in place.
         var assigned = false;
         var replaced = _innerIds.TryGetValue(id, out var before) ? before.ToArray() : Array.Empty<string>();
-        foreach (var old in replaced)
-            foreach (var key in _attrCache.Keys)
-                if (key.Length > old.Length && key[old.Length] == '\n' && key.StartsWith(old, StringComparison.Ordinal)) _attrCache.TryRemove(key, out _);
+        // One pass over the cache, not one per replaced id, and no .Keys: that property copies every
+        // key into a fresh string[] each time it is read, which on a page rebuilding a hundred
+        // elements was the largest single allocation site it had. Enumerating a concurrent
+        // dictionary while removing from it is safe by design.
+        if (replaced.Length > 0)
+            foreach (var entry in _attrCache)
+            {
+                var key = entry.Key;
+                foreach (var old in replaced)
+                    if (key.Length > old.Length && key[old.Length] == '\n' && string.CompareOrdinal(key, 0, old, 0, old.Length) == 0)
+                    {
+                        _attrCache.TryRemove(key, out _);
+                        break;
+                    }
+            }
         var ids = new List<string>();
         void Prepare(HtmlNode n, string path)
         {
@@ -945,13 +1003,16 @@ internal sealed class ScriptHost : IDisposable
         return replaced;
     }
 
-    private void SetClass(string id, string cls)
+    private void SetClass(string id, ReadOnlySpan<char> cls)
     {
-        // the same class list again restyles nothing
-        if (_attrCache.TryGetValue(id + "\n" + "class", out var had) && had == cls)
+        // the same class list again restyles nothing - and compared as characters, so the common
+        // case (a page writing the class it already has) does not even make the string
+        var key = id + "\n" + "class";
+        if (_attrCache.TryGetValue(key, out var had) && had.AsSpan().SequenceEqual(cls))
             return;
-        _attrCache[id + "\n" + "class"] = cls;
-        QueueOp(2, id, cls, string.Empty);
+        var value = cls.ToString();
+        _attrCache[key] = value;
+        QueueOp(2, id, value, string.Empty);
     }
 
     private void ApplyClass(string id, string cls)
@@ -1048,6 +1109,10 @@ internal sealed class ScriptHost : IDisposable
                 cv.SetFrame(f, count, cols);
         });
     }
+
+    /// <summary>Report as a delegate, made once. A method group becomes a fresh Action at every call site,
+    /// and this one is passed on every style write a page makes.</summary>
+    private Action<string>? _reportTo;
 
     private void Report(string message)
     {

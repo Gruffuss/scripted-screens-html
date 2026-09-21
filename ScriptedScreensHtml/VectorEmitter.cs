@@ -146,6 +146,13 @@ internal static class VectorEmitter
         public Dictionary<string, string> RentRecord() => _records.Count > 0 ? _records.Pop() : new Dictionary<string, string>(StringComparer.Ordinal);
         public void Return(Dictionary<string, string> record) { record.Clear(); _records.Push(record); }
 
+        /// <summary>
+        /// Every svg and canvas the emitter has drawn, with a hash of what it read from it last
+        /// time. Kept across frames, so it is not cleared by <see cref="Reset"/>; an element that
+        /// has left the tree is dropped when its snapshot goes. See <see cref="Invalidate"/>.
+        /// </summary>
+        public readonly List<(VisualElement ve, long sig)> Watched = new();
+
         public void Reset(HtmlRenderer.Result built, Tweens? tweens, float now, Dictionary<string, (float offset, int version)>? scrollSet, float pageW, float pageH)
         {
             Body.Clear(); Defs.Clear(); Scene.Clear(); Reported.Clear(); Deferred.Clear();
@@ -198,12 +205,107 @@ internal static class VectorEmitter
         return h;
     }
 
+    // ---- svg and canvas content, which no Box field covers -----------------------------------
+    //
+    // A script writes an svg shape's attribute (SvgShape.Set) or a canvas frame
+    // (CanvasElement.SetFrame) and NOTHING about the element's resolved box moves, so
+    // OffThread.Box.Same sees no change and nobody calls Result.Touch. That is why these two were
+    // excluded from the cache - but excluding them was never enough: an ancestor's cached text
+    // CONTAINS the svg's, and the ancestor was always cacheable, so a page whose script animates a
+    // shape replayed last frame's gauge for ever. (Reproduced: a circle whose `r` a script writes
+    // each frame emitted rx=26 while a fresh emission said rx=27, on every frame.)
+    //
+    // So each svg and canvas keeps a hash of everything the emitter reads from it, and a change
+    // marks the element AND its ancestors changed. With that in the signature they are ordinary
+    // cacheable elements.
+
+    /// <summary>Everything <see cref="EmitSvg"/> / <see cref="EmitCanvas"/> read from the element itself; 0 for anything else.</summary>
+    // ponytail: a canvas is hashed over its whole command list every frame. That is O(n) on a
+    // value that costs O(n) to emit, so it cannot dominate; if a huge static canvas ever shows up,
+    // compare cv.Commands by reference first (SetFrame installs a fresh array per frame today).
+    private static long ContentSig(VisualElement ve)
+    {
+        var h = 17L;
+        switch (ve)
+        {
+            case SvgElement svg:
+                var vb = svg.ViewBox;
+                h = h * 31 + vb.x.GetHashCode(); h = h * 31 + vb.y.GetHashCode();
+                h = h * 31 + vb.width.GetHashCode(); h = h * 31 + vb.height.GetHashCode();
+                h = h * 31 + (svg.Stretch ? 1 : 0);
+                h = h * 31 + svg.Shapes.Count;
+                for (var i = 0; i < svg.Shapes.Count; i++) h = ShapeSig(h, svg.Shapes[i]);
+                return h;
+            case CanvasElement cv:
+                h = h * 31 + cv.CanvasWidth.GetHashCode();
+                h = h * 31 + cv.CanvasHeight.GetHashCode();
+                h = h * 31 + cv.Count;
+                var cmds = cv.Commands;
+                var n = System.Math.Min(cv.Count, cmds.Length);
+                for (var i = 0; i < n; i++) h = h * 31 + cmds[i].GetHashCode();
+                h = h * 31 + cv.Strings.Count;
+                for (var i = 0; i < cv.Strings.Count; i++) h = h * 31 + StringComparer.Ordinal.GetHashCode(cv.Strings[i]);
+                return h;
+            default:
+                return 0;
+        }
+    }
+
+    /// <summary>A shape's tag and every attribute of it, and of a clipPath's children.</summary>
+    private static long ShapeSig(long h, SvgShape shape)
+    {
+        h = h * 31 + StringComparer.Ordinal.GetHashCode(shape.Tag);
+        h = h * 31 + shape.Attributes.Count;
+        foreach (var kv in shape.Attributes)
+        {
+            h = h * 31 + StringComparer.OrdinalIgnoreCase.GetHashCode(kv.Key);
+            h = h * 31 + StringComparer.Ordinal.GetHashCode(kv.Value);
+        }
+        if (shape.Children == null) return h;
+        h = h * 31 + shape.Children.Count;
+        for (var i = 0; i < shape.Children.Count; i++) h = ShapeSig(h, shape.Children[i]);
+        return h;
+    }
+
+    /// <summary>
+    /// Before the walk: an svg or canvas whose content changed marks itself and every ancestor
+    /// changed, since each ancestor's cached text contains this element's. Elements that have left
+    /// the tree (no snapshot) are dropped here.
+    /// </summary>
+    private static void Invalidate(Ctx ctx)
+    {
+        var boxes = OffThread.Boxes;
+        // No snapshot means Of() answers with a fresh Box every time, so nothing is cached anyway.
+        if (boxes == null || ctx.Watched.Count == 0) return;
+        for (var i = ctx.Watched.Count - 1; i >= 0; i--)
+        {
+            var (ve, was) = ctx.Watched[i];
+            if (ve.parent == null) { ctx.Watched.RemoveAt(i); continue; }   // out of the tree for good
+            // Not this page's element: if a thread ever serves two pages, leave the entry alone
+            // rather than consuming its change against the wrong snapshot.
+            if (!boxes.ContainsKey(ve)) continue;
+            var now = ContentSig(ve);
+            if (now == was) continue;
+            ctx.Watched[i] = (ve, now);
+            for (var a = ve; a != null; a = a.parent)
+                if (boxes.TryGetValue(a, out var box)) box.SubtreeChanged = true;
+        }
+    }
+
+    /// <summary>This svg or canvas is one to watch from now on, at the content it is being drawn at.</summary>
+    private static void Watch(Ctx ctx, VisualElement ve)
+    {
+        for (var i = 0; i < ctx.Watched.Count; i++)
+            if (ReferenceEquals(ctx.Watched[i].ve, ve)) { ctx.Watched[i] = (ve, ContentSig(ve)); return; }
+        ctx.Watched.Add((ve, ContentSig(ve)));
+    }
+
     public static Output Emit(HtmlRenderer.Result built, VisualElement root, float designW, float designH, Tweens? tweens = null, float now = 0f, Dictionary<string, (float offset, int version)>? scrollSet = null)
     {
         var ctx = _ctx ??= new Ctx();
         ctx.Reset(built, tweens, now, scrollSet, designW, designH);
         ctx.Epoch = EpochOf(ctx);
-        var inv = CultureInfo.InvariantCulture;
+        Invalidate(ctx);
         EmitElement(ctx, root, Vector2.zero, 0);
         if (ctx.Deferred.Count > 0)
         {
@@ -215,7 +317,7 @@ internal static class VectorEmitter
         LastReused = ctx.Reused;
         LastRebuilt = ctx.Rebuilt;
         var sb = ctx.Scene;
-        sb.Append("SCENE w=").Append(designW.ToString("0.##", inv)).Append(" h=").Append(designH.ToString("0.##", inv)).Append(" fit=stretch\n");
+        sb.Append("SCENE w=").AppendNum(designW).Append(" h=").AppendNum(designH).Append(" fit=stretch\n");
         if (ctx.Defs.Length > 0)
             sb.Append("DEFS {\n").Append(ctx.Defs).Append("}\n");
         sb.Append(ctx.Body);
@@ -453,7 +555,7 @@ internal static class VectorEmitter
                 var it = origin == "border-box" ? 0f : rs.borderTopWidth + (origin == "content-box" ? rs.paddingTop : 0f);
                 var ir = origin == "border-box" ? 0f : rs.borderRightWidth + (origin == "content-box" ? rs.paddingRight : 0f);
                 var ib = origin == "border-box" ? 0f : rs.borderBottomWidth + (origin == "content-box" ? rs.paddingBottom : 0f);
-                EmitImage(ctx, imageUrl, BackgroundFit(css), css, rs, x + il, y + it, Mathf.Max(1f, w - il - ir), Mathf.Max(1f, h - it - ib), indent, bg.a > 0.002f ? string.Empty : NodeId(ctx, ve));
+                EmitImage(ctx, imageUrl, BackgroundFit(css), css, rs, x + il, y + it, Mathf.Max(1f, w - il - ir), Mathf.Max(1f, h - it - ib), indent, bg.a > 0.002f ? null : ve);
             }
             else if (ColourTimeline(ctx, ve) is { } ka)
             {
@@ -589,8 +691,8 @@ internal static class VectorEmitter
                 // A stroke is centred on its path: inset by half the width so it stays inside the box.
                 var half = bw * 0.5f;
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x + half).Append(" y=").AppendNum(y + half)
-                    .Append(" w=").Append(tw != null ? tw.Lerp(tw.From.Rect.width - bw, w - bw) : F(w - bw))
-                    .Append(" h=").Append(tw != null ? tw.Lerp(tw.From.Rect.height - bw, h - bw) : F(h - bw))
+                    .Append(" w=").AppendVal(tw != null ? tw.Lerp(tw.From.Rect.width - bw, w - bw) : null, w - bw)
+                    .Append(" h=").AppendVal(tw != null ? tw.Lerp(tw.From.Rect.height - bw, h - bw) : null, h - bw)
                     .AppendRadius(rs, w, h, -half).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(bw).Append(Dash(css, bw)).Append('\n');
                 ctx.Out.Nodes++;
             }
@@ -614,12 +716,15 @@ internal static class VectorEmitter
                 // box and slides its children by a client-side offset (wheel or drag), so a
                 // scroll costs one rebuild and no tick. Children stay in page coordinates.
                 var ch = 0f;
-                foreach (var child in ve.Children())
+                // one snapshot lookup per child, not three (Children() returns the List itself, so
+                // the foreach here never boxed an enumerator - the repeated Of() was the only cost)
+                for (var ci = 0; ci < ve.childCount; ci++)
                 {
-                    if (OffThread.Of(child).display == DisplayStyle.None) continue;
-                    var cl = OffThread.Of(child).layout;
+                    var cb = OffThread.Of(ve[ci]);
+                    if (cb.display == DisplayStyle.None) continue;
+                    var cl = cb.layout;
                     if (float.IsNaN(cl.yMax)) continue;
-                    ch = Mathf.Max(ch, cl.yMax + OffThread.Of(child).marginBottom);
+                    ch = Mathf.Max(ch, cl.yMax + cb.marginBottom);
                 }
                 ch += rs.paddingBottom;
                 ctx.Body.Append(indent).Append("SC id=").Append(string.IsNullOrEmpty(ve.name) ? ctx.NextId("scroll") : ve.name)
@@ -655,7 +760,7 @@ internal static class VectorEmitter
             {
                 var src = inode.Attr("src") ?? FirstOfSrcset(inode.Attr("srcset"));
                 if (src != null)
-                    EmitImage(ctx, src, css.TryGetValue("object-fit", out var of) ? of.Trim() : "fill", css, rs, x, y, w, h, indent, NodeId(ctx, ve));
+                    EmitImage(ctx, src, css.TryGetValue("object-fit", out var of) ? of.Trim() : "fill", css, rs, x, y, w, h, indent, ve);
                 break;
             }
             case Label when ctx.Built.NodeOf.TryGetValue(ve, out var mnode) && mnode.Attr("data-marker") is { } markerShape:
@@ -675,9 +780,11 @@ internal static class VectorEmitter
                 EmitText(ctx, label, css, x, y, w, h, indent);
                 break;
             case SvgElement svg:
+                Watch(ctx, svg);
                 EmitSvg(ctx, svg, x, y, w, h, indent);
                 break;
             case CanvasElement cv:
+                Watch(ctx, cv);
                 EmitCanvas(ctx, cv, css, x, y, w, h, indent);
                 break;
             default:
@@ -700,12 +807,13 @@ internal static class VectorEmitter
 
         // Keep what this subtree wrote, to write again unchanged next frame. A subtree that produced
         // an external element or put something in the top layer is not kept: those are side effects
-        // beside the text, and replaying the characters alone would lose them. Nor is one whose
-        // content the box comparison cannot see - an svg's shapes, a canvas's commands, a tween.
+        // beside the text, and replaying the characters alone would lose them. Nor is one that is
+        // tweening, whose numbers are expressions over a start time. An svg's shapes and a canvas's
+        // commands are covered by ContentSig / Invalidate above, not by the box comparison.
         rs.SubtreeChanged = false;
         rs.Changed = false;
         rs.CacheUsable = ctx.Out.Externals.Count == externalsFrom && ctx.Deferred.Count == deferredFrom
-                         && ve is not SvgElement && ve is not CanvasElement && tw == null;
+                         && tw == null;
         if (!rs.CacheUsable)
             return;
         rs.CacheBodyLength = Keep(ctx.Body, bodyFrom, ref rs.CacheBody);
@@ -721,7 +829,10 @@ internal static class VectorEmitter
     {
         var length = sb.Length - from;
         if (length <= 0) return 0;
-        if (into == null || into.Length < length) into = new char[System.Math.Max(length, 64)];
+        // Double rather than size exactly, as Output.Take does: the root's buffer is the whole
+        // scene, so a page whose text grows one character ("9" -> "10") reallocated ~20 KB and
+        // one buffer per ancestor with it.
+        if (into == null || into.Length < length) into = new char[System.Math.Max(length, (into?.Length ?? 32) * 2)];
         sb.CopyTo(from, into, 0, length);
         return length;
     }
@@ -782,17 +893,18 @@ internal static class VectorEmitter
     private static List<VisualElement> ByZIndex(Ctx ctx, VisualElement ve)
     {
         var list = ctx.RentSorting();
-        var i = 0;
-        foreach (var child in ve.Children())
+        var n = ve.childCount;
+        for (var i = 0; i < n; i++)
         {
+            var child = ve[i];
             var z = 0;
             if (ctx.Built.CssOf(child).TryGetValue("z-index", out var zs))
                 int.TryParse(zs.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out z);
-            list.Add((z, i++, child));
+            list.Add((z, i, child));
         }
         list.Sort((a, b) => a.z != b.z ? a.z.CompareTo(b.z) : a.i.CompareTo(b.i));
         var result = ctx.RentChildren();
-        foreach (var e in list) result.Add(e.c);
+        for (var i = 0; i < list.Count; i++) result.Add(list[i].c);
         ctx.Return(list);
         return result;
     }
@@ -1137,14 +1249,31 @@ internal static class VectorEmitter
     /// the shape. The box is split instead: one rect per segment, each clipped to its band
     /// of the gradient line, each a solid colour or its own ramp. Exact, and static.
     /// </summary>
+    /// <summary>
+    /// Shadow lists by declaration. A `sh=` list depends on nothing but the text, and every
+    /// shadowed element re-parsed its own on every frame.
+    /// </summary>
+    private static readonly Dictionary<string, string> ShadowLists = new(StringComparer.Ordinal);
+
     /// <summary>CSS box-shadow list to the vector `sh` list: [[dx,dy,blur,spread,#colour[,inset]],...]; the vector mod draws inset ones inside the shape (ask 2).</summary>
-    private static string Shadows(string css, int max = int.MaxValue)
+    private static string Shadows(string css)
+    {
+        lock (ShadowLists)
+            if (ShadowLists.TryGetValue(css, out var hit)) return hit;
+        var made = ShadowsInner(css);
+        lock (ShadowLists)
+        {
+            if (ShadowLists.Count > 4096) ShadowLists.Clear();   // a script writing fresh values cannot fill it
+            ShadowLists[css] = made;
+        }
+        return made;
+    }
+
+    private static string ShadowsInner(string css)
     {
         var sb = new StringBuilder();
-        var count = 0;
         foreach (var item in SplitTopLevelCommas(css))
         {
-            if (count >= max) break;
             var parts = item.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length < 2) continue;
             var nums = new List<float>();
@@ -1164,7 +1293,6 @@ internal static class VectorEmitter
             sb.Append('[').AppendNum(nums[0]).Append(',').AppendNum(nums[1]).Append(',').AppendNum(nums[2]).Append(',').AppendNum(nums[3]).Append(',').AppendHex(colour);
             if (inset) sb.Append(",inset"); // vector requirement 2 / 3
             sb.Append(']');
-            count++;
         }
         return sb.Length > 0 ? " sh=[" + sb + "]" : string.Empty;
     }
@@ -1664,9 +1792,20 @@ internal static class VectorEmitter
             else if (right) x -= slack;
             w += slack;
         }
+        // TextMeshPro drops a line whose own metrics exceed the box before it ellipsizes: give the
+        // single line its metric height, centred on the CSS line box (the clip stays the CSS box).
+        // Decided here rather than rewritten into the finished T line, which cost four formatted
+        // numbers and four concatenations on every clipped single-line label.
+        var lines = 1; foreach (var ch in text) if (ch == '\n') lines++;
+        var ty = y; var th = h;
+        if (clipped && !wraps && lines == 1 && h < rs.fontSize * 1.4f)
+        {
+            th = rs.fontSize * 1.4f;
+            ty = y - (th - h) * 0.5f;
+        }
         var sb = ctx.Label;
         sb.Clear();
-        sb.Append(indent).Append("T x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h);
+        sb.Append(indent).Append("T x=").AppendNum(x).Append(" y=").AppendNum(ty).Append(" w=").AppendNum(w).Append(" h=").AppendNum(th);
         var textAt = sb.Length;
         sb.Append(" text=\"").Append(text).Append('"');
         string? labelFace = null;
@@ -1755,15 +1894,6 @@ internal static class VectorEmitter
         {
             var lv = lh0.Trim();
             lineHpx = lv.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(lv) : (lv.EndsWith("em", StringComparison.OrdinalIgnoreCase) || lv.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(lv) * (lv.EndsWith("%", StringComparison.Ordinal) ? 0.01f : 1f) : StyleApplier.Num(lv)) * rs.fontSize;
-        }
-        var lines = 1; foreach (var ch in text) if (ch == '\n') lines++;
-        if (clipped && !wraps && lines == 1 && h < rs.fontSize * 1.4f)
-        {
-            // TextMeshPro drops a line whose own metrics exceed the box before it ellipsizes: give the
-            // single line its metric height, centred on the CSS line box (the clip stays the CSS box)
-            var need = rs.fontSize * 1.4f;
-            sb.Replace(" y=" + F(y) + " w=", " y=" + F(y - (need - h) * 0.5f) + " w=");
-            sb.Replace(" h=" + F(h) + " text=", " h=" + F(need) + " text=");
         }
         var flexCentred = css.TryGetValue("display", out var dsp0) && dsp0.Trim() is "flex" or "inline-flex"
                           && ((css.TryGetValue("align-items", out var ai0) && ai0.Trim() == "center") || (css.TryGetValue("flex-direction", out var fd0) && fd0.Trim().StartsWith("column", StringComparison.Ordinal) && css.TryGetValue("justify-content", out var jc0) && jc0.Trim() == "center"));
@@ -3066,14 +3196,16 @@ internal static class VectorEmitter
     // ---------------------------------------------------------------- Batch C helpers
 
     /// <summary>IMG node (vector requirement 9): a picture in scene order with fit and the box's radii.</summary>
-    private static void EmitImage(Ctx ctx, string src, string fit, Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, float h, string indent, string nodeId)
+    /// <param name="idOf">The element whose id the image carries, or null for none.</param>
+    private static void EmitImage(Ctx ctx, string src, string fit, Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, float h, string indent, VisualElement? idOf)
     {
         var f = fit switch { "cover" => "cover", "contain" or "scale-down" => "contain", _ => "fill" };
         src = HtmlRenderer.ResolveUrl(src, ctx.Built);
         ctx.Body.Append(indent).Append("IMG x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
             .Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=").Append(f).AppendRadius(rs, w, h);
         if (rs.opacity < 0.999f) ctx.Body.Append(" o=").AppendNum(rs.opacity);
-        ctx.Body.Append(nodeId).Append('\n');
+        if (idOf != null) ctx.Body.AppendNodeId(ctx, idOf);
+        ctx.Body.Append('\n');
         ctx.Out.Nodes++;
     }
 
@@ -4187,19 +4319,10 @@ internal static class VectorEmitter
     }
 
     /// <summary>
-    /// The node id, plus `click=1` on a button: the vector mod makes such a node a hit region
-    /// and the click arrives at the page element's own on_click with the node id as value.
-    /// A button without an id gets its synthetic one, so it can still be clicked.
+    /// The node id, plus `click=1` on a button, straight into the buffer: the vector mod makes
+    /// such a node a hit region and the click arrives at the page element's own on_click with the
+    /// node id as value. A button without an id gets its synthetic one, so it can still be clicked.
     /// </summary>
-    private static string NodeId(Ctx ctx, VisualElement ve)
-    {
-        var button = IsButton(ctx, ve);
-        if (string.IsNullOrEmpty(ve.name) || (ve.name.StartsWith("__", StringComparison.Ordinal) && !button))
-            return string.Empty;
-        return " id=" + ve.name + (button ? " click=1" : string.Empty);
-    }
-
-    /// <summary>The id (and click flag) straight into the buffer: most elements carry one, every frame.</summary>
     private static StringBuilder AppendNodeId(this StringBuilder sb, Ctx ctx, VisualElement ve)
     {
         var button = IsButton(ctx, ve);
