@@ -83,6 +83,7 @@ internal static class JsToLuaTests
                                   + (known.Length == 0 ? "" : $" ({known.Length} known divergence(s) allowed)"));
         }
 
+        Writes(check);
         Manifest(check);
         Refused(check);
         Semantics(check);
@@ -235,6 +236,69 @@ internal static class JsToLuaTests
         check(absent.Count == 0, absent.Count == 0
             ? $"js->lua: the method manifest covers all {defined.Count} the prelude defines"
             : $"js->lua: the prelude defines {string.Join(", ", absent)}, which the manifest would refuse");
+    }
+
+    /// <summary>
+    /// What the script of the repository's most demanding page writes, and when. The split matters
+    /// more than the list: the compiler runs AFTER the page's setup code, so a setup-only write is
+    /// already in the geometry and needs no slot, while a runtime write needs one or the page has to
+    /// be refused. Every `innerHTML` on this page is setup, which is why it is the page to make work
+    /// first - the Atmo pages rebuild themselves at run time and need state enumeration instead.
+    /// </summary>
+    private static void Writes(Action<bool, string> check)
+    {
+        var root = Root();
+        if (root == null) return;
+        var script = Regex.Match(File.ReadAllText(Path.Combine(root, @"examples\07-game.lua")), "<script>(.*?)</script>", RegexOptions.Singleline).Groups[1].Value;
+        var (writes, _) = DomWrites.Of(script);
+
+        var runtime = writes.Where(w => w.Runtime && w.Id != null).Select(w => w.Id + "." + w.Property).Distinct().ToHashSet(StringComparer.Ordinal);
+        var setup = writes.Where(w => !w.Runtime && w.Id != null).Select(w => w.Id + "." + w.Property).Distinct().ToHashSet(StringComparer.Ordinal);
+
+        // driven every frame by draw(), so each needs a slot
+        var mustBeRuntime = new[]
+        {
+            "legA.style.height", "legB.style.height", "legA.style.top", "legB.style.top",
+            "bootA.style.top", "bootB.style.top", "player.style.transform",
+            "ridgeFar.style.transform", "ridgeNear.style.transform", "domes.style.transform",
+            "score.textContent",
+        };
+        // written once by shape()/fit()/scenery() before the compiler ever sees the page
+        var mustBeSetup = new[]
+        {
+            "stars.innerHTML", "pebbles.innerHTML", "obstacles.innerHTML",
+            "groundLine.style.top", "groundLine.style.height", "overlay.style.bottom",
+        };
+
+        var wrong = mustBeRuntime.Where(w => !runtime.Contains(w)).Select(w => w + " should be runtime")
+            .Concat(mustBeSetup.Where(w => !setup.Contains(w) || runtime.Contains(w)).Select(w => w + " should be setup only"))
+            .ToList();
+
+        check(wrong.Count == 0, wrong.Count == 0
+            ? $"js->lua: 07-game's writes split correctly - {runtime.Count} runtime, {setup.Count} setup only"
+            : $"js->lua: writes misclassified - {string.Join("; ", wrong)}");
+    }
+
+    /// <summary>Prints what each page writes, split into setup and runtime. Run with --domwrites.</summary>
+    internal static void Report()
+    {
+        var root = Root();
+        if (root == null) { Console.WriteLine("no source folder"); return; }
+        foreach (var (path, _, _) in Pages.Concat(CannotCompile.Select(c => (c.Path, 0, None))))
+        {
+            var file = Path.Combine(root, path);
+            if (!File.Exists(file)) continue;
+            var script = Regex.Match(File.ReadAllText(file), "<script>(.*?)</script>", RegexOptions.Singleline).Groups[1].Value;
+            if (script.Length == 0) continue;
+            var (writes, notes) = DomWrites.Of(script);
+            var runtime = writes.Where(w => w.Runtime).ToList();
+            Console.WriteLine($"\n== {path} == {writes.Count} writes, {runtime.Count} at runtime");
+            foreach (var g in runtime.GroupBy(w => w.Id ?? "<" + w.Computed + ">").OrderBy(g => g.Key, StringComparer.Ordinal))
+                Console.WriteLine($"   {g.Key,-16} {string.Join(" ", g.Select(w => w.Property).Distinct().OrderBy(p => p, StringComparer.Ordinal))}");
+            var setup = writes.Where(w => !w.Runtime).Select(w => (w.Id ?? "<" + w.Computed + ">") + "." + w.Property).Distinct().ToList();
+            if (setup.Count > 0) Console.WriteLine($"   setup only: {string.Join(", ", setup)}");
+            foreach (var n in notes) Console.WriteLine($"   note: {n}");
+        }
     }
 
     private static void Refused(Action<bool, string> check)

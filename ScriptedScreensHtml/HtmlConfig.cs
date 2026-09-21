@@ -28,6 +28,7 @@ internal static class HtmlConfig
     private static ConfigEntry<CullChoice>? _cullOffScreen;
     private static ConfigEntry<bool>? _verifyEmitCache;
     private static ConfigEntry<bool>? _probeV8;
+    private static ConfigEntry<bool>? _compileProbe;
     private static ConfigEntry<bool>? _useV8;
 
     /// <summary>
@@ -112,6 +113,14 @@ internal static class HtmlConfig
             "page frame costs the heap Unity collects. Does nothing unless ClearScript's DLLs have " +
             "been copied in by hand, and nothing in the mod uses them either way. Development tool " +
             "for deciding whether a JS engine with its own native heap is worth the dependency.");
+
+        _compileProbe = _file.Bind(
+            "Diagnostics", "CompileProbe", false,
+            "When a page is built, also compile its script to Lua and say in the log whether that " +
+            "worked and, if not, which line stopped it. Changes nothing a console shows - the page " +
+            "runs exactly as it does now. This is the compiler that will eventually replace the " +
+            "interpreter, and this is how it gets checked against real pages in the game before " +
+            "anything depends on it.");
     }
 
     /// <summary>Whether page scripts run on V8 rather than the C# interpreter.</summary>
@@ -119,6 +128,9 @@ internal static class HtmlConfig
 
     /// <summary>Whether to try loading ClearScript's V8 once at startup and report what it costs.</summary>
     internal static bool ProbeV8 => _probeV8?.Value ?? false;
+
+    /// <summary>Whether to compile each page's script to Lua at build time and report the outcome.</summary>
+    internal static bool CompileProbe => _compileProbe?.Value ?? false;
 
     /// <summary>Whether to re-translate each page once a second and check the reuse against it.</summary>
     internal static bool VerifyEmitCache => _verifyEmitCache?.Value ?? false;

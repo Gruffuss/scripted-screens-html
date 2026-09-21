@@ -481,6 +481,9 @@ internal sealed class HtmlSurface : MonoBehaviour
         _script?.Dispose();
         _script = null;
         if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: page built, script {built.Script.Length} chars, {built.ById.Count} elements");
+        // Reports only. The page still runs on the interpreter below; this says whether the compiler
+        // that will replace it can handle this page, on this machine, under Mono.
+        CompileProbe.Run(PageKey, built.Script);
         if (!string.IsNullOrWhiteSpace(built.Script))
         {
             _script = new ScriptHost(

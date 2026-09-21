@@ -17,6 +17,7 @@
         <Compile Include="..\ScriptedScreensHtml\TextMeasure.cs" />
         <Compile Include="..\ScriptedScreensHtml\JsNumber.cs" />
         <Compile Include="..\ScriptedScreensHtml\JsToLua.cs" />
+        <Compile Include="..\ScriptedScreensHtml\DomWrites.cs" />
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />
         <Compile Include="Probe2.cs" />
