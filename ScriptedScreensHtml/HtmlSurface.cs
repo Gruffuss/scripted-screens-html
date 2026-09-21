@@ -502,6 +502,18 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             var size = LayoutSize();
             HtmlRenderer.SurfaceAspect = size.x > 0f ? size.y / size.x : 1f;
+            // Every console reports a 460x460 canvas whatever its physical shape, so the only thing
+            // that knows a console is tall is the WORLD transform of its rect. If that is not valid
+            // yet - which is exactly the case on a surface built inside a capture's own call - the
+            // aspect falls back to the square canvas and the page lays out for the wrong screen.
+            if (HtmlConfig.Diagnostics)
+            {
+                var rt = (RectTransform)transform;
+                var r = rt.rect;
+                ScriptedScreensHtmlPlugin.Log?.LogInfo(
+                    $"html: \"{PageKey}\" laying out {size.x:0.#}x{size.y:0.#} (aspect {HtmlRenderer.SurfaceAspect:0.###}), " +
+                    $"rect {r.width:0.#}x{r.height:0.#}, lossyScale {rt.lossyScale.x:0.###},{rt.lossyScale.y:0.###}");
+            }
         }
         var face = FontLibrary.Default();
         ResolvedStyle.DefaultFace = face;
