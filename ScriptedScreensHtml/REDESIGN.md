@@ -87,12 +87,50 @@ without the mod. This is the contract between the compiled page and whoever feed
 | 2b | gradient stops are template literals, not slots |
 | 2c | def ids come from a page-wide counter and renumber on every re-emit (`d3b9b1d` claims to fix this and is in the tree — find why it does not hold) |
 
-**3. Compile clock-pure motion to expressions.** Generalise what already happens for `@keyframes`
-to script statements. A statement qualifies only if its right-hand side reads nothing but the time
-parameter, constants and never-written outer values. Per *statement*, not per callback: a loop that
-positions twenty elements from the clock and increments one score compiles the twenty and leaves
-the one. **It must fail toward "keep running"** — wrongly deciding a callback is pure freezes the
-console, which is the bug class fixed on 2026-09-21 (see 1h).
+**3. ~~Compile clock-pure motion to expressions.~~ Split update from draw.** *Rewritten 2026-09-21
+after surveying every page in the repo; the original item is struck because it would have found
+nothing.*
+
+**A purity analyser over page JavaScript has nothing to harvest: 0 of 35 statements in AtmoDark's
+`step()`, 0 of 27 in `07-game`'s `update()`, 0 of 109 bindings in its `values()`, 0 of 15 in
+HtmlTest8's `spin()`.** The callbacks do not reference a clock at all — `frame(t)` converts `t` to a
+delta and discards the absolute value; `step()` takes no time argument.
+
+The reason is worth keeping: **every clock-pure animation on these pages is already in CSS**, which
+`Tweens.cs` already compiles to `=from+(to-from)*ease(...)`. AtmoDark's five `@keyframes` map one
+for one onto the hand-written console's `t`-expressions — `@keyframes cb-march{to{background-position:26px 0}}`
+is `=mod(t*22.6,26)` — and the JS only *gates* them (`animation: state==='trip' ? 'cb-trip ...' : 'none'`),
+exactly as `clamp($trip,0,1)*` gates the Lua one. CSS took that job first, so nothing is left in the
+script for a purity pass to find.
+
+**The seam that does exist is update/draw, and the pages are already cut along it.** `07-game`:
+
+```js
+update(dt);   // 27 statements, all memory, writes nothing visible
+draw();       // 27 statements, no memory, writes 31 visible properties
+```
+
+`draw()` reads ~20 scalars and nothing else (`g.y g.step g.state g.clock g.score g.flashUntil g.far`
+`g.near g.domes g.ground`, the duck flags, and a 4-slot obstacle pool of `x y kind`). Promote those
+to `$data` and **25 of `draw()`'s 27 statements become vector expressions verbatim**; two are already
+written in the target dialect (`Math.sin(g.clock*8 + o.x*0.01)*3`, `Math.floor(g.clock*6)%2`). The
+two that resist are `className` writes, which are structural.
+
+This is exactly the hand-written consoles' decomposition: `sample()`/`inner_loop()`/`history()`
+accumulate inside Lua's `tick(dt)`; `page_trend()` declares the structure once with `$slot`
+expressions; `up_trend(v)` writes the slots. There is **no accumulation anywhere in either scene**.
+
+So the pass to build finds the scalars a callback writes that its DOM writes read, promotes them to
+`$data`, emits the draw half as expressions at load, and leaves the update half for step 4.
+
+**Two constraints from the survey:**
+
+- **`T.text` takes `$name`, never `=expr`** (`ScriptedScreensVector/REFERENCE.md`). Every
+  `textContent = fmt(x)` is a slot write however pure `x` is. This removes the commonest shape on
+  these pages from the expression path entirely.
+- `el.animate([...], { iterations: Infinity })` is the JS spelling of `@keyframes` — declarative and
+  clock-pure. Route it through `Tweens.cs` with the CSS keyframes, not through any analysis.
+  `HtmlTest6` probes it.
 
 **4. Transpile the remainder to Lua.** The subset a console page uses is small. The mismatches are
 a known table, handled once with explicit helpers rather than idiomatic output — verbose Lua nobody
