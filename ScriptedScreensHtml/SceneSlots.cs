@@ -315,6 +315,17 @@ internal static class SceneSlots
         if (In(PairKeys, scene, sceneLength, keyStart, keyEnd) && !quoted && rawEnd - rawStart > 2
             && scene[rawStart] == '[' && scene[rawEnd - 1] == ']' && Array.IndexOf(scene, '[', rawStart + 1, rawEnd - rawStart - 1) < 0)
         {
+            // Same first-come rule as a scalar, and it has to be spelled out here because a pair
+            // never inserts its bare name - only `X_t_0` and `X_t_1` through Part() - so the check
+            // above cannot see the clash. Two lines carrying one id and both writing a pair would
+            // otherwise SHARE those slots silently, and the last value written would win.
+            if (!ReferenceEquals(name, token.Fallback) && values.ContainsKey(name + "_0"))
+            {
+                name = token.Fallback;
+                token.Chosen = name;
+                token.Parts?.Clear();
+            }
+
             // a group's translate, scale and anchor: an element moved by a script changes values, not the structure
             sb.Append('[');
             var part = 0;

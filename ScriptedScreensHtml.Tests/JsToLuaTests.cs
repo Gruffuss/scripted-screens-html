@@ -85,6 +85,7 @@ internal static class JsToLuaTests
 
         Writes(check);
         Mapping(check);
+        PairCollision(check);
         Manifest(check);
         Refused(check);
         Semantics(check);
@@ -403,6 +404,27 @@ internal static class JsToLuaTests
             if (setup.Count > 0) Console.WriteLine($"   setup only: {string.Join(", ", setup)}");
             foreach (var n in notes) Console.WriteLine($"   note: {n}");
         }
+    }
+
+    /// <summary>
+    /// Two lines carrying one id, both writing a pair. The scalar case has a first-come rule; a pair
+    /// never inserts its bare name, only its components, so the rule could not see the clash and the
+    /// two lines shared their slots with the last value silently winning. Latent today because only
+    /// the transform group is named - and this is what bounds how many wrappers ever may be.
+    /// </summary>
+    private static void PairCollision(Action<bool, string> check)
+    {
+        const string scene = "SCENE w=100 h=100\nG a=[1,2] t=[3,4] id=dup {\n  G a=[5,6] t=[7,8] id=dup {\n    R x=1 y=2 w=3 h=4 f=#FFFFFF\n  }\n}\n";
+        var values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+        SceneSlots.Split(scene, values);
+
+        // the first line keeps the friendly names; the second must not reuse them
+        var first = values.TryGetValue("dup_t_0", out var a) ? a.Number : float.NaN;
+        var shared = values.Count(v => v.Value.IsNumber && Math.Abs(v.Value.Number - 7f) < 0.001f);
+        check(Math.Abs(first - 3f) < 0.001f && shared == 1,
+            Math.Abs(first - 3f) < 0.001f && shared == 1
+                ? "slots: two lines sharing an id do not share their pair slots"
+                : $"slots: pair collision - dup_t_0 is {first} (expected 3) and the second line's 7 appears {shared} time(s)");
     }
 
     private static void Refused(Action<bool, string> check)

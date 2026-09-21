@@ -536,7 +536,7 @@ internal static class VectorEmitter
                 if (baseC.a > 0.002f)
                 {
                     ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
-                        .AppendRadius(rs, w, h).Append(" f=").AppendHex(baseC).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
+                        .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=").AppendHex(baseC).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                     ctx.Out.Nodes++;
                 }
                 // CSS paints the first layer on top: emitted last
@@ -565,7 +565,7 @@ internal static class VectorEmitter
                 if (bg.a > 0.002f)
                 {
                     ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
-                        .AppendRadius(rs, w, h).Append(" f=").AppendHex(bg).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
+                        .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=").AppendHex(bg).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                     ctx.Out.Nodes++;
                 }
                 // background-origin: padding-box (the default, inside the border), content-box, or border-box
@@ -581,7 +581,7 @@ internal static class VectorEmitter
                 // A looping background-color animation: the scene walks the ramp, so no page frame
                 // is ever run for it - before this it kept a KeyframeRunner and a frame per boundary.
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
-                    .AppendRadius(rs, w, h).Append(" f=@").Append(ka.gid).Append(" fat==").Append(ka.at).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
+                    .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=@").Append(ka.gid).Append(" fat==").Append(ka.at).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (tw != null && !Tweens.Snap.NearColour(tw.From.Bg, bg) && (tw.From.Bg.a > 0.002f || bg.a > 0.002f) && !(bgCss != null && bgCss.Contains("gradient(")))
@@ -590,7 +590,7 @@ internal static class VectorEmitter
                 var gid = ctx.NextId("tw");
                 ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[[0,").AppendHex(tw.From.Bg).Append("],[1,").AppendHex(bg).Append("]]\n");
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
-                    .AppendRadius(rs, w, h).Append(" f=@").Append(gid).Append(" fat==").Append(tw.P).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
+                    .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=@").Append(gid).Append(" fat==").Append(tw.P).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (bgCss != null && bgCss.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase))
@@ -600,13 +600,13 @@ internal static class VectorEmitter
             else if (bgCss != null && bgCss.StartsWith("conic-gradient", StringComparison.OrdinalIgnoreCase) && ConicDef(ctx, bgCss) is { } cid)
             {
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
-                    .AppendRadius(rs, w, h).Append(" f=@").Append(cid).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
+                    .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=@").Append(cid).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (bgCss != null && bgCss.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) && RadialDef(ctx, bgCss) is { } rid)
             {
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
-                    .AppendRadius(rs, w, h).Append(" f=@").Append(rid).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
+                    .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=@").Append(rid).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             // a declared background keeps its box when it turns transparent (a lamp going dark), so the
@@ -614,20 +614,20 @@ internal static class VectorEmitter
             else if (bg.a > 0.002f || css.ContainsKey("background-color") || (css.TryGetValue("background", out var bgDecl) && StyleApplier.TryColor(bgDecl.Trim(), out _)))
             {
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
-                    .AppendRadius(rs, w, h).Append(" f=").AppendHex(bg).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
+                    .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=").AppendHex(bg).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (IsButton(ctx, ve))
             {
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
-                    .AppendRadius(rs, w, h).Append(" f=#00000001").AppendNodeId(ctx, ve).Append('\n');
+                    .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=#00000001").AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (shadow.Length > 0)
             {
                 // A shadow under a transparent box still casts: an invisible fill carries it.
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
-                    .AppendRadius(rs, w, h).Append(" f=#00000001").Append(shadow).Append('\n');
+                    .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=#00000001").Append(shadow).Append('\n');
                 ctx.Out.Nodes++;
             }
 
@@ -748,7 +748,7 @@ internal static class VectorEmitter
                 ch += rs.paddingBottom;
                 ctx.Body.Append(indent).Append("SC id=").Append(string.IsNullOrEmpty(ve.name) ? ctx.NextId("scroll") : ve.name)
                     .Append(" x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
-                    .Append(" ch=").AppendNum(Mathf.Max(ch, h)).AppendRadius(rs, w, h);
+                    .Append(" ch=").AppendNum(Mathf.Max(ch, h)).AppendRadius(rs, w, h, 0f, Keeps(ctx, ve));
                 if (ctx.ScrollSet != null && !string.IsNullOrEmpty(ve.name) && ctx.ScrollSet.TryGetValue(ve.name, out var ss))
                     ctx.Body.Append(" so=").AppendNum(ss.offset).Append(" sov=").Append(ss.version); // applied once per version (vector requirement 7)
                 ctx.Body.Append(" {\n");
@@ -1236,6 +1236,10 @@ internal static class VectorEmitter
     /// having moved makes the first test true. A page translated ONCE never gets that frame, so the
     /// answer has to be known up front, which is what NamedGroups carries.
     /// </remarks>
+    /// <summary>Whether a key with a zero value must still be emitted, because a script will write it.</summary>
+    private static bool Keeps(Ctx ctx, VisualElement ve)
+        => ve.name is { Length: > 0 } name && ctx.Built.Driven.Contains(name);
+
     private static bool Driven(Ctx ctx, VisualElement ve)
         => ve.name is { Length: > 0 } name && ctx.Built.NamedGroups.Contains(name);
 
@@ -2814,9 +2818,13 @@ internal static class VectorEmitter
 
     // ---------------------------------------------------------------- paint helpers
 
-    private static StringBuilder AppendRadius(this StringBuilder sb, OffThread.Box rs, float w, float h, float inset = 0f)
+    private static StringBuilder AppendRadius(this StringBuilder sb, OffThread.Box rs, float w, float h, float inset = 0f, bool keep = false)
     {
-        if (!Radii(rs, w, h, inset, out var tl, out var tr, out var br, out var bl)) return sb;
+        // `keep` for an element a script drives: the radii of a box with no height clamp to nothing,
+        // so the key is dropped and there is no slot for the radius to return through once the box
+        // grows. A bar animating up from 0% would be square for ever.
+        if (!Radii(rs, w, h, inset, out var tl, out var tr, out var br, out var bl))
+            return keep ? sb.Append(" rx=0") : sb;
         if (Mathf.Approximately(tl, tr) && Mathf.Approximately(tl, br) && Mathf.Approximately(tl, bl))
             return sb.Append(" rx=").AppendNum(tl);
         return sb.Append(" rx=[").AppendNum(tl).Append(',').AppendNum(tr).Append(',').AppendNum(br).Append(',').AppendNum(bl).Append(']');
@@ -2935,7 +2943,7 @@ internal static class VectorEmitter
         }
         var track = rs.backgroundColor.a > 0.002f ? rs.backgroundColor : new Color(0.14f, 0.19f, 0.29f);
         var rx = rs.borderTopLeftRadius > 0.01f ? rs.borderTopLeftRadius : h * 0.5f;
-        ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).AppendRadius(rs, w, h).Append(rs.borderTopLeftRadius > 0.01f ? string.Empty : " rx=" + F(rx)).Append(" f=").AppendHex(track).Append('\n');
+        ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).AppendRadius(rs, w, h, 0f, false).Append(rs.borderTopLeftRadius > 0.01f ? string.Empty : " rx=" + F(rx)).Append(" f=").AppendHex(track).Append('\n');
         ctx.Out.Nodes++;
         if (float.IsNaN(value) && control == "progress")
         {
@@ -3309,7 +3317,7 @@ internal static class VectorEmitter
         var f = fit switch { "cover" => "cover", "contain" or "scale-down" => "contain", _ => "fill" };
         src = HtmlRenderer.ResolveUrl(src, ctx.Built);
         ctx.Body.Append(indent).Append("IMG x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
-            .Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=").Append(f).AppendRadius(rs, w, h);
+            .Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=").Append(f).AppendRadius(rs, w, h, 0f, false);
         if (rs.opacity < 0.999f) ctx.Body.Append(" o=").AppendNum(rs.opacity);
         if (idOf != null) ctx.Body.AppendNodeId(ctx, idOf);
         ctx.Body.Append('\n');
@@ -3514,7 +3522,7 @@ internal static class VectorEmitter
                 shift = "+mod(t*" + F(delta / spec.Duration) + "+" + F(period * 1000f) + "," + F(period) + ")";
         }
         var id = ctx.NextId("stripes");
-        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).AppendRadius(rs, w, h).Append(" }\n");
+        ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" }\n");
         ctx.Body.Append(indent).Append("G clip=").Append(id).Append(" {\n");
         var count = Mathf.CeilToInt(span / period) + 2;
         var origin = (horizontal ? x : y) - period; // one period before the box so a shift never shows a gap

@@ -57,6 +57,22 @@ internal static class HtmlRenderer
         /// array, so naming every wrapper would retain hundreds per page. Filled from DomWrites.
         /// </summary>
         public readonly HashSet<string> NamedGroups = new(StringComparer.Ordinal);
+        /// <summary>
+        /// Every element a page's script writes after load. Wider than <see cref="NamedGroups"/> and
+        /// cheaper: it only decides whether a key is emitted at all, where naming a node makes the
+        /// renderer retain its whole prop array. Used to keep a key that would otherwise be dropped
+        /// for having a zero value - a slot that is not emitted can never be written to.
+        /// </summary>
+        public readonly HashSet<string> Driven = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Numbers the synthetic ids of elements the page gave none. Per page, not per process: it
+        /// used to be a static that was never reset, so an id counted every element this process had
+        /// ever built rather than the document it belongs to. That id is what the renderer hands Lua
+        /// as a click's value, and a compiled page's handler matches on it - so it has to be the
+        /// same next session or the button silently stops working.
+        /// </summary>
+        internal int AutoId;
         /// <summary>&lt;base href&gt;: relative urls in the page resolve against it.</summary>
         public string? BaseUrl;
         /// <summary>@starting-style rules: the state a newly shown element transitions from.</summary>
@@ -228,7 +244,7 @@ internal static class HtmlRenderer
         }
     }
 
-    private static int _autoId;
+
 
     public static Result Build(string source, FaceData? font)
     {
@@ -1298,7 +1314,7 @@ internal static class HtmlRenderer
         var id = node.Attr("id");
         if (id == null)
         {
-            id = "__" + node.Tag + (++_autoId).ToString(CultureInfo.InvariantCulture);
+            id = "__" + node.Tag + (++result.AutoId).ToString(CultureInfo.InvariantCulture);
             node.Attributes["id"] = id;
         }
         ve.name = id;

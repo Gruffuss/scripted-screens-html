@@ -476,6 +476,20 @@ internal sealed class HtmlSurface : MonoBehaviour
         try
         {
             var (writes, _) = DomWrites.Of(built.Script);
+
+            // Everything a script drives, so a key with a zero value is still emitted and still has
+            // a slot. A bar that animates up from 0% has every corner radius clamped to nothing at
+            // the moment it is translated, and without this it would have no rx to come back into.
+            foreach (var w in writes)
+            {
+                if (!w.Runtime) continue;
+                if (w.Id != null) built.Driven.Add(w.Id);
+                else if (w.Prefix is { Length: >= 2 } family)
+                    foreach (var id in built.ById.Keys)
+                        if (id.Length > family.Length && id.StartsWith(family, StringComparison.Ordinal))
+                            built.Driven.Add(id);
+            }
+
             foreach (var w in writes)
             {
                 if (!w.Runtime || w.Property is not ("style.transform" or "style.opacity" or "className")) continue;
