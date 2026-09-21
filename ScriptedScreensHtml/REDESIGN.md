@@ -171,6 +171,43 @@ So the pass to build finds the scalars a callback writes that its DOM writes rea
   clock-pure. Route it through `Tweens.cs` with the CSS keyframes, not through any analysis.
   `HtmlTest6` probes it.
 
+#### Step 3 worked by hand on `07-game`'s `draw()` (2026-09-21)
+
+Done before writing any analyser, because the survey's "25 of 27" was a count and this is the
+check. It holds, and it produces four requirements the plan did not have.
+
+| statement | becomes | needs |
+|---|---|---|
+| `player.style.transform = translate(PLAYER_X, GROUND-80-g.y)` | `G t=[189,"=430-$y"]` | `$y` |
+| `la = air ? 18 : (state==='running' ? (phase?24:16) : 24)` | `"=if(gt($y,0),18,if($running,if($phase,24,16),24))"` | `$running` |
+| `phase = Math.floor(g.step) % 2` | `=mod(floor($step),2)` | `$step` |
+| 14 pads, `x = (i*57+11-g.ground+1600) % 800 - 20` | `RP n=14 x="=mod(i*57+11-$ground+1600,800)-20"` | — |
+| obstacles, `o.kind==='drone' ? sin(g.clock*8 + o.x*0.01)*3 : 0` | `RP n=4`, `"=$odrone[i]*sin($clock*8+$ox[i]*0.01)*3"` | `$ox[] $oy[] $odrone[]` |
+| `scoreEl.textContent = pad(g.score)` | `text=$score` | a slot, never an expression |
+| `player.className = cls` | depends | see below |
+
+**The four requirements:**
+
+1. **String state becomes a 0/1 slot.** `g.state === 'running'` has no expression equivalent — the
+   language is scalar. The compiler must find comparisons of a state variable against string
+   literals and emit one boolean slot per compared value (`$running`, `$over`). The driver writes
+   0 or 1. Without this, `la` and `lb` are not expressible and the survey's count is wrong.
+2. **A loop index maps to `RP`'s `i` directly.** `for (let i = 0; i < 14; i++)` over elements that
+   differ only by `i` is a repeat, and `(i*57+11-$ground+1600) % 800 - 20` is the body verbatim.
+   This is the largest single win on the page: fourteen elements become one node.
+3. **A pool of objects becomes parallel arrays plus a repeat.** `obs[]` of `{x, y, kind}` becomes
+   `$ox[i]`, `$oy[i]`, `$odrone[i]`. The language indexes arrays, so a fixed-size pool — which is
+   how a game writes one anyway — needs nothing new.
+4. **A `className` write is expressible if and only if the classes it switches between only
+   declare properties that are themselves slottable.** Decidable at compile time by reading the
+   stylesheet: if `.duck` only changes heights and offsets, it folds into the same expressions; if
+   it changes `display` or adds a border, it is structural and the page needs both states emitted
+   and gated (step 6). **This is the check that decides whether a page compiles cleanly, and it is
+   a stylesheet question, not a JavaScript one.**
+
+What remains for the driver, in Lua, per frame: about twenty scalars and three short arrays. That
+is `up_trend(v)` in `ColdbenchConsole.lua`, which is the shape this is converging on.
+
 **4. Transpile the remainder to Lua.**
 
 **The mechanism exists and was checked against the shipped assemblies (2026-09-21), not assumed:**
