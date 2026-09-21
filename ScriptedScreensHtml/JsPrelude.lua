@@ -287,12 +287,16 @@ function ArrayMethods.join(a, sep)
   return concat(parts, sep or ",")
 end
 
+-- Both ends are clamped into the array, which is the half that is easy to leave out: JavaScript's
+-- slice(0, 7) over four entries returns four, where an unclamped copy returns seven with three
+-- holes in it - and the next .map over those holes is where it is finally noticed. Every Atmo page
+-- trims its event log this way.
 function ArrayMethods.slice(a, from, to)
   local n = a.length
   from = from or 0
-  if from < 0 then from = math.max(0, n + from) end
+  if from < 0 then from = math.max(0, n + from) else from = math.min(from, n) end
   to = to or n
-  if to < 0 then to = n + to end
+  if to < 0 then to = math.max(0, n + to) else to = math.min(to, n) end
   local out, m = {}, 0
   for i = from, to - 1 do out[m] = a[i] m = m + 1 end
   return js_array(out, m)
@@ -300,11 +304,18 @@ end
 
 -- concat flattens an array argument by exactly one level and appends anything else whole, so
 -- [a].concat(b) with b an array is a + b, and with b a plain object is a + [b].
+--
+-- The extra arguments are read out FIRST, before anything else loops. This Lua's `...` does not
+-- survive a numeric `for` in the same function: after one has run, `select("#", ...)` over-counts
+-- and `select(i, ...)` hands back values that were never passed. It cost an afternoon here, where
+-- a one-argument concat quietly produced an array one slot too long with a nil in it.
 function ArrayMethods.concat(a, ...)
+  local rest, count = {}, select("#", ...)
+  for i = 1, count do rest[i] = select(i, ...) end
   local out, n = {}, 0
   for i = 0, a.length - 1 do out[n] = a[i] n = n + 1 end
-  for i = 1, select("#", ...) do
-    local v = select(i, ...)
+  for i = 1, count do
+    local v = rest[i]
     if type(v) == "table" and type(v.length) == "number" then
       for j = 0, v.length - 1 do out[n] = v[j] n = n + 1 end
     else

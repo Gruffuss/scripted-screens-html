@@ -83,6 +83,56 @@ internal static class JsToLuaTests
             check(failure == null, failure ?? $"js->lua: {path} matches the original over {frames} frames"
                                   + (known.Length == 0 ? "" : $" ({known.Length} known divergence(s) allowed)"));
         }
+
+        Refusals(check);
+    }
+
+    /// <summary>
+    /// Constructs outside the supported subset, which must be REPORTED and not approximated. This
+    /// is the load-bearing claim of the whole design: a page that refuses to compile names its line
+    /// and can be fixed, while a page that compiles into something subtly different cannot even be
+    /// noticed. Each entry is valid JavaScript that the transpiler is expected to turn down.
+    /// </summary>
+    private static readonly (string Name, string Source)[] MustRefuse =
+    {
+        ("a class", "class A { go() { return 1; } } var a = new A();"),
+        ("a template literal", "var x = 2; var s = `two is ${x}`;"),
+        ("destructuring", "var o = { a: 1 }; var { a } = o;"),
+        ("array destructuring", "var xs = [1, 2]; var [a, b] = xs;"),
+        ("a switch", "var x = 1; switch (x) { case 1: x = 2; break; }"),
+        ("async/await", "async function f() { await 1; }"),
+        ("a generator", "function* g() { yield 1; }"),
+        ("a real regular expression", "var s = 'a1'.replace(/[0-9]+/g, '');"),
+        ("a spread argument", "function f() {} var xs = [1]; f(...xs);"),
+        ("an undeclared name", "missingThing.doSomething();"),
+        ("a do-while", "var i = 0; do { i++; } while (i < 3);"),
+        ("a labelled break", "outer: for (var i = 0; i < 2; i++) { break outer; }"),
+        ("optional chaining", "var o = {}; var v = o?.a?.b;"),
+        ("new", "function F() {} var f = new F();"),
+        ("throw", "function f() { throw new Error('x'); }"),
+        ("getters on a class", "var o = { set x(v) { this._x = v; } };"),
+    };
+
+    /// <summary>Each one must be turned down, and the report must say where.</summary>
+    private static void Refusals(Action<bool, string> check)
+    {
+        var accepted = new List<string>();
+        var silent = new List<string>();
+        foreach (var (name, source) in MustRefuse)
+        {
+            var lua = JsToLua.Compile(source, out var problems);
+            if (lua != null) accepted.Add(name);
+            else if (problems.Count == 0) silent.Add(name);
+        }
+        // `??` is supported rather than refused, so it is checked for the thing that distinguishes
+        // it from `||`: a falsy-but-defined left side is kept.
+        var nullish = JsToLua.Compile("var a = 0; var b = a ?? 9; var c = null; var d = c ?? 9;", out _);
+        check(nullish != null && !nullish.Contains("js_or"), "js->lua: ?? does not compile to ||");
+
+        check(accepted.Count == 0, accepted.Count == 0
+            ? $"js->lua: all {MustRefuse.Length} unsupported constructs are reported, not approximated"
+            : $"js->lua: silently accepted - {string.Join(", ", accepted)}");
+        if (silent.Count > 0) check(false, $"js->lua: refused with no reason given - {string.Join(", ", silent)}");
     }
 
     /// <summary>Null when the two runs agree, else the first few writes that differ.</summary>

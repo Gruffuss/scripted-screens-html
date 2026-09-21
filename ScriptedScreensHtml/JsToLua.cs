@@ -417,6 +417,15 @@ internal sealed class JsToLua
             case NonLogicalBinaryExpression bin:
                 return Binary(bin);
 
+            // `??` yields the right side only when the left is null or undefined, where `||` yields
+            // it for anything falsy - so `0 ?? 1` is 0 and `0 || 1` is 1. Lua's nil covers both null
+            // and undefined, so this is exact rather than approximate. It was silently compiling to
+            // `||` until a test asked for every unsupported construct to be refused and this one
+            // was not refused.
+            case LogicalExpression { Operator: Operator.NullishCoalescing } nc:
+                return "(function() local __v = " + Expr(nc.Left) + " if __v ~= nil then return __v end return "
+                       + Expr(nc.Right) + " end)()";
+
             case LogicalExpression log:
                 // Value position, so the operand itself is the result as in JS. The right side is a
                 // thunk because `&&` and `||` short-circuit, and guarding with them is the whole

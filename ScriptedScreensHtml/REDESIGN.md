@@ -335,6 +335,50 @@ without it, and a file in a mod folder can be deleted, edited or lost in a Works
 nothing saying so until a console goes blank — which is the failure this project has already had
 three times over.
 
+**"It reports rather than approximates" is a claim, so it is tested.** Seventeen constructs outside
+the supported subset — a class, a template literal, destructuring, `switch`, `async`, a generator, a
+real regular expression, a spread argument, an undeclared name, `do`/`while`, a labelled break,
+optional chaining, `new`, `throw`, a setter — are compiled and must each be turned down with a line
+number. **Sixteen were. The seventeenth was `??`, and it was compiling to `||`** — so `0 ?? 1` would
+have given 1 where JavaScript gives 0, in a page that looked like it compiled fine. Exactly the
+silent-mistranslation failure the whole reporting rule exists to prevent, and nothing but an
+explicit test for it would have found it. It is now implemented properly rather than refused: Lua’s
+`nil` covers both `null` and `undefined`, so the translation is exact.
+
+---
+
+#### What the DOM-write mapping actually has to cover, counted (2026-09-21)
+
+Measured across every page in the repository before designing it, because the size of the problem
+decides the shape of the answer. **Every write a page makes, by property:**
+
+| style property | writes | becomes |
+|---|---|---|
+| `transform` | 6 | the `G t=[..]` pair's two slots |
+| `top` | 5 | the box's `y` — **only when the element is absolutely positioned** |
+| `height` | 5 | the box's `h`, same condition |
+| `bottom` `color` `background` | 1 each | `y`, the label's `f`, the box's `f` |
+| `maskImage` `animation` | 1 each | `animation` is `@keyframes`, which `Tweens.cs` already compiles; `maskImage` wants a look |
+
+| element property | writes | becomes |
+|---|---|---|
+| `textContent` | 10 | `$id` — a slot, never an expression (`T.text` takes no `=expr`) |
+| `innerHTML` | 10 | **structural.** Recompile, or enumerate the reachable states and gate them |
+| `className` | 8 | decidable at compile time by reading the stylesheet — see step 3's fourth requirement |
+| `scrollTop` | 1 | nothing. A compiled console does not scroll |
+
+So the whole mapping is **eight style properties and four element properties**, and the interesting
+half is not the translation but the **condition**: a write only becomes a slot when it cannot move
+anything else. `top` and `height` on an absolutely positioned element reach that element's box and
+nothing else; on a flow element they move every sibling, and only Yoga knows where those land. That
+condition is a fact about the *stylesheet*, known at compile time, and the compiler must report the
+cases it cannot serve rather than emit a slot that quietly does the wrong thing.
+
+**`innerHTML` at 10 writes is the real work**, and it is step 6's, not step 3's: a page rebuilding
+markup is enumerating a state, and the answer is to emit the states and gate them rather than to
+translate the rebuild.
+
+---
 **What is NOT built, and is the next thing.** The transpiler translates the *language*; it does not
 yet know **where a DOM write lands in the scene**. `$('legA').style.height = la + 'px'` has to become
 a write to `$legA_h`, and only the emitter knows whether `legA` even has its own box, whether its
