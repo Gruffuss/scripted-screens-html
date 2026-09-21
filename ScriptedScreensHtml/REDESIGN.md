@@ -42,6 +42,104 @@ record of that investigation, not as work to do.
 After compiling, the mod drops the DOM, the cascade, the layout tree, the emitter state and the
 engine, and holds only what a recompile needs: the source and the id → slot map.
 
+## The plan (2026-09-21) — this supersedes the steps below
+
+**The mod is a compiler.** It runs at page load and unloads. It emits two things, and the game
+already runs both:
+
+| output | what it carries |
+|---|---|
+| a **vector scene** | the structure, slots named by the author's ids, and clock-pure motion as expressions |
+| **Lua source** | whatever the page's script does that has memory — as `on_frame` / `tick(dt)` / `on_click` handlers that write slots |
+
+Nothing of the HTML side is resident afterwards. **There is no JavaScript engine at runtime**, so
+there is no engine question: no Jint, no V8, no ClearScript, no native dependency, no shared buffer.
+Step 7 below is retained only as the measured record of that investigation.
+
+Where each thing a page does ends up:
+
+| the page does | compiles to | runs |
+|---|---|---|
+| CSS animation / transition | a vector expression | nowhere — it is geometry |
+| script motion that is pure in the clock | a vector expression | nowhere |
+| script with memory, per frame (a game loop) | Lua `on_frame` | the game's Lua VM, **200,000 instructions/frame** (`FrameCallbackManager.cs:77`) — ample |
+| `setInterval` a few Hz | Lua `tick(dt)` | same, 2/s |
+| `onclick` | Lua `on_click` | already true today |
+| any DOM write | a slot write | `VDATA:set_props{ data = ... }` — `ColdbenchConsole.lua:2841` |
+
+### Steps
+
+**0. Fix the instruments.** Every wrong conclusion on 2026-09-21 came from a measuring tool. The
+bench does not compile `HtmlSurface.cs` or `VectorBridge.cs`; its allocation window opens after
+`Tweens.Diff` and `OffThread.Capture`; it labels page-thread work "main thread"; and it never calls
+`tweens.Expire`, which made item 1g invisible to it. Do these before trusting another number.
+
+**1. Name slots by author id.** `<span id="temp">` compiles to `$temp`, so Lua addresses the scene
+without the mod. This is the contract between the compiled page and whoever feeds it.
+
+**2. Make the structure independent of values.** Three bugs, all printed by the mod itself in its
+`first difference` lines, and the reason a page that should send 4 structures in 3 minutes sends
+1-5 a second:
+
+| | |
+|---|---|
+| 2a | the `G` transform wrapper is dropped at identity — a *value* changes the *shape* of the text |
+| 2b | gradient stops are template literals, not slots |
+| 2c | def ids come from a page-wide counter and renumber on every re-emit (`d3b9b1d` claims to fix this and is in the tree — find why it does not hold) |
+
+**3. Compile clock-pure motion to expressions.** Generalise what already happens for `@keyframes`
+to script statements. A statement qualifies only if its right-hand side reads nothing but the time
+parameter, constants and never-written outer values. Per *statement*, not per callback: a loop that
+positions twenty elements from the clock and increments one score compiles the twenty and leaves
+the one. **It must fail toward "keep running"** — wrongly deciding a callback is pure freezes the
+console, which is the bug class fixed on 2026-09-21 (see 1h).
+
+**4. Transpile the remainder to Lua.** The subset a console page uses is small. The mismatches are
+a known table, handled once with explicit helpers rather than idiomatic output — verbose Lua nobody
+reads is the right trade:
+
+| | JS | Lua |
+|---|---|---|
+| truthiness | `if (0)`, `if ("")` are false | **both are true** — emit `js_truthy(x)` |
+| arrays | 0-based, `.length` | 1-based, `#t` |
+| modulo | `-1 % 3 === -1` | `-1 % 3 == 2` |
+| concat | `+` | `..` |
+| absent | `undefined` and `null` | only `nil` |
+| not-equal | `!==` | `~=` |
+
+None of these is subtle in effect: a flipped truthiness is a lamp stuck on, not a half pixel. And
+the output is Lua source that can be read, which no interpreter offers.
+
+**5. Unload after compiling.** Drop the DOM, the cascade, the layout tree, the emitter state.
+Keep only what a recompile needs: the source and the id → slot map.
+
+**6. Enumerate reachable states rather than recompiling for them.**
+
+> Emit every state the page can reach, gate them with slots, and recompile only for states that
+> cannot be enumerated.
+
+That is exactly `JOBROWS = 2` plus `"+N more"`: a chosen maximum, everything emitted, presence
+driven by opacity. Applied to themes:
+
+| theme changes | answer |
+|---|---|
+| colours only | slots. A switch is a data write, no recompile |
+| geometry within one design space | emit both, gate with `G o=$theme`. Hidden shapes are walked and evaluated but never tessellated |
+| **the design space itself** (726 vs 806) | **recompile** — the viewbox belongs to the scene, and `use_space()` already rejects the alternative: *"scaling would put 52px tabs on 46.8 and every hairline on a half pixel"* |
+
+So recompile means: **the source changed, or the design space changed.** Never per state change.
+
+**Additive vector-side ask** (no behaviour change — a fully transparent group draws nothing today
+either): a group-level early-out, `if (alpha <= 0.002f) return;` at `Tessellator.cs:1204`, would
+make a hidden subtree genuinely free instead of merely cheap.
+
+### The specification is already written, in Lua
+
+`CoolingUi/ColdbenchConsole.lua` and `ManufacturingUi/ManufacturingConsole.lua` are what the
+compiler should produce. Quoted in "Step 5 in full" below.
+
+---
+
 ## The bar
 
 A page is done only when, beside the Lua regulator (AtmoUi/AtmoRegulator.lua) on the same
