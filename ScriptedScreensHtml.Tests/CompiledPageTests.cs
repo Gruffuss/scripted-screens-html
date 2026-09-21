@@ -76,9 +76,11 @@ internal static class CompiledPageTests
         if (sent.Count == 0) { check(false, "compiled: nothing reached the vector element"); return; }
         check(true, $"compiled: {sent.Count} slot value(s) reached the vector element");
 
-        check(snap.Type != LuaValueType.Nil, snap.Type != LuaValueType.Nil
-            ? "compiled: the payload carries snap, so values do not glide"
-            : "compiled: the payload has no snap - every value would ease over the tick gap");
+        // The host sends with snap set; what the chunk owes is the flag that says there is
+        // something to send at all.
+        check(snap.Type == LuaValueType.Boolean, snap.Type == LuaValueType.Boolean
+            ? "compiled: the chunk flags when a frame produced values"
+            : "compiled: the chunk never flags a frame's values, so the host would send nothing");
 
         // draw() sets legA's height to 16, 18 or 24 and its top to legTop + (24 - height), and
         // legTop is 56 unless ducking, so top + height is 80 in CSS - and 80 plus the player's own
@@ -154,14 +156,14 @@ internal static class CompiledPageTests
     {
         var state = LuaState.Create();
         state.OpenStandardLibraries();
-        // a stand-in for the vector element, so the flush has somewhere to go
-        Chunk(state, "VDATA = { set_props = function(self, t) SENT = t.data LAST_SNAP = t.snap end }", "element");
         // The chunk carries its own prelude now, exactly as the one loaded into a chip does.
         Chunk(state, lua, "page");
         Chunk(state, Driver(frames), "frames");
 
+        // What a frame wrote, read exactly as the host reads it: the chunk leaves its values in
+        // PAYLOAD and flags DIRTY, and the host takes them from there. Nothing is sent from Lua.
         var sent = new Dictionary<string, LuaValue>(StringComparer.Ordinal);
-        var value = state.Environment["SENT"];
+        var value = state.Environment["PAYLOAD"];
         if (value.Type == LuaValueType.Table)
         {
             var table = value.Read<LuaTable>();
@@ -172,7 +174,7 @@ internal static class CompiledPageTests
                 if (key.Type == LuaValueType.String) sent[key.Read<string>()] = pair.Value;
             }
         }
-        return (sent, state.Environment["LAST_SNAP"]);
+        return (sent, state.Environment["DIRTY"]);
     }
 
     /// <summary>Drives the page's own callback, then hands one payload over - as the chip would.</summary>
