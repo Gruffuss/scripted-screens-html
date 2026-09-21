@@ -7,6 +7,41 @@ p99 28-35 ms, against the same console written in Lua for the vector mod at a fl
 p99 16-17 ms. This plan makes it a translation layer, as the vector mod was designed to be used:
 structure once, values as data.
 
+## The goal, stated properly (corrected 2026-09-21)
+
+**Nothing of the HTML side runs after the initial translation.** Not a reduced amount — nothing.
+The plan below was written as "structure once, values as patches *from the HTML mod*", and that
+middle step should not exist.
+
+The compiler turns HTML + CSS into a vector scene whose slots are named by the author's ids
+(`<span id="temp">` becomes `$temp`), hands it to the vector element once, and unloads. After that
+**Lua writes the values straight to that element**, exactly as the hand-written vector pages already
+do. `ColdbenchConsole.lua:2841` is the entire runtime data path:
+
+```lua
+if VDATA then VDATA:set_props({ data = v }) end
+```
+
+`VectorBridge` uses that same `keep = 1` mechanism today; it simply inserts the whole HTML pipeline
+in front of it and recomputes a scene first.
+
+Things previously treated as reasons to stay resident:
+
+| | |
+|---|---|
+| sending values | Lua's job, directly. The HTML mod was a detour |
+| clicks | already reach Lua's `on_click` with the button id; never through the HTML mod |
+| page JS | a mockup convenience — production logic is Lua, and clock-driven motion compiles to an expression |
+| DOM reads (`getBoundingClientRect`, `children`…) | only page JS needs them, and page JS is not running |
+| a genuine structural change (a theme press) | **recompile** — the compiler is *invoked*, not resident. `use_space()` is the same move |
+
+So there is no per-frame HTML work of any kind, and **the engine question disappears with it**: no
+JavaScript at runtime means no interpreter at runtime. Step 7 is retained below only as the measured
+record of that investigation, not as work to do.
+
+After compiling, the mod drops the DOM, the cascade, the layout tree, the emitter state and the
+engine, and holds only what a recompile needs: the source and the id → slot map.
+
 ## The bar
 
 A page is done only when, beside the Lua regulator (AtmoUi/AtmoRegulator.lua) on the same
