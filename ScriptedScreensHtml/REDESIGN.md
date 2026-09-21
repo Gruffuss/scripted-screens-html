@@ -67,6 +67,45 @@ Where each thing a page does ends up:
 | `onclick` | Lua `on_click` | already true today |
 | any DOM write | a slot write | `VDATA:set_props{ data = ... }` — `ColdbenchConsole.lua:2841` |
 
+### Vector 0.11.31 — the three blockers are gone (2026-09-21)
+
+Everything that could not be a runtime value now can be. Built and deployed by the vector session,
+offline-tested, **not yet seen in game**.
+
+| | now |
+|---|---|
+| gradient geometry `x1 y1 x2 y2 cx cy r fx fy a` | expressions |
+| gradient **stop positions and stop colours** | expressions; a stop colour written `$name` reads a colour from the payload |
+| **clip geometry** — `CP id=track { R x=20 w=$w h=16 }` | live, re-cut once per rebuild |
+| `G o=0` | returns at the group |
+
+All re-read once per rebuild before the tree walk, so sampling, banding and refinement are
+unchanged, and a gradient of plain numbers keeps the old path at no cost.
+
+**Three behaviours to rely on, and one to design around:**
+
+- **A live clip that evaluates to nothing hides its group** rather than falling back to unclipped.
+  A bar at 0% disappears instead of flooding its track — the CSS behaviour, and the safe failure
+  direction.
+- A radial focus that was never stated follows a live centre rather than a stale copy; live stop
+  positions that cross between ticks are re-sorted with their slots.
+- **`G o=0` still walks a subtree containing a click region, an `SC` or an `IMG`**, deliberately: a
+  browser sends clicks to an `opacity: 0` element. **This matters for step 6's "emit both themes and
+  gate the inactive one": the hidden skin's buttons would still be clickable.** A switch was
+  offered; asked for.
+- A scene that emits nothing at all still draws the magenta "emitted nothing" marker. Old
+  behaviour, easier to hit once groups are gated. Any page with a background rect never sees it.
+
+**And a rendering bug they found in ours while testing, which predates all of this:** a two-stop
+linear ramp whose stops do not span the shape kept ramping past its last stop instead of holding
+that colour, so a fade to transparent never finished fading. `NeedsRefinement` treated every
+two-stop linear gradient as exact, which only holds while the stops span 0..1. Fixed on their side.
+**AtmoDark's fade will now reach fully transparent and may look different from what it was tuned
+against** — check it on a console before assuming the page regressed. Ramps that span 0..1 are
+untouched; where it applies a rounded box went 40 → 134 vertices.
+
+---
+
 ### Steps
 
 **0. Fix the instruments.** Every wrong conclusion on 2026-09-21 came from a measuring tool. The
