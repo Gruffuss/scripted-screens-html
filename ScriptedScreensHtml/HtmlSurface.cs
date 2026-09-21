@@ -1500,7 +1500,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     private int StartAnimation(VisualElement ve, CssKeyframes frames, AnimationSpec spec)
     {
         // a looping opacity/transform animation runs in the scene (REDESIGN step 4), as for CSS ones
-        if (_built != null && float.IsPositiveInfinity(spec.Iterations) && !spec.Paused && VectorEmitter.Compilable(frames))
+        if (_built != null && float.IsPositiveInfinity(spec.Iterations) && !spec.Paused && VectorEmitter.Compilable(frames, _built.CssOf(ve)))
         {
             _built.TimeAnimations[ve] = (spec, OffThread.Now);
             _scriptTimeAnimations[++_animationSeq] = ve;
@@ -1886,7 +1886,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             if (!built.Keyframes.TryGetValue(spec.Name, out var frames)) continue;
             // a looping animation of opacity and transform only: the scene runs it (REDESIGN step 4), no
             // runner, no redraw at every keyframe
-            if (float.IsPositiveInfinity(spec.Iterations) && !spec.Paused && VectorEmitter.Compilable(frames))
+            if (float.IsPositiveInfinity(spec.Iterations) && !spec.Paused && VectorEmitter.Compilable(frames, built.CssOf(element)))
             {
                 built.TimeAnimations[element] = (spec, OffThread.Now);
                 continue;

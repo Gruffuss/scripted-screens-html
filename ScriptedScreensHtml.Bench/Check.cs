@@ -79,6 +79,32 @@ internal static class Check
                 { Console.WriteLine($"FAIL: keyframe runner asked for {steps} steps in 600 frames; NextDue is not gating"); failures++; }
         }
 
+        // Compilable decides whether an animation runs on the scene clock or keeps a KeyframeRunner,
+        // and getting it wrong in the generous direction is silent: the emitter simply never reaches
+        // the branch that would paint the colour, and the animation disappears with no warning.
+        {
+            var pulse = new CssKeyframes { Name = "pulse" };
+            pulse.Frames.Add(new CssKeyframe { Percent = 0f, Declarations = { new CssDeclaration("background-color", "#8b1a1a") } });
+            pulse.Frames.Add(new CssKeyframe { Percent = 100f, Declarations = { new CssDeclaration("background-color", "#ff5c5c") } });
+
+            var flat = new System.Collections.Generic.Dictionary<string, string> { ["background"] = "#8b1a1a" };
+            if (!VectorEmitter.Compilable(pulse, flat))
+                { Console.WriteLine("FAIL: a background-color animation on a flat background should run in the scene"); failures++; }
+
+            foreach (var layered in new[]
+                     {
+                         new System.Collections.Generic.Dictionary<string, string> { ["background"] = "linear-gradient(#111,#222)" },
+                         new System.Collections.Generic.Dictionary<string, string> { ["background-image"] = "url(a.png)" },
+                     })
+                if (VectorEmitter.Compilable(pulse, layered))
+                    { Console.WriteLine("FAIL: a background-color animation over an image or gradient must keep its runner"); failures++; }
+
+            var filter = new CssKeyframes { Name = "blur" };
+            filter.Frames.Add(new CssKeyframe { Percent = 0f, Declarations = { new CssDeclaration("filter", "blur(0)") } });
+            if (VectorEmitter.Compilable(filter, flat))
+                { Console.WriteLine("FAIL: filter is not something the scene can run"); failures++; }
+        }
+
         return failures;
     }
 

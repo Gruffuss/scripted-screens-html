@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
@@ -454,6 +454,14 @@ internal static class VectorEmitter
                 var ir = origin == "border-box" ? 0f : rs.borderRightWidth + (origin == "content-box" ? rs.paddingRight : 0f);
                 var ib = origin == "border-box" ? 0f : rs.borderBottomWidth + (origin == "content-box" ? rs.paddingBottom : 0f);
                 EmitImage(ctx, imageUrl, BackgroundFit(css), css, rs, x + il, y + it, Mathf.Max(1f, w - il - ir), Mathf.Max(1f, h - it - ib), indent, bg.a > 0.002f ? string.Empty : NodeId(ctx, ve));
+            }
+            else if (ColourTimeline(ctx, ve) is { } ka)
+            {
+                // A looping background-color animation: the scene walks the ramp, so no page frame
+                // is ever run for it - before this it kept a KeyframeRunner and a frame per boundary.
+                ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
+                    .AppendRadius(rs, w, h).Append(" f=@").Append(ka.gid).Append(" fat==").Append(ka.at).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
+                ctx.Out.Nodes++;
             }
             else if (tw != null && !Tweens.Snap.NearColour(tw.From.Bg, bg) && (tw.From.Bg.a > 0.002f || bg.a > 0.002f) && !(bgCss != null && bgCss.Contains("gradient(")))
             {
@@ -3604,14 +3612,37 @@ internal static class VectorEmitter
     /// eased per segment; scroll() runs over the box's whole range, view() while the
     /// element crosses the viewport. No clock, no rebuilds: the vector mod evaluates sy.
     /// </summary>
-    /// <summary>Keyframes that change only opacity and transform: the scene can run them as one expression.</summary>
-    internal static bool Compilable(CssKeyframes frames)
+    /// <summary>
+    /// Keyframes the scene can run on its own clock: opacity and transform become expressions on a
+    /// G, background-color becomes a ramp the fill walks. Anything else needs a KeyframeRunner, and
+    /// a runner costs the page a whole frame at every keyframe boundary.
+    ///
+    /// The element's own style decides too: a colour animation is painted by the plain-background
+    /// branch, so an element backed by an image or a gradient keeps its runner rather than quietly
+    /// losing its animation - the emitter would never reach the branch that draws it.
+    /// </summary>
+    internal static bool Compilable(CssKeyframes frames, Dictionary<string, string>? css = null)
     {
         if (frames.Frames.Count == 0) return false;
+        var colour = false;
         foreach (var f in frames.Frames)
             foreach (var d in f.Declarations)
-                if (d.Name != "opacity" && d.Name != "transform") return false;
+            {
+                if (d.Name == "opacity" || d.Name == "transform") continue;
+                if (d.Name == "background-color") { colour = true; continue; }
+                return false;
+            }
+        if (colour && (css == null || Layered(css))) return false;
         return true;
+    }
+
+    /// <summary>Does this element paint its background as anything other than one flat colour?</summary>
+    private static bool Layered(Dictionary<string, string> css)
+    {
+        if (css.TryGetValue("background-image", out var bi) && bi.Trim() != "none") return true;
+        return css.TryGetValue("background", out var bg)
+               && (bg.IndexOf("gradient(", StringComparison.OrdinalIgnoreCase) >= 0
+                   || bg.IndexOf("url(", StringComparison.OrdinalIgnoreCase) >= 0);
     }
 
     /// <summary>
@@ -3630,6 +3661,72 @@ internal static class VectorEmitter
             ? "(1-abs(mod(" + elapsed + "," + F(2f * d) + ")/" + F(d) + "-1))"
             : "(mod(" + elapsed + "," + F(d) + ")/" + F(d) + ")";
         return KeyframeGroup(spec, frames, p, x, y, w, h);
+    }
+
+    /// <summary>The phase of a looping animation in the scene clock, 0..1. Shared, so a colour ramp
+    /// and the transform group around it walk the same animation at the same rate.</summary>
+    private static string TimeProgress(Ctx ctx, AnimationSpec spec, float started)
+    {
+        var epoch = ctx.Tw != null && !float.IsNaN(ctx.Tw.Epoch) ? ctx.Tw.Epoch : ctx.Now;
+        var s0 = started + spec.Delay - epoch;
+        var d = Mathf.Max(0.001f, spec.Duration);
+        var elapsed = "max(0,t-(" + F(s0) + "))";
+        var p = spec.Alternate
+            ? "(1-abs(mod(" + elapsed + "," + F(2f * d) + ")/" + F(d) + "-1))"
+            : "(mod(" + elapsed + "," + F(d) + ")/" + F(d) + ")";
+        return spec.Reverse ? "(1-" + p + ")" : p;
+    }
+
+    /// <summary>
+    /// A looping background-color animation as a ramp plus a place to sample it. An expression
+    /// cannot return a colour, but it can return a position along one, so the frames become a GL def
+    /// and `fat` walks it - the same mechanism a colour transition already uses, with a stop per
+    /// keyframe instead of two. The page then runs no frames for the animation at all.
+    /// </summary>
+    private static (string gid, string at)? ColourTimeline(Ctx ctx, VisualElement ve)
+    {
+        if (!ctx.Built.TimeAnimations.TryGetValue(ve, out var ta)) return null;
+        if (!ctx.Built.Keyframes.TryGetValue(ta.spec.Name, out var frames) || frames.Frames.Count == 0) return null;
+
+        // a stop per keyframe; a frame naming no colour holds the one before it, as CSS does
+        var stops = _stops ??= new List<(float at, Color c)>();
+        stops.Clear();
+        foreach (var f in frames.Frames)
+        {
+            var has = false; var c = default(Color);
+            foreach (var d in f.Declarations)
+                if (d.Name == "background-color" && StyleApplier.TryColor(d.Value.Trim(), out var parsed)) { c = parsed; has = true; }
+            if (!has && stops.Count > 0) { c = stops[stops.Count - 1].c; has = true; }
+            if (has) stops.Add((f.Percent / 100f, c));
+        }
+        if (stops.Count < 2) return null;
+
+        var gid = ctx.NextId("ka");
+        ctx.Defs.Append("  GL id=").Append(gid).Append(" stops=[");
+        for (var i = 0; i < stops.Count; i++)
+        {
+            if (i > 0) ctx.Defs.Append(',');
+            ctx.Defs.Append('[').AppendNum(stops[i].at).Append(',').AppendHex(stops[i].c).Append(']');
+        }
+        ctx.Defs.Append("]\n");
+        return (gid, EasedAt(ta.spec, stops, TimeProgress(ctx, ta.spec, ta.start)));
+    }
+
+    [ThreadStatic] private static List<(float at, Color c)>? _stops;
+
+    /// <summary>Where along the ramp the progress sits. The stops are at the keyframe percents, so
+    /// easing is only a matter of crossing the gap between two of them faster or slower.</summary>
+    private static string EasedAt(AnimationSpec spec, List<(float at, Color c)> stops, string p)
+    {
+        var expr = F(stops[stops.Count - 1].at);
+        for (var i = stops.Count - 2; i >= 0; i--)
+        {
+            var a = stops[i].at; var b = stops[i + 1].at;
+            var span = Mathf.Max(0.0001f, b - a);
+            var local = spec.Easing.Expr("clamp((" + p + "-" + F(a) + ")/" + F(span) + ",0,1)");
+            expr = "if(lt(" + p + "," + F(b) + ")," + F(a) + "+(" + F(b - a) + ")*" + local + "," + expr + ")";
+        }
+        return expr;
     }
 
     private static string? ScrollTimeline(Ctx ctx, VisualElement ve, Dictionary<string, string> css, string timeline, float x, float y, float w, float h)
@@ -3651,7 +3748,7 @@ internal static class VectorEmitter
     }
 
     /// <summary>The frames as a G whose opacity and transform follow progress <paramref name="p"/> (0..1).</summary>
-    private static string KeyframeGroup(AnimationSpec spec, CssKeyframes frames, string p, float x, float y, float w, float h)
+    private static string? KeyframeGroup(AnimationSpec spec, CssKeyframes frames, string p, float x, float y, float w, float h)
     {
         if (spec.Reverse) p = "(1-" + p + ")";
 
@@ -3705,15 +3802,18 @@ internal static class VectorEmitter
             return "=" + expr;
         }
         var sb = new StringBuilder("G a=[").AppendNum(x + w * 0.5f).Append(',').AppendNum(y + h * 0.5f).Append(']');
+        var moved = false;
         var op = Piece(k => k.o);
-        if (op != "1") sb.Append(" o=").Append(Quote(op));
+        if (op != "1") { sb.Append(" o=").Append(Quote(op)); moved = true; }
         var txe = Piece(k => k.tx); var tye = Piece(k => k.ty);
-        if (txe != "0" || tye != "0") sb.Append(" t=[").Append(Quote(txe)).Append(',').Append(Quote(tye)).Append(']');
+        if (txe != "0" || tye != "0") { sb.Append(" t=[").Append(Quote(txe)).Append(',').Append(Quote(tye)).Append(']'); moved = true; }
         var re = Piece(k => k.r);
-        if (re != "0") sb.Append(" r=").Append(Quote(re));
+        if (re != "0") { sb.Append(" r=").Append(Quote(re)); moved = true; }
         var sxe = Piece(k => k.sx); var sye = Piece(k => k.sy);
-        if (sxe != "1" || sye != "1") sb.Append(" s=[").Append(Quote(sxe)).Append(',').Append(Quote(sye)).Append(']');
-        return sb.ToString();
+        if (sxe != "1" || sye != "1") { sb.Append(" s=[").Append(Quote(sxe)).Append(',').Append(Quote(sye)).Append(']'); moved = true; }
+        // A colour-only animation has nothing to say to a transform group, and an empty one would
+        // cost a node and a nesting level per animated element for no effect.
+        return moved ? sb.ToString() : null;
     }
 
     private static string Quote(string v) => v.StartsWith("=", StringComparison.Ordinal) ? "\"" + v + "\"" : v;
