@@ -1078,6 +1078,11 @@ internal sealed class HtmlSurface : MonoBehaviour
             var sa = Allocated();
             var template = SceneSlots.Split(output.Chars, output.Length, _slotScratch, _slotPrefix);
             _allocSplit += Allocated() - sa;
+            // The compiler needs the slot table, which only exists once the scene has been split -
+            // so this is the first moment a page can be compiled. Reports only; nothing depends on
+            // it and the page carries on exactly as before.
+            if (HtmlConfig.CompileProbe && !worker && _built != null && _panel != null)
+                CompileProbe.Full(PageKey, _built, _panel, layout, _slotScratch);
             if (template == _lastTemplate)
             {
                 List<SS.UiProp>? patch = null;

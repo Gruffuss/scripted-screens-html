@@ -115,6 +115,25 @@ internal static class CompiledPage
 
         // One binding per distinct (element, property) a running page writes. Setup writes are
         // already in the geometry by the time this runs, so they are not bound to anything.
+        // Every class string a key can take, across every write to it. A page assigns className from
+        // several places - draw(), over(), reset() - and each knows only part of the set, so taking
+        // the first write's list alone lost three of the player's four states.
+        var classes = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var computed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var w in writes)
+        {
+            if (!w.Runtime || w.Property != "className") continue;
+            foreach (var id in Targets(w, available))
+            {
+                var name = id + ".className";
+                // One unknowable write and the set is not a set. A flag rather than a marker value
+                // in the list, because a class really could be called anything.
+                if (w.Classes == null) { computed.Add(name); continue; }
+                if (!classes.TryGetValue(name, out var list)) classes[name] = list = new List<string>();
+                foreach (var c in w.Classes) if (!list.Contains(c)) list.Add(c);
+            }
+        }
+
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var w in writes)
         {
@@ -131,7 +150,9 @@ internal static class CompiledPage
                 // here and what it draws is emitted, so the running page picks rather than computes.
                 if (w.Property == "className")
                 {
-                    if (w.Classes == null)
+                    var reachable = computed.Contains(key) ? null
+                                  : classes.TryGetValue(key, out var all) ? all : w.Classes;
+                    if (reachable == null)
                     {
                         result.Unmapped.Add($"line {w.Line}: {key} - the class is computed, so its states cannot be enumerated");
                         continue;
@@ -143,7 +164,7 @@ internal static class CompiledPage
                     }
                     var states = new List<StateValues>();
                     var missing = new List<string>();
-                    foreach (var cls in w.Classes.Distinct(StringComparer.Ordinal))
+                    foreach (var cls in reachable.Distinct(StringComparer.Ordinal))
                     {
                         var produced = stateOf(id, cls);
                         if (produced == null) { missing.Add(cls.Length == 0 ? "(none)" : cls); continue; }
@@ -195,18 +216,15 @@ internal static class CompiledPage
         foreach (var slot in available)
         {
             if (!slot.StartsWith(prefix, StringComparison.Ordinal)) continue;
-            var cut = slot.LastIndexOf('_');
-            var id = cut > 0 ? slot.Substring(0, cut) : slot;
-            // `pb1_t_0` cuts to `pb1_t`, so keep cutting while what is left still starts the prefix
-            while (id.Length > prefix.Length && !found.Contains(id))
-            {
-                var next = id.LastIndexOf('_');
-                if (next <= 0 || !id.StartsWith(prefix, StringComparison.Ordinal)) break;
-                var shorter = id.Substring(0, next);
-                if (!shorter.StartsWith(prefix, StringComparison.Ordinal) || shorter.Length < prefix.Length) break;
-                id = shorter;
-            }
-            if (id.Length > prefix.Length && id.StartsWith(prefix, StringComparison.Ordinal)) found.Add(id);
+
+            // The member is the prefix plus a number and nothing else. `'ob' + i` makes ob0..ob3,
+            // and without the number test it also matched `obstacles` - the container they live in -
+            // so a className write meant for the obstacles was bound to their parent instead.
+            var end = prefix.Length;
+            while (end < slot.Length && slot[end] >= '0' && slot[end] <= '9') end++;
+            if (end == prefix.Length) continue;                       // no index: a different element
+            if (end < slot.Length && slot[end] != '_') continue;      // `obstacles` rather than `ob3`
+            found.Add(slot.Substring(0, end));
         }
         foreach (var id in found) yield return id;
     }
