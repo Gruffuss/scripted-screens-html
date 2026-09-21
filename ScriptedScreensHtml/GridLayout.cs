@@ -296,8 +296,12 @@ internal sealed class GridLayout
             var ownW = Stretches(justifySelf) || contentCol;
             var childH = it.Ve.layout.height; if (float.IsNaN(childH)) childH = 0f;
             var childW = it.Ve.layout.width; if (float.IsNaN(childW)) childW = 0f;
-            var offY = ownH ? 0f : Mathf.Max(0f, chh - childH) * Factor(alignSelf);
-            var offX = ownW ? 0f : Mathf.Max(0f, cw - childW) * Factor(justifySelf);
+            // Rounded because the layout runs on a whole-pixel grid (YGConfigSetPointScaleFactor(1)):
+            // centring an odd leftover gives a half pixel, Yoga snaps it back, and the two disagree
+            // forever - the settle loop then runs its full eight passes every frame and leaves
+            // whichever of the two states the last pass happened to write.
+            var offY = ownH ? 0f : Mathf.Round(Mathf.Max(0f, chh - childH) * Factor(alignSelf));
+            var offX = ownW ? 0f : Mathf.Round(Mathf.Max(0f, cw - childW) * Factor(justifySelf));
             // a stretched item takes the cell (-1 = its own size, left to the cascade or the content)
             var rect = new Rect(padL + colX[it.Col] + offX, padT + rowY[it.Row] + offY, ownW && !contentCol ? cw : -1f, ownH && fixedRow ? chh : -1f);
             if (_placed.TryGetValue(it.Ve, out var prev) && Same(prev, rect))

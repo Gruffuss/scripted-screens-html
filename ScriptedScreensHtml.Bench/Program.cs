@@ -71,6 +71,7 @@ internal static class Program
             // the surface's own gate: a frame nobody needs is not run at all
             if (SkipIdle && !Js.Wants(1f + i * 0.016f)) { skipped++; continue; }
             var before = GC.GetAllocatedBytesForCurrentThread();
+            Keep = i == iterations - 1;
             var p = Once(panel, root, built, boxes, scratch, tweens, slots, size, 1f + i * 0.016f);
             totalBytes += GC.GetAllocatedBytesForCurrentThread() - before;
             for (var k = 0; k < 5; k++) { phases[k].bytes += p[k].bytes; phases[k].ticks += p[k].ticks; }
@@ -118,6 +119,8 @@ internal static class Program
     private static readonly Dictionary<string, SceneSlots.Value> Previous = new(StringComparer.Ordinal);
     private static long TotalSlots, ChangedSlots, Frames, IdleFrames;
     internal static string LastScene = string.Empty;
+    /// <summary>Set for the last iteration only, so the dump still has a scene to write.</summary>
+    internal static bool Keep;
 
 
     private static (long bytes, long ticks)[] Once(Panel panel, VisualElement root, HtmlRenderer.Result built,
@@ -192,7 +195,10 @@ internal static class Program
                 }
             }
         }
-        LastScene = output.Scene;
+        // Only the frame whose scene is actually written out pays for a string - the same trap the
+        // game had at HtmlSurface.cs:1076, and the reason this file's phase table never summed to
+        // its own total: the residue was always 2 x the scene's characters.
+        if (Keep) LastScene = output.Scene;
         return p;
     }
 

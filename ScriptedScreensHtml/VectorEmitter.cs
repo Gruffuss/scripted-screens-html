@@ -149,6 +149,11 @@ internal static class VectorEmitter
         public void Reset(HtmlRenderer.Result built, Tweens? tweens, float now, Dictionary<string, (float offset, int version)>? scrollSet, float pageW, float pageH)
         {
             Body.Clear(); Defs.Clear(); Scene.Clear(); Reported.Clear(); Deferred.Clear();
+            // Per frame, not per thread: these were only ever added to, so the diagnostics line
+            // reported a running total - "13972 subtrees reused" for a 150-element page - and every
+            // reading taken from it was meaningless.
+            Reused = 0; Rebuilt = 0;
+            WhyChanged = WhyNoCache = WhyMoved = WhyDepth = WhyEpoch = WhyTween = 0;
             Built = built; Tw = tweens; Now = now; ScrollSet = scrollSet; PageW = pageW; PageH = pageH;
             Ids = 0; EmittingDeferred = false; ScrollTop = float.NaN; ScrollH = 0f; ScrollRange = 0f; SvgScale = 1f;
             Out.Reset();

@@ -38,6 +38,15 @@ internal sealed class ElementStyle
     private void Set(L i, StyleLength v)
     {
         StyleLength? value = Unset(v.keyword) ? null : v;
+        // Writing the value it already has is not a write. The settle loop in Panel.Layout stops
+        // when a pass writes nothing, so counting a no-op keeps it running to its pass cap: a
+        // caller that re-asserts Left = 0 every pass (GridLayout does) held it open on its own.
+        var had = _len[(int)i];
+        if (had.HasValue == value.HasValue
+            && (!value.HasValue || (had!.Value.keyword == value.Value.keyword
+                                    && had.Value.value.unit == value.Value.value.unit
+                                    && had.Value.value.value.Equals(value.Value.value.value))))
+            return;
         _len[(int)i] = value;
         VisualElement.StyleWrites++;
         var auto = value?.keyword == StyleKeyword.Auto;

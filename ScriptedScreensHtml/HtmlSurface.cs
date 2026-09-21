@@ -1073,7 +1073,11 @@ internal sealed class HtmlSurface : MonoBehaviour
         _lastTranslateMs = r.TranslateMs;
         _translateMsTotal += r.TranslateMs;
         _lastNodes = output.Nodes;
-        _lastChars = output.Scene.Length;
+        // Output.Length, never Output.Scene.Length: the latter materialises the whole scene
+        // (new string(Chars, 0, Length)) to read a number this already holds, on the game thread,
+        // every emit, for one diagnostics line that is off by default. 20 KB a frame on a 10 KB
+        // scene - the exact garbage Output's buffer exists to avoid, put back one line away.
+        _lastChars = output.Length;
         _emits++;
         foreach (var w in output.Warnings)
             ScriptedScreensHtmlPlugin.Log?.LogWarning(w);
