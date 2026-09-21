@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -175,7 +175,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         // a page stepping twice a second was laying out, ticking and translating on every display
         // frame, and 96% of those frames produced a scene identical to the one before.
         var wanted = _dirty || !_inbox.IsEmpty || (_script?.WantsFrame(Time.time) ?? false)
-                     || _animations.Count > 0 || _tweens.Any || AnySvgBlending();
+                     || AnimationDue(Time.time) || _tweens.NextDue(Time.time) <= Time.time || AnySvgBlending();
+        _lastDue = due;
         if (due && !wanted) _gateSkips++;
         if (due && wanted)
         {
@@ -250,7 +251,29 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     /// <summary>What the gate sees right now, for the diagnostics line: which clause is holding frames back.</summary>
     private string GateWhy() =>
-        $"dirty {_dirty}, inbox {!_inbox.IsEmpty}, script {(_script != null ? _script.GateWhy() : "none")}, runners {_animations.Count}, tweens {_tweens.Any}";
+        $"dirty {_dirty}, inbox {!_inbox.IsEmpty}, script {(_script != null ? _script.GateWhy() : "none")}, runners {_animations.Count}, tweens {_tweens.Any}, "
+        + $"due {_lastDue}, updated {_frameSeen == Time.frameCount}, panel {_panel != null}, current {IsCurrent}, state {_pageState}";
+
+    /// <summary>
+    /// The gate's own answer last update. Read it with `updated`: a surface whose Update is not
+    /// running at all (ScriptedScreens deactivates a console nobody is looking at) reports exactly
+    /// like one the gate is holding back - no emits, nothing dirty, no skips - and the two want
+    /// opposite fixes.
+    /// </summary>
+    private bool _lastDue;
+
+    /// <summary>
+    /// Is any keyframe runner at a boundary? Having one is not a reason to run a frame: a runner
+    /// writes at boundaries and does nothing between them, so `_animations.Count > 0` held this gate
+    /// open permanently for any page with an animation the emitter cannot compile to an expression -
+    /// which includes background-position, background-color and filter, i.e. most real pages.
+    /// </summary>
+    private bool AnimationDue(float now)
+    {
+        for (var i = 0; i < _animations.Count; i++)
+            if (_animations[i].NextDue(now) <= now) return true;
+        return false;
+    }
 
     private bool AnySvgBlending()
     {

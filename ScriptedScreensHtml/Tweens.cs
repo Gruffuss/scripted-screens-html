@@ -228,6 +228,24 @@ internal sealed class Tweens
     private readonly List<VisualElement> _scratch = new();
 
     public bool Any => _live.Count > 0;
+
+    /// <summary>
+    /// The clock at which a live tween next needs a page frame: its end, and nothing before it.
+    /// A running tween is emitted as one expression over `t` - the renderer animates it - so the
+    /// scene text does not change while it runs and every frame taken in between produces an empty
+    /// patch. A 600 ms transition was costing about 36 full passes for nothing. The frame at the end
+    /// is owed, because that is when Expire re-emits it with plain numbers and the page goes static.
+    /// </summary>
+    public float NextDue(float now)
+    {
+        var soonest = float.MaxValue;
+        foreach (var kv in _live)
+        {
+            var end = kv.Value.Start + kv.Value.Duration;
+            if (end < soonest) soonest = end;
+        }
+        return soonest <= now ? now : soonest;
+    }
     public int Count => _live.Count;
     /// <summary>Time.time when the scene the vector mod shows was applied (its `t` = 0); NaN before the first.</summary>
     public float Epoch = float.NaN;

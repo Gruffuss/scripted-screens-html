@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UIElements;
@@ -206,6 +206,41 @@ internal sealed class KeyframeRunner
 
         SetTransition(span);
         ApplyFrame(target);
+    }
+
+    /// <summary>
+    /// The clock at which this runner next has something to do - it writes at keyframe boundaries
+    /// and does nothing in between, so the surface has no reason to run a whole page frame for it
+    /// until then. Existing was previously enough: `_animations.Count > 0` held the idle-frame gate
+    /// open for the life of any page carrying one animation this cannot compile, so such a page paid
+    /// the full pipeline at display rate forever while producing an identical scene.
+    ///
+    /// Errs toward <paramref name="now"/> - "due immediately" - for every case that is not a plain
+    /// forward run between two frames. A needless frame costs a frame; a missed one stops an
+    /// animation, which is the failure that reads as a broken mod.
+    /// </summary>
+    public float NextDue(float now)
+    {
+        if (_finished) return float.MaxValue;
+        if (_spec.Paused || _segment < 0 || _snapped || _frames.Frames.Count < 2) return now;
+
+        var frames = _frames.Frames;
+        var duration = Mathf.Max(0.001f, _spec.Duration);
+        var elapsed = now - _start - _pauseShift;
+        if (elapsed < 0f) return _start + _pauseShift;            // still in the delay
+
+        var iteration = Mathf.FloorToInt(elapsed / duration);
+        if (iteration >= _spec.Iterations) return now;            // the landing frame is owed
+        // A new iteration snaps to its start frame, which is a write owed now. _segment still
+        // describes the PREVIOUS iteration, so projecting from it lands a whole period late and the
+        // gate sleeps through the start of every cycle - four writes in ten seconds instead of twenty.
+        if (iteration != _iteration) return now;
+        if (IsReversed(iteration)) return now;                    // reverse walks the list backwards; not worth the arithmetic
+        if (_segment + 1 >= frames.Count) return now;
+
+        // Forward: the next write happens when progress reaches the following frame's percent.
+        var at = _start + _pauseShift + iteration * duration + frames[_segment + 1].Percent / 100f * duration;
+        return at > now ? at : now;
     }
 
     private bool IsReversed(int iteration)

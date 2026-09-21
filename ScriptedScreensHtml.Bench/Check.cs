@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Reflection;
 using UnityEngine;
@@ -48,6 +48,37 @@ internal static class Check
         Console.WriteLine(failures == 0
             ? $"  PASS  Box.Same compares all {fields.Length} fields"
             : $"  {failures} FAILED of {fields.Length} fields");
+        // A keyframe runner has to make progress when it is stepped, and then say when it next
+        // wants stepping. The idle-frame gate asks NextDue and runs no page frame until then, so a
+        // runner that always answers "now" costs a frame every frame, and one that answers too late
+        // stops animating - and neither is visible in the code, only in a clock.
+        {
+            var ve = new VisualElement();
+            var frames = new CssKeyframes { Name = "pulse" };
+            frames.Frames.Add(new CssKeyframe { Percent = 0f, Declarations = { new CssDeclaration("background-color", "#8b1a1a") } });
+            frames.Frames.Add(new CssKeyframe { Percent = 50f, Declarations = { new CssDeclaration("background-color", "#ff5c5c") } });
+            frames.Frames.Add(new CssKeyframe { Percent = 100f, Declarations = { new CssDeclaration("background-color", "#8b1a1a") } });
+            var spec = new AnimationSpec { Name = "pulse", Duration = 2f, Iterations = float.PositiveInfinity };
+            var runner = new KeyframeRunner(ve, frames, spec, 0f, null);
+
+            // The gate loop, exactly as HtmlSurface runs it: step only when the runner says it is due.
+            var writes = 0; var steps = 0; var t = 0f;
+            for (var frame = 0; frame < 600; frame++)   // ten seconds at 60 fps
+            {
+                t = frame / 60f;
+                if (runner.NextDue(t) > t) continue;
+                steps++;
+                runner.Update(t);
+                if (runner.Wrote) { runner.Wrote = false; writes++; }
+            }
+            // 2 s period, a write at each of 0%/50%/100%: about 10 writes in ten seconds, plus the
+            // per-iteration snap. Far fewer means it stalled; hundreds means NextDue never closed.
+            if (writes < 8 || writes > 40)
+                { Console.WriteLine($"FAIL: keyframe runner wrote {writes} times in 10 s, expected about 10-20"); failures++; }
+            if (steps > 120)
+                { Console.WriteLine($"FAIL: keyframe runner asked for {steps} steps in 600 frames; NextDue is not gating"); failures++; }
+        }
+
         return failures;
     }
 
