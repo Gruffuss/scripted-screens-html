@@ -235,6 +235,7 @@ void TestBuildRows()
     var area = HtmlParser.Parse("<map name=m><area shape=rect coords=\"0,0,10,10\" id=a1><area shape=circle coords=\"5,5,3\" id=a2></map>").Children[0];
     Check(area.Children.Count == 2 && area.Children[1].Tag == "area", "area is a void tag: two siblings under the map");
     TestSceneSlots();
+TestDefsLiterals();
     TestTextMeasure();
 }
 
@@ -307,6 +308,20 @@ void TestTextMeasure()
     Check(allocated < 1000, $"text: measuring allocates nothing once warm ({allocated} bytes for 1000 calls)");
 }
 
+void TestDefsLiterals()
+{
+    // Inside DEFS, geometry slots but two things must not: an array (a change there is a change of
+    // shape, not of value) and a quoted string (`d` takes no expressions at all). Pinned separately
+    // from the main fixture so neither can be broken without a named failure.
+    const string scene = "SCENE w=100 h=100\nDEFS {\n  GL id=g1 units=bbox x1=0 y1=0.5 x2=0.64 y2=0.5 stops=[[0,#E0A44FBF],[0.64,#00000000]]\n  CP id=c1 { P d=\"M 0 0 L 10 10 Z\" }\n}\nR x=1 y=2 w=3 h=4 f=#FFFFFF\n";
+    var v = new Dictionary<string, SceneSlots.Value>();
+    var t = SceneSlots.Split(scene, v);
+    Check(t.Contains("x2=$"), $"defs: gradient geometry slots\n{t}");
+    Check(t.Contains("stops=[[0,#E0A44FBF],[0.64,#00000000]]"), $"defs: gradient stops stay literal\n{t}");
+    Check(t.Contains("d=\"M 0 0 L 10 10 Z\""), $"defs: a quoted path stays literal\n{t}");
+    Check(t.Contains("DEFS {") && t.Contains("}"), $"defs: the block survives intact\n{t}");
+}
+
 void TestSceneSlots()
 {
     // Two emits of the same page with different values: same template, only values differ;
@@ -318,7 +333,12 @@ void TestSceneSlots()
     var ta = SceneSlots.Split(a, va);
     var tb = SceneSlots.Split(b, vb);
     Check(ta == tb, $"slots: same structure, same template\n{ta}\n{tb}");
-    Check(ta.Contains("CP id=clip1 { R x=0 y=0 w=10 h=10 }") && ta.StartsWith("SCENE w=640 h=640"), "slots: SCENE and DEFS stay literal");
+    // DEFS geometry slots since vector 0.11.31 re-reads gradients and clips before each tree walk;
+    // before that a slot there was silently dropped, which is why this used to assert the opposite.
+    Check(ta.StartsWith("SCENE w=640 h=640"), "slots: the SCENE line stays literal");
+    Check(!ta.Contains("CP id=clip1 { R x=0 y=0 w=10 h=10 }") && ta.Contains("CP id=clip1 { R x=$"),
+          $"slots: clip geometry inside DEFS is slotted\n{ta}");
+    Check(ta.Contains("sh=[[0,3,8,0,#0000001F]]"), "slots: arrays stay literal");
     Check(ta.Contains("sh=[[0,3,8,0,#0000001F]]") && ta.Contains("id=tab1") && ta.Contains("font=\"Manrope SemiBold\"") && ta.Contains("lh=1.33"), "slots: arrays, ids, fonts and number-only keys stay literal");
     // A line carrying the author's id names its slots after it, so Lua can write to the compiled
     // scene by the name in the markup; a line with no id keeps the positional name.

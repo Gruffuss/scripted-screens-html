@@ -18,7 +18,7 @@ namespace ScriptedScreensHtml;
 /// keeps the positional <c>$L&lt;line&gt;_&lt;key&gt;</c>, which nothing outside can address.
 /// </summary>
 /// <remarks>
-/// Pure text work, no Unity: tested headless. DEFS (gradients, clips) and the SCENE line stay
+/// Pure text work, no Unity: tested headless. The SCENE line stays
 /// literal, since the vector mod reads them once. Arrays (radii, shadows, points) stay literal:
 /// a change there is a structure change.
 ///
@@ -120,9 +120,20 @@ internal static class SceneSlots
             while (text < end && scene[text] == ' ') text++;
             if (defsDepth > 0)
             {
-                // inside DEFS: literal; track braces to find its end
+                // Inside DEFS. These used to be copied literally, because the vector mod read a
+                // gradient or a clip ONCE at parse time and a slot there would have been silently
+                // dropped. Since vector 0.11.31 it re-reads them before each tree walk, so they
+                // slot like any other line — which is what stops a data-driven gradient or a
+                // clipped bar from forcing a whole new structure.
+                //
+                // Arrays still stay literal (`stops=[[0,#fff],[1,#000]]`, `p=[...]`) and so do
+                // quoted strings (`d="M ..."`), both handled by SlotLine already. A brace counted
+                // here still ends the block, and a line that is only a brace has nothing to slot.
                 for (var i = start; i < end; i++) { if (scene[i] == '{') defsDepth++; else if (scene[i] == '}') defsDepth--; }
-                sb.Append(scene, start, end - start);
+                if (text >= end || scene[text] == '}')
+                    sb.Append(scene, start, end - start);
+                else
+                    SlotLine(scene, sceneLength, start, end, line, sb, values, memory);
             }
             else if (Starts(scene, sceneLength, text, end, "DEFS"))
             {
