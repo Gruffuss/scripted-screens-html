@@ -8,9 +8,14 @@ namespace ScriptedScreensHtml;
 /// <summary>
 /// Splits an emitted scene into a template and its values, so the vector mod gets the structure
 /// once and only changed values afterwards (REDESIGN.md, step 1). Every position, size, opacity,
-/// stroke width, font size, text and colour in a node line becomes a data slot
-/// <c>$L&lt;line&gt;_&lt;key&gt;</c>, and so does every number inside an expression. Two emits of
-/// the same page with different values produce the same template; only the values differ.
+/// stroke width, font size, text and colour in a node line becomes a data slot, and so does every
+/// number inside an expression. Two emits of the same page with different values produce the same
+/// template; only the values differ.
+///
+/// A slot is named after the element's own id where the line carries one - <c>&lt;span id="temp"&gt;</c>
+/// is <c>$temp</c> and its box is <c>$temp_x</c>, <c>$temp_w</c> - so a Lua chip can write to the
+/// compiled scene by the names in the markup, with this mod no longer running. A line with no id
+/// keeps the positional <c>$L&lt;line&gt;_&lt;key&gt;</c>, which nothing outside can address.
 /// </summary>
 /// <remarks>
 /// Pure text work, no Unity: tested headless. DEFS (gradients, clips) and the SCENE line stay
@@ -49,7 +54,14 @@ internal static class SceneSlots
     private sealed class Token
     {
         public string Key = string.Empty;
+        /// <summary>The id the line carried when Name was worked out; "" when it carried none.</summary>
+        public string Id = string.Empty;
+        /// <summary>Preferred: the author's id, or the positional name when there is no usable id.</summary>
         public string Name = string.Empty;
+        /// <summary>The positional name, used when another line claimed Name first.</summary>
+        public string Fallback = string.Empty;
+        /// <summary>Which of the two the last split actually used: Parts are built from it.</summary>
+        public string? Chosen;
         public List<string>? Parts;
     }
 
@@ -140,6 +152,7 @@ internal static class SceneSlots
 
     private static void SlotLine(char[] scene, int sceneLength, int from, int to, int line, StringBuilder sb, Dictionary<string, Value> values, Memory memory)
     {
+        var (idStart, idEnd) = LineId(scene, from, to);
         var i = from;
         // indent and op
         while (i < to && scene[i] == ' ') sb.Append(scene[i++]);
@@ -162,9 +175,51 @@ internal static class SceneSlots
             var vStart = j + 1;
             var vEnd = ValueEnd(scene, sceneLength, vStart, to);
             sb.Append(scene, keyStart, keyEnd - keyStart).Append('=');
-            SlotValue(scene, sceneLength, keyStart, keyEnd, vStart, vEnd, line, index++, sb, values, memory);
+            SlotValue(scene, sceneLength, keyStart, keyEnd, vStart, vEnd, idStart, idEnd, line, index++, sb, values, memory);
             i = vEnd;
         }
+    }
+
+    /// <summary>
+    /// The <c>id=</c> this line carries, or an empty range. Quoted values are stepped over, so
+    /// <c>text="run id=3"</c> is not mistaken for one.
+    /// </summary>
+    private static (int start, int end) LineId(char[] scene, int from, int to)
+    {
+        for (var i = from; i < to; i++)
+        {
+            if (scene[i] == '"')
+            {
+                i++;
+                while (i < to && scene[i] != '"') { if (scene[i] == '\\') i++; i++; }
+                continue;
+            }
+            if (scene[i] != ' ' || i + 3 >= to || scene[i + 1] != 'i' || scene[i + 2] != 'd' || scene[i + 3] != '=') continue;
+            var s = i + 4;
+            var e = s;
+            while (e < to && scene[e] != ' ') e++;
+            return (s, e);
+        }
+        return (0, 0);
+    }
+
+    /// <summary>
+    /// An element id as a slot name, or null when it cannot be one: the mod's own synthetic names
+    /// (<c>__x3</c>), and anything shaped like a positional name (<c>L12</c>), which would then be
+    /// claimed by two unrelated things.
+    /// </summary>
+    private static string? Friendly(string id)
+    {
+        if (id.Length == 0 || id.Length > 48) return null;
+        if (id.Length >= 2 && id[0] == '_' && id[1] == '_') return null;
+        if ((id[0] == 'L' || id[0] == 'M') && id.Length > 1 && id[1] >= '0' && id[1] <= '9') return null;
+        // ASCII only, so the name is an identifier the vector mod's expression parser accepts:
+        // anything else (a dash, a space, an accent) becomes an underscore.
+        var sb = new StringBuilder(id.Length + 1);
+        if (id[0] >= '0' && id[0] <= '9') sb.Append('_');
+        foreach (var c in id)
+            sb.Append((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' ? c : '_');
+        return sb.ToString();
     }
 
     /// <summary>End of a value: a quoted string (with \" escapes), a bracketed array, or up to the next space.</summary>
@@ -189,25 +244,39 @@ internal static class SceneSlots
     }
 
     private static void SlotValue(char[] scene, int sceneLength, int keyStart, int keyEnd, int rawStart, int rawEnd,
-                                  int line, int index, StringBuilder sb, Dictionary<string, Value> values, Memory memory)
+                                  int idStart, int idEnd, int line, int index, StringBuilder sb, Dictionary<string, Value> values, Memory memory)
     {
         if (rawEnd <= rawStart) return;
         var quoted = rawEnd - rawStart >= 2 && scene[rawStart] == '"' && scene[rawEnd - 1] == '"';
         var bodyStart = quoted ? rawStart + 1 : rawStart;
         var bodyEnd = quoted ? rawEnd - 1 : rawEnd;
         var token = memory.TokenAt(line, index);
-        if (!Is(scene, sceneLength, keyStart, keyEnd, token.Key))
+        if (!Is(scene, sceneLength, keyStart, keyEnd, token.Key) || !Is(scene, sceneLength, idStart, idEnd, token.Id))
         {
             token.Key = new string(scene, keyStart, keyEnd - keyStart);
-            token.Name = memory.Prefix + line.ToString(CultureInfo.InvariantCulture) + "_" + Safe(token.Key);
+            token.Id = idEnd > idStart ? new string(scene, idStart, idEnd - idStart) : string.Empty;
+            token.Fallback = memory.Prefix + line.ToString(CultureInfo.InvariantCulture) + "_" + Safe(token.Key);
+            // The author's own id names the slot, so a Lua chip writes to the scene by the name it
+            // wrote in the markup: <span id="temp"> is $temp, and its box is $temp_x, $temp_w and so
+            // on. A line with no id keeps the positional name, which nothing outside can address.
+            var friendly = Friendly(token.Id);
+            token.Name = friendly == null ? token.Fallback
+                : string.Equals(token.Key, "text", StringComparison.Ordinal) ? friendly
+                : friendly + "_" + Safe(token.Key);
             token.Parts?.Clear();
+            token.Chosen = null;
         }
+        // Two lines carrying the same id would name the same slot twice and one value would be lost,
+        // so the second one back to its positional name. First come wins, and emission order is the
+        // document's, so the same line wins every time.
         var name = token.Name;
+        if (!ReferenceEquals(name, token.Fallback) && values.ContainsKey(name)) name = token.Fallback;
+        if (!ReferenceEquals(name, token.Chosen)) { token.Chosen = name; token.Parts?.Clear(); }
 
         if (bodyEnd > bodyStart && scene[bodyStart] == '=')
         {
             if (quoted) sb.Append('"');
-            SlotNumbers(scene, sceneLength, bodyStart, bodyEnd, token, sb, values);
+            SlotNumbers(scene, sceneLength, bodyStart, bodyEnd, token, name, sb, values);
             if (quoted) sb.Append('"');
             return;
         }
@@ -262,7 +331,7 @@ internal static class SceneSlots
     }
 
     /// <summary>Every number literal in an expression becomes a slot; identifiers (i1, hash2, $names) are left alone.</summary>
-    private static void SlotNumbers(char[] expr, int sceneLength, int from, int to, Token token, StringBuilder sb, Dictionary<string, Value> values)
+    private static void SlotNumbers(char[] expr, int sceneLength, int from, int to, Token token, string name, StringBuilder sb, Dictionary<string, Value> values)
     {
         var k = 0;
         var i = from;
@@ -285,7 +354,7 @@ internal static class SceneSlots
             }
             if (float.TryParse(expr.AsSpan(i, j - i), NumberStyles.Float, CultureInfo.InvariantCulture, out var n))
             {
-                var slot = Part(token, k++, token.Name);
+                var slot = Part(token, k++, name);
                 values[slot] = new Value(n);
                 sb.Append('$').Append(slot);
             }

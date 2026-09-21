@@ -320,7 +320,10 @@ void TestSceneSlots()
     Check(ta == tb, $"slots: same structure, same template\n{ta}\n{tb}");
     Check(ta.Contains("CP id=clip1 { R x=0 y=0 w=10 h=10 }") && ta.StartsWith("SCENE w=640 h=640"), "slots: SCENE and DEFS stay literal");
     Check(ta.Contains("sh=[[0,3,8,0,#0000001F]]") && ta.Contains("id=tab1") && ta.Contains("font=\"Manrope SemiBold\"") && ta.Contains("lh=1.33"), "slots: arrays, ids, fonts and number-only keys stay literal");
-    Check(va["L4_w"].Number == 152f && vb["L4_w"].Number == 160f && va["L4_f"].Text == "#FFFFFF", "slots: numbers and colours are values");
+    // A line carrying the author's id names its slots after it, so Lua can write to the compiled
+    // scene by the name in the markup; a line with no id keeps the positional name.
+    Check(va["tab1_w"].Number == 152f && vb["tab1_w"].Number == 160f && va["tab1_f"].Text == "#FFFFFF", "slots: numbers and colours are values, named by the element's own id");
+    Check(!va.ContainsKey("L4_w") && ta.Contains("w=$tab1_w"), $"slots: an author id replaces the positional name\n{ta}");
     Check(va["L8_t_0"].Number == -140.9f && vb["L8_t_0"].Number == -144.7f && ta.Contains("t=[$L8_t_0,$L8_t_1]"), $"slots: a moved group is values, not structure\n{ta}");
     Check(va["L6_text"].Text == "say \"hi\"\nO<sub>2</sub> 21.0", $"slots: text is unescaped ({va["L6_text"].Text})");
     Check(ta.Contains("(t-$L5_o_") && ta.Contains("+($L5_o_") && ta.Contains("*smoothstep($L5_o_") && ta.Contains(",clamp(("), $"slots: numbers in expressions become slots, signs included, names do not\n{ta}");

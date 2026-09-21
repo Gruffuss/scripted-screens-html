@@ -452,7 +452,9 @@ internal static class VectorEmitter
             groups++;
         }
         else filterShadow = css.TryGetValue("filter", out var fcss2) && Filters(ctx, fcss2, out _, out var fs2) ? fs2 : string.Empty;
-        if ((css.TryGetValue("clip-path", out var cpath) || css.TryGetValue("-webkit-clip-path", out cpath)) && ClipPath(ctx, cpath, x, y, w, h, xform, css.TryGetValue("clip-rule", out var clipRule) && clipRule.Trim() == "evenodd") is { } clipId)
+        // An always-on group at identity must not turn a rectangular clip into a polygon one.
+        var clipXform = xform is { IsIdentity: false } ? xform : null;
+        if ((css.TryGetValue("clip-path", out var cpath) || css.TryGetValue("-webkit-clip-path", out cpath)) && ClipPath(ctx, cpath, x, y, w, h, clipXform, css.TryGetValue("clip-rule", out var clipRule) && clipRule.Trim() == "evenodd") is { } clipId)
         {
             ctx.Body.Append(indent).Append("G clip=").Append(clipId).Append(" {\n");
             groups++;
@@ -462,7 +464,10 @@ internal static class VectorEmitter
             ctx.Body.Append(indent).Append("G mask=@").Append(maskId).Append(" {\n");  // gradient mask on the subtree (vector requirement 10)
             groups++;
         }
-        if (rs.opacity < 0.999f || (tw != null && tw.From.Opacity < 0.999f))
+        if (rs.opacity < 0.999f) Unsettled(ve).Faded = true;
+        // Opacity is the other wrapper a value can delete: fully opaque and the G disappears, which
+        // is a different scene, not a different number. Emitted whenever it can still change.
+        if (rs.opacity < 0.999f || (tw != null && tw.From.Opacity < 0.999f) || CanFade(ctx, ve))
         {
             ctx.Body.Append(indent).Append("G o=").Append(tw != null ? tw.Lerp(tw.From.Opacity, rs.opacity) : F(rs.opacity)).Append(" {\n");
             groups++;
@@ -1168,6 +1173,39 @@ internal static class VectorEmitter
         return pts;
     }
 
+    /// <summary>
+    /// What this element has already been seen to do. The scene is compiled once, so a value that
+    /// moves afterwards must be a slot in it - and the only elements whose CSS cannot answer
+    /// "can this change?" are the ones a script writes to. Having done it once is the answer
+    /// available here; a compiled script will say so up front instead.
+    /// </summary>
+    private sealed class Seen { public bool Moved, Faded; }
+
+    // Weak keys, like HtmlRenderer's own records: a removed element must not be kept alive by this.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<VisualElement, Seen> Watched = new();
+
+    private static Seen Unsettled(VisualElement ve) => Watched.GetValue(ve, _ => new Seen());
+
+    /// <summary>A transition or animation that could touch this property, or the property itself declared.</summary>
+    private static bool Declared(Dictionary<string, string> css, string property, string[] keys)
+    {
+        foreach (var key in keys)
+            if (css.ContainsKey(key)) return true;
+        return (css.TryGetValue("transition", out var tr) || css.TryGetValue("transition-property", out tr))
+               && (tr.IndexOf(property, StringComparison.Ordinal) >= 0 || tr.IndexOf("all", StringComparison.Ordinal) >= 0);
+    }
+
+    private static readonly string[] MoveKeys = { "transform", "translate", "rotate", "scale", "offset-path", "offset-distance", "animation", "animation-name" };
+    private static readonly string[] FadeKeys = { "opacity", "animation", "animation-name" };
+
+    /// <summary>Can this element's transform still change once the page is compiled?</summary>
+    private static bool CanMove(Ctx ctx, VisualElement ve)
+        => (Watched.TryGetValue(ve, out var seen) && seen.Moved) || Declared(ctx.Built.CssOf(ve), "transform", MoveKeys);
+
+    /// <summary>Can this element's opacity still change? Same argument, same failure if it cannot.</summary>
+    private static bool CanFade(Ctx ctx, VisualElement ve)
+        => (Watched.TryGetValue(ve, out var seen) && seen.Faded) || Declared(ctx.Built.CssOf(ve), "opacity", FadeKeys);
+
     /// <summary>A CSS transform as the vector G attributes, kept numeric so clip
     /// polygons declared in scene space can be put through the same transform.</summary>
     private sealed class Xform
@@ -1177,6 +1215,14 @@ internal static class VectorEmitter
         private float _ox, _oy, _or;
         private OffsetPlace? _offset;
         private Tweens.Tween? _tw;
+        /// <summary>
+        /// This element's transform is not settled, so every part of the group is written even at
+        /// identity: the scene is compiled once, and a value that moves afterwards needs a slot to
+        /// land in. Without it a translate reaching 0 deletes the whole group from the text.
+        /// </summary>
+        public bool Always;
+        /// <summary>Nothing to apply: a clip outline through this must stay a rectangle.</summary>
+        public bool IsIdentity;
 
         /// <summary>The element's resolved transform (UI Toolkit has already applied the CSS), tweened if one is running.</summary>
         public static Xform? From(Ctx ctx, int depth, VisualElement ve, Tweens.Tween? tw, float x, float y, float w, float h, OffsetPlace? offset = null)
@@ -1192,7 +1238,9 @@ internal static class VectorEmitter
             var running = tw != null && tw.From.TransformDiffers(tw.To) ? tw : null;
             var identity = Mathf.Abs(tx) < 0.01f && Mathf.Abs(ty) < 0.01f && Mathf.Abs(r) < 0.01f
                            && Mathf.Abs(sx - 1f) < 0.001f && Mathf.Abs(sy - 1f) < 0.001f;
-            if (identity && running == null && offset?.Ex == null)
+            if (!identity) Unsettled(ve).Moved = true;
+            var always = CanMove(ctx, ve);
+            if (identity && running == null && offset?.Ex == null && !always)
                 return null;
             var xf = ctx.RentXform(depth);
             xf.Ax = offset?.Ax ?? x + w * 0.5f; xf.Ay = offset?.Ay ?? y + h * 0.5f;
@@ -1200,6 +1248,8 @@ internal static class VectorEmitter
             xf._ox = offset?.Dx ?? 0f; xf._oy = offset?.Dy ?? 0f; xf._or = offset?.Rot ?? 0f;
             xf._offset = offset;
             xf._tw = running;
+            xf.Always = always;
+            xf.IsIdentity = identity && running == null && offset?.Ex == null;
             return xf;
         }
 
@@ -1225,9 +1275,10 @@ internal static class VectorEmitter
                 sb.Append(" s=[\"").Append(_tw.Lerp(f.Scale.x, Sx)).Append("\",\"").Append(_tw.Lerp(f.Scale.y, Sy)).Append("\"]");
                 return;
             }
-            if (Tx != 0f || Ty != 0f) sb.Append(" t=[").AppendNum(Tx).Append(',').AppendNum(Ty).Append(']');
-            if (R != 0f) sb.Append(" r=").AppendNum(R);
-            if (Sx != 1f || Sy != 1f) sb.Append(" s=[").AppendNum(Sx).Append(',').AppendNum(Sy).Append(']');
+            // Always: every part written, so the line's shape does not depend on the values in it.
+            if (Always || Tx != 0f || Ty != 0f) sb.Append(" t=[").AppendNum(Tx).Append(',').AppendNum(Ty).Append(']');
+            if (Always || R != 0f) sb.Append(" r=").AppendNum(R);
+            if (Always || Sx != 1f || Sy != 1f) sb.Append(" s=[").AppendNum(Sx).Append(',').AppendNum(Sy).Append(']');
         }
 
         /// <summary>Scale, rotate, translate about the anchor: the vector G's order.</summary>
