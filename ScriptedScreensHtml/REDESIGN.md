@@ -132,7 +132,32 @@ So the pass to build finds the scalars a callback writes that its DOM writes rea
   clock-pure. Route it through `Tweens.cs` with the CSS keyframes, not through any analysis.
   `HtmlTest6` probes it.
 
-**4. Transpile the remainder to Lua.** The subset a console page uses is small. The mismatches are
+**4. Transpile the remainder to Lua.**
+
+**The mechanism exists and was checked against the shipped assemblies (2026-09-21), not assumed:**
+
+| | |
+|---|---|
+| compile source into the chip's own state | `LuaState.Load(ReadOnlySpan<char> chunk, string chunkName, LuaTable? environment = null)` → a `LuaClosure`, which is a `LuaFunction` (`Lua.dll`, workshop item 3659911735) |
+| isolate it | that `environment` argument. Generated code gets its own `_ENV` and cannot touch the author's globals |
+| run it | `LuaState.RunAsync(LuaFunction, …)` |
+| per-frame hook | `FrameCallbackManager.Register(chip, state, callback)` — `internal static`, reachable through the publicised ScriptedScreens reference we already use |
+| budget | `MaxInstructionsPerFrame = 200000` (`FrameCallbackManager.cs:77`), four times the per-tick budget |
+
+**Two constraints that decide the shape, both read from the decompile:**
+
+- **One frame callback per chip, and registering replaces it.** `Register` ends with
+  `instance._callbacks[referenceId] = callbackData;`. A compiled page that registers `on_frame`
+  would silently evict the one the author's Lua registered. **So chain, do not register**: read the
+  existing entry and install a wrapper that calls both, ours first. Alternatively emit the frame
+  work as a named function in the page's environment and let the author's own `on_frame` call it —
+  decide when the first page needs it, but never replace theirs.
+- **Generated Lua must never yield.** `tick()` and `on_frame()` share the chip's root `LuaState`,
+  and the file's own warning is explicit: *"running on_frame while tick is suspended races shared
+  globals and closure upvalues"*. No `coroutine.yield`, no `ic.yield`, no `sleep` in anything the
+  transpiler emits.
+
+The subset a console page uses is small. The mismatches are
 a known table, handled once with explicit helpers rather than idiomatic output — verbose Lua nobody
 reads is the right trade:
 
