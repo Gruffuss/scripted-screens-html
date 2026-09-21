@@ -9,37 +9,40 @@ const calls = [];
 const stubs = {
   __log: (l, m) => calls.push('log:' + l + ':' + m),
   __has: id => id in attrs,
-  __query: sel => (sel === '.x' ? ['a'] : sel === 'form' ? ['form1'] : sel === '*' ? Object.keys(attrs) : []),
-  __setStyle: (id, p, v) => calls.push('style:' + id + ':' + p + '=' + v),
-  __setText: (id, t) => calls.push('text:' + id + '=' + t),
-  __setHtml: (id, h) => calls.push('html:' + id + '=' + h),
-  __setClass: (id, c) => { attrs[id].class = c; },
+  __query_s: sel => (sel === '.x' ? ['a'] : sel === 'form' ? ['form1'] : sel === '*' ? Object.keys(attrs) : []).join(''),
+  __setHtml_s: (id, h) => { calls.push('html:' + id + '=' + h); return ''; },
+  __writeBatch: b => { const p = b.split('');
+    for (let i = 0; i + 3 < p.length; i += 4) {
+      if (p[i] === 's') calls.push('style:' + p[i+1] + ':' + p[i+2] + '=' + p[i+3]);
+      else if (p[i] === 't') calls.push('text:' + p[i+1] + '=' + p[i+3]);
+      else if (p[i] === 'c') attrs[p[i+1]].class = p[i+3];
+    } },
   __getAttr: (id, n) => (attrs[id] && attrs[id][n] !== undefined ? attrs[id][n] : null),
   __setAttr: (id, n, v) => { (attrs[id] = attrs[id] || {})[n] = v; },
   __removeAttr: (id, n) => { delete attrs[id][n]; },
   __appendHtml: (p, h) => calls.push('append:' + p + ':' + h),
   __insertHtml: (p, h, b) => calls.push('insert:' + p + ':' + h + ':' + b),
   __remove: id => calls.push('remove:' + id),
-  __size: () => [10, 20],
-  __canvasFrame: () => {},
+  __size_s: () => '10,20',
+  __canvasFrame_s: () => {},
   __now: () => 0,
   __setValue: (id, v) => calls.push('value:' + id + '=' + v),
   __wantClicks: id => calls.push('wantclicks:' + id),
   __wantPointer: t => calls.push('wantpointer:' + t),
   __textOf: id => 'text of ' + id,
   __htmlOf: (id, outer) => (outer ? '<div id="' + id + '">x</div>' : 'x'),
-  __children: id => children[id] || [],
+  __children_s: id => (children[id] || []).join(''),
   __parent: id => parents[id] || null,
-  __attrs: id => Object.entries(attrs[id] || {}).flat(),
+  __attrs_s: id => Object.entries(attrs[id] || {}).flat().join(''),
   __contains: (a, id) => { for (let p = parents[id]; p; p = parents[p]) if (p === a) return true; return false; },
-  __rect: () => [1, 2, 3, 4],
+  __rect_s: () => '1,2,3,4',
   __cssOf: (id, p) => (p === 'color' ? 'red' : ''),
-  __viewport: () => [640, 480],
+  __viewport_s: () => '640,480',
   __media: q => q.indexOf('min-width') >= 0,
-  __animate: () => 7,
+  __animate_s: () => 7,
   __cancelAnimation: h => calls.push('cancel:' + h),
-  __children_rects: () => [30, 40],
-  __scrollOf: () => null,
+  __children_rects_s: () => '30,40',
+  __scrollOf_s: () => null,
 };
 Object.assign(globalThis, stubs);
 require('vm').runInThisContext(src);   // top-level vars become globals, as in the engine
@@ -52,6 +55,20 @@ if (a.style.width !== '5px' || a.style.cssText.indexOf('width: 5px') < 0) throw 
 if (getComputedStyle(a).getPropertyValue('color') !== 'red') throw new Error('computed');
 if (a.className !== 'x y' || !a.classList.contains('y')) throw new Error('className');
 if (a.getBoundingClientRect().width !== 3) throw new Error('rect');
+
+// Every array the host returns crosses as delimited text and is rebuilt here, so these four are
+// the check on that seam: an empty run must be an empty array, not [''] or [NaN], and a null must
+// stay null - `[]` would read as true and silently take the wrong branch in scrollTop.
+if (a.getBoundingClientRect().height !== 4) throw new Error('rect height');
+if (document.querySelectorAll('.x').length !== 1) throw new Error('query');
+if (document.querySelectorAll('.nothing').length !== 0) throw new Error('empty query is an empty array');
+if (a.children.length !== 1 || a.children[0].id !== 'b') throw new Error('children');
+if (document.getElementById('b').children.length !== 0) throw new Error('childless element is an empty array');
+if (a.getAttribute('data-k') !== 'z') throw new Error('attr');
+if (a.attributes.length !== 3) throw new Error('attributes: ' + a.attributes.length);
+if (a.clientWidth !== 10 || a.clientHeight !== 20) throw new Error('size');
+if (window.innerWidth !== 640) throw new Error('viewport');
+if (a.scrollTop !== 0) throw new Error('scrollTop with no scroll state');
 if (a.scrollHeight !== 40) throw new Error('scrollHeight');
 let got = null; a.addEventListener('ping', e => { got = e.detail; });
 a.dispatchEvent(new CustomEvent('ping', { detail: 42 }));
@@ -113,4 +130,21 @@ mid.dispatchEvent(new CustomEvent('ping'));
 if (!fired) throw new Error('listener added before adoption did not carry over');
 mid.replaceWith(document.createElement('b'));
 if (calls[calls.length - 1] !== 'remove:mid') throw new Error('replaceWith on adopted element ' + calls[calls.length - 1]);
+// Style, text and class writes queue in JS and cross once per entry, so nothing above has reached
+// the host yet. That batching is invisible to a page and would be equally invisible to this test:
+// without flushing and checking, a queue that never drained would still read as a pass.
+const mark = calls.length;
+a.style.color = 'red';
+a.style.width = '10px';
+a.textContent = 'hi';
+a.className = 'q';
+if (calls.length !== mark) throw new Error('writes crossed before the flush');
+__flushWrites();
+const wrote = calls.slice(mark);
+if (wrote.length !== 3) throw new Error('flushed writes: ' + JSON.stringify(wrote));
+if (wrote[0] !== 'style:a:color=red' || wrote[2] !== 'text:a=hi') throw new Error('write order: ' + JSON.stringify(wrote));
+if (attrs.a.class !== 'q') throw new Error('class write did not land');
+__flushWrites();
+if (calls.length !== mark + 3) throw new Error('a second flush resent the batch');
+
 process.stdout.write('prelude smoke ok; ' + calls.length + ' binding calls' + String.fromCharCode(10));

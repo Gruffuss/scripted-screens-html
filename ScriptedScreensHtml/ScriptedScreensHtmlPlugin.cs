@@ -1,4 +1,4 @@
-using BepInEx.Logging;
+﻿using BepInEx.Logging;
 using HarmonyLib;
 using StationeersMods.Interface;
 using UnityEngine;
@@ -70,7 +70,13 @@ public sealed class ScriptedScreensHtmlPlugin : ModBehaviour
     /// </summary>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822:Mark members as static",
         Justification = "Unity calls Update only on an instance method; making it static silently stops it running.")]
-    private void Update() => HtmlSurface.ReportIfDue();
+    // The heap is sampled here rather than in ReportIfDue because that runs once a report, and an
+    // allocation rate needs every frame: a sample taken seconds apart hides the collections between.
+    private void Update()
+    {
+        FrameAlloc.SampleHeap();
+        HtmlSurface.ReportIfDue();
+    }
 
     private static void ReportGC()
     {

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using UnityEngine;
@@ -37,11 +37,23 @@ internal static class Js
     internal static bool Wants(float now) => _host == null || _host.WantsFrame(now);
 
     /// <summary>One script frame, as the game runs one before each emit.</summary>
+    /// <summary>What the main thread spends on the script half, split: waiting for the worker, and
+    /// applying what it queued. The two want completely different fixes and the bench charged both
+    /// to one "script" line.</summary>
+    internal static long WaitBytes, ApplyBytes; internal static int Steps;
+
     internal static void Step(HtmlRenderer.Result built, float now)
     {
         if (_host == null) return;
-        _host.RunSynchronously(now, built.ById, 2000);
+        var b = GC.GetAllocatedBytesForCurrentThread();
+        // Frame, not RunSynchronously: the game's per-frame path is Frame(now, byId, waitMs: 12)
+        // (HtmlSurface.PageFrame). RunSynchronously is the capture and rebuild path and allocates an
+        // event and a closure per call that a page frame never pays - measuring it charged the
+        // emitter's neighbour for work the game does not do.
+        _host.Frame(now, built.ById, 12);
+        var mid = GC.GetAllocatedBytesForCurrentThread();
         _host.Pump();
+        WaitBytes += mid - b; ApplyBytes += GC.GetAllocatedBytesForCurrentThread() - mid; Steps++;
     }
 
     internal static void Run(HtmlRenderer.Result built, Panel panel, Vector2 size, int frames)

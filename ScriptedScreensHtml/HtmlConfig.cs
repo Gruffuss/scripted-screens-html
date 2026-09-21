@@ -1,4 +1,4 @@
-using BepInEx.Configuration;
+﻿using BepInEx.Configuration;
 
 namespace ScriptedScreensHtml;
 
@@ -28,6 +28,7 @@ internal static class HtmlConfig
     private static ConfigEntry<CullChoice>? _cullOffScreen;
     private static ConfigEntry<bool>? _verifyEmitCache;
     private static ConfigEntry<bool>? _probeV8;
+    private static ConfigEntry<bool>? _useV8;
 
     /// <summary>
     /// Per-page statistics every five seconds and the informational log lines (page built,
@@ -97,6 +98,14 @@ internal static class HtmlConfig
             "vector mod's own CullOffScreen, since a page only needs a frame that mod will draw; " +
             "Always and Never decide it here instead.");
 
+        _useV8 = _file.Bind(
+            "Performance", "UseV8", false,
+            "Run page scripts on V8 instead of the built-in C# interpreter. V8 keeps its objects in " +
+            "a native heap Unity never walks, so a page's JavaScript stops feeding the collector that " +
+            "causes the stutter - measured outside the game at 252 bytes a frame against 23,998. It " +
+            "needs ClearScript's DLLs beside the plugin; without them a page says so in the log and " +
+            "runs on the interpreter as before.");
+
         _probeV8 = _file.Bind(
             "Diagnostics", "ProbeV8", false,
             "Once at startup, try to load ClearScript's V8 from the mod folder and report what a " +
@@ -104,6 +113,9 @@ internal static class HtmlConfig
             "been copied in by hand, and nothing in the mod uses them either way. Development tool " +
             "for deciding whether a JS engine with its own native heap is worth the dependency.");
     }
+
+    /// <summary>Whether page scripts run on V8 rather than the C# interpreter.</summary>
+    internal static bool UseV8 => _useV8?.Value ?? false;
 
     /// <summary>Whether to try loading ClearScript's V8 once at startup and report what it costs.</summary>
     internal static bool ProbeV8 => _probeV8?.Value ?? false;

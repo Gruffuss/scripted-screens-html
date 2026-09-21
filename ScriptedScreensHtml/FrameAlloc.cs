@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Unity.Profiling;
 using Unity.Profiling.LowLevel.Unsafe;
 
@@ -107,6 +107,46 @@ internal static class FrameAlloc
         {
             ScriptedScreensHtmlPlugin.Log?.LogInfo("html: could not enumerate profiler counters: " + ex.Message);
         }
+    }
+
+    /// <summary>
+    /// The allocation rate, from the one number Mono will answer: the managed heap in use, sampled
+    /// every frame, with the positive deltas summed.
+    ///
+    /// The note above rejects GC.GetTotalMemory because it falls at a collection and a window
+    /// containing one reads negative. That is true of subtracting the endpoints, and not of this:
+    /// between collections the heap only grows, so each frame's rise is allocation, and a fall is a
+    /// collection and is dropped. What it misses is whatever was allocated during the frames a
+    /// collection landed in - a handful of frames a minute, so a few per cent low.
+    ///
+    /// Why it is worth having: counting collections is not comparable between two runs whose live
+    /// heaps differ, because the heap size sets the threshold that triggers one. Two engines
+    /// measured that way came out 800 MB apart in heap and the collection counts said the opposite
+    /// of every other measurement. A rate does not care how big the heap is.
+    /// </summary>
+    private static long _lastHeap = -1L;
+    private static long _grown;
+    private static int _falls;
+
+    /// <summary>Once per frame, from the plugin.</summary>
+    internal static void SampleHeap()
+    {
+        var now = GC.GetTotalMemory(false);
+        if (_lastHeap >= 0)
+        {
+            var d = now - _lastHeap;
+            if (d > 0) _grown += d; else if (d < 0) _falls++;
+        }
+        _lastHeap = now;
+    }
+
+    /// <summary>MB per second since the last call, and how many collections were seen in that time.</summary>
+    internal static (double mb, int collections) TakeRate(double seconds)
+    {
+        var mb = seconds > 0 ? _grown / 1048576.0 / seconds : 0.0;
+        var falls = _falls;
+        _grown = 0; _falls = 0;
+        return (mb, falls);
     }
 
     /// <summary>Said once, so a reading that is missing says why instead of looking like zero.</summary>

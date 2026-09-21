@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -95,8 +95,40 @@ internal static class Program
         Console.WriteLine($"  total   {totalBytes / (double)iterations,10:N0} B   {sw.Elapsed.TotalMilliseconds / iterations,7:F3} ms per display frame");
         for (var k = 0; k < 5; k++)
             Console.WriteLine($"  {names[k],-7} {phases[k].bytes / (double)iterations,10:N0} B   {phases[k].ticks / (double)Stopwatch.Frequency * 1000.0 / iterations,7:F3} ms");
+        if (Js.Steps > 0)
+            Console.WriteLine($"  of script: waiting for the worker {Js.WaitBytes / (double)Js.Steps,8:N0} B, applying its writes {Js.ApplyBytes / (double)Js.Steps,8:N0} B");
         File.WriteAllText("scene.txt", LastScene);
         if (js) Js.Run(built, panel, size, iterations);
+        if (Environment.GetEnvironmentVariable("BENCH_STYLE") == "1")
+        {
+            // The main-thread half of a page frame is applying the writes the script made, and the
+            // bench charges it all to "script" without saying what inside it costs. These are the
+            // values a page animating from a clock really produces.
+            var ve = new VisualElement();
+            var cases = new[]
+            {
+                new CssDeclaration("width", "81.93%"),
+                new CssDeclaration("height", "12px"),
+                new CssDeclaration("opacity", "0.819"),
+                new CssDeclaration("transform", "translateY(-14.2px)"),
+                new CssDeclaration("background-color", "#8b1a1a"),
+                new CssDeclaration("left", "205.5px"),
+            };
+            Action<string> warn = _ => { };
+            for (var i = 0; i < 2000; i++) foreach (var c in cases) StyleApplier.Apply(ve, c, warn);
+            foreach (var c in cases)
+            {
+                const int n = 20000;
+                StyleApplier.Apply(ve, c, warn);
+                var b = GC.GetAllocatedBytesForCurrentThread();
+                var t = Stopwatch.GetTimestamp();
+                for (var i = 0; i < n; i++) StyleApplier.Apply(ve, c, warn);
+                var bytes = (GC.GetAllocatedBytesForCurrentThread() - b) / (double)n;
+                var us = (Stopwatch.GetTimestamp() - t) / (double)Stopwatch.Frequency * 1e6 / n;
+                Console.WriteLine($"  style   {c.Name,-18} {c.Value,-18} {bytes,7:N0} B  {us,6:F2} us");
+            }
+        }
+
         if (Environment.GetEnvironmentVariable("BENCH_PARSE") == "1")
         {
             // what it costs merely to read the markup back, with no cascade and no tree: the floor

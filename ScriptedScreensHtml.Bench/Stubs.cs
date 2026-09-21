@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace ScriptedScreensHtml;
 
@@ -23,6 +23,9 @@ internal static class HtmlConfig
 {
     internal static bool Diagnostics => false;
     internal static bool DumpScenes => false;
+
+    // The bench measures the interpreter, so it always runs the interpreter: BENCH_V8=1 to compare.
+    internal static bool UseV8 => Environment.GetEnvironmentVariable("BENCH_V8") == "1";
 }
 
 internal static class FontLibrary

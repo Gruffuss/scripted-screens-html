@@ -819,6 +819,14 @@ internal sealed class HtmlSurface : MonoBehaviour
     private int _lastChars;
 
     /// <summary>Also driven by the plugin each frame, so the heap line keeps coming when no page exists: without a reading for "no consoles at all" there is no denominator for what a page costs.</summary>
+    /// <summary>The allocation rate for the report line: the counter when this player serves one, else summed heap growth.</summary>
+    private static string AllocLine()
+    {
+        if (FrameAlloc.Valid) return $"alloc {FrameAlloc.LastFrameBytes / 1024f:0} KB/frame; ";
+        var (mb, collections) = FrameAlloc.TakeRate(ReportIntervalSeconds);
+        return $"alloc {mb:0.0} MB/s, {collections} collected; ";
+    }
+
     internal static void ReportIfDue()
     {
         FrameAlloc.Retry();   // the counter may only become available once the profiler's systems are up
@@ -832,7 +840,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         _framesAtReport = Time.frameCount;
         double PerFrame(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / frames;
         ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: frames over 25 ms: {_slowFrames}, slowest {_worstFrame:0} ms, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, "
-            + (FrameAlloc.Valid ? $"alloc {FrameAlloc.LastFrameBytes / 1024f:0} KB/frame; " : "alloc n/a; ")
+            + AllocLine()
             + $"game thread per frame: pages {PerFrame(_allUpdateTicks):0.00} ms (emit {PerFrame(_allEmitTicks):0.00})");
         _slowFrames = 0; _worstFrame = 0f;
         _allUpdateTicks = _allEmitTicks = 0;

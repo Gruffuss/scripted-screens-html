@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <!-- Measures one page's emit on .NET 8, where GC.GetAllocatedBytesForCurrentThread works
        (Mono answers 0), so a change to the emitter can be priced without a game restart.
        Absolute times do not transfer to Mono; allocation per emit does. -->
@@ -34,6 +34,7 @@
     <Compile Include="..\ScriptedScreensHtml\Tweens.cs" />
     <Compile Include="..\ScriptedScreensHtml\VectorEmitter.cs" />
     <Compile Include="..\ScriptedScreensHtml\ScriptHost.cs" />
+    <Compile Include="..\ScriptedScreensHtml\JsEngine.cs" />
     <Compile Include="Check.cs" />
     <Compile Include="Js.cs" />
     <Compile Include="Stubs.cs" />
@@ -41,6 +42,8 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Jint" Version="4.16.2" />
+    <PackageReference Include="Microsoft.ClearScript.V8" Version="7.4.5" />
+    <PackageReference Include="Microsoft.ClearScript.V8.Native.win-x64" Version="7.4.5" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="UnityEngine.CoreModule"><HintPath>$(Managed)\UnityEngine.CoreModule.dll</HintPath></Reference>

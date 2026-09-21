@@ -1,10 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using System.Threading;
-using Jint;
 using UnityEngine.UIElements;
 
 namespace ScriptedScreensHtml;
@@ -65,7 +64,14 @@ internal sealed class ScriptHost : IDisposable
     /// <summary>The worker is inside a read that needs its pending writes applied: the main thread drains them now.</summary>
     private volatile bool _syncing;
     private bool _pumpedMidFrame;
-    private readonly ConcurrentDictionary<string, (float w, float h)> _sizes = new(StringComparer.Ordinal);
+    // Plain dictionaries under one lock, not ConcurrentDictionary. Snapshot rewrites these for
+    // every element that moved on every frame, and a ConcurrentDictionary set allocates a fresh
+    // node each time where a Dictionary updates its existing entry in place. On a page animating
+    // 150 elements that was ~11.6 KB a frame on the game thread - the single largest thing the
+    // main thread allocated, and it bought nothing: the writer is always the game thread and the
+    // readers are a handful of __rect/__size calls a frame, so there is no contention to spread.
+    private readonly object _measured = new();
+    private readonly Dictionary<string, (float w, float h)> _sizes = new(StringComparer.Ordinal);
     /// <summary>Per scroll container, as the vector mod last reported: [offset, scrollHeight, viewport height] in page px.</summary>
     internal readonly ConcurrentDictionary<string, float[]> ScrollState = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _attrCache = new(StringComparer.Ordinal);
@@ -79,9 +85,9 @@ internal sealed class ScriptHost : IDisposable
     private readonly ManualResetEventSlim _frameFinished = new(true);
 
     /// <summary>__pending: -1 an animation frame is queued, 0 nothing at all, otherwise the clock of the earliest timer in ms.</summary>
-    private void SetPending(Jint.Native.JsValue pending)
+    private void SetPending(object? pending)
     {
-        var next = pending.IsNumber() ? pending.AsNumber() : 0;
+        var next = _engine?.AsNumber(pending) ?? 0;
         _rafPending = next < 0;
         _nextDueMs = next > 0 && next < int.MaxValue ? (int)next : int.MaxValue;
         _hasPendingWork = next != 0;
@@ -113,7 +119,7 @@ internal sealed class ScriptHost : IDisposable
     private volatile float _frameNow;
     private float _lastFrameAt = -1f;
     private const float MinFrameInterval = 1f / 30f;   // timers only; animation frames follow the game's frames
-    private Engine? _engine;   // worker thread only
+    private IJsEngine? _engine;   // worker thread only
 
     public bool HasDataHandler => _hasDataHandler;
     public bool HasPendingWork => _hasPendingWork;
@@ -176,7 +182,7 @@ internal sealed class ScriptHost : IDisposable
         return doneEvent.Wait(50) ? handle : -1; // ponytail: the handle is needed synchronously; the main thread answers within a frame
     }
     /// <summary>Layout rects per id, relative to the page, refreshed every frame for getBoundingClientRect.</summary>
-    private readonly ConcurrentDictionary<string, (float x, float y, float w, float h)> _rects = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (float x, float y, float w, float h)> _rects = new(StringComparer.Ordinal);
 
     public ScriptHost(Func<string, VisualElement?> find, Func<string, SvgShape?> findShape, Func<string, HtmlNode?> findNode,
         Func<string, List<string>> query, Action<VisualElement, string> setClass, List<CssRule> rules, Action<string> warn,
@@ -214,6 +220,7 @@ internal sealed class ScriptHost : IDisposable
             if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: running page script ({script.Length} chars)");
             _engine!.Execute(script);
             _engine.Invoke("__ready");
+            _engine!.Invoke("__flushWrites");
             AfterRun();
             if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"js: page script done, data handler {_hasDataHandler}, pending work {_hasPendingWork}, animation frame {_rafPending}, next timer {(_nextDueMs == int.MaxValue ? "none" : _nextDueMs + " ms")}");
         });
@@ -230,6 +237,7 @@ internal sealed class ScriptHost : IDisposable
         _toEngine.Enqueue(() =>
         {
             _engine!.Invoke("__click", id, (double)x, (double)y);
+            _engine!.Invoke("__flushWrites");
             AfterRun();
         });
         _wake.Set();
@@ -242,6 +250,7 @@ internal sealed class ScriptHost : IDisposable
         _toEngine.Enqueue(() =>
         {
             _engine!.Invoke("__pointer", id, type, (double)x, (double)y);
+            _engine!.Invoke("__flushWrites");
             AfterRun();
         });
         _wake.Set();
@@ -255,6 +264,7 @@ internal sealed class ScriptHost : IDisposable
         _toEngine.Enqueue(() =>
         {
             _engine!.Invoke("__fire", id, type, null);
+            _engine!.Invoke("__flushWrites");
             AfterRun();
         });
         _wake.Set();
@@ -266,6 +276,7 @@ internal sealed class ScriptHost : IDisposable
         _toEngine.Enqueue(() =>
         {
             _engine!.Invoke("__input", id, value);
+            _engine!.Invoke("__flushWrites");
             AfterRun();
         });
         _wake.Set();
@@ -278,6 +289,7 @@ internal sealed class ScriptHost : IDisposable
             if (_hasDataHandler)
             {
                 _engine!.Invoke("__emit", "data", json);
+                _engine!.Invoke("__flushWrites");
                 AfterRun();
             }
         });
@@ -374,16 +386,22 @@ internal sealed class ScriptHost : IDisposable
                 "js: the engine thread did not stop in 2 s; leaving its wake handle alone so it can still release the engine.");
     }
 
-    internal int CacheSizes => _attrCache.Count + _sizes.Count + _rects.Count;
+    internal int CacheSizes { get { lock (_measured) return _attrCache.Count + _sizes.Count + _rects.Count; } }
 
     private void Snapshot(Dictionary<string, VisualElement> elements)
     {
         // ids a script removed (an innerHTML rebuild makes new ones every tick) leave the caches;
         // an id the worker assigned whose element is not built yet only loses its cached attributes
+        lock (_measured)
+        {
         if (_sizes.Count > elements.Count * 2 + 64 || _attrCache.Count > elements.Count * 16 + 256)
         {
-            foreach (var key in _sizes.Keys) if (!elements.ContainsKey(key)) _sizes.TryRemove(key, out _);
-            foreach (var key in _rects.Keys) if (!elements.ContainsKey(key)) _rects.TryRemove(key, out _);
+            _stale.Clear();
+            foreach (var key in _sizes.Keys) if (!elements.ContainsKey(key)) _stale.Add(key);
+            foreach (var key in _stale) _sizes.Remove(key);
+            _stale.Clear();
+            foreach (var key in _rects.Keys) if (!elements.ContainsKey(key)) _stale.Add(key);
+            foreach (var key in _stale) _rects.Remove(key);
             foreach (var key in _attrCache.Keys)
             {
                 var nl = key.IndexOf('\n');
@@ -408,7 +426,11 @@ internal sealed class ScriptHost : IDisposable
                 if (!_rects.TryGetValue(kv.Key, out var wasRect) || wasRect != rect) _rects[kv.Key] = rect;
             }
         }
+        }
     }
+
+    /// <summary>Keys to drop, reused: the prune cannot remove while enumerating a Dictionary.</summary>
+    private readonly List<string> _stale = new();
 
     // ---- reads over the node tree, on the worker; the tree is written on the main thread and read here ----
     private string TextOf(string id) => _findNode(id) is { } n ? Text(n).Trim() : string.Empty;
@@ -448,7 +470,7 @@ internal sealed class ScriptHost : IDisposable
     {
         string? best = null;
         var bestArea = float.MaxValue;
-        foreach (var kv in _rects)
+        lock (_measured) foreach (var kv in _rects)
         {
             var r = kv.Value;
             if (x < r.x || y < r.y || x > r.x + r.w || y > r.y + r.h) continue;
@@ -490,7 +512,89 @@ internal sealed class ScriptHost : IDisposable
 
     private double[] RectOf(string id)
     {
-        return _rects.TryGetValue(id, out var r) ? new[] { (double)r.x, (double)r.y, (double)r.w, (double)r.h } : new[] { 0.0, 0.0, 0.0, 0.0 };
+        lock (_measured) return _rects.TryGetValue(id, out var r) ? new[] { (double)r.x, (double)r.y, (double)r.w, (double)r.h } : new[] { 0.0, 0.0, 0.0, 0.0 };
+    }
+
+    // A host array is a JS array under Jint and is not one under ClearScript: `[0]` works, `.length`
+    // is undefined and slice() comes back empty. Rather than keep two preludes, every array crosses
+    // the boundary as delimited text and the prelude puts it back together - nine wrappers there,
+    // no change at the thirty call sites, and one prelude both engines run. These are DOM queries and
+    // measurements, not per-frame work; the hot path is style writes, which are strings already.
+    /// <summary>
+    /// Every style, text and class write a page makes in one frame, as one crossing.
+    ///
+    /// A page animating 25 elements made 25 separate calls a frame. Under Jint a crossing is nearly
+    /// free; under V8 each one marshals, and a straight swap measured 44,353 bytes a tick against
+    /// Jint's 12,907 - the engine was cheaper and the boundary ate the difference. These writes were
+    /// already deferred to the game thread and already coalesced there, so holding them to the end of
+    /// the tick changes nothing a page can observe; they are flushed before any structural change and
+    /// before the frame is translated.
+    /// </summary>
+    private void WriteBatch(string batch)
+    {
+        var p = batch.Split(Unit);
+        for (var i = 0; i + 3 < p.Length; i += 4)
+            switch (p[i])
+            {
+                case "s": SetStyle(p[i + 1], p[i + 2], p[i + 3]); break;
+                case "t": SetText(p[i + 1], p[i + 3]); break;
+                case "c": SetClass(p[i + 1], p[i + 3]); break;
+            }
+    }
+
+    private const char Unit = '\u0001';
+
+    /// <summary>Strings as one field-separated run. Text is arbitrary, so the separator is a control character no markup carries.</summary>
+    private static string Texts(IReadOnlyList<string> items)
+    {
+        if (items.Count == 0) return string.Empty;
+        var sb = new StringBuilder();
+        for (var i = 0; i < items.Count; i++) { if (i > 0) sb.Append(Unit); sb.Append(items[i]); }
+        return sb.ToString();
+    }
+
+    /// <summary>Numbers as text, invariant: the machine's own culture would write a decimal comma and JS would read two numbers.</summary>
+    private static string Nums(params double[] values)
+    {
+        var sb = new StringBuilder();
+        for (var i = 0; i < values.Length; i++) { if (i > 0) sb.Append(','); sb.Append(values[i].ToString("R", CultureInfo.InvariantCulture)); }
+        return sb.ToString();
+    }
+
+    private static string Nums(float[] values)
+    {
+        var sb = new StringBuilder();
+        for (var i = 0; i < values.Length; i++) { if (i > 0) sb.Append(','); sb.Append(values[i].ToString("R", CultureInfo.InvariantCulture)); }
+        return sb.ToString();
+    }
+
+    private static string[] Split(string joined) => joined.Length == 0 ? Array.Empty<string>() : joined.Split(Unit);
+
+    private static double[] Numbers(string joined)
+    {
+        if (joined.Length == 0) return Array.Empty<double>();
+        var parts = joined.Split(',');
+        var outv = new double[parts.Length];
+        for (var i = 0; i < parts.Length; i++) double.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out outv[i]);
+        return outv;
+    }
+
+    /// <summary>
+    /// The engine this page runs on. V8 is asked for only when the config says so and falls back to
+    /// Jint with the reason logged: a page with no engine is a dead console, which is worse than a
+    /// page with a costly one.
+    /// </summary>
+    private static IJsEngine NewEngine()
+    {
+        if (!HtmlConfig.UseV8) return new JintEngine();
+        var v8 = V8Engine.TryCreate(out var why);
+        if (v8 != null)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogInfo("js: running pages on V8");
+            return v8;
+        }
+        ScriptedScreensHtmlPlugin.Log?.LogWarning("js: V8 was asked for and could not start (" + why + "); this page runs on Jint");
+        return new JintEngine();
     }
 
     // ---------------- worker thread ----------------
@@ -499,32 +603,24 @@ internal sealed class ScriptHost : IDisposable
     {
         try
         {
-            _engine = new Engine(o =>
-            {
-                o.LimitRecursion(200);
-                o.TimeoutInterval(TimeSpan.FromSeconds(15)); // a runaway script frame must not wedge the worker; generous because a game load stalls every thread for seconds
-                o.Strict(false);
-            });
-            _engine.SetValue("__log", new Action<string, string>(Log));
-            BindToFixed();
-            _engine.SetValue("__has", new Func<string, bool>(id => { if (_structuralPending > 0) Sync(); return _find(id) != null || _findShape(id) != null; }));
-            _engine.SetValue("__parseHtml", new Func<string, string>(html => TreeJson(HtmlParser.Parse(html)))); // DOMParser: the page parser, on the worker
-            _engine.SetValue("__query", new Func<string, string[]>(sel => { Sync(); return _query(sel).ToArray(); }));
-            _engine.SetValue("__setStyle", new Action<string, string, string>(SetStyle));
-            _engine.SetValue("__setText", new Action<string, string>(SetText));
-            _engine.SetValue("__setHtml", new Func<string, string, string[]>(SetHtml));
-            _engine.SetValue("__setClass", new Action<string, string>(SetClass));
-            _engine.SetValue("__getAttr", new Func<string, string, string?>(GetAttr));
-            _engine.SetValue("__setAttr", new Action<string, string, string>(SetAttr));
-            _engine.SetValue("__appendHtml", new Action<string, string>((parent, html) => WriteStructural(() => _appendHtml(parent, html))));
-            _engine.SetValue("__remove", new Action<string>(id => WriteStructural(() => _remove(id))));
-            _engine.SetValue("__setValue", new Action<string, string>((id, v) => Write(() => _setValue(id, v))));
-            _engine.SetValue("__wantClicks", new Action<string>(id => Write(() => _wantClicks(id))));
-            _engine.SetValue("__wantPointer", new Action<string>(type => _pointerTypes.Add(type)));
-            _engine.SetValue("__cssOf", new Func<string, string, string>(CssOf));
-            _engine.SetValue("__setScroll", new Action<string, double>((id, off) => Write(() => _setScroll(id, (float)off))));
-            _engine.SetValue("__scrollOf", new Func<string, float[]?>(id => ScrollState.TryGetValue(id, out var st) ? st : null));
-            _engine.SetValue("__scrollBox", new Func<string, string?>(id =>
+            _engine = NewEngine();
+            _engine.Bind("__log", new Action<string, string>(Log));
+            _engine.Bind("__has", new Func<string, bool>(id => { if (_structuralPending > 0) Sync(); return _find(id) != null || _findShape(id) != null; }));
+            _engine.Bind("__parseHtml", new Func<string, string>(html => TreeJson(HtmlParser.Parse(html)))); // DOMParser: the page parser, on the worker
+            _engine.Bind("__query_s", new Func<string, string>(sel => { Sync(); return Texts(_query(sel)); }));
+            _engine.Bind("__writeBatch", new Action<string>(WriteBatch));
+            _engine.Bind("__setHtml_s", new Func<string, string, string>((id, html) => Texts(SetHtml(id, html))));
+            _engine.Bind("__getAttr", new Func<string, string, string?>(GetAttr));
+            _engine.Bind("__setAttr", new Action<string, string, string>(SetAttr));
+            _engine.Bind("__appendHtml", new Action<string, string>((parent, html) => WriteStructural(() => _appendHtml(parent, html))));
+            _engine.Bind("__remove", new Action<string>(id => WriteStructural(() => _remove(id))));
+            _engine.Bind("__setValue", new Action<string, string>((id, v) => Write(() => _setValue(id, v))));
+            _engine.Bind("__wantClicks", new Action<string>(id => Write(() => _wantClicks(id))));
+            _engine.Bind("__wantPointer", new Action<string>(type => _pointerTypes.Add(type)));
+            _engine.Bind("__cssOf", new Func<string, string, string>(CssOf));
+            _engine.Bind("__setScroll", new Action<string, double>((id, off) => Write(() => _setScroll(id, (float)off))));
+            _engine.Bind("__scrollOf_s", new Func<string, string?>(id => ScrollState.TryGetValue(id, out var st) ? Nums(st) : null));
+            _engine.Bind("__scrollBox", new Func<string, string?>(id =>
             {
                 // the nearest ancestor (or the element itself) that scrolls: overflow auto/scroll
                 for (var cur = id; cur != null; cur = ParentOf(cur))
@@ -534,33 +630,33 @@ internal sealed class ScriptHost : IDisposable
                 }
                 return null;
             }));
-            _engine.SetValue("__viewport", new Func<double[]>(() => new[] { (double)_viewport.x, (double)_viewport.y }));
-            _engine.SetValue("__media", new Func<string, bool>(CssParser.MediaMatches));
-            _engine.SetValue("__animate", new Func<string, string[], string, int>(Animate));
-            _engine.SetValue("__cancelAnimation", new Action<int>(h => Write(() => _cancelAnimation?.Invoke(h))));
-            _engine.SetValue("__children_rects", new Func<string, double[]>(id =>
+            _engine.Bind("__viewport_s", new Func<string>(() => Nums(_viewport.x, _viewport.y)));
+            _engine.Bind("__media", new Func<string, bool>(CssParser.MediaMatches));
+            _engine.Bind("__animate_s", new Func<string, string, string, int>((id, frames, opts) => Animate(id, Split(frames), opts)));
+            _engine.Bind("__cancelAnimation", new Action<int>(h => Write(() => _cancelAnimation?.Invoke(h))));
+            _engine.Bind("__children_rects_s", new Func<string, string>(id =>
             {
                 // the content extent below and right of an element's own top-left: scrollWidth / scrollHeight
                 var right = 0.0; var bottom = 0.0;
                 var own = RectOf(id);
                 foreach (var c in ChildrenOf(id)) { var r = RectOf(c); right = Math.Max(right, r[0] + r[2] - own[0]); bottom = Math.Max(bottom, r[1] + r[3] - own[1]); }
-                return new[] { Math.Max(right, own[2]), Math.Max(bottom, own[3]) };
+                return Nums(Math.Max(right, own[2]), Math.Max(bottom, own[3]));
             }));
-            _engine.SetValue("__textOf", new Func<string, string>(id => { Sync(); return TextOf(id); }));
-            _engine.SetValue("__htmlOf", new Func<string, bool, string>((id, outer) => { Sync(); return HtmlOf(id, outer); }));
-            _engine.SetValue("__children", new Func<string, string[]>(id => { Sync(); return ChildrenOf(id); }));
-            _engine.SetValue("__parent", new Func<string, string?>(id => { Sync(); return ParentOf(id); }));
-            _engine.SetValue("__attrs", new Func<string, string[]>(id => { Sync(); return AttrsOf(id); }));
-            _engine.SetValue("__contains", new Func<string, string, bool>((a, b) => { Sync(); return Contains(a, b); }));
-            _engine.SetValue("__rect", new Func<string, double[]>(RectOf));
-            _engine.SetValue("__elementAt", new Func<double, double, string?>(ElementAt));
-            _engine.SetValue("__insertHtml", new Action<string, string, string>((parent, html, before) => WriteStructural(() => _insertHtml(parent, html, before))));
-            _engine.SetValue("__removeAttr", new Action<string, string>((id, name) => { _attrCache.TryRemove(id + "\n" + name, out _); Write(() => { var n = _findNode(id); if (n != null && n.Attributes.Remove(name)) { AfterAttribute(id, n, name); RecascadeForAttribute(id, n, name); } }); }));
-            _engine.SetValue("__size", new Func<string, double[]>(Size));
-            _engine.SetValue("__canvasFrame", new Action<string, double[], string[], int>(CanvasFrame));
-            _engine.SetValue("__now", new Func<double>(() => _frameNow * 1000.0));
+            _engine.Bind("__textOf", new Func<string, string>(id => { Sync(); return TextOf(id); }));
+            _engine.Bind("__htmlOf", new Func<string, bool, string>((id, outer) => { Sync(); return HtmlOf(id, outer); }));
+            _engine.Bind("__children_s", new Func<string, string>(id => { Sync(); return Texts(ChildrenOf(id)); }));
+            _engine.Bind("__parent", new Func<string, string?>(id => { Sync(); return ParentOf(id); }));
+            _engine.Bind("__attrs_s", new Func<string, string>(id => { Sync(); return Texts(AttrsOf(id)); }));
+            _engine.Bind("__contains", new Func<string, string, bool>((a, b) => { Sync(); return Contains(a, b); }));
+            _engine.Bind("__rect_s", new Func<string, string>(id => Nums(RectOf(id))));
+            _engine.Bind("__elementAt", new Func<double, double, string?>(ElementAt));
+            _engine.Bind("__insertHtml", new Action<string, string, string>((parent, html, before) => WriteStructural(() => _insertHtml(parent, html, before))));
+            _engine.Bind("__removeAttr", new Action<string, string>((id, name) => { _attrCache.TryRemove(id + "\n" + name, out _); Write(() => { var n = _findNode(id); if (n != null && n.Attributes.Remove(name)) { AfterAttribute(id, n, name); RecascadeForAttribute(id, n, name); } }); }));
+            _engine.Bind("__size_s", new Func<string, string>(id => Nums(Size(id))));
+            _engine.Bind("__canvasFrame_s", new Action<string, string, string, int>((id, cmds, cols, n) => CanvasFrame(id, Numbers(cmds), Split(cols), n)));
+            _engine.Bind("__now", new Func<double>(() => _frameNow * 1000.0));
             _engine.Execute(Prelude);
-            if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo("js: engine ready (worker thread)");
+            if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo("js: " + _engine.Name + " ready (worker thread)");
         }
         catch (Exception ex)
         {
@@ -610,6 +706,7 @@ internal sealed class ScriptHost : IDisposable
         try
         {
             var pending = _engine!.Invoke("__tick", nowSeconds * 1000.0);
+            _engine.Invoke("__flushWrites");
             SetPending(pending);
         }
         finally
@@ -623,34 +720,11 @@ internal sealed class ScriptHost : IDisposable
 
     private void AfterRun()
     {
-        var has = _engine!.Invoke("__hasDataHandler");
-        _hasDataHandler = has.IsBoolean() && has.AsBoolean();
+        _hasDataHandler = _engine!.AsBool(_engine.Invoke("__hasDataHandler"));
         SetPending(_engine.Invoke("__hasPending"));
     }
 
     // ---- callbacks from the script (worker thread): reads answer from snapshots, writes queue to main ----
-
-    /// <summary>
-    /// Number.prototype.toFixed, formatted by the host. Jint's own allocates in proportion to how
-    /// many digits the double really has, and a page animating from a clock never has round values:
-    /// measured at 59,602 bytes a frame for 25 calls against 4,216 here, and faster with it. Bound
-    /// as a function on the prototype rather than a JS wrapper, which cost half the saving again.
-    /// Digits outside 0..20 go back to the engine, so a page still sees the error a browser gives.
-    /// </summary>
-    private void BindToFixed()
-    {
-        var prototype = _engine!.Evaluate("Number.prototype").AsObject();
-        var native = prototype.Get("toFixed");
-        prototype.FastSetProperty("toFixed", new Jint.Runtime.Descriptors.PropertyDescriptor(
-            new Jint.Runtime.Interop.ClrFunction(_engine, "toFixed", (self, args) =>
-            {
-                var digits = args.Length > 0 && !args[0].IsUndefined() ? (int)Jint.Runtime.TypeConverter.ToNumber(args[0]) : 0;
-                if (digits < 0 || digits > 20)
-                    return native is Jint.Native.Function.Function fn ? fn.Call(self, args) : Jint.Native.JsValue.Undefined;
-                var value = self.IsNumber() ? self.AsNumber() : Jint.Runtime.TypeConverter.ToNumber(self);
-                return JsNumber.ToFixed(value, digits);
-            }), true, false, true));
-    }
 
     private void Log(string level, string msg)
     {
@@ -959,7 +1033,7 @@ internal sealed class ScriptHost : IDisposable
 
     private double[] Size(string id)
     {
-        return _sizes.TryGetValue(id, out var s) ? new[] { (double)s.w, (double)s.h } : new[] { 0.0, 0.0 };
+        lock (_measured) return _sizes.TryGetValue(id, out var s) ? new[] { (double)s.w, (double)s.h } : new[] { 0.0, 0.0 };
     }
 
     private void CanvasFrame(string id, double[] cmds, string[] colours, int count)
@@ -983,6 +1057,30 @@ internal sealed class ScriptHost : IDisposable
 
     /// <summary>The browser-ish surface, in JavaScript, over the callbacks above.</summary>
     private const string Prelude = @"
+// Every host binding that would hand back an array hands back delimited text instead, because a
+// host array is a JS array under Jint and is not one under ClearScript. These nine wrappers put
+// the array back under the name the rest of this file already calls, so one prelude runs on both.
+// Style, text and class writes queue here and cross once per entry. Order is kept, because a
+// class write after a style write on the same element must land after it.
+var __writes = [];
+function __setStyle(id, p, v){ __writes.push('s', id, p, v); }
+function __setText(id, t){ __writes.push('t', id, '', t); }
+function __setClass(id, c){ __writes.push('c', id, '', c); }
+function __flushWrites(){ if (__writes.length) { var w = __writes; __writes = []; __writeBatch(w.join('\u0001')); } }
+function __sarr(s){ return (s === null || s === undefined || s === '') ? [] : String(s).split('\u0001'); }
+function __narr(s){ if (s === null || s === undefined || s === '') return []; var p = String(s).split(','); for (var i = 0; i < p.length; i++) p[i] = +p[i]; return p; }
+function __query(sel){ return __sarr(__query_s(sel)); }
+function __setHtml(id, html){ return __sarr(__setHtml_s(id, html)); }
+function __children(id){ return __sarr(__children_s(id)); }
+function __attrs(id){ return __sarr(__attrs_s(id)); }
+function __rect(id){ return __narr(__rect_s(id)); }
+function __size(id){ return __narr(__size_s(id)); }
+function __viewport(){ return __narr(__viewport_s()); }
+function __children_rects(id){ return __narr(__children_rects_s(id)); }
+// null is the answer when the element does not scroll, and [] would read as true
+function __scrollOf(id){ var s = __scrollOf_s(id); return (s === null || s === undefined) ? null : __narr(s); }
+function __animate(id, frames, opts){ return __animate_s(id, frames.join('\u0001'), opts); }
+function __canvasFrame(id, cmds, cols, n){ __canvasFrame_s(id, cmds.join(','), cols.join('\u0001'), n); }
 var window = globalThis;
 var console = {
   log: function(){ __log('log', Array.prototype.slice.call(arguments).join(' ')); },
@@ -1485,10 +1583,10 @@ var __hasCache = {};
 function __hasId(id){ if (__hasCache[id]) return true; var yes = __has(id); if (yes) __hasCache[id] = true; return yes; }
 (function(){
   var raw = { appendHtml: __appendHtml, insertHtml: __insertHtml, setHtml: __setHtml, remove: __remove };
-  __appendHtml = function(a, b){ __hasCache = {}; return raw.appendHtml(a, b); };
-  __insertHtml = function(a, b, c){ __hasCache = {}; return raw.insertHtml(a, b, c); };
-  __setHtml = function(a, b){ __hasCache = {}; return raw.setHtml(a, b); };
-  __remove = function(a){ __hasCache = {}; return raw.remove(a); };
+  __appendHtml = function(a, b){ __hasCache = {}; __flushWrites(); return raw.appendHtml(a, b); };
+  __insertHtml = function(a, b, c){ __hasCache = {}; __flushWrites(); return raw.insertHtml(a, b, c); };
+  __setHtml = function(a, b){ __hasCache = {}; __flushWrites(); return raw.setHtml(a, b); };
+  __remove = function(a){ __hasCache = {}; __flushWrites(); return raw.remove(a); };
 })();
 var __kebabCache = {};
 function __kebab(p){ var k = String(p); var hit = __kebabCache[k]; if (hit !== undefined) return hit; var out = k.replace(/[A-Z]/g, function(m){ return '-' + m.toLowerCase(); }); __kebabCache[k] = out; return out; }

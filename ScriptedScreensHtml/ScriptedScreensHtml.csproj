@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <ModName>ScriptedScreensHtml</ModName>
         <AssemblyName>$(ModName)</AssemblyName>
@@ -37,6 +37,11 @@
              the shipped DLL is never modified. -->
         <PackageReference Include="BepInEx.AssemblyPublicizer.MSBuild" Version="0.4.3" PrivateAssets="all" />
         <PackageReference Include="Jint" Version="4.16.2" />
+        <!-- V8 through ClearScript: an alternative engine for page scripts, selected by config and
+             loaded by reflection, so nothing here is referenced at compile time. It is here to be
+             restored and copied. -->
+        <PackageReference Include="Microsoft.ClearScript.V8" Version="7.4.5" ExcludeAssets="compile" />
+        <PackageReference Include="Microsoft.ClearScript.V8.Native.win-x64" Version="7.4.5" ExcludeAssets="compile" />
         <Reference Include="ScriptedScreens" Publicize="true">
             <HintPath>$(ScriptedScreensDirectory)\ScriptedScreens.dll</HintPath>
             <Private>False</Private>
@@ -58,13 +63,19 @@
     </ItemGroup>
     <ItemGroup>
         <!-- The JS engine and its parser ship next to the plugin; LaunchPad resolves them from the mod folder. -->
-        <CopyItemsDeps Include="$(TargetDir)Jint.dll;$(TargetDir)Acornima.dll" />
+        <CopyItemsDeps Include="$(TargetDir)Jint.dll;$(TargetDir)Acornima.dll;$(TargetDir)ClearScript.Core.dll;$(TargetDir)ClearScript.V8.dll;$(TargetDir)ClearScript.V8.ICUData.dll" />
+        <!-- BepInEx walks a mod folder recursively and loads every *.dll as a managed assembly; a
+             native one throws BadImageFormatException and takes the whole mod down with it, and a
+             subfolder does not help. So V8 itself ships under an extension BepInEx ignores and is
+             staged outside the scan path at startup. -->
+        <CopyItemsNative Include="$(NuGetPackageRoot)microsoft.clearscript.v8.native.win-x64\7.4.5\runtimes\win-x64\native\ClearScriptV8.win-x64.dll" />
         <CopyItemsExamples Include="$(ProjectDir)\examples\**\*.lua" />
         <CopyItemsMockups Include="$(ProjectDir)\AtmoApple.lua;$(ProjectDir)\AtmoDark.lua;$(ProjectDir)\AtmoLight.lua" />
         <CopyItemsDocs Include="$(ProjectDir)\README.md;$(ProjectDir)\SUPPORT.md;$(ProjectDir)\QUICKSTART.md;$(ProjectDir)\CHANGELOG.md;$(ProjectDir)\THIRD-PARTY-NOTICES.md" />
     </ItemGroup>
     <Target Name="CopyAssetsToMods" AfterTargets="PostBuild">
         <Copy SourceFiles="@(CopyItemsDeps)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)" ContinueOnError="true" />
+        <Copy SourceFiles="@(CopyItemsNative)" DestinationFiles="$(StationeersDocumentsDirectory)\mods\$(ModName)\%(Filename)%(Extension).bin" ContinueOnError="true" />
         <Copy SourceFiles="@(CopyItemsAbout)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)\About\%(RecursiveDir)" ContinueOnError="true" />
         <Copy SourceFiles="@(CopyItemsExamples)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)\examples\%(RecursiveDir)" ContinueOnError="true" />
         <Copy SourceFiles="@(CopyItemsDocs)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)" ContinueOnError="true" />
