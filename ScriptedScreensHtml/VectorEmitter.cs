@@ -1674,12 +1674,30 @@ internal static class VectorEmitter
     {
         var ax = 0.5f - dx; var ay = 0.5f - dy;
         var bx = 0.5f + dx; var by = 0.5f + dy;
-        ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").AppendNum(ax + (bx - ax) * p0).Append(" y1=").AppendNum(ay + (by - ay) * p0)
-            .Append(" x2=").AppendNum(ax + (bx - ax) * p1).Append(" y2=").AppendNum(ay + (by - ay) * p1).Append(" stops=[");
+
+        // Fold the stop span into the line, so the positions that a running page changes become
+        // GEOMETRY rather than entries in an array. `stops=[[0,C],[0.67,T]]` becomes
+        // `x2=<0.67 of the line>` with `stops=[[0,C],[1,T]]`: an exact reparametrisation of a
+        // linear map, and the numbers that move are now slottable, where an array is not.
+        //
+        // Requires vector >= 0.11.31. Before it, a two-stop ramp whose stops did not span the
+        // shape kept ramping past its last stop instead of holding that colour, so shortening the
+        // line would have changed what is drawn. Since that fix it clamps to the end stop, which is
+        // what makes this equivalent.
+        var first = stops[0].at;
+        var last = stops[stops.Count - 1].at;
+        var span = last - first;
+        var foldable = span > 0.0005f && (first > 0.0005f || last < 0.9995f);
+        var q0 = foldable ? p0 + (p1 - p0) * first : p0;
+        var q1 = foldable ? p0 + (p1 - p0) * last : p1;
+
+        ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").AppendNum(ax + (bx - ax) * q0).Append(" y1=").AppendNum(ay + (by - ay) * q0)
+            .Append(" x2=").AppendNum(ax + (bx - ax) * q1).Append(" y2=").AppendNum(ay + (by - ay) * q1).Append(" stops=[");
         for (var i = 0; i < stops.Count; i++)
         {
             if (i > 0) ctx.Defs.Append(',');
-            ctx.Defs.Append('[').AppendNum(stops[i].at).Append(',').AppendHex(stops[i].c).Append(']');
+            var at = foldable ? (stops[i].at - first) / span : stops[i].at;
+            ctx.Defs.Append('[').AppendNum(at).Append(',').AppendHex(stops[i].c).Append(']');
         }
         ctx.Defs.Append("]\n");
     }
