@@ -459,6 +459,39 @@ internal sealed class HtmlSurface : MonoBehaviour
     }
 
     /// <summary>
+    /// Gives every unnamed element under <paramref name="root"/> a name a slot can be made from.
+    /// </summary>
+    /// <remarks>
+    /// A synthetic name starts with <c>__</c>, which the slot namer rejects deliberately - those are
+    /// this mod's own inventions and nothing outside should address them. But an element a class
+    /// moves has to be addressable or the state has nowhere to write, so the ones under a
+    /// class-written element are renamed after their position in the document: stable across
+    /// sessions, unlike the synthetic counter, and unlikely to collide with anything an author wrote.
+    /// </remarks>
+    private static void Nameable(VisualElement root, HtmlRenderer.Result built, string prefix)
+    {
+        Walk(root, prefix);
+
+        void Walk(VisualElement ve, string path)
+        {
+            for (var i = 0; i < ve.childCount; i++)
+            {
+                var child = ve[i];
+                var here = path + "_" + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if (child.name != null && child.name.StartsWith("__", StringComparison.Ordinal)
+                    && !built.ById.ContainsKey(here))
+                {
+                    built.ById.Remove(child.name);
+                    child.name = here;
+                    built.ById[here] = child;
+                    if (built.NodeOf.TryGetValue(child, out var node)) node.Attributes["id"] = here;
+                }
+                Walk(child, child.name ?? here);
+            }
+        }
+    }
+
+    /// <summary>
     /// Marks the elements whose wrapping transform group has to carry its id, so a compiled page
     /// can address their translate, rotation and scale by name. Only the ones a script really
     /// drives, and only those it drives <b>after</b> the page has loaded - a transform written once
@@ -488,6 +521,17 @@ internal sealed class HtmlSurface : MonoBehaviour
                     foreach (var id in built.ById.Keys)
                         if (id.Length > family.Length && id.StartsWith(family, StringComparison.Ordinal))
                             built.Driven.Add(id);
+            }
+
+            // An element a CLASS moves needs a name of its own. `#player.duck .helmet` shifts a
+            // descendant that the markup never named, so it carries a synthetic `__div42` - which
+            // the slot namer rejects, leaving the state with nothing to write. Every element under
+            // one whose class is written gets a stable, addressable name instead, derived from its
+            // position in the document so it is the same next session.
+            foreach (var w in writes)
+            {
+                if (!w.Runtime || w.Property != "className" || w.Id == null) continue;
+                if (built.ById.TryGetValue(w.Id, out var root) && root != null) Nameable(root, built, w.Id);
             }
 
             foreach (var w in writes)

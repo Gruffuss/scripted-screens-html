@@ -405,6 +405,67 @@ argument; `NaN` does not poison `Math.min`. Each is listed with its demonstratio
 
 ---
 
+#### The compiler, working on a live page (2026-09-21, late)
+
+**Confirmed in game, every console:**
+
+```
+html compile probe: ".../main/run" -> 31 slot binding(s), 576 lines of Lua, 1033 slot(s) in the scene, everything bound
+```
+
+`Diagnostics.CompileProbe` compiles each page at build time and `DumpScenes` writes the result to
+`compiled/<page>.lua`, so the output is read rather than guessed at. It changes nothing a console
+shows; the page still runs on the interpreter.
+
+**What the emitted table looks like**, with the live layout producing the same biases the offline
+test derived:
+
+```lua
+  ["legA.style.top"]          = { read = "length",    to = { { "legA_y", 85 }, { "bootA_y", 105 } } }
+  ["player.style.transform"]  = { read = "translate", to = { { "player_t_0", 0 }, { "player_t_1", 0 } } }
+  ["score.textContent"]       = { read = "text",      to = { { "score", 0 } } }
+  ["player.className"]        = { read = "state", states = {
+    [""] = { },
+    ["duck hurt"] = { { "player_0_x", 0 }, { "player_0_y", 87 }, { "player_1_x", 4 }, ... },
+  } }
+```
+
+**Three bugs that only reading that dump revealed**, none of which a passing test would have:
+
+- **A family index is a number.** `$('ob' + i)` gives the prefix `ob`, which also matched
+  `obstacles` — the container those obstacles live in — so a className write meant for the
+  obstacles was bound to their parent.
+- **One key, many writes.** A page assigns className from `draw()`, `over()` and `reset()`, and
+  each knows a different part of the set. Binding the first write's list alone lost three of the
+  player's four states, so the compiled page had no `duck` at all.
+- **An element a class moves needs a name.** `#player.duck .helmet` shifts a descendant the markup
+  never named, so it carries a synthetic `__div42` — which the slot namer rejects by design. Every
+  state came out empty. Elements under a class-written one are now named after their position in
+  the document, which is stable across sessions where the synthetic counter is not.
+
+**And the constraint that shapes the runtime half: the author's program is never modified.** Not
+the source on the chip, in the save, or in the editor. The compiled page is a second tenant of the
+same VM — its own chunk, its own `_ENV` chained to the chip's globals through a metatable, so it
+can read `ic` and `math` but cannot clobber anything the author wrote.
+
+Two things are deliberately **not** used, both of which looked like the obvious call:
+
+| | why not |
+|---|---|
+| `StationeersLua.UpdateSourceServerSide` | builds a whole new runtime and replaces the old one — it would destroy the player's program |
+| `FrameCallbackManager.Register` | writes `_callbacks[referenceId] = data`, one callback per chip, so it would silently evict whatever the author registered. There is no chaining API |
+
+So the compiled page is driven from this mod's own update, with the guards that manager applies
+(not while the state is running, the chip's execution lock, an instruction hook, cancel if it does
+not finish synchronously). More code, and the only route that collides with nothing.
+
+**Also established from the assemblies rather than assumed:** the per-frame budget is
+`MaxInstructionsPerFrame = 200000`, four times the tick budget and hardcoded; five consecutive
+errors faults the chip for good; and generated Lua must never yield — `BeginPending` halts the chip
+outright if `tick()` is suspended when a frame callback runs, because both share the root state.
+
+---
+
 #### What a six-agent survey found that the mapping had wrong (2026-09-21)
 
 Six agents read the emitter, the slotter, the surface, the layout, the tween path and the
