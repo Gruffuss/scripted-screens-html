@@ -99,6 +99,76 @@ internal static class Program
             Console.WriteLine($"  of script: waiting for the worker {Js.WaitBytes / (double)Js.Steps,8:N0} B, applying its writes {Js.ApplyBytes / (double)Js.Steps,8:N0} B");
         File.WriteAllText("scene.txt", LastScene);
         if (js) Js.Run(built, panel, size, iterations);
+        if (Environment.GetEnvironmentVariable("BENCH_CROSS") == "1")
+        {
+            // What one host crossing costs the MANAGED heap, by shape. V8 keeps its own objects in a
+            // native heap Unity never walks, so everything a page costs under V8 is this table times
+            // how often the boundary is used. Measured because "reads are still per-call" was a guess
+            // and the page it was about barely reads at all.
+            var engine = V8Engine.TryCreate(out var why);
+            if (engine == null) { Console.WriteLine("  cross   V8 unavailable: " + why); }
+            else
+                using (engine)
+                {
+                    var sink = 0.0; var ssink = string.Empty;
+                    engine.Bind("__void", new Action(() => { }));
+                    engine.Bind("__num", new Action<double>(v => sink += v));
+                    engine.Bind("__str", new Action<string>(v => ssink = v));
+                    engine.Bind("__ret_num", new Func<double>(() => 1.5));
+                    engine.Bind("__ret_str", new Func<string>(() => "81.93%"));
+                    engine.Execute("var __big = new Array(120).join('width\u0001px\u000181.93%\u0001');");
+                    engine.Execute(string.Join("\n", new[] {
+                        "function __f_void(n){ for (var i=0;i<n;i++) __void(); }",
+                        "function __f_num(n){ for (var i=0;i<n;i++) __num(i*0.5); }",
+                        "function __f_short(n){ for (var i=0;i<n;i++) __str('width'); }",
+                        "function __f_big(n){ for (var i=0;i<n;i++) __str(__big); }",
+                        "function __f_retnum(n){ var s=0; for (var i=0;i<n;i++) s+=__ret_num(); return s; }",
+                        "function __f_retstr(n){ var s=0; for (var i=0;i<n;i++) s+=__ret_str().length; return s; }",
+                        "var __buf = new Float64Array(64);",
+                        "function __f_buf(n){ for (var i=0;i<n;i++) __buf[i & 63] = i * 0.5; }",
+                        "function __f_none(n){ var s=0; for (var i=0;i<n;i++) s+=i; return s; }",
+                    }));
+                    Console.WriteLine($"  cross   (the batch string here is {engine.Invoke("eval", "__big.length")} chars)");
+
+                    // The OTHER direction, which the rows below never touch: the host calling into
+                    // the script. Every page frame does this at least twice (__tick, __flushWrites)
+                    // and it goes through MethodInfo.Invoke with a boxed object[], so it is a
+                    // different and possibly much dearer animal than a script->host call.
+                    {
+                        for (var i = 0; i < 1000; i++) engine.Invoke("__f_none", 1.0);
+                        const int n = 20000;
+                        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+                        var b = GC.GetTotalMemory(false);
+                        var t = Stopwatch.GetTimestamp();
+                        for (var i = 0; i < n; i++) engine.Invoke("__f_none", 1.0);
+                        var us = (Stopwatch.GetTimestamp() - t) / (double)Stopwatch.Frequency * 1e6 / n;
+                        Console.WriteLine($"  cross   {"HOST calling into the script",-32} {(GC.GetTotalMemory(false) - b) / (double)n,9:N1} B  {us,7:F3} us");
+                    }
+                    foreach (var (name, label) in new[]
+                             {
+                                 ("__f_none", "nothing (JS only)"),
+                                 ("__f_void", "call, no arguments"),
+                                 ("__f_num", "call with a double"),
+                                 ("__f_short", "call with a short string"),
+                                 ("__f_big", "call with the batch string"),
+                                 ("__f_retnum", "call returning a double"),
+                                 ("__f_retstr", "call returning a string"),
+                                 ("__f_buf", "write into a shared Float64Array"),
+                             })
+                    {
+                        engine.Invoke(name, 1000.0);
+                        const int n = 20000;
+                        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+                        var b = GC.GetTotalMemory(false);
+                        var t = Stopwatch.GetTimestamp();
+                        engine.Invoke(name, (double)n);
+                        var us = (Stopwatch.GetTimestamp() - t) / (double)Stopwatch.Frequency * 1e6 / n;
+                        var bytes = (GC.GetTotalMemory(false) - b) / (double)n;
+                        Console.WriteLine($"  cross   {label,-32} {bytes,9:N1} B  {us,7:F3} us");
+                    }
+                }
+        }
+
         if (Environment.GetEnvironmentVariable("BENCH_STYLE") == "1")
         {
             // The main-thread half of a page frame is applying the writes the script made, and the
