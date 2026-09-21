@@ -798,6 +798,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>Also driven by the plugin each frame, so the heap line keeps coming when no page exists: without a reading for "no consoles at all" there is no denominator for what a page costs.</summary>
     internal static void ReportIfDue()
     {
+        FrameAlloc.Retry();   // the counter may only become available once the profiler's systems are up
         if (!HtmlConfig.Diagnostics)
             return;
         var now = Clock.Elapsed.TotalSeconds;
@@ -807,7 +808,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         var frames = Mathf.Max(1, Time.frameCount - _framesAtReport);
         _framesAtReport = Time.frameCount;
         double PerFrame(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / frames;
-        ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: frames over 25 ms: {_slowFrames}, slowest {_worstFrame:0} ms, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}; "
+        ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: frames over 25 ms: {_slowFrames}, slowest {_worstFrame:0} ms, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, "
+            + (FrameAlloc.Valid ? $"alloc {FrameAlloc.LastFrameBytes / 1024f:0} KB/frame; " : "alloc n/a; ")
             + $"game thread per frame: pages {PerFrame(_allUpdateTicks):0.00} ms (emit {PerFrame(_allEmitTicks):0.00})");
         _slowFrames = 0; _worstFrame = 0f;
         _allUpdateTicks = _allEmitTicks = 0;
@@ -821,7 +823,10 @@ internal sealed class HtmlSurface : MonoBehaviour
                 $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, {(page._hiddenNow ? "hidden, " : string.Empty)}last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
                 + $"(layout {page._lastLayoutMs:0.00} + copy {page._lastCopyMs:0.00}, translate {page._lastTranslateMs:0.0}; page thread {page._workerMsTotal / ReportIntervalSeconds:0.0} ms/s; game thread waited {page._heldMs:0.00} ms), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
                 + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}, gate: {page._gateSkips} skipped, {page.GateWhy()}"
-                + $", allocated per emit: step {page._allocStep / 1024f / Mathf.Max(1, emits):0} KB, layout {page._allocLayout / 1024f / Mathf.Max(1, emits):0} KB, copy {page._allocCopy / 1024f / Mathf.Max(1, emits):0} KB, translate {page._allocTranslate / 1024f / Mathf.Max(1, emits):0} KB, send {page._allocSend / 1024f / Mathf.Max(1, emits):0} KB (of translate: emit {page._allocEmit / 1024f / Mathf.Max(1, emits):0} KB, split {page._allocSplit / 1024f / Mathf.Max(1, emits):0} KB)");
+                + (_perThreadAlloc ? $", allocated per emit: step {page._allocStep / 1024f / Mathf.Max(1, emits):0} KB, layout {page._allocLayout / 1024f / Mathf.Max(1, emits):0} KB, copy {page._allocCopy / 1024f / Mathf.Max(1, emits):0} KB, translate {page._allocTranslate / 1024f / Mathf.Max(1, emits):0} KB, send {page._allocSend / 1024f / Mathf.Max(1, emits):0} KB (of translate: emit {page._allocEmit / 1024f / Mathf.Max(1, emits):0} KB, split {page._allocSplit / 1024f / Mathf.Max(1, emits):0} KB)"
+                    // Mono has no per-thread counter, so there is nothing to divide between phases.
+                    // Printing the heap delta per phase looked like attribution and was noise.
+                    : ", per-phase allocation: unavailable on this runtime"));
             page._dScript = page._dAnim = page._dTween = page._dDom = page._dOther = page._gateSkips = 0;
             page._structureSends = page._patchSends = page._patchSlots = page._morphs = 0;
             page._allocStep = page._allocLayout = page._allocCopy = page._allocTranslate = page._allocSend = page._allocEmit = page._allocSplit = 0;

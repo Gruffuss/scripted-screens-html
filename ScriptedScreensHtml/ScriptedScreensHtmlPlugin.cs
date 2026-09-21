@@ -44,6 +44,7 @@ public sealed class ScriptedScreensHtmlPlugin : ModBehaviour
                 HtmlConfig.Load(Config);
             Log.LogInfo(Config != null ? "Diagnostics settings registered with LaunchPad." : "No ConfigFile from LaunchPad; diagnostics stay off.");
             ReportGC();
+            FrameAlloc.Report();
             if (HtmlConfig.ProbeV8) V8Probe.Run();
 
             _harmony = new Harmony(PluginInfo.PLUGIN_GUID);

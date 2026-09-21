@@ -359,9 +359,19 @@ internal sealed class ScriptHost : IDisposable
     {
         _stop = true;
         _wake.Set();
-        // The engine is disposed by the worker on its way out; wait briefly, then release the event.
-        _thread.Join(500);
-        _wake.Dispose();
+        // The engine is disposed by the worker on its way out, and that is the ONLY place it is
+        // disposed - so the worker has to get there. It cannot check _stop while it is inside a
+        // script frame, and a frame may run for as long as the engine's timeout, so this join can
+        // time out with the worker still alive. Disposing the event then made its next WaitOne throw
+        // ObjectDisposedException from outside any catch, killing the thread before it released the
+        // engine: a whole Jint engine, prelude AST and shim set leaked per page rebuild, and this
+        // session alone started 337 of them. An unreleased event handle costs a handle; an
+        // unreleased engine lengthens every future GC pause, because the pause is set by live heap.
+        if (_thread.Join(2000))
+            _wake.Dispose();
+        else
+            ScriptedScreensHtmlPlugin.Log?.LogWarning(
+                "js: the engine thread did not stop in 2 s; leaving its wake handle alone so it can still release the engine.");
     }
 
     internal int CacheSizes => _attrCache.Count + _sizes.Count + _rects.Count;
@@ -559,9 +569,11 @@ internal sealed class ScriptHost : IDisposable
             return;
         }
 
+        try
+        {
         while (!_stop)
         {
-            _wake.WaitOne(250);
+            try { _wake.WaitOne(250); } catch (ObjectDisposedException) { break; }
             if (_stop)
                 break;
             try
@@ -579,7 +591,13 @@ internal sealed class ScriptHost : IDisposable
                 Report("js: " + ex.Message);
             }
         }
-        try { _engine?.Dispose(); } catch (Exception) { }
+        }
+        finally
+        {
+            // The engine is released whatever ends the loop - a break, or anything thrown by the
+            // work above. Before, an exception escaping the loop skipped this line entirely.
+            try { _engine?.Dispose(); } catch (Exception) { }
+        }
     }
 
     internal static long TickBytes, TickCalls;
@@ -1053,8 +1071,8 @@ function __emit(type, json){
 // through a per-frame string table. The frame is flushed to the main thread after each
 // script run; the emitter turns it into vector nodes.
 var __canvases = {};
-function __ctx(id){
-  if (__canvases[id]) return __canvases[id];
+function __ctx(id){ var kept = __canvases[id]; return kept ? kept : __mkCtx(id); }
+function __mkCtx(id){
   var c = { __id:id, __cmds:[], __cols:[], __colIdx:{}, fillStyle:'#000', strokeStyle:'#000', lineWidth:1, lineCap:'butt', lineJoin:'miter', miterLimit:10, globalAlpha:1,
             font:'10px sans-serif', textAlign:'start', textBaseline:'alphabetic', shadowColor:'rgba(0,0,0,0)', shadowBlur:0, shadowOffsetX:0, shadowOffsetY:0,
             globalCompositeOperation:'source-over', lineDashOffset:0, imageSmoothingEnabled:true, direction:'ltr', filter:'none' };
@@ -1230,9 +1248,8 @@ var HTMLInputElement = __interface('HTMLInputElement', function(o){ return __isE
 function Option(text, value, defaultSelected, selected){ var o = __detached('option'); o.textContent = text === undefined ? '' : String(text); if (value !== undefined) o.setAttribute('value', String(value)); if (selected || defaultSelected) o.setAttribute('selected', ''); return o; }
 window.requestIdleCallback = function(fn){ return setTimeout(function(){ fn({ timeRemaining: function(){ return 10; }, didTimeout: false }); }, 1); }; window.cancelIdleCallback = clearTimeout;
 window.self = window; window.top = window; window.parent = window; window.frames = [];
-function __styleProxy(id){
-  var kept = __styleProxies[id];
-  if (kept) return kept;
+function __styleProxy(id){ var kept = __styleProxies[id]; return kept ? kept : __mkStyleProxy(id); }
+function __mkStyleProxy(id){
   var cache = __styleCache[id] = __styleCache[id] || {};
   var target = {
     setProperty: function(p, v){ p = __kebab(p); var sv = String(v); if (cache[p] === sv) return; cache[p] = sv; __setStyle(id, p, sv); },
@@ -1311,9 +1328,11 @@ function __pointer(id, type, x, y){
 }
 
 // ---- elements ----
-function __el(id){
-  var cached = __elShims[id];
-  if (cached) return cached;
+// A cache hit must not enter a function that contains closures: Jint allocates an environment
+// record per call for any function whose locals are captured by a nested function, whether or not
+// that call reaches the nesting. Splitting the hit out took this from 496 B a lookup to nothing.
+function __el(id){ var cached = __elShims[id]; return cached ? cached : __mkEl(id); }
+function __mkEl(id){
   var el = __elShims[id] = {
     dispatchEvent: function(ev){ if (!ev || !ev.type) return true; ev.target = ev.target || el; __dispatchOn(id, ev); return !ev.defaultPrevented; },
     insertAdjacentHTML: function(where, html){ where = String(where).toLowerCase(); if (where === 'beforeend') __appendHtml(id, String(html)); else if (where === 'afterbegin') { var c = __children(id); if (c.length) __insertHtml(id, String(html), c[0]); else __appendHtml(id, String(html)); } else if (where === 'beforebegin') { var p = __parent(id); if (p) __insertHtml(p, String(html), id); } else if (where === 'afterend') { var p2 = __parent(id); var s = __sibling(id, 1); if (p2) { if (s) __insertHtml(p2, String(html), s.id); else __appendHtml(p2, String(html)); } } },
@@ -1418,11 +1437,39 @@ function __el(id){
     removeChild: function(c){ __forget(c.id); __remove(c.id); return c; },
     remove: function(){ __forget(id); __remove(id); }
   };
+  // A class list is read and rewritten constantly by real pages, and the previous version cost about
+  // six style writes per add/remove pair: a regex split plus .filter(Boolean) on every read, a second
+  // read inside remove, and a bound closure per argument. remove's first loop was also dead AND
+  // wrong - inside function(x){ return x !== arguments[i]; } the `arguments` is the callback's own,
+  // so arguments[0] is x and the test is x !== x. Its result was then thrown away and the real
+  // removal done by the expression after it. Splitting by hand and writing only on a real change.
   el.classList = {
-    __list: function(){ return String(__getAttr(id, 'class') || '').split(/\s+/).filter(Boolean); },
-    add: function(){ var l = el.classList.__list(); for (var i = 0; i < arguments.length; i++) if (l.indexOf(arguments[i]) < 0) l.push(arguments[i]); __setClass(id, l.join(' ')); },
-    remove: function(){ var l = el.classList.__list(); for (var i = 0; i < arguments.length; i++) l = l.filter(function(x){ return x !== arguments[i]; }.bind(null)); var drop = Array.prototype.slice.call(arguments); __setClass(id, el.classList.__list().filter(function(x){ return drop.indexOf(x) < 0; }).join(' ')); },
-    toggle: function(c, force){ var l = el.classList.__list(); var has = l.indexOf(c) >= 0; var want = force === undefined ? !has : !!force; if (want && !has) l.push(c); if (!want && has) l = l.filter(function(x){ return x !== c; }); __setClass(id, l.join(' ')); return want; },
+    __list: function(){
+      var s = String(__getAttr(id, 'class') || ''), out = [], i = 0, j, n = s.length;
+      while (i < n) {
+        while (i < n && s.charCodeAt(i) <= 32) i++;
+        j = i;
+        while (j < n && s.charCodeAt(j) > 32) j++;
+        if (j > i) out.push(s.slice(i, j));
+        i = j;
+      }
+      return out;
+    },
+    add: function(){ var l = el.classList.__list(), grew = false;
+      for (var i = 0; i < arguments.length; i++) if (l.indexOf(arguments[i]) < 0) { l.push(arguments[i]); grew = true; }
+      if (grew) __setClass(id, l.join(' ')); },
+    remove: function(){ var l = el.classList.__list(), out = [], k, keep;
+      for (var i = 0; i < l.length; i++) {
+        keep = true;
+        for (k = 0; k < arguments.length; k++) if (l[i] === arguments[k]) { keep = false; break; }
+        if (keep) out.push(l[i]);
+      }
+      if (out.length !== l.length) __setClass(id, out.join(' ')); },
+    toggle: function(c, force){ var l = el.classList.__list(); var has = l.indexOf(c) >= 0; var want = force === undefined ? !has : !!force;
+      if (want === has) return want;
+      if (want) l.push(c);
+      else { var out = []; for (var i = 0; i < l.length; i++) if (l[i] !== c) out.push(l[i]); l = out; }
+      __setClass(id, l.join(' ')); return want; },
     contains: function(c){ return el.classList.__list().indexOf(c) >= 0; }
   };
   return el;
