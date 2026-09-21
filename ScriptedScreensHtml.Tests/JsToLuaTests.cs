@@ -84,6 +84,7 @@ internal static class JsToLuaTests
         }
 
         Writes(check);
+        Mapping(check);
         Manifest(check);
         Refused(check);
         Semantics(check);
@@ -277,6 +278,63 @@ internal static class JsToLuaTests
         check(wrong.Count == 0, wrong.Count == 0
             ? $"js->lua: 07-game's writes split correctly - {runtime.Count} runtime, {setup.Count} setup only"
             : $"js->lua: writes misclassified - {string.Join("; ", wrong)}");
+    }
+
+    /// <summary>
+    /// The acceptance test for the mapping: every runtime write 07-game makes, against the scene the
+    /// emitter really produced for it (captured from the game, checked in beside this file). This is
+    /// the one check that spans both halves of the compiler - what the script writes, and what the
+    /// renderer exposes - so it is where a mismatch between them shows up.
+    ///
+    /// The elements this page moves are all `#player div { position: absolute }`, so they are out of
+    /// flow and their boxes are their own business. An in-flow element would be refused, correctly.
+    /// </summary>
+    private static void Mapping(Action<bool, string> check)
+    {
+        var root = Root();
+        if (root == null) return;
+        var scenePath = Path.Combine(AppContext.BaseDirectory, "07-game.scene.txt");
+        if (!File.Exists(scenePath)) scenePath = Path.Combine(root, "..", "ScriptedScreensHtml.Tests", "07-game.scene.txt");
+        if (!File.Exists(scenePath)) { check(false, "js->lua: the captured 07-game scene is missing"); return; }
+
+        var values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+        SceneSlots.Split(File.ReadAllText(scenePath), values);
+        var available = values.Keys.ToHashSet(StringComparer.Ordinal);
+
+        var script = Regex.Match(File.ReadAllText(Path.Combine(root, @"examples\07-game.lua")), "<script>(.*?)</script>", RegexOptions.Singleline).Groups[1].Value;
+        var (writes, _) = DomWrites.Of(script);
+
+        // every element this page drives is a child of #player or a positioned layer
+        var mapped = new List<string>();
+        var needsGroup = new List<string>();
+        var refused = new List<string>();
+        foreach (var w in writes.Where(w => w.Runtime && w.Id != null).DistinctBy(w => w.Id + "." + w.Property))
+        {
+            var r = DomSlots.Map(w.Id!, w.Property, outOfFlow: true, available);
+            if (!r.Mapped) refused.Add($"{w.Id}.{w.Property}: {r.Problem}");
+            else if (r.NeedsGroup) needsGroup.Add($"{w.Id}.{w.Property}");
+            else mapped.Add($"{w.Id}.{w.Property} -> {string.Join(",", r.Slots)}");
+        }
+
+        // What must map today, straight onto the box the emitter already names.
+        foreach (var want in new[] { "legA.style.height", "legB.style.height", "legA.style.top", "bootA.style.top", "score.textContent" })
+            check(mapped.Any(m => m.StartsWith(want + " ", StringComparison.Ordinal)),
+                mapped.FirstOrDefault(m => m.StartsWith(want + " ", StringComparison.Ordinal)) ?? $"js->lua: {want} does not map");
+
+        // The transforms need the wrapper to carry its element's id - a request to the emitter, not
+        // a failure. Pinned so the count cannot drift without someone noticing.
+        // Four, not five: the pebbles are moved through a computed id (`$('pb' + i)`), which is a
+        // repeat rather than one element and is counted separately.
+        check(needsGroup.Count == 4,
+            needsGroup.Count == 4
+                ? $"js->lua: 4 transforms need a named group ({string.Join(", ", needsGroup.Select(g => g.Split('.')[0]))})"
+                : $"js->lua: expected 4 transforms needing a named group, got {needsGroup.Count}: {string.Join(", ", needsGroup)}");
+
+        // className is refused BY DESIGN here - it resolves through the stylesheet, not this table.
+        var unexpected = refused.Where(r => !r.Contains("className", StringComparison.Ordinal)).ToList();
+        check(unexpected.Count == 0, unexpected.Count == 0
+            ? $"js->lua: every value write on 07-game maps ({mapped.Count} direct, {needsGroup.Count} via a group)"
+            : $"js->lua: {unexpected.Count} write(s) unmapped - {string.Join("; ", unexpected.Take(4))}");
     }
 
     /// <summary>Prints what each page writes, split into setup and runtime. Run with --domwrites.</summary>

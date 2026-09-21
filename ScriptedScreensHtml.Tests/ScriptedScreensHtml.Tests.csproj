@@ -18,6 +18,7 @@
         <Compile Include="..\ScriptedScreensHtml\JsNumber.cs" />
         <Compile Include="..\ScriptedScreensHtml\JsToLua.cs" />
         <Compile Include="..\ScriptedScreensHtml\DomWrites.cs" />
+        <Compile Include="..\ScriptedScreensHtml\DomSlots.cs" />
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />
         <Compile Include="Probe2.cs" />
@@ -33,4 +34,9 @@
         <HintPath>$(SteamLibraryDirectory)\..\workshop\content\544550\3659911735\Lua.dll</HintPath>
       </Reference>
     </ItemGroup>
+  <ItemGroup>
+    <!-- A scene captured from the running game, so the mapping is checked against what the emitter
+         really produces rather than against a hand-written approximation of it. -->
+    <None Include="07-game.scene.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
