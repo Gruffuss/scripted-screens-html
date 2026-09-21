@@ -34,3 +34,6 @@ __pycache__/
 # Working notes for the people and tools developing these mods: local paths and session coordination, never published
 CLAUDE.md
 FOR-VECTOR-SESSION.md
+
+# the knowledge-graph build: generated, and one file per node
+graphify-out/

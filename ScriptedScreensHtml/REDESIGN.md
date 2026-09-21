@@ -249,6 +249,101 @@ reads is the right trade:
 None of these is subtle in effect: a flipped truthiness is a lamp stuck on, not a half pixel. And
 the output is Lua source that can be read, which no interpreter offers.
 
+#### Step 4, the language half: built and diffed against the original (2026-09-21)
+
+`JsToLua.cs` (AST to Lua source) and `JsPrelude.lua` (the runtime it sits on). **All six pages in
+this repository transpile**, and `examples/07-game.lua` — the worst case, an endless runner with jump
+physics, a spawn timer, collision, scoring, game-over and restart — produces **byte-identical DOM
+writes** to the original JavaScript over **3,000 frames**, fifty seconds of play: 49 distinct writes, 0 differ.
+
+**All six pass, and the check is permanent**: `ScriptedScreensHtml.Tests` runs it (`dotnet run`)
+against the game's own `Lua.dll`, so a page is checked on the interpreter that will actually run
+it rather than on a lookalike.
+
+**The front end cost nothing, which was the first thing worth checking.** Jint already ships with
+**Acornima**, a complete JavaScript parser, and `Acornima.dll` is already in the mod's deploy list.
+So there is no new dependency and nothing to hand-write — and because the transpiler runs once at
+load and unloads, the parser is compile-time only. Nothing of it is on the runtime path.
+
+**Measured before writing a line of it: the language these pages use is 35 AST node types.** No
+classes, generators, async, destructuring, template literals or `switch`. That is what makes this
+tractable, and it is why the transpiler *reports* anything outside that set rather than
+approximating it — a page that refuses to compile is a fixable problem, a page that compiles and
+behaves subtly differently is not.
+
+**The differential harness is the only reason any of this can be believed.** `scratchpad/luaprobe`
+runs a page's script **both ways** — the original JavaScript under Jint, the transpiled Lua under the
+game's own `Lua.dll` — drives the same frames into each, and diffs every DOM write. "It compiles" and
+"it is correct" are different claims and only the harness separates them. Both sides get the same
+deterministic `Math.random`, or the obstacle course diverges for a reason that is not a bug.
+
+**Six things that were wrong, each found by running it rather than by reading it:**
+
+| | |
+|---|---|
+| an immediately-invoked function | `(function(){...})()` — Lua calls only a name, a field or another call, so the parentheses are load bearing |
+| a function closing over a later `const` | JavaScript's `const` is in scope for a function written *above* it; a Lua `local` is not, so the function read a global nothing ever set. Every top-level binding is forward-declared |
+| `&&` and `||` in value position | were eager. `typeof location !== 'undefined' && location.hash` faults on the spot that way, and every Atmo page does exactly that. The right side is a thunk now |
+| printing a number | JavaScript prints the **shortest** string that reads back as the same double; `%.17g` prints `933.33333333333337` where the page shows `933.3333333333334`. Ask for 15, then 16, then 17 digits and take the first that round-trips |
+| a getter | `get el() { return $(this.id) }` becomes Lua's `__index`, which is the same idea — but the receiver has to be named, since an arrow function never has one |
+| `$` in an identifier | legal in JavaScript, not in Lua. The page's own `const $ = id => ...` shorthand |
+
+**A seventh, and the one worth generalising: every JavaScript construct that does not evaluate all
+of its operands has to be emitted lazily, and a Lua function call evaluates all of its arguments.**
+`js_if(test, yes, no)` looked like an honest ternary and ran *both* branches. On this page one
+branch calls `Math.random`, so the obstacle sequence shifted by one draw and the two runs diverged
+at frame 79 out of 180 — far enough in to look like a physics difference rather than a translation
+one. `&&` and `||` had already been caught the same way; the ternary is the third member of that
+family and there are no others. A ternary is now Lua's own `a and b or c` where the consequent
+provably cannot be `false` or `nil`, which costs nothing and short-circuits for free, and an inline
+closure otherwise.
+
+**How it was found is the reusable part.** The frame-by-frame trace of both runs, diffed, named the
+exact frame and the exact field: `nextSpawn` 788.75 against 665.63, with every other number in the
+game identical. The difference was 123.12, which is `380 *` the gap between two consecutive draws of
+the generator — so the answer was "one side drew an extra random number", not "the physics differs",
+before any code was read. Guessing has a poor record on this project; a differential trace does not
+need to guess.
+
+**A seventh, which is a standing hazard rather than a fixed bug: Lua 5.4 has an integer subtype and
+JavaScript does not.** Any product above 2^53 is exact in Lua and lossy in JavaScript, so the two
+give different answers. It surfaced in the test's own random generator — the multiplier was large
+enough to overflow — and the fix was to pick one that stays under 2^53 in both. A page doing wide
+integer arithmetic would diverge the same way, silently. Not currently detected.
+
+**Method calls go through a dispatcher, not Lua's `obj:name()`.** Giving JavaScript's string methods
+to Lua's string metatable would work and that metatable is shared with the whole VM — the generated
+chunk runs in its own `_ENV` precisely so it cannot reach the author's Lua, and mutating a global
+metatable walks straight past that. A function the *page* put on an object is called with no
+receiver, which is not a shortcut: measured, every function stored on an object across these pages
+is an arrow function, and an arrow function has no `this`.
+
+`LuaState.Load(ReadOnlySpan<char>, string, LuaTable)` and `RunAsync` were re-confirmed against the
+shipped `Lua.dll` rather than trusted from the note above.
+
+**The one divergence left in the repository is a language difference, not a translation bug, and it
+is pinned in the test rather than hidden.** `AtmoApple` saves a scroll position with
+`kept[id] = el.scrollTop` and restores it by walking `Object.keys(kept)`. In JavaScript, assigning
+`undefined` still **creates** the property, so the key exists and the restore runs; in Lua,
+assigning `nil` creates nothing, so there is no key. Preserving that would mean an `undefined`
+sentinel threaded through every comparison, coercion and truthiness test in the prelude — a large,
+risky change to keep a scroll position a compiled console does not have. It is listed as an allowed
+difference for that page alone, so a *new* difference there still fails.
+
+**The prelude is an embedded resource, not a file beside the DLL.** A page cannot be compiled
+without it, and a file in a mod folder can be deleted, edited or lost in a Workshop update with
+nothing saying so until a console goes blank — which is the failure this project has already had
+three times over.
+
+**What is NOT built, and is the next thing.** The transpiler translates the *language*; it does not
+yet know **where a DOM write lands in the scene**. `$('legA').style.height = la + 'px'` has to become
+a write to `$legA_h`, and only the emitter knows whether `legA` even has its own box, whether its
+`top` reaches that box or goes through Yoga, and whether a `G` wrapper carries it. That mapping is
+step 3's classification, and it is the join between the two halves. Until it exists the prelude
+records DOM writes by name, which is what the harness diffs.
+
+---
+
 **5. Unload after compiling.** Drop the DOM, the cascade, the layout tree, the emitter state.
 Keep only what a recompile needs: the source and the id → slot map.
 

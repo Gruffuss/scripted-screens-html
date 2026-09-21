@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
+    <Import Project="..\StationeersLuaAddonTemplate-main\Stationeers.VS.User.props" Condition="Exists('..\StationeersLuaAddonTemplate-main\Stationeers.VS.User.props')" />
     <PropertyGroup>
         <OutputType>Exe</OutputType>
         <TargetFramework>net8.0</TargetFramework>
@@ -15,13 +16,20 @@
         <Compile Include="..\ScriptedScreensHtml\SceneSlots.cs" />
         <Compile Include="..\ScriptedScreensHtml\TextMeasure.cs" />
         <Compile Include="..\ScriptedScreensHtml\JsNumber.cs" />
+        <Compile Include="..\ScriptedScreensHtml\JsToLua.cs" />
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />
         <Compile Include="Probe2.cs" />
         <Compile Include="Probe3.cs" />
         <Compile Include="JsBench.cs" />
+        <Compile Include="JsToLuaTests.cs" />
     </ItemGroup>
     <ItemGroup>
       <PackageReference Include="Jint" Version="4.16.2" />
+      <!-- The game's own Lua, so a transpiled page is checked on the interpreter that will run it
+           rather than on a lookalike. -->
+      <Reference Include="Lua">
+        <HintPath>$(SteamLibraryDirectory)\..\workshop\content\544550\3659911735\Lua.dll</HintPath>
+      </Reference>
     </ItemGroup>
 </Project>

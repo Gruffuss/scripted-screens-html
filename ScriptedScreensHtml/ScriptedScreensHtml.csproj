@@ -70,6 +70,10 @@
              staged outside the scan path at startup. -->
         <CopyItemsNative Include="$(NuGetPackageRoot)microsoft.clearscript.v8.native.win-x64\7.4.5\runtimes\win-x64\native\ClearScriptV8.win-x64.dll" />
         <CopyItemsExamples Include="$(ProjectDir)\examples\**\*.lua" />
+        <!-- The compiled page's runtime. Embedded rather than copied: it has to be there whenever a
+             page is compiled, and a file beside the DLL can be deleted, edited or lost in a Workshop
+             update without anything saying so until a console goes blank. -->
+        <EmbeddedResource Include="$(ProjectDir)\JsPrelude.lua" />
         <CopyItemsMockups Include="$(ProjectDir)\AtmoApple.lua;$(ProjectDir)\AtmoDark.lua;$(ProjectDir)\AtmoLight.lua" />
         <CopyItemsDocs Include="$(ProjectDir)\README.md;$(ProjectDir)\SUPPORT.md;$(ProjectDir)\QUICKSTART.md;$(ProjectDir)\CHANGELOG.md;$(ProjectDir)\THIRD-PARTY-NOTICES.md" />
     </ItemGroup>
