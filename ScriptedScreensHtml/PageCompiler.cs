@@ -37,7 +37,13 @@ internal static class PageCompiler
             available,
             id => BoxOf(id, built, absolute, available),
             id => Tabular(id, built),
-            (id, cls) => StateOf(id, cls, built, panel, size, absolute, available));
+            (id, cls) => StateOf(id, cls, built, panel, size, absolute, available),
+            // The chunk has to carry its own runtime. Everything the translated page and the
+            // binding table use - js_str, DOM, Pending - lives there, and a chunk without it dies
+            // on its first line and defines nothing, which reads as "the page defined no frame".
+            CompileProbe.Prelude(out _),
+            // The console's own design size, so the page sizes itself for THIS screen.
+            (size.x, size.y));
     }
 
     // ---- where things are -----------------------------------------------------------------------

@@ -97,11 +97,23 @@ internal static class CompiledPage
     /// What the page draws with a given class on a given element: the caller sets the class, lays
     /// the page out and reads back the slots that moved. Null when the state cannot be produced.
     /// </param>
+    /// <param name="prelude">
+    /// The runtime the compiled page sits on. It goes at the FRONT of the chunk: everything the
+    /// translated page and the binding runtime use - js_str, DOM, Pending - is defined there, so
+    /// without it the chunk dies on its first line and defines nothing.
+    /// </param>
+    /// <param name="viewport">
+    /// The page's design size. A page lays itself out from <c>window.innerHeight</c> at setup, and
+    /// the prelude's stub is zero - so every console compiled for the default 800 and the artwork
+    /// sat at the wrong height on any console that is not that tall.
+    /// </param>
     /// <param name="element">The vector element's name in Lua, which the flush writes to.</param>
     internal static Result Compile(string script, ICollection<string> available,
                                    Func<string, DomSlots.Box?> boxOf,
                                    Func<string, bool>? tabular = null,
                                    Func<string, string, StateValues?>? stateOf = null,
+                                   string? prelude = null,
+                                   (double Width, double Height)? viewport = null,
                                    string element = "VDATA")
     {
         var result = new Result();
@@ -187,7 +199,7 @@ internal static class CompiledPage
             }
         }
 
-        result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), element);
+        result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), prelude, viewport, element);
         return result;
     }
 
@@ -231,12 +243,23 @@ internal static class CompiledPage
 
     // ---- the chunk --------------------------------------------------------------------------------
 
-    private static string Assemble(string page, List<Binding> bindings, Func<string, bool> tabular, string element)
+    private static string Assemble(string page, List<Binding> bindings, Func<string, bool> tabular,
+                                   string? prelude, (double Width, double Height)? viewport, string element)
     {
-        var sb = new StringBuilder(page.Length + bindings.Count * 64 + 2048);
+        var sb = new StringBuilder(page.Length + (prelude?.Length ?? 0) + bindings.Count * 64 + 2048);
 
         sb.Append("-- Compiled page. The mod that produced this is not running.\n")
           .Append("-- Every lookup below was a compile-time fact; none of it is worked out again here.\n\n");
+
+        // First, because everything after it depends on it: js_str, DOM, Pending and the rest
+        // are all defined there, and without it the chunk dies on its first line and defines nothing.
+        if (prelude != null) sb.Append(prelude).Append("\n\n");
+
+        // The console this page was compiled for. A page reads it at setup to size itself, and
+        // the prelude's stub is zero, so without this every console laid out for the fallback 800.
+        if (viewport is { } v)
+            sb.Append("window.innerWidth, window.innerHeight = ")
+              .Append(Num(v.Width)).Append(", ").Append(Num(v.Height)).Append("\n\n");
 
         sb.Append("BOUND = {\n");
         foreach (var b in bindings)
@@ -315,7 +338,12 @@ internal static class CompiledPage
     /// having been mistranslated rather than as a setting.
     /// </remarks>
     private static string Runtime(string element) => @"
-local PAYLOAD, DIRTY = {}, false
+-- Globals of this chunk, not locals, so the host can read what a frame produced. The payload does
+-- not go to the element from here: the mod already has the send path, knows which element this page
+-- is, and owns the rate at which the renderer wants values. Reaching for an element handle in Lua
+-- would mean reproducing all of that, and getting the name wrong once already cost a silent frozen
+-- console - the chunk ran, computed every value, and dropped them all.
+PAYLOAD, DIRTY = {}, false
 
 -- A script writes CSS, not numbers: a height arrives as '18px', an offset as '-604.8px', an opacity
 -- as '0.62'. tonumber gives nil for the first two, so coercing instead of parsing made every one of
@@ -385,9 +413,39 @@ end
 -- gain a glide it never had - on every value at once, which reads as the motion having been
 -- mistranslated rather than as a setting.
 function DOM.flush()
-  if not DIRTY then return end
-  DIRTY = false
-  if " + element + @" then " + element + @":set_props({ data = PAYLOAD, snap = 1 }) end
+  -- Nothing to do: the host takes PAYLOAD when DIRTY says there is something in it, and clears the
+  -- flag. Kept as a function so the page's frame reads the same whether or not a host is listening.
+end
+
+-- The entry point the host calls once a frame. It is a GLOBAL of this chunk's own environment,
+-- which is how the host finds it - everything the page itself declared is a local of the chunk and
+-- invisible from outside, deliberately.
+--
+-- What it drives depends on what the page asked for, and pages differ: a game registers a
+-- requestAnimationFrame callback and re-registers it every frame, a dashboard sets an interval and
+-- keeps the same one. Both were captured by the prelude rather than run, so this is where they are
+-- finally driven - and then one payload goes out for everything the frame wrote.
+frame = function(dt)
+  CLOCK = (CLOCK or 0) + (dt or 0)
+  local t = CLOCK * 1000
+
+  local pending = Pending.frame
+  if #pending > 0 then
+    local fn = pending[#pending]
+    Pending.frame = {}                 -- a rAF page re-registers inside the call
+    fn(t)
+  else
+    for i = 1, #Pending.timers do
+      local timer = Pending.timers[i]
+      timer.at = (timer.at or 0) + (dt or 0) * 1000
+      if timer.at >= (timer.ms or 0) then
+        timer.at = 0
+        timer.fn(t)
+      end
+    end
+  end
+
+  DOM.flush()
 end
 ";
 

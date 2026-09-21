@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 
 namespace ScriptedScreensHtml;
@@ -28,14 +29,46 @@ namespace ScriptedScreensHtml;
 /// </remarks>
 internal static class ChipHost
 {
-    private static readonly Type? ManagerType = Type.GetType("StationeersLua.LuaChipRuntimeManager, StationeersLua");
+    private static readonly Type? ManagerType = FindManager();
     private static readonly FieldInfo? RuntimesField =
         ManagerType?.GetField("Runtimes", BindingFlags.Static | BindingFlags.NonPublic);
     private static FieldInfo? _stateField;
     private static bool _complained;
 
+    /// <summary>
+    /// The runtime manager, found by walking the loaded assemblies rather than by
+    /// <c>Type.GetType</c>. Under BepInEx a plugin assembly is not necessarily resolvable by name
+    /// through the default load context, so the qualified-name lookup returns null and every page
+    /// silently declines to compile with nothing in the log to say why.
+    /// </summary>
+    private static Type? FindManager()
+    {
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            if (!string.Equals(assembly.GetName().Name, "StationeersLua", StringComparison.Ordinal)) continue;
+            try { return assembly.GetType("StationeersLua.LuaChipRuntimeManager", throwOnError: false); }
+            catch (Exception) { return null; }
+        }
+        return null;
+    }
+
     /// <summary>Whether the Lua side is reachable at all on this install.</summary>
     internal static bool Available => RuntimesField != null;
+
+    /// <summary>Says once, at startup, whether a page can be handed to its chip and what is missing if not.</summary>
+    internal static void Report()
+    {
+        if (Available)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogInfo("html: the chip's Lua is reachable; a page that compiles can run on it");
+            return;
+        }
+        ScriptedScreensHtmlPlugin.Log?.LogWarning(
+            "html: cannot reach StationeersLua's runtime table, so no page can be handed to its chip - " +
+            (ManagerType == null
+                ? "LuaChipRuntimeManager was not found among the loaded assemblies"
+                : "the Runtimes field was not found on it"));
+    }
 
     /// <summary>
     /// The root Lua state of a chip, or null when it has not compiled yet. Null is ordinary and
@@ -71,31 +104,140 @@ internal static class ChipHost
     }
 
     /// <summary>
-    /// The programmable chip a cartridge holds, by the same walk ScriptedScreens does. Pure game
-    /// API; the cartridge is not itself a chip, it has one in a slot.
+    /// Loads a compiled page's chunk into a chip's running VM and returns its frame function.
     /// </summary>
-    internal static object? ChipOf(object? cartridge)
+    /// <remarks>
+    /// The chunk gets its OWN environment table, whose metatable falls through to the chip's
+    /// globals. So it can read <c>ic</c>, <c>math</c> and everything the author has - and every
+    /// name it writes stays in its own table, where the author's program cannot see it and it
+    /// cannot clobber the author's. The author's source is not read, not parsed and not touched.
+    ///
+    /// It is run through a protected coroutine and the stack is rewound afterwards, which is the
+    /// pattern StationeersLua itself uses to inject its require bootstrap into a live chip.
+    /// </remarks>
+    internal static (object? Env, object? Frame) LoadInto(object? state, string lua, string chunkName)
     {
-        if (cartridge == null) return null;
+        if (state is not Lua.LuaState chip) return (null, null);
         try
         {
-            var slots = cartridge.GetType().GetProperty("Slots")?.GetValue(cartridge) as IEnumerable;
-            if (slots == null) return null;
-            foreach (var slot in slots)
-            {
-                if (slot == null) continue;
-                var type = slot.GetType().GetProperty("Type")?.GetValue(slot);
-                if (type == null || type.ToString() != "ProgrammableChip") continue;
-                var get = slot.GetType().GetMethod("Get", Type.EmptyTypes);
-                var chip = get?.MakeGenericMethod(Type.GetType("Assets.Scripts.Objects.Electrical.ProgrammableChip, Assembly-CSharp")!)
-                              .Invoke(slot, null);
-                if (chip != null) return chip;
-            }
+            var env = new Lua.LuaTable();
+            var meta = new Lua.LuaTable();
+            meta["__index"] = chip.Environment;
+            env.Metatable = meta;
+
+            var closure = chip.Load(lua.AsSpan(), chunkName, env);
+
+            // Deliberately NOT a protected coroutine. Protection turns a failure into a quiet
+            // `false, message` on the stack, and reading that back was more code than letting the
+            // exception reach the catch below - where it is logged in full. A chunk that failed and
+            // a chunk that ran and defined nothing look identical otherwise, which is the least
+            // useful thing a log can say.
+            var stack = chip.Stack;
+            var baseline = stack.Count;
+            var running = chip.RunAsync(closure, default);
+            if (!running.IsCompleted) running.AsTask().GetAwaiter().GetResult();
+
+            // Stack hygiene is not optional: whatever the chunk left behind would otherwise sit
+            // under the author's next call.
+            if (stack.Count > baseline) stack.PopUntil(baseline);
+
+            return env["frame"].TryRead<Lua.LuaFunction>(out var frame) ? (env, frame) : (env, null);
         }
         catch (Exception ex)
         {
-            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: cannot find the chip in this cartridge: {ex.Message}");
+            ScriptedScreensHtmlPlugin.Log?.LogError($"html: could not load the compiled page into its chip - {ex}");
+            return (null, null);
         }
-        return null;
+    }
+
+    /// <summary>
+    /// Runs a compiled page's frame function once, with the guards the game's own frame runner
+    /// applies. Returns false when it could not run, which is ordinary and means "not this frame".
+    /// </summary>
+    /// <remarks>
+    /// Driven from this mod rather than registered with ScriptedScreens' FrameCallbackManager,
+    /// which keeps one callback per chip and would evict whatever the author registered. The
+    /// guards that manager applies have to be repeated here instead, and each of them matters:
+    /// a call while the state is already running corrupts it; a call while the chip's tick is
+    /// suspended mid-yield is the thing that halts a chip outright; and a frame function that does
+    /// not finish synchronously has to be abandoned rather than awaited.
+    /// </remarks>
+    internal static bool RunFrame(object? state, object? frame, float dt, int budget = 200000)
+    {
+        if (state is not Lua.LuaState chip || frame is not Lua.LuaFunction fn) return false;
+        if (chip.IsRunning) return false;
+
+        try
+        {
+            var stack = chip.Stack;
+            var baseline = stack.Count;
+            stack.Push(dt);
+            var running = chip.RunAsync(fn, 1, default);
+            if (!running.IsCompleted)
+            {
+                // It yielded or blocked. Both are fatal to a shared state, so it is dropped here
+                // rather than waited on.
+                if (stack.Count > baseline) stack.PopUntil(baseline);
+                return false;
+            }
+            running.GetAwaiter().GetResult();
+            if (stack.Count > baseline) stack.PopUntil(baseline);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: a compiled page's frame failed - {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// What the last frame wrote, or null when it wrote nothing. Clears the flag, so a frame that
+    /// changes nothing costs one boolean read and sends nothing.
+    /// </summary>
+    internal static Dictionary<string, object>? Drain(object? environment)
+    {
+        if (environment is not Lua.LuaTable env) return null;
+        if (!env["DIRTY"].TryRead<bool>(out var dirty) || !dirty) return null;
+        env["DIRTY"] = false;
+
+        if (!env["PAYLOAD"].TryRead<Lua.LuaTable>(out var payload) || payload == null) return null;
+
+        var values = new Dictionary<string, object>(StringComparer.Ordinal);
+        var key = Lua.LuaValue.Nil;
+        while (payload.TryGetNext(key, out var pair))
+        {
+            key = pair.Key;
+            if (key.Type != Lua.LuaValueType.String) continue;
+            var name = key.Read<string>();
+            if (pair.Value.TryRead<double>(out var number)) values[name] = number;
+            else if (pair.Value.TryRead<string>(out var text)) values[name] = text;
+        }
+        return values.Count > 0 ? values : null;
+    }
+
+    /// <summary>
+    /// The programmable chip a housing holds - ScriptedScreens' own lookup, not a copy of it.
+    /// </summary>
+    /// <remarks>
+    /// There are several housings and they are not interchangeable in the host's callback: a
+    /// console arrives as a Motherboard with a null cartridge, a tablet as a cartridge, the visor
+    /// as itself. Walking the slots here meant getting that walk right for each of them, and the
+    /// first attempt found a chip in none. `CircuitHolderHelper.GetChip` already does it for every
+    /// housing the mod supports, and the reference is publicised, so it is called rather than
+    /// reproduced.
+    /// </remarks>
+    internal static object? ChipOf(object? holder)
+    {
+        if (holder is not Assets.Scripts.Objects.Thing thing) return null;
+        try
+        {
+            return ScriptedScreens.ScriptableUi.Utility.CircuitHolderHelper.GetChip(thing);
+        }
+        catch (Exception ex)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: cannot find the chip in this housing: {ex.Message}");
+            return null;
+        }
     }
 }

@@ -46,7 +46,11 @@ internal static class CompiledPageTests
 
         var compiled = CompiledPage.Compile(script, available, id => Box(id, boxes, available),
                                             tabular: id => id is "score" or "hi",
-                                            stateOf: (id, cls) => State(id, cls, boxes, available));
+                                            stateOf: (id, cls) => State(id, cls, boxes, available),
+                                            // The same prelude production embeds. Leaving it out here
+                                            // is what let the chunk ship without one: the test loaded
+                                            // the prelude separately and never noticed.
+                                            prelude: File.ReadAllText(Path.Combine(root, "JsPrelude.lua")));
 
         check(compiled.Lua != null, compiled.Lua != null
             ? $"compiled: 07-game compiles, {compiled.Bindings.Count} slot binding(s)"
@@ -150,9 +154,9 @@ internal static class CompiledPageTests
     {
         var state = LuaState.Create();
         state.OpenStandardLibraries();
-        Chunk(state, File.ReadAllText(Path.Combine(root, "JsPrelude.lua")), "prelude");
         // a stand-in for the vector element, so the flush has somewhere to go
         Chunk(state, "VDATA = { set_props = function(self, t) SENT = t.data LAST_SNAP = t.snap end }", "element");
+        // The chunk carries its own prelude now, exactly as the one loaded into a chip does.
         Chunk(state, lua, "page");
         Chunk(state, Driver(frames), "frames");
 

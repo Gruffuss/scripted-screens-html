@@ -46,6 +46,7 @@ public sealed class ScriptedScreensHtmlPlugin : ModBehaviour
             ReportGC();
             FrameAlloc.Report();
             if (HtmlConfig.ProbeV8) V8Probe.Run();
+            if (HtmlConfig.RunCompiled) ChipHost.Report();
 
             _harmony = new Harmony(PluginInfo.PLUGIN_GUID);
             _harmony.PatchAll(typeof(HtmlElementPatch).Assembly);

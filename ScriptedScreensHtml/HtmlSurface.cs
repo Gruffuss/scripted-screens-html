@@ -37,6 +37,8 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>What the bridge needs to address the vector mod: the host identity and the page element id.</summary>
     internal object? Board;
     internal object? Cartridge;
+    /// <summary>Set once this page runs compiled; while it is set the page does no per-frame work.</summary>
+    private CompiledRun? _compiled;
     internal object? Visor;
     internal string ElementId = string.Empty;
     /// <summary>The data element's id: the vector mod needs a host of its own for a data payload.</summary>
@@ -157,6 +159,18 @@ internal sealed class HtmlSurface : MonoBehaviour
             _ => lod.cull,   // a page only needs a frame the vector mod will draw
         };
         var onScreen = visible || !cull;
+        // A compiled page is not laid out, scripted, translated or split. Its Lua is in the chip
+        // and writes the scene's slots directly, so all this update does is give that Lua a frame.
+        if (_compiled != null)
+        {
+            if (_compiled.Tick(Cartridge ?? Board, SendCompiled)) return;
+            // It gave up - the chip recompiled under it, or its frames kept failing. Back to the
+            // interpreter, which is always able to run the page.
+            _compiled = null;
+            _dirty = true; _dOther++;
+            Wake();
+        }
+
         _hiddenNow = !onScreen;
         if (onScreen != _wasOnScreen)
         {
@@ -1001,6 +1015,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         public string? Why;
     }
 
+    /// <summary>The build this surface last tried to compile, so a failure is not retried every frame.</summary>
+    private HtmlRenderer.Result? _compileTried;
     private readonly Dictionary<VisualElement, OffThread.Box> _boxes = new();
     private readonly List<VisualElement> _boxScratch = new();
     private double _lastCopyMs;
@@ -1122,11 +1138,24 @@ internal sealed class HtmlSurface : MonoBehaviour
             var sa = Allocated();
             var template = SceneSlots.Split(output.Chars, output.Length, _slotScratch, _slotPrefix);
             _allocSplit += Allocated() - sa;
-            // The compiler needs the slot table, which only exists once the scene has been split -
-            // so this is the first moment a page can be compiled. Reports only; nothing depends on
-            // it and the page carries on exactly as before.
+            // The compiler needs the slot table, which only exists once the scene has been split,
+            // so this is the first moment a page can be compiled.
             if (HtmlConfig.CompileProbe && !worker && _built != null && _panel != null)
                 CompileProbe.Full(PageKey, _built, _panel, layout, _slotScratch);
+
+            // Hand the page to its chip. From the next update this surface stops laying out, running
+            // the script and translating, which is the whole point; if it cannot be handed over the
+            // page carries on exactly as it does today.
+            // Whichever holds the chip. A console's host is a Motherboard and its `cartridge` is
+            // null; only a tablet has one. Gating on the cartridge alone meant no console ever
+            // reached this, which is why nothing happened the first time it was switched on.
+            var holder = Cartridge ?? Board;
+            if (HtmlConfig.RunCompiled && _compiled == null && !worker && _built != null && _panel != null
+                && holder != null && _compileTried != _built)
+            {
+                _compileTried = _built;
+                _compiled = CompiledRun.Start(PageKey, holder, _built!, _panel!, layout, _slotScratch);
+            }
             if (template == _lastTemplate)
             {
                 List<SS.UiProp>? patch = null;
@@ -1194,6 +1223,33 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     private static SS.UiProp Prop(string key, SceneSlots.Value v) =>
         new() { Key = key, Value = v.IsNumber ? SS.UiValue.FromNumber(v.Number) : SS.UiValue.FromString(v.Text ?? string.Empty) };
+
+    /// <summary>
+    /// Sends what a compiled page's frame produced, through the same path a translated patch takes.
+    /// </summary>
+    /// <remarks>
+    /// The values come from Lua rather than from a translation, and that is the only difference -
+    /// the renderer cannot tell, and neither can anything between here and it. `snap` for the same
+    /// reason a patch uses it: a browser does not ease, so neither should this.
+    /// </remarks>
+    private void SendCompiled(System.Collections.Generic.Dictionary<string, object> values)
+    {
+        if (State is not SS.BoardState state || values.Count == 0) return;
+
+        var props = new SS.UiProp[values.Count];
+        var i = 0;
+        foreach (var pair in values)
+            props[i++] = new SS.UiProp
+            {
+                Key = pair.Key,
+                Value = pair.Value is double d ? SS.UiValue.FromNumber((float)d) : SS.UiValue.FromString((string)pair.Value),
+            };
+
+        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
+            new SS.UiValue { Type = SS.UiValueType.Map, Map = props }, null, snap: true);
+        _patchSends++;
+        _patchSlots += props.Length;
+    }
 
     /// <summary>Hands a finished translation to the vector mod. Game thread.</summary>
     private void FinishJob()

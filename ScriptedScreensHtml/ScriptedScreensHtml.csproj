@@ -53,6 +53,14 @@
             <HintPath>$(StationeersManagedDirectory)\UnityEngine.TextCoreTextEngineModule.dll</HintPath>
             <Private>False</Private>
         </Reference>
+        <!-- The Lua interpreter the game already runs. Referenced for its types only - LuaState,
+             LuaTable, LuaClosure - so a compiled page can be loaded into the chip that owns it.
+             Private=False: it ships with StationeersLua and must not be copied beside this mod,
+             where BepInEx would load a second copy of it as a mod assembly. -->
+        <Reference Include="Lua">
+            <HintPath>$(SteamLibraryDirectory)\..\workshop\content\$(StationeersSteamAppId)\$(StationeersLuaWorkshopId)\Lua.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
         <Reference Include="StationeersMods.Interface">
             <HintPath>$(StationeersLaunchPadDirectory)\StationeersMods.Interface.dll</HintPath>
             <Private>False</Private>

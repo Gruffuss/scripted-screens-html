@@ -29,6 +29,7 @@ internal static class HtmlConfig
     private static ConfigEntry<bool>? _verifyEmitCache;
     private static ConfigEntry<bool>? _probeV8;
     private static ConfigEntry<bool>? _compileProbe;
+    private static ConfigEntry<bool>? _runCompiled;
     private static ConfigEntry<bool>? _useV8;
 
     /// <summary>
@@ -114,6 +115,15 @@ internal static class HtmlConfig
             "been copied in by hand, and nothing in the mod uses them either way. Development tool " +
             "for deciding whether a JS engine with its own native heap is worth the dependency.");
 
+        _runCompiled = _file.Bind(
+            "Performance", "RunCompiled", false,
+            "Compile a page once and let its chip run it, instead of laying it out, running its " +
+            "script and translating it on every frame. The page becomes a vector scene whose values " +
+            "are named slots plus Lua that writes them, and this mod stops doing anything per frame " +
+            "for it. A page using something the compiler will not translate keeps running the way it " +
+            "does now and says so in the log. The author's own program is never modified - the " +
+            "compiled page is a separate chunk in the same VM with its own environment.");
+
         _compileProbe = _file.Bind(
             "Diagnostics", "CompileProbe", false,
             "When a page is built, also compile its script to Lua and say in the log whether that " +
@@ -131,6 +141,9 @@ internal static class HtmlConfig
 
     /// <summary>Whether to compile each page's script to Lua at build time and report the outcome.</summary>
     internal static bool CompileProbe => _compileProbe?.Value ?? false;
+
+    /// <summary>Whether a page that compiles is handed to its chip and stops doing per-frame work here.</summary>
+    internal static bool RunCompiled => _runCompiled?.Value ?? false;
 
     /// <summary>Whether to re-translate each page once a second and check the reuse against it.</summary>
     internal static bool VerifyEmitCache => _verifyEmitCache?.Value ?? false;
