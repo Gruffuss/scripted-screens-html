@@ -289,6 +289,9 @@ internal static class JsToLuaTests
     /// The elements this page moves are all `#player div { position: absolute }`, so they are out of
     /// flow and their boxes are their own business. An in-flow element would be refused, correctly.
     /// </summary>
+    /// <summary>The player's own absolute top in the captured scene, which its children's tops are relative to.</summary>
+    private const double PlayerTop = 85;
+
     private static void Mapping(Action<bool, string> check)
     {
         var root = Root();
@@ -310,11 +313,32 @@ internal static class JsToLuaTests
         var refused = new List<string>();
         foreach (var w in writes.Where(w => w.Runtime && w.Id != null).DistinctBy(w => w.Id + "." + w.Property))
         {
-            var r = DomSlots.Map(w.Id!, w.Property, outOfFlow: true, available);
+            // Every element this page drives is #player div { position: absolute } or a positioned
+            // layer. The player's own top is 85 in this capture, which is the bias its children's
+            // `top` writes carry - the scene is absolute and CSS is not.
+            var box = new DomSlots.Box(outOfFlow: true, parentX: 0, parentY: PlayerTop, hasBackground: false);
+            var r = DomSlots.Map(w.Id!, w.Property, box, available);
             if (!r.Mapped) refused.Add($"{w.Id}.{w.Property}: {r.Problem}");
             else if (r.NeedsGroup) needsGroup.Add($"{w.Id}.{w.Property}");
-            else mapped.Add($"{w.Id}.{w.Property} -> {string.Join(",", r.Slots)}");
+            else mapped.Add($"{w.Id}.{w.Property} -> {string.Join(",", r.Slots)}"
+                            + (r.Bias.Any(b => b != 0) ? $" (+{string.Join(",", r.Bias)})" : ""));
         }
+
+        // A position write carries the containing block's origin, and getting that wrong is silent:
+        // legA sits at scene y=141 with a CSS top of 56, inside a player whose own top is 85.
+        var topWrite = mapped.FirstOrDefault(m => m.StartsWith("legA.style.top ", StringComparison.Ordinal));
+        check(topWrite != null && topWrite.Contains($"(+{PlayerTop}", StringComparison.Ordinal),
+            topWrite == null ? "js->lua: legA.style.top does not map"
+            : topWrite.Contains($"(+{PlayerTop}", StringComparison.Ordinal)
+                ? $"js->lua: a position write carries its parent's origin - {topWrite}"
+                : $"js->lua: legA.style.top has no bias, so it would draw {PlayerTop} units out - {topWrite}");
+
+        // A size does not, and must not.
+        var sizeWrite = mapped.FirstOrDefault(m => m.StartsWith("legA.style.height ", StringComparison.Ordinal));
+        check(sizeWrite != null && !sizeWrite.Contains("(+", StringComparison.Ordinal),
+            sizeWrite != null && !sizeWrite.Contains("(+", StringComparison.Ordinal)
+                ? "js->lua: a size write carries no bias"
+                : $"js->lua: legA.style.height should have no bias - {sizeWrite}");
 
         // What must map today, straight onto the box the emitter already names.
         foreach (var want in new[] { "legA.style.height", "legB.style.height", "legA.style.top", "bootA.style.top", "score.textContent" })
@@ -356,7 +380,7 @@ internal static class JsToLuaTests
             var (writes, notes) = DomWrites.Of(script);
             var runtime = writes.Where(w => w.Runtime).ToList();
             Console.WriteLine($"\n== {path} == {writes.Count} writes, {runtime.Count} at runtime");
-            foreach (var g in runtime.GroupBy(w => w.Id ?? "<" + w.Computed + ">").OrderBy(g => g.Key, StringComparer.Ordinal))
+            foreach (var g in runtime.GroupBy(w => w.Id ?? (w.Prefix != null ? w.Prefix + "* (from " + w.Computed + ")" : "<" + w.Computed + ">")).OrderBy(g => g.Key, StringComparer.Ordinal))
                 Console.WriteLine($"   {g.Key,-16} {string.Join(" ", g.Select(w => w.Property).Distinct().OrderBy(p => p, StringComparer.Ordinal))}");
             var setup = writes.Where(w => !w.Runtime).Select(w => (w.Id ?? "<" + w.Computed + ">") + "." + w.Property).Distinct().ToList();
             if (setup.Count > 0) Console.WriteLine($"   setup only: {string.Join(", ", setup)}");

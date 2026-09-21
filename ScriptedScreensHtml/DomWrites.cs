@@ -40,6 +40,13 @@ internal sealed class DomWrites
         public string? Id;
         /// <summary>The id expression's source when it is computed, e.g. <c>'pb' + i</c>.</summary>
         public string? Computed;
+        /// <summary>
+        /// The literal head of a computed id, so <c>$('pb' + i)</c> gives <c>pb</c>. A page builds a
+        /// family of elements with one prefix and a running number, and every member of that family
+        /// already exists in the page with its own id - so the family resolves to a list of real
+        /// elements at compile time and needs no run-time lookup at all.
+        /// </summary>
+        public string? Prefix;
         /// <summary>`style.height`, `textContent`, `className`, `@data-mode` for an attribute.</summary>
         public string Property = string.Empty;
         /// <summary>True when this write can happen after the page has been compiled.</summary>
@@ -71,6 +78,13 @@ internal sealed class DomWrites
     private readonly Dictionary<string, string> _aliases = new(StringComparer.Ordinal);
     /// <summary>Names bound to a one-argument getElementById wrapper, i.e. the page's own `$`.</summary>
     private readonly HashSet<string> _lookups = new(StringComparer.Ordinal);
+    /// <summary>
+    /// A getter that hands back an element, and the literal head of the ids it hands back. The
+    /// object-pool idiom: <c>{ id: 'ob' + i, get el() { return $(this.id); } }</c> makes
+    /// <c>o.el.style.transform</c> a write to the `ob` family, and nothing else in the script says
+    /// so. Keyed by the getter's name, since that is all a write site gives.
+    /// </summary>
+    private readonly Dictionary<string, string> _handles = new(StringComparer.Ordinal);
 
     private sealed class FunctionInfo
     {
@@ -116,6 +130,40 @@ internal sealed class DomWrites
             }
             // const player = $('player')  /  document.getElementById('player')
             if (init is CallExpression direct && Target(direct) is { } id) _aliases[name.Name] = id;
+        }
+        Handles(root);
+    }
+
+    /// <summary>
+    /// Finds the object-pool handle: a getter whose body looks up <c>this.FIELD</c>, where FIELD is
+    /// set in the same literal to a string with a literal head. That head names the whole family,
+    /// and every member of it already exists in the page under its own id.
+    /// </summary>
+    private void Handles(Node root)
+    {
+        foreach (var n in All(root))
+        {
+            if (n is not ObjectExpression obj) continue;
+
+            // what each plain property is initialised to, so `this.id` can be followed
+            var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var p in obj.Properties)
+                if (p is ObjectProperty { Kind: PropertyKind.Init, Key: Identifier k } prop && Head(prop.Value) is { } head)
+                    fields[k.Name] = head;
+
+            foreach (var p in obj.Properties)
+            {
+                if (p is not ObjectProperty { Kind: PropertyKind.Get, Key: Identifier getter, Value: FunctionExpression fn }) continue;
+                foreach (var inner in All(fn.Body))
+                {
+                    if (inner is not ReturnStatement { Argument: CallExpression call }) continue;
+                    if (!IsLookup(call) && !(call.Callee is Identifier f && _lookups.Contains(f.Name))) continue;
+                    if (call.Arguments.Count != 1) continue;
+                    if (call.Arguments[0] is MemberExpression { Object: ThisExpression, Computed: false, Property: Identifier field }
+                        && fields.TryGetValue(field.Name, out var prefix))
+                        _handles[getter.Name] = prefix;
+                }
+            }
         }
     }
 
@@ -226,14 +274,20 @@ internal sealed class DomWrites
                 write.Id = id;
                 return write;
             case CallExpression call2 when IsLookup(call2) || (call2.Callee is Identifier f && _lookups.Contains(f.Name)):
-                // `$('pb' + i)` - a family of elements, which is a repeat rather than one slot
+                // `$('pb' + i)` - a family of elements, resolved by its literal head below
                 write.Computed = call2.Arguments.Count > 0 ? Source(call2.Arguments[0]) : "?";
+                write.Prefix = call2.Arguments.Count > 0 ? Head(call2.Arguments[0]) : null;
                 return write;
             case Identifier name when _aliases.TryGetValue(name.Name, out var aliased):
                 write.Id = aliased;
                 return write;
             case Identifier name2:
                 write.Computed = name2.Name;
+                return write;
+            case MemberExpression { Computed: false, Property: Identifier handle } m when _handles.TryGetValue(handle.Name, out var family):
+                // `o.el` on an object pool: one write site, a family of real elements
+                write.Computed = Source(m);
+                write.Prefix = family;
                 return write;
             case MemberExpression m:
                 write.Computed = Source(m);
@@ -242,6 +296,18 @@ internal sealed class DomWrites
                 return null;
         }
     }
+
+    /// <summary>
+    /// The literal string an expression begins with, or null. <c>'pb' + i</c> gives <c>pb</c>;
+    /// anything whose left edge is not a literal gives nothing, because a prefix guessed wrong would
+    /// name the wrong elements.
+    /// </summary>
+    private static string? Head(Node n) => n switch
+    {
+        StringLiteral s => s.Value,
+        NonLogicalBinaryExpression { Operator: Operator.Addition } b => Head(b.Left),
+        _ => null,
+    };
 
     /// <summary>A short, recognisable rendering of an expression for a report.</summary>
     private static string Source(Node n) => n switch
@@ -293,7 +359,7 @@ internal sealed class DomWrites
             }
 
         foreach (var w in _writes)
-            if (w.Runtime && w.Computed != null)
+            if (w.Runtime && w.Id == null && w.Prefix == null)
                 _notes.Add($"line {w.Line}: writes `{w.Property}` on an element chosen at run time (`{w.Computed}`)");
     }
 

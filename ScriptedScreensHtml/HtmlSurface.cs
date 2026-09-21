@@ -477,9 +477,18 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             var (writes, _) = DomWrites.Of(built.Script);
             foreach (var w in writes)
-                if (w.Runtime && w.Id != null
-                    && (w.Property is "style.transform" or "style.opacity" or "className"))
-                    built.NamedGroups.Add(w.Id);
+            {
+                if (!w.Runtime || w.Property is not ("style.transform" or "style.opacity" or "className")) continue;
+                if (w.Id != null) { built.NamedGroups.Add(w.Id); continue; }
+                // A family written through one expression - `$('pb' + i)` over fourteen pebbles.
+                // Every member already exists in the page under its own id, so the family resolves
+                // to real elements here and needs no lookup at run time. A prefix short enough to
+                // catch unrelated elements is ignored rather than guessed at.
+                if (w.Prefix is { Length: >= 2 } prefix)
+                    foreach (var id in built.ById.Keys)
+                        if (id.Length > prefix.Length && id.StartsWith(prefix, StringComparison.Ordinal))
+                            built.NamedGroups.Add(id);
+            }
         }
         catch (System.Exception ex)
         {

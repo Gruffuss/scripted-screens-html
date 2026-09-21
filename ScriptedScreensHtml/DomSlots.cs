@@ -31,24 +31,53 @@ namespace ScriptedScreensHtml;
 /// </remarks>
 internal static class DomSlots
 {
+    /// <summary>Where an element sits and how it is laid out: what the safety question turns on.</summary>
+    internal readonly struct Box
+    {
+        /// <summary>Whether the element is out of normal flow, so its box moves nothing else.</summary>
+        public readonly bool OutOfFlow;
+        /// <summary>
+        /// The absolute scene position of the containing block's top-left corner. The emitter writes
+        /// ABSOLUTE coordinates - <c>x = parentPos.x + layout.x</c> - while CSS `top` and `left` are
+        /// measured from the containing block, so the two differ by exactly this. Measured on the
+        /// game page: legA sits at scene y=141 with a CSS top of 56, inside a player whose own top
+        /// is 85. Writing the CSS value straight into the slot would put it 85 units too high.
+        /// </summary>
+        public readonly double ParentX, ParentY;
+        /// <summary>Whether this element also paints a background, so its own `f` slot is the box's and not the text's.</summary>
+        public readonly bool HasBackground;
+
+        public Box(bool outOfFlow, double parentX, double parentY, bool hasBackground)
+        {
+            OutOfFlow = outOfFlow; ParentX = parentX; ParentY = parentY; HasBackground = hasBackground;
+        }
+    }
+
     /// <summary>What a write maps to, or why it does not.</summary>
     internal readonly struct Result
     {
         /// <summary>The slot names to write, in order. Empty when <see cref="Problem"/> is set.</summary>
         public readonly string[] Slots;
+        /// <summary>
+        /// Added to the written value before it reaches each slot, in the same order. Zero for a
+        /// size; the containing block's origin for a position, since the scene is in absolute
+        /// coordinates and CSS is not.
+        /// </summary>
+        public readonly double[] Bias;
         /// <summary>Why this write cannot be a slot, or null when it can.</summary>
         public readonly string? Problem;
         /// <summary>True when the write needs the element's transform group to carry its id.</summary>
         public readonly bool NeedsGroup;
 
-        private Result(string[] slots, string? problem, bool needsGroup)
+        private Result(string[] slots, double[] bias, string? problem, bool needsGroup)
         {
-            Slots = slots; Problem = problem; NeedsGroup = needsGroup;
+            Slots = slots; Bias = bias; Problem = problem; NeedsGroup = needsGroup;
         }
 
-        public static Result Ok(params string[] slots) => new(slots, null, false);
-        public static Result Group(params string[] slots) => new(slots, null, true);
-        public static Result No(string why) => new(Array.Empty<string>(), why, false);
+        public static Result Ok(params string[] slots) => new(slots, new double[slots.Length], null, false);
+        public static Result Shifted(string slot, double bias) => new(new[] { slot }, new[] { bias }, null, false);
+        public static Result Group(params string[] slots) => new(slots, new double[slots.Length], null, true);
+        public static Result No(string why) => new(Array.Empty<string>(), Array.Empty<double>(), why, false);
         public bool Mapped => Problem == null;
     }
 
@@ -95,9 +124,9 @@ internal static class DomSlots
     /// </summary>
     /// <param name="id">The element's id. A write to an element without one cannot be mapped.</param>
     /// <param name="property">As <see cref="DomWrites"/> reports it: <c>style.height</c>, <c>textContent</c>.</param>
-    /// <param name="outOfFlow">Whether the element's position is absolute or fixed, from the cascade.</param>
+    /// <param name="box">Where the element sits and how it is laid out, from the cascade and layout.</param>
     /// <param name="available">Slot names the emitted scene actually exposes, from <see cref="SceneSlots"/>.</param>
-    internal static Result Map(string id, string property, bool outOfFlow, ICollection<string> available)
+    internal static Result Map(string id, string property, in Box box, ICollection<string> available)
     {
         if (string.IsNullOrEmpty(id))
             return Result.No("the element has no id, so nothing in the scene is named after it");
@@ -143,13 +172,28 @@ internal static class DomSlots
 
         // The condition that makes the rest sound. In normal flow this element's size and position
         // decide where its siblings go, and only the layout engine knows that.
-        if (!outOfFlow && (key is "w" or "h" or "x" or "y"))
+        if (!box.OutOfFlow && (key is "w" or "h" or "x" or "y"))
             return Result.No($"\"{id}\" is in normal flow, so changing its {css} moves its siblings");
 
+        // An element that paints a background emits its box and its text as two lines carrying the
+        // same id, and the first one claims `<id>_f`. That is the box's fill, so a `color` write
+        // routed to it would repaint the background instead of the text - silently, and only on the
+        // elements that have both. Refused until the emitter distinguishes them.
+        if (css == "color" && box.HasBackground)
+            return Result.No($"\"{id}\" paints a background, so its `f` slot is the box's fill rather than the text's");
+
         var name = id + "_" + key;
-        return available.Contains(name)
-            ? Result.Ok(name)
-            : Result.No($"\"{id}\" emits no {key}, so `{css}` has no slot");
+        if (!available.Contains(name))
+            return Result.No($"\"{id}\" emits no {key}, so `{css}` has no slot");
+
+        // The scene is in absolute coordinates and CSS is not, so a position carries its containing
+        // block's origin. A size does not: `height` is a length either way.
+        return key switch
+        {
+            "x" => Result.Shifted(name, box.ParentX),
+            "y" => Result.Shifted(name, box.ParentY),
+            _ => Result.Ok(name),
+        };
     }
 
     /// <summary>
@@ -162,14 +206,14 @@ internal static class DomSlots
     /// The caller computes this from the cascade; this decides whether the difference is expressible.
     /// </param>
     internal static Result Classes(IReadOnlyDictionary<string, IReadOnlyCollection<string>> changed,
-                                   Func<string, bool> outOfFlow, ICollection<string> available)
+                                   Func<string, Box> boxOf, ICollection<string> available)
     {
         var slots = new List<string>();
         var group = false;
         foreach (var pair in changed)
             foreach (var property in pair.Value)
             {
-                var mapped = Map(pair.Key, "style." + property, outOfFlow(pair.Key), available);
+                var mapped = Map(pair.Key, "style." + property, boxOf(pair.Key), available);
                 if (!mapped.Mapped)
                     return Result.No($"the class changes `{property}` on \"{pair.Key}\", which is not a value: {mapped.Problem}");
                 group |= mapped.NeedsGroup;

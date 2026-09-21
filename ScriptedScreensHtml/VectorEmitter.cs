@@ -1214,11 +1214,30 @@ internal static class VectorEmitter
 
     /// <summary>Can this element's transform still change once the page is compiled?</summary>
     private static bool CanMove(Ctx ctx, VisualElement ve)
-        => (Watched.TryGetValue(ve, out var seen) && seen.Moved) || Declared(ctx.Built.CssOf(ve), "transform", MoveKeys);
+        => (Watched.TryGetValue(ve, out var seen) && seen.Moved)
+           || Declared(ctx.Built.CssOf(ve), "transform", MoveKeys)
+           || Driven(ctx, ve);
 
     /// <summary>Can this element's opacity still change? Same argument, same failure if it cannot.</summary>
     private static bool CanFade(Ctx ctx, VisualElement ve)
-        => (Watched.TryGetValue(ve, out var seen) && seen.Faded) || Declared(ctx.Built.CssOf(ve), "opacity", FadeKeys);
+        => (Watched.TryGetValue(ve, out var seen) && seen.Faded)
+           || Declared(ctx.Built.CssOf(ve), "opacity", FadeKeys)
+           || Driven(ctx, ve);
+
+    /// <summary>
+    /// Whether a script moves this element, known before it has moved once.
+    /// </summary>
+    /// <remarks>
+    /// The two tests above are both retrospective: either the element has ALREADY been seen to move,
+    /// or its own CSS declares a transform. Neither fires for an element whose only mover is a
+    /// script - `#player` declares no transform, and nothing has moved it yet at the moment a page
+    /// is first translated - so the group was dropped at identity and there was nowhere for the
+    /// script's writes to land. Today that heals itself on the next frame, because the element
+    /// having moved makes the first test true. A page translated ONCE never gets that frame, so the
+    /// answer has to be known up front, which is what NamedGroups carries.
+    /// </remarks>
+    private static bool Driven(Ctx ctx, VisualElement ve)
+        => ve.name is { Length: > 0 } name && ctx.Built.NamedGroups.Contains(name);
 
     /// <summary>A CSS transform as the vector G attributes, kept numeric so clip
     /// polygons declared in scene space can be put through the same transform.</summary>
