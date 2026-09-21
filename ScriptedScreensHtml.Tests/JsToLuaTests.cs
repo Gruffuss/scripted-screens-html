@@ -316,13 +316,29 @@ internal static class JsToLuaTests
             // Every element this page drives is #player div { position: absolute } or a positioned
             // layer. The player's own top is 85 in this capture, which is the bias its children's
             // `top` writes carry - the scene is absolute and CSS is not.
-            var box = new DomSlots.Box(outOfFlow: true, parentX: 0, parentY: PlayerTop, hasBackground: false);
+            // legA holds bootA, and the scene is absolute, so moving legA must move bootA with it:
+            // in the capture legA is at y=141 and bootA at y=161, twenty below.
+            var inside = w.Id == "legA" ? new[] { ("bootA", 0d, 20d) }
+                       : w.Id == "legB" ? new[] { ("bootB", 0d, 12d) }
+                       : System.Array.Empty<(string, double, double)>();
+            var box = new DomSlots.Box(outOfFlow: true, parentX: 0, parentY: PlayerTop,
+                                       hasBackground: false, inside: inside);
             var r = DomSlots.Map(w.Id!, w.Property, box, available);
             if (!r.Mapped) refused.Add($"{w.Id}.{w.Property}: {r.Problem}");
             else if (r.NeedsGroup) needsGroup.Add($"{w.Id}.{w.Property}");
             else mapped.Add($"{w.Id}.{w.Property} -> {string.Join(",", r.Slots)}"
                             + (r.Bias.Any(b => b != 0) ? $" (+{string.Join(",", r.Bias)})" : ""));
         }
+
+        // Moving an element must move what is inside it. The scene is absolute, so a child's box
+        // carries its own position and would otherwise stay exactly where it was - the leg would
+        // slide and leave its boot behind.
+        var legTop = mapped.FirstOrDefault(m => m.StartsWith("legA.style.top ", StringComparison.Ordinal));
+        check(legTop != null && legTop.Contains("bootA_y", StringComparison.Ordinal),
+            legTop == null ? "js->lua: legA.style.top does not map"
+            : legTop.Contains("bootA_y", StringComparison.Ordinal)
+                ? $"js->lua: moving legA moves bootA with it - {legTop}"
+                : $"js->lua: legA.style.top leaves bootA behind - {legTop}");
 
         // A position write carries the containing block's origin, and getting that wrong is silent:
         // legA sits at scene y=141 with a CSS top of 56, inside a player whose own top is 85.

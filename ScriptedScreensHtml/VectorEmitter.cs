@@ -1874,6 +1874,11 @@ internal static class VectorEmitter
         // a purely numeric label is read as a number by the scene reader: guard it (after the tags above, which must stay tags)
         else if (float.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out _))
             text = "<noparse>" + text + "</noparse>";
+        // Same failure, different trigger: a value beginning with `=` is an EXPRESSION to the scene
+        // reader, so a label reading "= 5 kPa" or "=> vent" was handed over as a formula and drew
+        // nothing. The tag moves the `=` off the front, which is all the reader looks at.
+        if (text.Length > 0 && text[0] == '=' && !text.StartsWith("<noparse>", StringComparison.Ordinal))
+            text = "<noparse>" + text + "</noparse>";
         var align = rs.unityTextAlign;
         var centre = align == TextAnchor.MiddleCenter || align == TextAnchor.UpperCenter || align == TextAnchor.LowerCenter;
         var right = align == TextAnchor.MiddleRight || align == TextAnchor.UpperRight || align == TextAnchor.LowerRight;

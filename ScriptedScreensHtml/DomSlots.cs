@@ -46,10 +46,21 @@ internal static class DomSlots
         public readonly double ParentX, ParentY;
         /// <summary>Whether this element also paints a background, so its own `f` slot is the box's and not the text's.</summary>
         public readonly bool HasBackground;
+        /// <summary>
+        /// Every descendant that emits a named box, and how far its own box sits from this one.
+        /// Load bearing, and the least obvious thing in this file: because the scene is in absolute
+        /// coordinates, moving an element does NOT move its children - each child's box carries its
+        /// own absolute position and would stay exactly where it was. So one DOM write is not one
+        /// slot. `legA.style.top` has to move `legA_y` and `bootA_y` together, and `bootA_y` is also
+        /// the target of `bootA.style.top`, so two writes compose into one slot.
+        /// </summary>
+        public readonly IReadOnlyList<(string Id, double Dx, double Dy)> Inside;
 
-        public Box(bool outOfFlow, double parentX, double parentY, bool hasBackground)
+        public Box(bool outOfFlow, double parentX, double parentY, bool hasBackground,
+                   IReadOnlyList<(string Id, double Dx, double Dy)>? inside = null)
         {
             OutOfFlow = outOfFlow; ParentX = parentX; ParentY = parentY; HasBackground = hasBackground;
+            Inside = inside ?? Array.Empty<(string, double, double)>();
         }
     }
 
@@ -76,6 +87,7 @@ internal static class DomSlots
 
         public static Result Ok(params string[] slots) => new(slots, new double[slots.Length], null, false);
         public static Result Shifted(string slot, double bias) => new(new[] { slot }, new[] { bias }, null, false);
+        public static Result Shifted(string[] slots, double[] bias) => new(slots, bias, null, false);
         public static Result Group(params string[] slots) => new(slots, new double[slots.Length], null, true);
         public static Result No(string why) => new(Array.Empty<string>(), Array.Empty<double>(), why, false);
         public bool Mapped => Problem == null;
@@ -187,13 +199,24 @@ internal static class DomSlots
             return Result.No($"\"{id}\" emits no {key}, so `{css}` has no slot");
 
         // The scene is in absolute coordinates and CSS is not, so a position carries its containing
-        // block's origin. A size does not: `height` is a length either way.
-        return key switch
+        // block's origin - and everything inside this element has to move with it, because each
+        // descendant's box carries its own absolute position and would otherwise stay put.
+        if (key is "x" or "y")
         {
-            "x" => Result.Shifted(name, box.ParentX),
-            "y" => Result.Shifted(name, box.ParentY),
-            _ => Result.Ok(name),
-        };
+            var vertical = key == "y";
+            var origin = vertical ? box.ParentY : box.ParentX;
+            var slots = new List<string> { name };
+            var bias = new List<double> { origin };
+            foreach (var child in box.Inside)
+            {
+                var childSlot = child.Id + "_" + key;
+                if (!available.Contains(childSlot)) continue;
+                slots.Add(childSlot);
+                bias.Add(origin + (vertical ? child.Dy : child.Dx));
+            }
+            return Result.Shifted(slots.ToArray(), bias.ToArray());
+        }
+        return Result.Ok(name);
     }
 
     /// <summary>

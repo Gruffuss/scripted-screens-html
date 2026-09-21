@@ -405,6 +405,69 @@ argument; `NaN` does not poison `Math.min`. Each is listed with its demonstratio
 
 ---
 
+#### What a six-agent survey found that the mapping had wrong (2026-09-21)
+
+Six agents read the emitter, the slotter, the surface, the layout, the tween path and the
+structural writes; a seventh asked what they had missed. **Three of their findings were things this
+mapping had wrong, and every one would have drawn the wrong thing without saying so.** Recorded in
+full because the remainder is the specification for what is left.
+
+**Fixed, with the evidence:**
+
+| | what it was | what it is |
+|---|---|---|
+| the scene is in **absolute** coordinates (`x = parentPos.x + layout.x`, `VectorEmitter.cs:339`) and CSS is not | `style.top` → `y` | `style.top` → `y` **plus the containing block's origin**. Measured: `legA` is at scene `y=141` with a CSS top of 56, inside a player whose own top is 85 — the raw value would have drawn it 85 units high |
+| **moving an element does not move what is inside it**, because each descendant's box carries its own absolute position | one write, one slot | one write, **a set of slots with arithmetic**: `legA.style.top` writes `legA_y` *and* `bootA_y` |
+| the transform group is **dropped at identity** unless the element has already moved or its CSS declares a transform (`VectorEmitter.cs:1250`) | fine, because the page had already animated | both tests are retrospective and a compile-once page never gets the frame that makes them true. `CanMove`/`CanFade` now also ask whether a script drives the element |
+| two lines can carry the same id — a Label with a background emits `R` then `T` — and `<id>_f` goes to whichever comes first | `color` → `<id>_f` | refused, because that slot is the **box's** fill and the write would repaint the background instead of the text |
+
+**The critic's headline, and it is the right frame: one DOM write is not one slot.** Four ways it
+is not — a parent's move takes its descendants with it; an element with a border emits a second,
+id-less geometry line; the transform anchor is `a=[x+w/2, y+h/2]` so a `w` write leaves a stale
+rotation centre; and a Label with a background loses its text-colour slot to its own box. The rule
+is **(element, property) → a set of (line, key) slots plus the arithmetic relating them**, written
+in one payload.
+
+**Still open, each with its demonstration:**
+
+- **`textContent` is not a plain string.** Seven emitter paths shape it: escapes, `<mspace=0.6em>`
+  around digit runs under `tabular-nums`, `<noparse>` around a purely numeric string, `<u>`/`<s>`,
+  `BreakAll`, and a `<font=..>` span added after the fact. `<span id="score">00000</span>` emits
+  `text="<mspace=0.6em>00000</mspace>"`. Compiled Lua writing the raw string loses digit alignment,
+  or the text vanishes. The shaping has to travel with the slot.
+- **`snap` is missing from the compiled write.** The surface passes `snap: true` on every patch
+  today; the `VDATA:set_props{ scene=.., keep=1, data=.. }` shape has no `snap`, so every value
+  would glide over the tick gap — a visible change on every page at once that reads as a
+  mistranslation of the motion.
+- **`rx` disappears when it clamps to zero.** When every clamped radius falls to <= 0.01 no `rx=`
+  token is emitted at all, so a bar animating up from 0% has no radius slot to come back into and
+  stays square for ever.
+- **A pair slot has no first-come demotion.** The scalar case is handled, but a pair inserts only
+  `X_t_0`/`X_t_1` and never the bare `X_t`, so two named wrapper lines on one element **silently
+  share** them and the last write wins. Only the transform group is named today, which is why this
+  is latent rather than live — but it bounds how many wrappers may ever carry an id.
+- **A button without an author id has an unstable click id.** The synthetic name is
+  `"__" + tag + (++_autoId)` from a process-wide static that is never reset, so it counts every
+  element the process has built rather than the document. A compiled page's Lua handler would stop
+  matching after a restart. Every clickable element a compiled page handles needs an author id, and
+  the compiler should say so.
+- **`color` is inherited**, so the write lands on descendants' `f`, not the element's own line.
+- **`maskImage` is not a slot at all** — the only write changes the number of gradient stops, and
+  `stops=` is literal by construction.
+- **`animation` is slottable after all**, contrary to the note above: an infinite unpaused animation
+  is emitted as `G o="=if(lt(p,..),..,..)"`, and every literal in that expression slots.
+- **The emitted structure depends on which branch the setup code took**, so “decidable at compile
+  time from the stylesheet” is weaker than it reads: an element can get a box only because setup
+  gave it one, and a state setup never reaches has no node to gate.
+
+**A live bug found in passing and fixed**: a label whose text begins with `=` was handed to the
+renderer as an *expression*, so it drew nothing. The numeric guard covered `"3"` and not `"= 5 kPa"`.
+
+**Read the whole critique before the next step** — it is the most useful artefact this work has
+produced, and none of it came from the passing tests.
+
+---
+
 #### Step 3 built: the mapping, and what it turned out to hinge on (2026-09-21)
 
 **Confirmed in game first.** The compiler had been checked exhaustively *outside* the game and none
