@@ -323,12 +323,17 @@ internal static class JsToLuaTests
 
         // The transforms need the wrapper to carry its element's id - a request to the emitter, not
         // a failure. Pinned so the count cannot drift without someone noticing.
-        // Four, not five: the pebbles are moved through a computed id (`$('pb' + i)`), which is a
-        // repeat rather than one element and is counted separately.
-        check(needsGroup.Count == 4,
-            needsGroup.Count == 4
-                ? $"js->lua: 4 transforms need a named group ({string.Join(", ", needsGroup.Select(g => g.Split('.')[0]))})"
-                : $"js->lua: expected 4 transforms needing a named group, got {needsGroup.Count}: {string.Join(", ", needsGroup)}");
+        // Nothing should need a group any more: the emitter names the wrappers of the elements a
+        // script drives, so a transform is an ordinary slot write like any other. This scene was
+        // captured from the game AFTER that change, so a non-zero count here means the emitter
+        // stopped naming them.
+        check(needsGroup.Count == 0, needsGroup.Count == 0
+            ? "js->lua: every transform has a named group in the emitted scene"
+            : $"js->lua: {needsGroup.Count} transform(s) have no named group: {string.Join(", ", needsGroup)}");
+
+        foreach (var want in new[] { "player.style.transform", "ridgeFar.style.transform", "domes.style.transform" })
+            check(mapped.Any(m => m.StartsWith(want + " ", StringComparison.Ordinal)),
+                mapped.FirstOrDefault(m => m.StartsWith(want + " ", StringComparison.Ordinal)) ?? $"js->lua: {want} does not map");
 
         // className is refused BY DESIGN here - it resolves through the stylesheet, not this table.
         var unexpected = refused.Where(r => !r.Contains("className", StringComparison.Ordinal)).ToList();

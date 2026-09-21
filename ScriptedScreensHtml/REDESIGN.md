@@ -405,6 +405,66 @@ argument; `NaN` does not poison `Math.min`. Each is listed with its demonstratio
 
 ---
 
+#### Step 3 built: the mapping, and what it turned out to hinge on (2026-09-21)
+
+**Confirmed in game first.** The compiler had been checked exhaustively *outside* the game and none
+of that said it runs *in* it. `Diagnostics.CompileProbe` compiles each page's script at build time
+and logs the outcome, changing nothing a console shows. Every console:
+
+```
+html compile probe: ".../main/run" compiles - 11708 chars of JavaScript into 14875 chars / 444 lines of Lua, prelude 23182 chars
+html compile probe: ".../main/web" compiles - 58682 chars of JavaScript into 75161 chars / 443 lines of Lua, prelude 23182 chars
+```
+
+Zero failures, zero exceptions. The embedded prelude loads and Acornima parses under Mono.
+
+**`DomWrites` answers what the mapping must serve**, and the answer reorders the work. The compiler
+runs *after* the page's setup code, so a setup-only write is already in the geometry and needs
+nothing. Setup-versus-runtime is **call-graph reachability, not source position** — `draw()` is
+written at the top level and only ever runs from a frame callback.
+
+| page | runtime writes | shape |
+|---|---|---|
+| `07-game` | 22 | **values.** Every `innerHTML` on this page is setup only |
+| `AtmoDark` / `AtmoLight` | **1 each** — `frame.innerHTML` / `panel.innerHTML` | the page rebuilds itself wholesale |
+| `AtmoApple` | 8, two of them `innerHTML` | same |
+| `05-script` | **0** | nothing runs after setup |
+
+So **`07-game` is the page to make work first**, and the Atmo pages are step 6's problem, not step
+3's. That was not obvious before counting.
+
+**`DomSlots` is the mapping**, and the interesting half is not which key but **whether it is safe**.
+A write is a slot write only when changing it cannot move anything else: an element out of flow owns
+its box, while an element in normal flow decides where its siblings go and only the layout engine
+knows that. Both halves report rather than guess.
+
+**The acceptance test spans both halves of the compiler** — every runtime write `07-game` makes,
+against **the scene the emitter really produced**, captured from the running game and checked in
+beside the test. Result: **10 map directly, 4 through a group**, none unmapped. The ten land on
+boxes the emitter already names (`legA_h`, `legA_y`, `score`).
+
+**Two conditions checked against the page's own CSS rather than assumed:**
+
+- `#player div { position: absolute }` puts every element `draw()` moves out of flow, so `top` and
+  `height` map one-to-one onto `y` and `h`.
+- **Every class the page switches changes only slottable things** — `.duck` moves descendants'
+  `left/top/width/height`, `.hurt` and `.flash` change a colour, `.hidden` sets `opacity`. So
+  `player.className = 'duck'` folds into slot writes rather than a rebuild. That is step 3's fourth
+  requirement answered concretely, and it is a fact about the **stylesheet**, not the script.
+
+**The one emitter change, and the reason it is narrow.** A transform lives on a wrapping `G` that
+carries no `id=`, so its numbers get positional names nothing outside can address. The obvious fix
+— name every wrapper — was **rejected after reading the renderer**: `SceneModel.cs:663` registers an
+identified node in `scene.Identified` and retains its whole prop array, so that would retain hundreds
+per page, which is the cost this redesign exists to remove. Instead the surface asks `DomWrites`
+which elements the script actually drives and the emitter names only those — four on the game page.
+
+**Still open for `07-game`:** the computed-id families (`$('pb' + i)` over fourteen pebbles, `o.el`
+over a four-slot obstacle pool). Both are repeats, which the format already has, and the plan's step
+3 requirements 2 and 3 describe them; neither is mapped yet.
+
+---
+
 #### What the DOM-write mapping actually has to cover, counted (2026-09-21)
 
 Measured across every page in the repository before designing it, because the size of the problem

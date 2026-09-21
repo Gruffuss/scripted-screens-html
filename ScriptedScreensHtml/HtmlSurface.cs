@@ -458,6 +458,36 @@ internal sealed class HtmlSurface : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Marks the elements whose wrapping transform group has to carry its id, so a compiled page
+    /// can address their translate, rotation and scale by name. Only the ones a script really
+    /// drives, and only those it drives <b>after</b> the page has loaded - a transform written once
+    /// during setup is already in the geometry by the time anything is emitted.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not "name every wrapper". The renderer registers an identified node in
+    /// <c>scene.Identified</c> and keeps its whole prop array, so that would retain hundreds per
+    /// page - which is the cost this whole redesign exists to remove.
+    /// </remarks>
+    private static void NameDrivenGroups(HtmlRenderer.Result built)
+    {
+        built.NamedGroups.Clear();
+        if (string.IsNullOrWhiteSpace(built.Script)) return;
+        try
+        {
+            var (writes, _) = DomWrites.Of(built.Script);
+            foreach (var w in writes)
+                if (w.Runtime && w.Id != null
+                    && (w.Property is "style.transform" or "style.opacity" or "className"))
+                    built.NamedGroups.Add(w.Id);
+        }
+        catch (System.Exception ex)
+        {
+            // A page whose script cannot be analysed still runs; it just gets no named groups.
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: could not read the script's writes: {ex.Message}");
+        }
+    }
+
     private void BuildInner()
     {
         {
@@ -481,6 +511,12 @@ internal sealed class HtmlSurface : MonoBehaviour
         _script?.Dispose();
         _script = null;
         if (HtmlConfig.Diagnostics) ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: page built, script {built.Script.Length} chars, {built.ById.Count} elements");
+        // Which elements the script drives with a transform or an opacity, so the emitter names
+        // their wrapping groups and those numbers become addressable slots. Everything else an
+        // element's box already carries its id for. Cheap: one AST walk per build, and the set is
+        // the handful a page really animates - four on the game page.
+        NameDrivenGroups(built);
+
         // Reports only. The page still runs on the interpreter below; this says whether the compiler
         // that will replace it can handle this page, on this machine, under Mono.
         CompileProbe.Run(PageKey, built.Script);

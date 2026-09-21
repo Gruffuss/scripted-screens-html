@@ -439,7 +439,21 @@ internal static class VectorEmitter
         // offset-path + offset-distance + offset-rotate: the box moved to its point on the path and turned along it
         var offset = css.TryGetValue("offset-path", out var opath) ? Offset(css, opath, ve, x, y, w, h, tw) : null;
         var xform = Xform.From(ctx, depth, ve, tw, x, y, w, h, offset);
-        if (xform != null) { ctx.Body.Append(indent); xform.AppendTo(ctx.Body); ctx.Body.Append(" {\n"); groups++; }
+        if (xform != null)
+        {
+            ctx.Body.Append(indent);
+            xform.AppendTo(ctx.Body);
+            // The wrapper carries its element's id when a script drives it, so its translate,
+            // rotation and scale become named slots ($name_t_0 and so on) rather than positional
+            // ones nothing outside can address. Only those few: an identified node makes the
+            // renderer keep its whole prop array, so naming every wrapper would retain hundreds per
+            // page. The id alone, never `click=1` - a button's hit region belongs on its box, and
+            // two of them would fire twice for one press.
+            if (ve.name is { Length: > 0 } named && ctx.Built.NamedGroups.Contains(named))
+                ctx.Body.Append(" id=").Append(named);
+            ctx.Body.Append(" {\n");
+            groups++;
+        }
         if (css.TryGetValue("transform", out var tcss) && StyleApplier.NeedsMatrix(tcss) && Matrix(tcss, css, x, y, w, h) is { } m)
         {
             // skew(), matrix(), 3D: the whole list composed into one matrix about the origin (vector requirement 13)

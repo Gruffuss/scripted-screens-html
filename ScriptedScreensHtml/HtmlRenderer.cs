@@ -50,6 +50,13 @@ internal static class HtmlRenderer
         public float ViewportWidth;
         /// <summary>Stylesheet rules and the node each element came from, for className changes at runtime.</summary>
         public List<CssRule> Rules = new();
+        /// <summary>
+        /// Element ids whose wrapping transform group must carry its id, so the numbers on it are
+        /// addressable slots rather than positional ones nothing outside can name. Only the few a
+        /// page's script actually drives: the renderer retains an identified node's whole prop
+        /// array, so naming every wrapper would retain hundreds per page. Filled from DomWrites.
+        /// </summary>
+        public readonly HashSet<string> NamedGroups = new(StringComparer.Ordinal);
         /// <summary>&lt;base href&gt;: relative urls in the page resolve against it.</summary>
         public string? BaseUrl;
         /// <summary>@starting-style rules: the state a newly shown element transitions from.</summary>

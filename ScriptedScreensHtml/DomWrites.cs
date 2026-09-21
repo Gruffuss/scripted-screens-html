@@ -119,7 +119,7 @@ internal sealed class DomWrites
         }
     }
 
-    private bool IsLookup(CallExpression call) =>
+    private static bool IsLookup(CallExpression call) =>
         call.Callee is MemberExpression { Computed: false, Property: Identifier { Name: "getElementById" } };
 
     /// <summary>The element id a call resolves to, when it is a literal.</summary>
@@ -175,12 +175,12 @@ internal sealed class DomWrites
         }
     }
 
-    private bool IsSchedulerCall(CallExpression call) =>
+    private static bool IsSchedulerCall(CallExpression call) =>
         (call.Callee is Identifier i && Schedulers.Contains(i.Name))
         || (call.Callee is MemberExpression { Computed: false, Property: Identifier m } && Schedulers.Contains(m.Name));
 
     /// <summary>The name of a named function handed to a scheduler.</summary>
-    private string? Scheduled(CallExpression call)
+    private static string? Scheduled(CallExpression call)
     {
         if (!IsSchedulerCall(call)) return null;
         foreach (var arg in call.Arguments)
