@@ -53,6 +53,12 @@ internal sealed class DomWrites
         public bool Runtime;
         /// <summary>Line in the script, for a report the author can act on.</summary>
         public int Line;
+        /// <summary>
+        /// For a className write: every class string the script can assign here, when they are all
+        /// literals. A class name is a state, not a value, so the compiler lays the page out in each
+        /// and emits what each draws. Null when the script computes one, which cannot be enumerated.
+        /// </summary>
+        public List<string>? Classes;
 
         public override string ToString() =>
             (Id ?? "<" + Computed + ">") + "." + Property + (Runtime ? " (runtime)" : " (setup)");
@@ -85,6 +91,15 @@ internal sealed class DomWrites
     /// so. Keyed by the getter's name, since that is all a write site gives.
     /// </summary>
     private readonly Dictionary<string, string> _handles = new(StringComparer.Ordinal);
+    /// <summary>
+    /// What a `const` was initialised to. A page almost always builds a class name in a local first -
+    /// `const cls = (duck ? 'duck' : '') + (over ? ' hurt' : '')` and then `el.className = cls.trim()` -
+    /// so stopping at the name would miss every state that write can reach. Only `const`: anything
+    /// reassigned later is not the single value this pretends it is.
+    /// </summary>
+    private readonly Dictionary<string, List<Expression>> _constants = new(StringComparer.Ordinal);
+    /// <summary>Guards against a name defined in terms of itself while enumerating what it can hold.</summary>
+    private readonly HashSet<string> _resolving = new(StringComparer.Ordinal);
 
     private sealed class FunctionInfo
     {
@@ -132,6 +147,66 @@ internal sealed class DomWrites
             if (init is CallExpression direct && Target(direct) is { } id) _aliases[name.Name] = id;
         }
         Handles(root);
+
+        // Every expression a name can ever hold: its initialiser, anything later assigned to it, and
+        // - when it is a parameter - every argument passed at a call site. The union over-approximates,
+        // which is the safe direction: an extra state costs a little compile time, a missing one
+        // costs a class the page can reach and the compiler cannot draw.
+        //
+        // Function bodies included, because the class a page assigns is almost always built in a
+        // local inside draw(), and All() deliberately stops at a function boundary.
+        foreach (var n in Everything(root))
+        {
+            switch (n)
+            {
+                case VariableDeclaration vd:
+                    foreach (var d in vd.Declarations)
+                        if (d.Id is Identifier vn && d.Init != null) Holds(vn.Name, d.Init);
+                    break;
+
+                case AssignmentExpression { Operator: Operator.Assignment, Left: Identifier an } assign:
+                    Holds(an.Name, assign.Right);
+                    break;
+
+                // a parameter holds whatever its callers pass
+                case FunctionDeclaration { Id: { } fid } fn:
+                    Parameters(fid.Name, fn.Params, root);
+                    break;
+            }
+        }
+    }
+
+    private void Holds(string name, Expression value)
+    {
+        if (!_constants.TryGetValue(name, out var list)) _constants[name] = list = new List<Expression>();
+        if (list.Count < 16) list.Add(value);   // a name with more than sixteen sources is not a state
+    }
+
+    /// <summary>Binds each parameter to every argument any caller passes it.</summary>
+    private void Parameters(string function, in NodeList<Node> parameters, Node root)
+    {
+        var names = new List<string?>();
+        foreach (var p in parameters) names.Add(p is Identifier id ? id.Name : null);
+        if (names.Count == 0) return;
+
+        foreach (var n in Everything(root))
+        {
+            if (n is not CallExpression { Callee: Identifier callee } call || callee.Name != function) continue;
+            for (var i = 0; i < names.Count && i < call.Arguments.Count; i++)
+                if (names[i] is { } param && call.Arguments[i] is Expression arg)
+                    Holds(param, arg);
+        }
+    }
+
+    /// <summary>Every node below this one, through function boundaries as well.</summary>
+    private static IEnumerable<Node> Everything(Node n)
+    {
+        yield return n;
+        foreach (var kid in n.ChildNodes)
+        {
+            if (kid == null) continue;
+            foreach (var deep in Everything(kid)) yield return deep;
+        }
     }
 
     /// <summary>
@@ -260,7 +335,14 @@ internal sealed class DomWrites
 
         // el.textContent = ...
         if (ElementProperties.Contains(prop.Name))
-            return Make(target.Object, prop.Name, assign);
+        {
+            var write = Make(target.Object, prop.Name, assign);
+            // A className write is a state. Collect the strings it can take, so the compiler can lay
+            // the page out in each; one computed value and the set is not enumerable, which is a
+            // different answer and has to stay distinguishable from "no classes".
+            if (write != null && prop.Name == "className") write.Classes = Literals(assign.Right);
+            return write;
+        }
 
         return null;
     }
@@ -308,6 +390,83 @@ internal sealed class DomWrites
         NonLogicalBinaryExpression { Operator: Operator.Addition } b => Head(b.Left),
         _ => null,
     };
+
+    /// <summary>
+    /// Every string an expression can evaluate to, when that is a finite set of literals. A page
+    /// writes `duckNow ? 'duck' : ''` or `(duck ? 'duck' : '') + (over ? ' hurt' : '')`, and both are
+    /// enumerable; anything else returns null rather than a guess.
+    /// </summary>
+    private List<string>? Literals(Expression e)
+    {
+        switch (e)
+        {
+            case Identifier name when _constants.TryGetValue(name.Name, out var sources):
+                {
+                    if (!_resolving.Add(name.Name)) return null;   // defined in terms of itself
+                    try
+                    {
+                        var all = new List<string>();
+                        foreach (var source in sources)
+                        {
+                            var some = Literals(source);
+                            if (some == null) return null;          // one unknowable source, and the set is not a set
+                            all.AddRange(some);
+                        }
+                        return all.Count == 0 ? null : all;
+                    }
+                    finally { _resolving.Remove(name.Name); }
+                }
+
+            case StringLiteral s:
+                return new List<string> { s.Value };
+
+            case ConditionalExpression c:
+                {
+                    var yes = Literals(c.Consequent);
+                    var no = Literals(c.Alternate);
+                    if (yes == null || no == null) return null;
+                    yes.AddRange(no);
+                    return yes;
+                }
+
+            // `a + b` where both sides are enumerable: every combination, which is how a page builds
+            // "duck hurt" out of two independent flags
+            case NonLogicalBinaryExpression { Operator: Operator.Addition } b:
+                {
+                    var left = Literals(b.Left);
+                    var right = Literals(b.Right);
+                    if (left == null || right == null) return null;
+                    if (left.Count * right.Count > 32) return null;   // a combinatorial blow-up is not a state set
+                    var all = new List<string>();
+                    foreach (var l in left)
+                        foreach (var r in right)
+                            all.Add(l + r);
+                    return all;
+                }
+
+            // `cls.trim()` and the like: the shape survives, so look through it
+            case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "trim" } } m }:
+                {
+                    var inner = Literals(m.Object);
+                    if (inner == null) return null;
+                    var trimmed = new List<string>();
+                    foreach (var v in inner) trimmed.Add(v.Trim());
+                    return trimmed;
+                }
+
+            case LogicalExpression { Operator: Operator.LogicalOr } l:
+                {
+                    var left = Literals(l.Left);
+                    var right = Literals(l.Right);
+                    if (left == null || right == null) return null;
+                    left.AddRange(right);
+                    return left;
+                }
+
+            default:
+                return null;
+        }
+    }
 
     /// <summary>A short, recognisable rendering of an expression for a report.</summary>
     private static string Source(Node n) => n switch

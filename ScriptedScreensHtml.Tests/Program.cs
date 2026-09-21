@@ -385,6 +385,7 @@ if (args.Length > 0 && args[0] == "--probe2") { Probe2.Run(); return 0; }
 if (args.Length > 0 && args[0] == "--probe3") { Probe3.Run(); return 0; }
 Console.WriteLine("JsToLua");
 ScriptedScreensHtml.Tests.JsToLuaTests.Run(Check);
+ScriptedScreensHtml.Tests.CompiledPageTests.Run(Check);
 
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");
 return failures.Count == 0 ? 0 : 1;

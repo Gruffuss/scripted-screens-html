@@ -1,283 +1,298 @@
-SCENE w=800 h=1241.49 fit=stretch
+SCENE w=800 h=390.08 fit=stretch
 DEFS {
   GL id=grad2_1 units=bbox x1=0.5 y1=-0 x2=0.5 y2=1 stops=[[0,#0B1020],[1,#1D1630]]
-  CP id=clip2_2 { R x=0 y=0 w=800 h=1241 }
-  CP id=clip12_1 { R x=0 y=85 w=800 h=961 }
+  CP id=clip2_2 { R x=0 y=0 w=800 h=390 }
+  CP id=clip12_1 { R x=0 y=49 w=800 h=269 }
   GL id=grad54_1 units=bbox x1=0 y1=0 x2=1 y2=1 stops=[[0,#7FB2D9],[1,#2D4F7A]]
   GL id=grad95_1 units=bbox x1=0.5 y1=-0 x2=0.5 y2=1 stops=[[0,#B8583A],[1,#7C3624]]
   GL id=grad113_1 units=bbox x1=-0 y1=0.5 x2=1 y2=0.5 stops=[[0,#D8DDE3],[1,#8A949F]]
   GL id=grad121_1 units=bbox x1=-0 y1=0.5 x2=1 y2=0.5 stops=[[0,#D8DDE3],[1,#8A949F]]
   GL id=grad125_1 units=bbox x1=-0 y1=0.5 x2=1 y2=0.5 stops=[[0,#D8DDE3],[1,#8A949F]]
 }
-R x=0 y=0 w=800 h=1241 f=#05070D id=body
-R x=0 y=0 w=800 h=1241 f=@grad2_1 id=app
+R x=0 y=0 w=800 h=390 f=#05070D id=body
+R x=0 y=0 w=800 h=390 f=@grad2_1 id=app
 G clip=clip2_2 {
-  T x=32 y=22 w=336.05 h=41 text="STATIONEER <color=#F0A020FF>RUN</color>" size=34 f=#F3E9DC font="Barlow Condensed Bold" cspace=8 valign=middle
-  T x=528 y=38 w=28.25 h=23 text="HI" size=18 f=#A89C8F font="Barlow Condensed" cspace=12 valign=middle
-  T x=550 y=24 w=99.8 h=36 text="<mspace=0.44em>00000</mspace>" size=30 f=#F3E9DC font="Barlow Condensed" valign=middle id=hi
-  T x=645 y=38 w=74.15 h=23 text="SCORE" size=18 f=#A89C8F font="Barlow Condensed" cspace=12 valign=middle
-  T x=701 y=24 w=98.45 h=36 text="<mspace=0.44em>00474</mspace>" size=30 f=#F3E9DC font="Barlow Condensed" valign=middle id=score
+  T x=24 y=10 w=253.7 h=29 text="STATIONEER <color=#F0A020FF>RUN</color>" size=24 f=#F3E9DC font="Barlow Condensed Bold" cspace=8 valign=middle
+  T x=599 y=20 w=24.2 h=18 text="HI" size=14 f=#A89C8F font="Barlow Condensed" cspace=12 valign=middle
+  T x=615 y=11 w=75.5 h=27 text="<mspace=0.44em>00000</mspace>" size=22 f=#F3E9DC font="Barlow Condensed" valign=middle id=hi
+  T x=683 y=20 w=63.35 h=18 text="SCORE" size=14 f=#A89C8F font="Barlow Condensed" cspace=12 valign=middle
+  G a=[751.5,24.5] t=[0,0] r=0 s=[1,1] id=score {
+  G o=1 {
+  T x=727 y=11 w=74.15 h=27 text="<mspace=0.44em>00671</mspace>" size=22 f=#F3E9DC font="Barlow Condensed" valign=middle id=score
+  }
+  }
   G clip=clip12_1 {
     G o=0.3 {
-    R x=0 y=85 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=0 y=49 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.5 {
-    R x=197 y=168 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=197 y=132 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.7 {
-    R x=394 y=251 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=394 y=215 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.9 {
-    R x=591 y=334 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=591 y=123 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.4 {
-    R x=788 y=417 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=788 y=206 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.6 {
-    R x=185 y=500 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=185 y=114 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.8 {
-    R x=382 y=583 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=382 y=197 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.3 {
-    R x=579 y=666 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=579 y=105 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.5 {
-    R x=776 y=749 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=776 y=188 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.7 {
-    R x=173 y=832 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=173 y=96 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.9 {
-    R x=370 y=915 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=370 y=179 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.4 {
-    R x=567 y=157 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=567 y=87 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.6 {
-    R x=764 y=240 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=764 y=170 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.8 {
-    R x=161 y=323 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=161 y=78 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.3 {
-    R x=358 y=406 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=358 y=161 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.5 {
-    R x=555 y=489 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=555 y=69 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.7 {
-    R x=752 y=572 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=752 y=152 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.9 {
-    R x=149 y=655 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=149 y=60 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.4 {
-    R x=346 y=738 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=346 y=143 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.6 {
-    R x=543 y=821 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=543 y=51 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.8 {
-    R x=740 y=904 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=740 y=134 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.3 {
-    R x=137 y=146 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=137 y=217 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.5 {
-    R x=334 y=229 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=334 y=125 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.7 {
-    R x=531 y=312 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=531 y=208 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.9 {
-    R x=728 y=395 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=728 y=116 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.4 {
-    R x=125 y=478 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=125 y=199 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.6 {
-    R x=322 y=561 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=322 y=107 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.8 {
-    R x=519 y=644 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=519 y=190 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.3 {
-    R x=716 y=727 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=716 y=98 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.5 {
-    R x=113 y=810 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=113 y=181 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.7 {
-    R x=310 y=893 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=310 y=89 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.9 {
-    R x=507 y=135 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=507 y=172 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.4 {
-    R x=704 y=218 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=704 y=80 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.6 {
-    R x=101 y=301 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=101 y=163 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.8 {
-    R x=298 y=384 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=298 y=71 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.3 {
-    R x=495 y=467 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=495 y=154 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.5 {
-    R x=692 y=550 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=692 y=62 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.7 {
-    R x=89 y=633 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=89 y=145 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.9 {
-    R x=286 y=716 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=286 y=53 w=3 h=3 rx=1.5 f=#FFFFFF
     }
     G o=0.4 {
-    R x=483 y=799 w=3 h=3 rx=1.5 f=#FFFFFF
+    R x=483 y=136 w=3 h=3 rx=1.5 f=#FFFFFF
     }
-    R x=560 y=115 w=120 h=120 rx=60 sh=[[0,0,30,0,#000000]] f=@grad54_1 id=planet
-    G a=[620,176] t=[0,0] r=-12 s=[1,1] {
-    R x=531.5 y=170.5 w=177 h=11 rx=5.5 f=none s=#DCC8A08C sw=3
+    R x=560 y=79 w=120 h=120 rx=60 sh=[[0,0,30,0,#000000]] f=@grad54_1 id=planet
+    G a=[620,140] t=[0,0] r=-12 s=[1,1] {
+    R x=531.5 y=134.5 w=177 h=11 rx=5.5 f=none s=#DCC8A08C sw=3
     }
-    G a=[0,85] t=[-391.9,0] r=0 s=[1,1] id=ridgeFar {
-      R x=0 y=896 w=220 h=70 rx=[60,60,0,0] f=#2A1D33
-      R x=800 y=896 w=220 h=70 rx=[60,60,0,0] f=#2A1D33
-      R x=100 y=854 w=220 h=112 rx=[60,60,0,0] f=#2A1D33
-      R x=900 y=854 w=220 h=112 rx=[60,60,0,0] f=#2A1D33
-      R x=200 y=882 w=220 h=84 rx=[60,60,0,0] f=#2A1D33
-      R x=1000 y=882 w=220 h=84 rx=[60,60,0,0] f=#2A1D33
-      R x=300 y=840 w=220 h=126 rx=[60,60,0,0] f=#2A1D33
-      R x=1100 y=840 w=220 h=126 rx=[60,60,0,0] f=#2A1D33
-      R x=400 y=868 w=220 h=98 rx=[60,60,0,0] f=#2A1D33
-      R x=1200 y=868 w=220 h=98 rx=[60,60,0,0] f=#2A1D33
-      R x=500 y=896 w=220 h=70 rx=[60,60,0,0] f=#2A1D33
-      R x=1300 y=896 w=220 h=70 rx=[60,60,0,0] f=#2A1D33
-      R x=600 y=854 w=220 h=112 rx=[60,60,0,0] f=#2A1D33
-      R x=1400 y=854 w=220 h=112 rx=[60,60,0,0] f=#2A1D33
-      R x=700 y=882 w=220 h=84 rx=[60,60,0,0] f=#2A1D33
-      R x=1500 y=882 w=220 h=84 rx=[60,60,0,0] f=#2A1D33
+    G a=[0,49] t=[-43,0] r=0 s=[1,1] id=ridgeFar {
+    G o=1 {
+        R x=0 y=228 w=220 h=36 rx=[36,36,0,0] f=#2A1D33
+        R x=800 y=228 w=220 h=36 rx=[36,36,0,0] f=#2A1D33
+        R x=100 y=186 w=220 h=78 rx=[60,60,0,0] f=#2A1D33
+        R x=900 y=186 w=220 h=78 rx=[60,60,0,0] f=#2A1D33
+        R x=200 y=214 w=220 h=50 rx=[50,50,0,0] f=#2A1D33
+        R x=1000 y=214 w=220 h=50 rx=[50,50,0,0] f=#2A1D33
+        R x=300 y=172 w=220 h=92 rx=[60,60,0,0] f=#2A1D33
+        R x=1100 y=172 w=220 h=92 rx=[60,60,0,0] f=#2A1D33
+        R x=400 y=200 w=220 h=64 rx=[60,60,0,0] f=#2A1D33
+        R x=1200 y=200 w=220 h=64 rx=[60,60,0,0] f=#2A1D33
+        R x=500 y=228 w=220 h=36 rx=[36,36,0,0] f=#2A1D33
+        R x=1300 y=228 w=220 h=36 rx=[36,36,0,0] f=#2A1D33
+        R x=600 y=186 w=220 h=78 rx=[60,60,0,0] f=#2A1D33
+        R x=1400 y=186 w=220 h=78 rx=[60,60,0,0] f=#2A1D33
+        R x=700 y=214 w=220 h=50 rx=[50,50,0,0] f=#2A1D33
+        R x=1500 y=214 w=220 h=50 rx=[50,50,0,0] f=#2A1D33
     }
-    G a=[0,85] t=[-381.1,0] r=0 s=[1,1] id=ridgeNear {
-      R x=0 y=926 w=260 h=40 rx=[40,40,0,0] f=#3B2233
-      R x=800 y=926 w=260 h=40 rx=[40,40,0,0] f=#3B2233
-      R x=133 y=898 w=300 h=68 rx=[60,60,0,0] f=#3B2233
-      R x=933 y=898 w=300 h=68 rx=[60,60,0,0] f=#3B2233
-      R x=267 y=870 w=340 h=96 rx=[60,60,0,0] f=#3B2233
-      R x=1067 y=870 w=340 h=96 rx=[60,60,0,0] f=#3B2233
-      R x=400 y=912 w=260 h=54 rx=[54,54,0,0] f=#3B2233
-      R x=1200 y=912 w=260 h=54 rx=[54,54,0,0] f=#3B2233
-      R x=533 y=884 w=300 h=82 rx=[60,60,0,0] f=#3B2233
-      R x=1333 y=884 w=300 h=82 rx=[60,60,0,0] f=#3B2233
-      R x=667 y=926 w=340 h=40 rx=[40,40,0,0] f=#3B2233
-      R x=1467 y=926 w=340 h=40 rx=[40,40,0,0] f=#3B2233
     }
-    G a=[400,85] t=[-773,0] r=0 s=[1,1] id=domes {
-      R x=300 y=903 w=90 h=45 rx=[45,45,0,0] f=#4FD1E840
-      P d="M 313.89 916.89 A 44 44 0 0 1 345 904 L 345 904 A 44 44 0 0 1 376.11 916.89" f=none s=#4FD1E899 sw=2 cap=butt
-      P d="M 376.11 916.89 A 44 44 0 0 1 389 948 L 389 947" f=none s=#4FD1E899 sw=2 cap=butt
-      P d="M 301 947 L 301 948 A 44 44 0 0 1 313.89 916.89" f=none s=#4FD1E899 sw=2 cap=butt
-      R x=290 y=948 w=110 h=18 f=#4A3140
-      R x=342 y=900 w=6 h=6 rx=3 f=#FF4D3D
-      R x=1100 y=903 w=90 h=45 rx=[45,45,0,0] f=#4FD1E840
-      P d="M 1113.89 916.89 A 44 44 0 0 1 1145 904 L 1145 904 A 44 44 0 0 1 1176.11 916.89" f=none s=#4FD1E899 sw=2 cap=butt
-      P d="M 1176.11 916.89 A 44 44 0 0 1 1189 948 L 1189 947" f=none s=#4FD1E899 sw=2 cap=butt
-      P d="M 1101 947 L 1101 948 A 44 44 0 0 1 1113.89 916.89" f=none s=#4FD1E899 sw=2 cap=butt
-      R x=1090 y=948 w=110 h=18 f=#4A3140
-      R x=1142 y=900 w=6 h=6 rx=3 f=#FF4D3D
+    G a=[0,49] t=[-100.3,0] r=0 s=[1,1] id=ridgeNear {
+    G o=1 {
+        R x=0 y=243 w=260 h=21 rx=[21,21,0,0] f=#3B2233
+        R x=800 y=243 w=260 h=21 rx=[21,21,0,0] f=#3B2233
+        R x=133 y=215 w=300 h=49 rx=[49,49,0,0] f=#3B2233
+        R x=933 y=215 w=300 h=49 rx=[49,49,0,0] f=#3B2233
+        R x=267 y=187 w=340 h=77 rx=[60,60,0,0] f=#3B2233
+        R x=1067 y=187 w=340 h=77 rx=[60,60,0,0] f=#3B2233
+        R x=400 y=229 w=260 h=35 rx=[35,35,0,0] f=#3B2233
+        R x=1200 y=229 w=260 h=35 rx=[35,35,0,0] f=#3B2233
+        R x=533 y=201 w=300 h=63 rx=[60,60,0,0] f=#3B2233
+        R x=1333 y=201 w=300 h=63 rx=[60,60,0,0] f=#3B2233
+        R x=667 y=243 w=340 h=21 rx=[21,21,0,0] f=#3B2233
+        R x=1467 y=243 w=340 h=21 rx=[21,21,0,0] f=#3B2233
     }
-    R x=0 y=966 w=800 h=80 f=@grad95_1 id=groundLine
-    R x=0 y=966 w=800 h=3 f=#E07A52
-    G a=[4,980] t=[45.1,0] r=0 s=[1,1] {
-    R x=0 y=978 w=8 h=4 rx=2 f=#8E422C id=pb0
     }
-    G a=[7.5,993] t=[102.1,0] r=0 s=[1,1] {
-    R x=0 y=991 w=15 h=4 rx=2 f=#8E422C id=pb1
+    G a=[400,49] t=[-143.3,0] r=0 s=[1,1] id=domes {
+    G o=1 {
+        R x=300 y=201 w=90 h=45 rx=[45,45,0,0] f=#4FD1E840
+        P d="M 313.89 214.89 A 44 44 0 0 1 345 202 L 345 202 A 44 44 0 0 1 376.11 214.89" f=none s=#4FD1E899 sw=2 cap=butt
+        P d="M 376.11 214.89 A 44 44 0 0 1 389 246 L 389 245" f=none s=#4FD1E899 sw=2 cap=butt
+        P d="M 301 245 L 301 246 A 44 44 0 0 1 313.89 214.89" f=none s=#4FD1E899 sw=2 cap=butt
+        R x=290 y=246 w=110 h=18 f=#4A3140
+        R x=342 y=198 w=6 h=6 rx=3 f=#FF4D3D
+        R x=1100 y=201 w=90 h=45 rx=[45,45,0,0] f=#4FD1E840
+        P d="M 1113.89 214.89 A 44 44 0 0 1 1145 202 L 1145 202 A 44 44 0 0 1 1176.11 214.89" f=none s=#4FD1E899 sw=2 cap=butt
+        P d="M 1176.11 214.89 A 44 44 0 0 1 1189 246 L 1189 245" f=none s=#4FD1E899 sw=2 cap=butt
+        P d="M 1101 245 L 1101 246 A 44 44 0 0 1 1113.89 214.89" f=none s=#4FD1E899 sw=2 cap=butt
+        R x=1090 y=246 w=110 h=18 f=#4A3140
+        R x=1142 y=198 w=6 h=6 rx=3 f=#FF4D3D
     }
-    G a=[11,1006] t=[159.1,0] r=0 s=[1,1] {
-    R x=0 y=1004 w=22 h=4 rx=2 f=#8E422C id=pb2
     }
-    G a=[4.5,1019] t=[216.1,0] r=0 s=[1,1] {
-    R x=0 y=1017 w=9 h=4 rx=2 f=#8E422C id=pb3
+    R x=0 y=264 w=800 h=54 f=@grad95_1 id=groundLine
+    R x=0 y=264 w=800 h=3 f=#E07A52
+    G a=[4,278] t=[504.4,0] r=0 s=[1,1] {
+    R x=0 y=276 w=8 h=4 rx=2 f=#8E422C id=pb0
     }
-    G a=[8,1032] t=[273.1,0] r=0 s=[1,1] {
-    R x=0 y=1030 w=16 h=4 rx=2 f=#8E422C id=pb4
+    G a=[7.5,291] t=[561.4,0] r=0 s=[1,1] {
+    R x=0 y=289 w=15 h=4 rx=2 f=#8E422C id=pb1
     }
-    G a=[11.5,983] t=[330.1,0] r=0 s=[1,1] {
-    R x=0 y=981 w=23 h=4 rx=2 f=#8E422C id=pb5
+    G a=[11,304] t=[618.4,0] r=0 s=[1,1] {
+    R x=0 y=302 w=22 h=4 rx=2 f=#8E422C id=pb2
     }
-    G a=[5,996] t=[387.1,0] r=0 s=[1,1] {
-    R x=0 y=994 w=10 h=4 rx=2 f=#8E422C id=pb6
+    G a=[4.5,281] t=[675.4,0] r=0 s=[1,1] {
+    R x=0 y=279 w=9 h=4 rx=2 f=#8E422C id=pb3
     }
-    G a=[8.5,1009] t=[444.1,0] r=0 s=[1,1] {
-    R x=0 y=1007 w=17 h=4 rx=2 f=#8E422C id=pb7
+    G a=[8,294] t=[732.4,0] r=0 s=[1,1] {
+    R x=0 y=292 w=16 h=4 rx=2 f=#8E422C id=pb4
     }
-    G a=[12,1022] t=[501.1,0] r=0 s=[1,1] {
-    R x=0 y=1020 w=24 h=4 rx=2 f=#8E422C id=pb8
+    G a=[11.5,307] t=[-10.6,0] r=0 s=[1,1] {
+    R x=0 y=305 w=23 h=4 rx=2 f=#8E422C id=pb5
     }
-    G a=[5.5,1035] t=[558.1,0] r=0 s=[1,1] {
-    R x=0 y=1033 w=11 h=4 rx=2 f=#8E422C id=pb9
+    G a=[5,284] t=[46.4,0] r=0 s=[1,1] {
+    R x=0 y=282 w=10 h=4 rx=2 f=#8E422C id=pb6
     }
-    G a=[9,986] t=[615.1,0] r=0 s=[1,1] {
-    R x=0 y=984 w=18 h=4 rx=2 f=#8E422C id=pb10
+    G a=[8.5,297] t=[103.4,0] r=0 s=[1,1] {
+    R x=0 y=295 w=17 h=4 rx=2 f=#8E422C id=pb7
     }
-    G a=[12.5,999] t=[672.1,0] r=0 s=[1,1] {
-    R x=0 y=997 w=25 h=4 rx=2 f=#8E422C id=pb11
+    G a=[12,310] t=[160.4,0] r=0 s=[1,1] {
+    R x=0 y=308 w=24 h=4 rx=2 f=#8E422C id=pb8
     }
-    G a=[6,1012] t=[729.1,0] r=0 s=[1,1] {
-    R x=0 y=1010 w=12 h=4 rx=2 f=#8E422C id=pb12
+    G a=[5.5,287] t=[217.4,0] r=0 s=[1,1] {
+    R x=0 y=285 w=11 h=4 rx=2 f=#8E422C id=pb9
     }
-    G a=[9.5,1025] t=[-13.9,0] r=0 s=[1,1] {
-    R x=0 y=1023 w=19 h=4 rx=2 f=#8E422C id=pb13
+    G a=[9,300] t=[274.4,0] r=0 s=[1,1] {
+    R x=0 y=298 w=18 h=4 rx=2 f=#8E422C id=pb10
     }
-    G a=[0,85] t=[153,821] r=0 s=[1,1] {
-      R x=0 y=93 w=26 h=52 rx=6 f=@grad113_1
-      R x=7 y=85 w=12 h=10 rx=[3,3,0,0] f=#5D6670
-      R x=0 y=109 w=26 h=8 f=#3DA35A
+    G a=[12.5,313] t=[331.4,0] r=0 s=[1,1] {
+    R x=0 y=311 w=25 h=4 rx=2 f=#8E422C id=pb11
     }
-    G a=[0,85] t=[811.3,841] r=0 s=[1,1] {
-      R x=0 y=85 w=44 h=40 rx=3 f=#7A8591
-      R x=1.5 y=86.5 w=41 h=37 rx=1.5 f=none s=#4B545E sw=3
-      R x=6 y=101 w=32 h=6 f=#F0A020
-      R x=18 y=89 w=8 h=8 rx=4 f=#D9DEE4
+    G a=[6,290] t=[388.4,0] r=0 s=[1,1] {
+    R x=0 y=288 w=12 h=4 rx=2 f=#8E422C id=pb12
     }
-    G a=[0,85] t=[-200,0] r=0 s=[1,1] {
-      R x=0 y=93 w=26 h=52 rx=6 f=@grad121_1
-      R x=7 y=85 w=12 h=10 rx=[3,3,0,0] f=#5D6670
-      R x=0 y=109 w=26 h=8 f=#3DA35A
+    G a=[9.5,303] t=[445.4,0] r=0 s=[1,1] {
+    R x=0 y=301 w=19 h=4 rx=2 f=#8E422C id=pb13
     }
-    G a=[0,85] t=[-200,0] r=0 s=[1,1] {
-      R x=0 y=93 w=26 h=52 rx=6 f=@grad125_1
-      R x=7 y=85 w=12 h=10 rx=[3,3,0,0] f=#5D6670
-      R x=0 y=109 w=26 h=8 f=#3DA35A
+    G a=[400,49] t=[0,0] r=0 s=[1,1] id=obstacles {
+    G o=1 {
+        G a=[0,49] t=[-46.3,155] r=0 s=[1,1] {
+          R x=0 y=57 w=26 h=52 rx=6 f=@grad113_1
+          R x=7 y=49 w=12 h=10 rx=[3,3,0,0] f=#5D6670
+          R x=0 y=73 w=26 h=8 f=#3DA35A
+        }
+        G a=[0,49] t=[808.7,178.7] r=0 s=[1,1] {
+          R x=6 y=57 w=40 h=16 rx=8 f=#59626D
+          R x=0 y=49 w=52 h=4 rx=2 f=#C9CFD6
+          R x=22 y=61 w=8 h=8 rx=4 f=#FF4D3D
+        }
+        G a=[0,49] t=[-200,0] r=0 s=[1,1] {
+          R x=0 y=57 w=26 h=52 rx=6 f=@grad121_1
+          R x=7 y=49 w=12 h=10 rx=[3,3,0,0] f=#5D6670
+          R x=0 y=73 w=26 h=8 f=#3DA35A
+        }
+        G a=[0,49] t=[-200,0] r=0 s=[1,1] {
+          R x=0 y=57 w=26 h=52 rx=6 f=@grad125_1
+          R x=7 y=49 w=12 h=10 rx=[3,3,0,0] f=#5D6670
+          R x=0 y=73 w=26 h=8 f=#3DA35A
+        }
     }
-    G a=[30,125] t=[90,708.8] r=0 s=[1,1] id=player {
-      R x=2 y=107 w=16 h=34 rx=4 f=#6F7A86
-      R x=5 y=103 w=10 h=8 rx=[3,3,0,0] f=#C9CFD6
-      R x=17 y=147 w=10 h=18 rx=3 f=#B86E10 id=legA
-      R x=15 y=161 w=14 h=6 rx=3 f=#3A3F47 id=bootA
-      R x=31 y=147 w=10 h=18 rx=3 f=#B86E10 id=legB
-      R x=29 y=161 w=14 h=6 rx=3 f=#3A3F47 id=bootB
-      R x=14 y=111 w=30 h=32 rx=[8,8,4,4] f=#F0A020
-      R x=14 y=133 w=30 h=5 f=#B86E10
-      R x=30 y=117 w=16 h=8 rx=4 f=#B86E10
-      R x=12 y=85 w=36 h=32 rx=[16,16,12,12] f=#C9CFD6
-      R x=26 y=93 w=20 h=14 rx=[2.8,7,7,2.8] f=#4FD1E8
-      R x=36 y=95 w=6 h=3 rx=1.5 f=#D9F7FF
+    }
+    G a=[30,89] t=[90,28.2] r=0 s=[1,1] id=player {
+    G o=1 {
+        R x=2 y=71 w=16 h=34 rx=4 f=#6F7A86
+        R x=5 y=67 w=10 h=8 rx=[3,3,0,0] f=#C9CFD6
+        R x=17 y=111 w=10 h=18 rx=3 f=#B86E10 id=legA
+        R x=15 y=125 w=14 h=6 rx=3 f=#3A3F47 id=bootA
+        R x=31 y=111 w=10 h=18 rx=3 f=#B86E10 id=legB
+        R x=29 y=125 w=14 h=6 rx=3 f=#3A3F47 id=bootB
+        R x=14 y=75 w=30 h=32 rx=[8,8,4,4] f=#F0A020
+        R x=14 y=97 w=30 h=5 f=#B86E10
+        R x=30 y=81 w=16 h=8 rx=4 f=#B86E10
+        R x=12 y=49 w=36 h=32 rx=[16,16,12,12] f=#C9CFD6
+        R x=26 y=57 w=20 h=14 rx=[2.8,7,7,2.8] f=#4FD1E8
+        R x=36 y=59 w=6 h=3 rx=1.5 f=#D9F7FF
+    }
     }
   }
+  G a=[400,168] t=[0,0] r=0 s=[1,1] id=overlay {
   G o=1 {
-    T x=171 y=526 w=626.3 h=77 text="STATIONEER RUN" size=64 f=#F3E9DC font="Barlow Condensed Bold" cspace=8 valign=middle id=msgBig
-    T x=320 y=608 w=224 h=28 text="tap JUMP to play" size=22 f=#A89C8F font="Barlow" valign=middle id=msgSmall
+      T x=244 y=130 w=429.2 h=48 text="STATIONEER RUN" size=40 f=#F3E9DC font="Barlow Condensed Bold" cspace=8 valign=middle id=msgBig
+      T x=338 y=184 w=175.4 h=22 text="tap JUMP to play" size=17 f=#A89C8F font="Barlow" valign=middle id=msgSmall
   }
-  R x=32 y=1070 w=356 h=142 rx=22 f=#2B3A55 id=jumpBtn
-  R x=33.5 y=1071.5 w=353 h=139 rx=20.5 f=none s=#4D6A99 sw=3
-  T x=165 y=1105 w=129.5 h=48 text="JUMP" size=40 f=#F3E9DC font="Barlow Condensed Bold" cspace=10 valign=middle
-  T x=154 y=1157 w=159.2 h=20 text="or tap the field" size=16 f=#A89C8F font="Barlow" cspace=4 valign=middle
-  R x=412 y=1070 w=356 h=142 rx=22 f=#3A2A3F id=duckBtn click=1
-  R x=413.5 y=1071.5 w=353 h=139 rx=20.5 f=none s=#6D4A73 sw=3
-  T x=545 y=1105 w=129.5 h=48 text="DUCK" size=40 f=#F3E9DC font="Barlow Condensed Bold" cspace=10 valign=middle
-  T x=536 y=1157 w=153.8 h=20 text="hold to crouch" size=16 f=#A89C8F font="Barlow" cspace=4 valign=middle
+  }
+  R x=24 y=326 w=368 h=56 rx=14 f=#2B3A55 id=jumpBtn
+  R x=25.5 y=327.5 w=365 h=53 rx=12.5 f=none s=#4D6A99 sw=3
+  T x=176 y=338 w=94.4 h=32 text="JUMP" size=26 f=#F3E9DC font="Barlow Condensed Bold" cspace=10 valign=middle
+  R x=408 y=326 w=368 h=56 rx=14 f=#3A2A3F id=duckBtn click=1
+  R x=409.5 y=327.5 w=365 h=53 rx=12.5 f=none s=#6D4A73 sw=3
+  T x=561 y=338 w=91.7 h=32 text="DUCK" size=26 f=#F3E9DC font="Barlow Condensed Bold" cspace=10 valign=middle
 }

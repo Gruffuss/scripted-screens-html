@@ -481,6 +481,36 @@ JSON = { stringify = js_str, parse = function() return nil end }
 -- writes on the vector scene. Nothing here reads layout, because by the time this runs the layout
 -- has already happened, once, in the compiler.
 
+-- Text as the EMITTER would have written it. A slot write goes straight into the scene and skips
+-- the emitter, so the shaping it does has to be reproduced here or the label is wrong in two ways
+-- that both look like the page broke rather than like a formatting difference:
+--
+--   * the scene reader types a clean number as a NUMBER even when it is quoted, and a number has
+--     no text, so a score of '00042' simply vanishes. <noparse> keeps it a string.
+--   * font-variant-numeric: tabular-nums has no OpenType equivalent here, so the emitter monospaces
+--     each digit run instead. Without it a counter's digits shift sideways as they change.
+--
+-- Also the escapes, which the scene format needs whatever the text is.
+local function escaped(s)
+  s = s:gsub('\\', '\\\\')      -- the backslash first, or it doubles the ones added below
+  s = s:gsub('"', '\\"')
+  s = s:gsub('\r', '')
+  s = s:gsub('\n', '\\n')
+  return s
+end
+
+function js_plain(s)
+  s = escaped(s)
+  -- a purely numeric label, and the leading `=` that the scene reader would take as an expression
+  if tonumber(s) ~= nil or s:sub(1, 1) == '=' then return '<noparse>' .. s .. '</noparse>' end
+  return s
+end
+
+function js_tabular(s)
+  s = escaped(s)
+  return (s:gsub('%d+', function(run) return '<mspace=0.6em>' .. run .. '</mspace>' end))
+end
+
 DOM = { writes = {}, order = {}, missing = {} }
 
 function DOM.reset()
@@ -493,6 +523,13 @@ end
 UNDEFINED = setmetatable({}, { __tostring = function() return "undefined" end })
 
 local function record(id, key, value)
+  -- A compiled page installs DOM.bind, which sends the write straight to its scene slot and keeps
+  -- nothing. Without it - the offline harness, and any page being checked against its original -
+  -- the write is recorded by name so the two runs can be compared.
+  if DOM.bind then
+    DOM.bind(id, key, value)
+    return
+  end
   local slot = id .. "." .. key
   if DOM.writes[slot] == nil then DOM.order[#DOM.order + 1] = slot end
   DOM.writes[slot] = value == nil and UNDEFINED or value

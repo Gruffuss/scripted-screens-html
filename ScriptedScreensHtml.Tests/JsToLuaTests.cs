@@ -397,7 +397,8 @@ internal static class JsToLuaTests
             var runtime = writes.Where(w => w.Runtime).ToList();
             Console.WriteLine($"\n== {path} == {writes.Count} writes, {runtime.Count} at runtime");
             foreach (var g in runtime.GroupBy(w => w.Id ?? (w.Prefix != null ? w.Prefix + "* (from " + w.Computed + ")" : "<" + w.Computed + ">")).OrderBy(g => g.Key, StringComparer.Ordinal))
-                Console.WriteLine($"   {g.Key,-16} {string.Join(" ", g.Select(w => w.Property).Distinct().OrderBy(p => p, StringComparer.Ordinal))}");
+                Console.WriteLine($"   {g.Key,-16} {string.Join(" ", g.Select(w => w.Property).Distinct().OrderBy(p => p, StringComparer.Ordinal))}"
+                                  + (g.Any(w => w.Classes != null) ? "   states: " + string.Join(" | ", g.Where(w => w.Classes != null).SelectMany(w => w.Classes!).Distinct().Select(c => c.Length == 0 ? "(none)" : c)) : ""));
             var setup = writes.Where(w => !w.Runtime).Select(w => (w.Id ?? "<" + w.Computed + ">") + "." + w.Property).Distinct().ToList();
             if (setup.Count > 0) Console.WriteLine($"   setup only: {string.Join(", ", setup)}");
             foreach (var n in notes) Console.WriteLine($"   note: {n}");
