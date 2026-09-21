@@ -238,9 +238,24 @@ StringMethods.replaceAll = StringMethods.replace
 
 -- numbers
 
+-- C's %f rounds an exact midpoint to even, JavaScript rounds it away from zero: 2.5.toFixed(0) is
+-- "3" in a browser and "2" from %f, and 0.25.toFixed(1) is "0.3" against "0.2". Only a midpoint the
+-- double really sits on differs, and the test for one cannot be made on v * 10^digits, which
+-- invents them - 1.45 * 10 is exactly 14.5 while 1.45 is 1.44999999999999995559, and rounding that
+-- up would be wrong. The product only screens; the value's own decimal expansion decides.
+-- Not covered: |v| >= 1e21, where JavaScript falls back to its ordinary number-to-string.
 function NumberMethods.toFixed(v, digits)
-  digits = digits or 0
-  return format("%." .. format("%d", digits) .. "f", v)
+  digits = floor(digits or 0)
+  if v ~= v then return "NaN" end
+  local spec = "%." .. format("%d", digits) .. "f"
+  local scaled = abs(v) * 10 ^ digits
+  if digits < 20 and scaled < 1e15 and fmod(scaled, 1) == 0.5 then
+    local exact = format("%.20f", abs(v))
+    if sub(exact, #exact - (20 - digits) + 1):match("^50*$") then
+      return (v < 0 and "-" or "") .. format(spec, (floor(scaled) + 1) / 10 ^ digits)
+    end
+  end
+  return format(spec, v)
 end
 
 function NumberMethods.toString(v) return js_str(v) end

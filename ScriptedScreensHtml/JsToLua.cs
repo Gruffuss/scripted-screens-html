@@ -31,10 +31,21 @@ internal sealed class JsToLua
     private readonly StringBuilder _sb = new();
     private readonly List<string> _problems = new();
     private readonly HashSet<string> _known = new(StringComparer.Ordinal);
-    /// <summary>Names already declared at the top of the chunk, so their statement assigns rather than redeclares.</summary>
-    private readonly HashSet<string> _hoisted = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Names already declared at the top of the CURRENT scope, so their statement assigns rather
+    /// than redeclaring. Saved and restored around every function body: an inner `let total = 0`
+    /// that shares a name with an outer one must shadow it, not assign it.
+    /// </summary>
+    private HashSet<string> _hoisted = new(StringComparer.Ordinal);
     private int _depth;
+    /// <summary>Counts loops so each label is unique.</summary>
     private int _loop;
+    /// <summary>The label a `continue` here belongs to: the ENCLOSING loop, saved and restored.</summary>
+    private int _enclosing;
+    /// <summary>Whether emission is in the script's own top-level statement list.</summary>
+    private bool _top = true;
+    /// <summary>The name `this` refers to, set only inside a getter body.</summary>
+    private string? _receiver;
 
     /// <summary>Lua keywords, which a JS name or property of the same spelling has to be moved past.</summary>
     private static readonly HashSet<string> Keywords = new(StringComparer.Ordinal)
@@ -52,8 +63,40 @@ internal sealed class JsToLua
         "Math", "Number", "String", "Boolean", "JSON", "console", "document", "window",
         "localStorage", "performance", "Date", "isNaN", "parseFloat", "parseInt", "Infinity", "NaN",
         "undefined", "requestAnimationFrame", "setTimeout", "setInterval", "clearInterval", "Object",
-        "location", "Array",
+        "location",
     };
+
+    /// <summary>
+    /// Names the chunk itself binds. A page declaring one of these would shadow it, and the failure
+    /// would be the host finding no entry points at all rather than anything the page could see.
+    /// </summary>
+    private static readonly HashSet<string> Reserved = new(StringComparer.Ordinal) { "PAGE", "DOM", "Pending", "UNDEFINED" };
+
+    /// <summary>
+    /// Every method the prelude implements. A page calling anything else would otherwise compile
+    /// cleanly and then fail at run time with no line number in its own source - which is exactly
+    /// the contract this compiler exists to keep, and the longest way it was being broken: the whole
+    /// tail of `splice`, `shift`, `charCodeAt`, `Math.log2`, `Object.values` and the rest.
+    /// A page's own method on its own object is not in here, so a called name is only reported when
+    /// the page does not define a property of that name anywhere either.
+    /// JsToLuaTests checks this list against JsPrelude.lua, so the two cannot drift apart quietly.
+    /// </summary>
+    internal static readonly HashSet<string> PreludeMethods = new(StringComparer.Ordinal)
+    {
+        "add", "addEventListener", "atan2", "charAt", "concat", "contains", "createElement",
+        "endsWith", "entries", "every", "filter", "find", "forEach", "getElementById", "hypot",
+        "includes", "indexOf", "isFinite", "isNaN", "join", "keys", "map", "padEnd", "padStart",
+        "parseFloat", "pop", "push", "querySelector", "querySelectorAll", "reduce", "remove",
+        "replace", "replaceAll", "round", "sign", "slice", "some", "sort", "split", "startsWith",
+        "substring", "toFixed", "toLowerCase", "toString", "toUpperCase", "toggle", "trim", "trunc",
+        // plain functions on the library tables, reached the same way
+        "floor", "ceil", "abs", "sqrt", "sin", "cos", "tan", "atan", "asin", "acos", "exp", "log",
+        "pow", "min", "max", "random", "assign", "stringify", "parse", "getItem", "setItem", "now",
+        "log2", "getAttribute", "setAttribute", "warn", "error",
+    };
+
+    /// <summary>Property names the page itself defines, so its own methods are not reported as unknown.</summary>
+    private readonly HashSet<string> _pageProperties = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Compiles a page's script to Lua. Returns null when something in it cannot be translated, and
@@ -88,17 +131,11 @@ internal sealed class JsToLua
         // declared at that point cannot see - the function would read a global that is never set.
         // Only this outermost scope is hoisted: lifting a `let` out of a loop would change which
         // binding a closure inside it captures.
-        var names = new List<string>();
-        foreach (var s in ast.Body)
-        {
-            if (s is FunctionDeclaration { Id: { } id }) names.Add(Safe(id.Name));
-            else if (s is VariableDeclaration vd)
-                foreach (var d in vd.Declarations)
-                    if (d.Id is Identifier vid) names.Add(Safe(vid.Name));
-        }
-        foreach (var n in names) c._hoisted.Add(n);
-        for (var i = 0; i < names.Count; i += 40)
-            c.Line("local " + string.Join(", ", names.GetRange(i, Math.Min(40, names.Count - i))));
+        var names = Hoistable(ast.Body);
+        foreach (var n in names)
+            if (Reserved.Contains(n))
+                c._problems.Add("the page declares `" + n + "`, which the compiled chunk needs for itself");
+        c.OpenScope(names);
 
         foreach (var s in ast.Body)
         {
@@ -117,6 +154,57 @@ internal sealed class JsToLua
 
     private void Line(string text) => _sb.Append(' ', _depth * 2).Append(text).Append('\n');
 
+    /// <summary>
+    /// What a scope has to declare up front. Three kinds, and each has its own reason:
+    /// a <b>function declaration</b> because JavaScript hoists it and a page may call one written
+    /// later; a <b>var</b> because it is function-scoped where a Lua local is block-scoped, so one
+    /// declared inside an `if` has to outlive it; and a <b>let/const at the scope's own statement
+    /// list</b> because a function written above it may close over it. A `let` deeper in - inside a
+    /// loop or an `if` - is left alone, since lifting it out would change which binding a closure
+    /// captures.
+    /// </summary>
+    private static List<string> Hoistable(in NodeList<Statement> body)
+    {
+        var names = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void Add(string name)
+        {
+            var safe = Safe(name);
+            if (seen.Add(safe)) names.Add(safe);
+        }
+
+        foreach (var s in body)
+        {
+            if (s is FunctionDeclaration { Id: { } id }) Add(id.Name);
+            else if (s is VariableDeclaration vd)
+                foreach (var d in vd.Declarations)
+                    if (d.Id is Identifier vid) Add(vid.Name);
+        }
+
+        // `var` and nested function declarations anywhere below, but not through another function
+        foreach (var s in body)
+            foreach (var n in Walk(s))
+            {
+                if (n is FunctionDeclaration { Id: { } deep }) Add(deep.Name);
+                else if (n is VariableDeclaration { Kind: VariableDeclarationKind.Var } dv)
+                    foreach (var d in dv.Declarations)
+                        if (d.Id is Identifier dvid) Add(dvid.Name);
+            }
+        return names;
+    }
+
+    /// <summary>Declares a scope's hoisted names and makes their statements assign. Returns the scope it replaced.</summary>
+    private HashSet<string> OpenScope(List<string> names)
+    {
+        var previous = _hoisted;
+        _hoisted = new HashSet<string>(names, StringComparer.Ordinal);
+        // forty to a line: Lua caps locals per function and one long line is unreadable
+        for (var i = 0; i < names.Count; i += 40)
+            Line("local " + string.Join(", ", names.GetRange(i, Math.Min(40, names.Count - i))));
+        return previous;
+    }
+
     /// <summary>Walks the whole tree for every name the page binds, so the unknown-name check is order-free.</summary>
     private void Declared(Node n)
     {
@@ -129,6 +217,10 @@ internal sealed class JsToLua
         if (n is FunctionExpression fe) Parameters(fe.Params);
         if (n is ArrowFunctionExpression ae) Parameters(ae.Params);
         if (n is CatchClause { Param: Identifier c }) _known.Add(c.Name);
+        // a property the page writes is a method it may call, so it is not an unknown one
+        if (n is ObjectProperty { Key: Identifier pk }) _pageProperties.Add(pk.Name);
+        if (n is ObjectProperty { Key: StringLiteral sk }) _pageProperties.Add(sk.Value);
+        if (n is AssignmentExpression { Left: MemberExpression { Computed: false, Property: Identifier ak } }) _pageProperties.Add(ak.Name);
         foreach (var kid in n.ChildNodes) if (kid != null) Declared(kid);
 
         void Parameters(in NodeList<Node> ps)
@@ -159,12 +251,20 @@ internal sealed class JsToLua
                     var init = d.Init == null ? "nil" : Expr(d.Init);
                     _known.Add(id.Name);
                     var name = Safe(id.Name);
+                    // `_hoisted` only ever holds the script's own top-level names, so it may only be
+                    // consulted there. An inner `let total = 0` that happens to share a name with a
+                    // top-level one would otherwise assign the OUTER binding - silently, and
+                    // corrupting state in a part of the page that never mentions it.
                     Line((_hoisted.Contains(name) ? "" : "local ") + name + " = " + init);
                 }
                 break;
 
             case FunctionDeclaration f when f.Id != null:
-                // forward-declared above, so this is an assignment rather than a `local function`
+                // At the top level this is forward-declared, so it assigns. Anywhere else it is a
+                // `local function`, or it would overwrite - and destroy - an outer function of the
+                // same name for the rest of the page.
+                // always an assignment: every scope declares its own function names up front, so a
+                // nested one shadows rather than overwriting an outer function of the same name
                 Line(Safe(f.Id.Name) + " = function(" + Params(f.Params) + ")");
                 Body(f.Body);
                 Line("end");
@@ -199,8 +299,14 @@ internal sealed class JsToLua
                 ForOf(fof);
                 break;
 
+            case ContinueStatement when _enclosing == 0:
+                Unsupported(s, "`continue` outside a loop");
+                break;
+
             case ContinueStatement:
-                Line("goto continue" + _loop.ToString(CultureInfo.InvariantCulture));
+                // the ENCLOSING loop, not the highest-numbered one: a loop that has already closed
+                // left its counter behind, and jumping to its label is either wrong or unreachable
+                Line("goto continue" + _enclosing.ToString(CultureInfo.InvariantCulture));
                 break;
 
             case BreakStatement:
@@ -208,17 +314,7 @@ internal sealed class JsToLua
                 break;
 
             case TryStatement t:
-                // pcall: on these pages try only ever guards localStorage and JSON, so the error
-                // value is never read and the handler is a plain fallback.
-                Line("local __ok = pcall(function()");
-                _depth++; Statement(t.Block); _depth--;
-                Line("end)");
-                if (t.Handler != null)
-                {
-                    Line("if not __ok then");
-                    _depth++; Statement(t.Handler.Body); _depth--;
-                    Line("end");
-                }
+                Try(t);
                 break;
 
             case EmptyStatement:
@@ -258,6 +354,15 @@ internal sealed class JsToLua
 
     private void Assign(AssignmentExpression a)
     {
+        // `arr.length = 0` is how JavaScript clears an array, and `.length` reads as js_len(), which
+        // is a call and cannot be assigned to. Reported rather than emitted: truncating an array
+        // properly means dropping the elements past the new length too, and a page that grows one
+        // this way expects holes, so this is not a one-liner to guess at.
+        if (a.Left is MemberExpression { Computed: false, Property: Identifier { Name: "length" } })
+        {
+            Unsupported(a, "assigning to .length");
+            return;
+        }
         var target = Expr(a.Left);
         var value = Expr(a.Right);
         switch (a.Operator)
@@ -272,6 +377,51 @@ internal sealed class JsToLua
         }
     }
 
+    /// <summary>
+    /// <c>try</c> as a <c>pcall</c> of a closure, which is the only shape Lua offers - and which is
+    /// wrong for anything that leaves the block by another route. A <c>return</c> inside it returns
+    /// from the closure and the function carries on; a <c>break</c> is a Lua load error; a
+    /// declaration inside it dies at the closure's end; and <c>finally</c> has no equivalent at all.
+    /// Each of those is reported rather than emitted, because on these pages <c>try</c> only ever
+    /// guards localStorage and JSON - a plain fallback, which this shape does serve correctly.
+    /// </summary>
+    private void Try(TryStatement t)
+    {
+        if (t.Finalizer != null) Unsupported(t, "a `finally` block");
+        foreach (var inner in Escapes(t.Block)) Unsupported(inner, "`" + inner.Type + "` inside a `try` block");
+
+        Line("local __ok = pcall(function()");
+        _depth++; Statement(t.Block); _depth--;
+        Line("end)");
+        if (t.Handler != null)
+        {
+            Line("if not __ok then");
+            _depth++; Statement(t.Handler.Body); _depth--;
+            Line("end");
+        }
+    }
+
+    /// <summary>Statements in a try block whose effect escapes it, which a pcall closure swallows.</summary>
+    private static IEnumerable<Node> Escapes(Node block)
+    {
+        foreach (var n in Walk(block))
+        {
+            if (n is ReturnStatement or BreakStatement or ContinueStatement or VariableDeclaration) yield return n;
+            // a nested function's own return is its own business
+            if (n is FunctionDeclaration or FunctionExpression or ArrowFunctionExpression) break;
+        }
+    }
+
+    private static IEnumerable<Node> Walk(Node n)
+    {
+        yield return n;
+        foreach (var kid in n.ChildNodes)
+        {
+            if (kid == null || kid is FunctionDeclaration or FunctionExpression or ArrowFunctionExpression) continue;
+            foreach (var deep in Walk(kid)) yield return deep;
+        }
+    }
+
     private void ForLoop(ForStatement f)
     {
         // A JS `for` is a while loop with an initialiser and an update, which is what this emits
@@ -279,18 +429,30 @@ internal sealed class JsToLua
         // writes the counter, and nothing is gained by it.
         Line("do");
         _depth++;
+        var wasTop = _top; _top = false;
         if (f.Init is VariableDeclaration vd) Statement(vd);
         else if (f.Init is Expression ie) ExprStatement(ie);
         var mine = ++_loop;
+        var outer = _enclosing; _enclosing = mine;
         Line("while " + (f.Test == null ? "true" : Truthy(f.Test)) + " do");
+        _depth++;
+        // The body goes in a block of its own with the label last. Lua refuses a `goto` that jumps
+        // into a local's scope, and the update statement has to run after a `continue`, so the label
+        // cannot simply sit before it: `for (...) { if (x) continue; let v = 1; }` is an everyday
+        // shape and would not load.
+        Line("do");
         _depth++;
         Statement(f.Body);
         Line("::continue" + mine.ToString(CultureInfo.InvariantCulture) + "::");
+        _depth--;
+        Line("end");
         if (f.Update != null) ExprStatement(f.Update);
         _depth--;
         Line("end");
         _depth--;
         Line("end");
+        _enclosing = outer;
+        _top = wasTop;
     }
 
     private void ForOf(ForOfStatement f)
@@ -309,9 +471,13 @@ internal sealed class JsToLua
         // JS arrays are 0-based with a length field here (see the prelude), so the walk is too
         Line("for __i = 0, " + n + ".length - 1 do");
         _depth++;
+        var outer = _enclosing; _enclosing = mine;
+        var wasTop = _top; _top = false;
         Line("local " + Safe(id.Name) + " = " + n + "[__i]");
         Statement(f.Body);
         Line("::continue" + mine.ToString(CultureInfo.InvariantCulture) + "::");
+        _enclosing = outer;
+        _top = wasTop;
         _depth--;
         Line("end");
         _depth--;
@@ -320,10 +486,19 @@ internal sealed class JsToLua
 
     private void Body(Node body)
     {
+        var wasTop = _top; _top = false;
+        var outer = _enclosing; _enclosing = 0;   // `continue` cannot cross a function boundary
         _depth++;
-        if (body is BlockStatement b) { foreach (var s in b.Body) if (s is Statement st) Statement(st); }
+        if (body is BlockStatement b)
+        {
+            var previous = OpenScope(Hoistable(b.Body));
+            foreach (var s in b.Body) if (s is Statement st) Statement(st);
+            _hoisted = previous;
+        }
         else if (body is Expression e) Line("do return " + Expr(e) + " end");
         _depth--;
+        _enclosing = outer;
+        _top = wasTop;
     }
 
     private string Params(in NodeList<Node> ps)
@@ -380,6 +555,9 @@ internal sealed class JsToLua
         _ => false,
     };
 
+    /// <summary>`null`, or the `undefined` that is spelled as a bare name; Lua's nil is both.</summary>
+    private static bool IsNull(Expression e) => e is NullLiteral || (e is Identifier { Name: "undefined" });
+
     private static bool IsComparison(Operator op) => op is Operator.Equality or Operator.Inequality
         or Operator.StrictEquality or Operator.StrictInequality or Operator.LessThan
         or Operator.LessThanOrEqual or Operator.GreaterThan or Operator.GreaterThanOrEqual;
@@ -408,8 +586,13 @@ internal sealed class JsToLua
             case NullLiteral:
                 return "nil";
 
+            case ThisExpression when _receiver == null:
+                // Only a getter has a receiver here; an arrow function has no `this` at all, so a
+                // bare `self` would be a nil global rather than a translation.
+                return Fail(e, "`this` outside a getter");
+
             case ThisExpression:
-                return "self";
+                return _receiver;
 
             case MemberExpression m:
                 return Member(m);
@@ -473,6 +656,11 @@ internal sealed class JsToLua
 
             case FunctionExpression fe:
                 return Lambda(fe.Params, fe.Body);
+
+            case AssignmentExpression { Operator: Operator.Assignment, Left: MemberExpression { Computed: true } }:
+                // `a[next()] = v` as a value would evaluate the index once to write and again to
+                // read back, so next() would run twice. Reported rather than quietly done twice.
+                return Fail(e, "an assignment to a computed index used as a value");
 
             case AssignmentExpression { Operator: Operator.Assignment } av:
                 // Lua has no assignment expression, so `a || (a = x)` becomes a closure that
@@ -560,17 +748,26 @@ internal sealed class JsToLua
     {
         var declared = Params(ps);
         var header = "function(" + (receiver == null ? declared : declared.Length == 0 ? receiver : receiver + ", " + declared) + ")";
+        var hadReceiver = _receiver;
+        if (receiver != null) _receiver = receiver;
         // the body writes lines into the shared buffer, so it is taken back out and inlined here
         var saved = _sb.Length;
         Body(body);
         var inner = _sb.ToString(saved, _sb.Length - saved);
         _sb.Length = saved;
+        _receiver = hadReceiver;
         return header + "\n" + inner + new string(' ', _depth * 2) + "end";
     }
 
     private string Member(MemberExpression m)
     {
         var obj = Expr(m.Object);
+        // Lua indexes a name, a call or a parenthesised expression - not a bare literal. `({a:7}).a`
+        // would emit `{["a"] = 7}.a`, which does not parse.
+        if (m.Object is ObjectExpression or ArrayExpression or StringLiteral or NumericLiteral
+            or FunctionExpression or ArrowFunctionExpression or ConditionalExpression or LogicalExpression
+            or NonLogicalBinaryExpression or NonUpdateUnaryExpression)
+            obj = "(" + obj + ")";
         if (m.Computed) return obj + "[" + Expr(m.Property) + "]";
         if (m.Property is not Identifier p) return Fail(m, "that property access");
         // `.length` is a field on an array here and the character count on a string, so it asks
@@ -593,8 +790,17 @@ internal sealed class JsToLua
             // JS % truncates toward zero where Lua's floors, so they differ on negatives. fmod is JS's.
             Operator.Remainder => "math.fmod(" + l + ", " + r + ")",
             Operator.Exponentiation => "(" + l + " ^ " + r + ")",
-            Operator.StrictEquality or Operator.Equality => "(" + l + " == " + r + ")",
-            Operator.StrictInequality or Operator.Inequality => "(" + l + " ~= " + r + ")",
+            Operator.StrictEquality => "(" + l + " == " + r + ")",
+            Operator.StrictInequality => "(" + l + " ~= " + r + ")",
+            // Loose equality coerces across types - `0 == "0"` and `1 == true` are both true - and
+            // there is no short Lua equivalent. But the ONE form pages actually write is `x == null`,
+            // meaning "null or undefined", and Lua's nil is exactly both of those. So that compiles
+            // exactly and every other loose comparison is reported, which is a one-character fix for
+            // whoever wrote it. Measured: every loose comparison across all six pages is this form.
+            Operator.Equality when IsNull(b.Left) || IsNull(b.Right) => "(" + l + " == " + r + ")",
+            Operator.Inequality when IsNull(b.Left) || IsNull(b.Right) => "(" + l + " ~= " + r + ")",
+            Operator.Equality or Operator.Inequality =>
+                Fail(b, "loose " + (b.Operator == Operator.Equality ? "==" : "!=") + " (use === or !==)"),
             Operator.LessThan => "(" + l + " < " + r + ")",
             Operator.LessThanOrEqual => "(" + l + " <= " + r + ")",
             Operator.GreaterThan => "(" + l + " > " + r + ")",
@@ -638,7 +844,11 @@ internal sealed class JsToLua
         // which is global: the generated chunk runs in its own _ENV precisely so it cannot reach
         // into the author's Lua, and mutating a shared metatable would walk straight past that.
         if (c.Callee is MemberExpression { Computed: false, Property: Identifier p } m && p.Name != "length")
+        {
+            if (!PreludeMethods.Contains(p.Name) && !_pageProperties.Contains(p.Name))
+                Unsupported(c, "`." + p.Name + "()`, which the prelude does not provide");
             return "js_m(" + Expr(m.Object) + ", " + Quote(p.Name) + (args.Length > 0 ? ", " + args : "") + ")";
+        }
         if (c.Callee is MemberExpression { Computed: true } cm)
             return "js_m(" + Expr(cm.Object) + ", " + Expr(cm.Property) + (args.Length > 0 ? ", " + args : "") + ")";
         // Lua calls only a name, a field or another call, so an immediately-invoked function

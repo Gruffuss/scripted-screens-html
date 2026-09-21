@@ -32,7 +32,6 @@ internal static class JsToLuaTests
     private static readonly (string Path, int Frames, string[] Known)[] Pages =
     {
         (@"examples\07-game.lua", 3000, None),   // physics, spawning, collision, game over and restart
-        (@"examples\05-script.lua", 20, None),
         (@"examples\09-transition.lua", 20, None),
         (@"AtmoDark.lua", 60, None),
         (@"AtmoLight.lua", 60, None),
@@ -84,6 +83,9 @@ internal static class JsToLuaTests
                                   + (known.Length == 0 ? "" : $" ({known.Length} known divergence(s) allowed)"));
         }
 
+        Manifest(check);
+        Refused(check);
+        Semantics(check);
         Refusals(check);
     }
 
@@ -113,6 +115,74 @@ internal static class JsToLuaTests
         ("getters on a class", "var o = { set x(v) { this._x = v; } };"),
     };
 
+    /// <summary>
+    /// Behaviour that has to survive, one snippet each, run both ways like a page. Most of these
+    /// come from an audit that demonstrated each as a real mistranslation; a few pin something that
+    /// was already right so a later change cannot quietly break it. Each writes its answer with
+    /// out(), so the existing diff machinery does the comparing.
+    /// </summary>
+    private static readonly (string Name, string Source)[] MustMatch =
+    {
+        ("an inner let shadows, not assigns",
+         @"let total = 0; function tally(xs){ let total = 0; for (let j=0;j<xs.length;j++) total += xs[j]; return total; } var t = tally([1,2,3]); out(t + '/' + total);"),
+        ("a nested function shadows, not replaces",
+         @"function draw(){ return 'outer'; } function setup(){ function draw(){ return 'inner'; } return draw(); } out(setup() + '/' + draw());"),
+        ("a function may call one declared below it",
+         @"function a(){ return b(); } function b(){ return 'below'; } out(a());"),
+        ("var is function-scoped, not block-scoped",
+         @"function f(c){ if (c) { var y = 1; } return y; } out(String(f(true)) + '/' + String(f(false)));"),
+        ("var survives a for block",
+         @"function f(){ for (var i = 0; i < 3; i++) {} return i; } out(f());"),
+        ("continue before a later local",
+         @"var s = 0; for (let i=0;i<4;i++){ if (i===2) continue; let v = i*2; s += v; } out(s);"),
+        ("continue after a sibling loop",
+         @"var s = ''; for (let i=0;i<3;i++){ for (let j=0;j<2;j++){ s += '.'; } if (i===1) continue; s += i; } out(s);"),
+        ("continue in a for-of",
+         @"var s = 0; for (const v of [1,2,3,4]) { if (v === 2) continue; s += v; } out(s);"),
+        ("a ternary evaluates one branch only",
+         @"var n = 0; function bump(){ n++; return 1; } var x = false ? bump() : 2; out(x + '/' + n);"),
+        ("&& and || short-circuit",
+         @"var n = 0; function bump(){ n++; return 1; } var a = false && bump(); var b = true || bump(); out(String(a) + '/' + String(b) + '/' + n);"),
+        ("x == null catches undefined too",
+         @"var o = {}; out(String(o.missing == null) + '/' + String(null == null) + '/' + String(0 == null));"),
+        ("?? keeps a falsy but defined left side",
+         @"out(String(0 ?? 9) + '/' + String(null ?? 9) + '/' + String('' ?? 9));"),
+        ("a literal as the object of a member access",
+         @"out(({ a: 7 }).a + '/' + [3,4].length + '/' + (5).toFixed(1));"),
+        ("% keeps the sign of the dividend",
+         @"out((-1 % 3) + '/' + (1 % 3) + '/' + (-7 % 2));"),
+        ("an early return leaves the function",
+         @"function f(x){ if (x) { return 'yes'; } return 'no'; } out(f(true) + '/' + f(false));"),
+        ("a getter sees its receiver",
+         @"var o = { id: 'k', get label(){ return 'id=' + this.id; } }; out(o.label);"),
+        ("a number prints as JavaScript prints it",
+         @"out(String(1/3) + '/' + String(0.1+0.2) + '/' + String(3.0) + '/' + String(100));"),
+    };
+
+    private static void Semantics(Action<bool, string> check)
+    {
+        var root = Root();
+        if (root == null) return;
+        var wrong = new List<string>();
+        foreach (var (name, source) in MustMatch)
+        {
+            // out() is the one thing the snippet needs, and it is the same write on both sides
+            var js = "function out(v){ document.getElementById('r').textContent = String(v); }" + source;
+            var lua = JsToLua.Compile(js, out var problems);
+            if (lua == null) { wrong.Add($"{name}: does not compile ({problems.FirstOrDefault()})"); continue; }
+            try
+            {
+                var a = RunJs(js, 0).TryGetValue("r.textContent", out var x) ? x : "(none)";
+                var b = RunLua(root, lua, 0).TryGetValue("r.textContent", out var y) ? y : "(none)";
+                if (a != b) wrong.Add($"{name}: js={a} lua={b}");
+            }
+            catch (Exception ex) { wrong.Add($"{name}: threw - {First(ex.Message)}"); }
+        }
+        check(wrong.Count == 0, wrong.Count == 0
+            ? $"js->lua: all {MustMatch.Length} semantic cases match the original"
+            : $"js->lua: {wrong.Count} semantic case(s) wrong - {string.Join("; ", wrong.Take(4))}");
+    }
+
     /// <summary>Each one must be turned down, and the report must say where.</summary>
     private static void Refusals(Action<bool, string> check)
     {
@@ -133,6 +203,55 @@ internal static class JsToLuaTests
             ? $"js->lua: all {MustRefuse.Length} unsupported constructs are reported, not approximated"
             : $"js->lua: silently accepted - {string.Join(", ", accepted)}");
         if (silent.Count > 0) check(false, $"js->lua: refused with no reason given - {string.Join(", ", silent)}");
+    }
+
+    /// <summary>
+    /// Pages that cannot be compiled, and the reason each must give. A page that draws on a canvas
+    /// or builds DOM has no translation today - `innerHTML` is a structural change, not a value -
+    /// and the point is that it is turned down <b>at compile time with the method named</b>, rather
+    /// than compiling and then failing on a console with nothing in the page to point at.
+    /// </summary>
+    private static readonly (string Path, string[] Reasons)[] CannotCompile =
+    {
+        (@"examples\05-script.lua", new[] { "appendChild", "getContext", "clearRect" }),
+    };
+
+    /// <summary>
+    /// The transpiler's list of what the prelude provides, against the prelude itself. The list is
+    /// what turns a missing method from a runtime surprise into a compile-time report, so the two
+    /// drifting apart quietly would give back exactly the failure it was added to remove - a page
+    /// that compiles and then dies on a console.
+    /// </summary>
+    private static void Manifest(Action<bool, string> check)
+    {
+        var root = Root();
+        if (root == null) return;
+        var prelude = File.ReadAllText(Path.Combine(root, "JsPrelude.lua"));
+        var defined = new HashSet<string>(StringComparer.Ordinal);
+        foreach (Match m in Regex.Matches(prelude, @"function\s+(?:String|Array|Number)Methods\.([A-Za-z_]\w*)")) defined.Add(m.Groups[1].Value);
+        foreach (Match m in Regex.Matches(prelude, @"^(?:String|Array|Number)Methods\.([A-Za-z_]\w*)\s*=", RegexOptions.Multiline)) defined.Add(m.Groups[1].Value);
+
+        var absent = defined.Where(n => !JsToLua.PreludeMethods.Contains(n)).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        check(absent.Count == 0, absent.Count == 0
+            ? $"js->lua: the method manifest covers all {defined.Count} the prelude defines"
+            : $"js->lua: the prelude defines {string.Join(", ", absent)}, which the manifest would refuse");
+    }
+
+    private static void Refused(Action<bool, string> check)
+    {
+        var root = Root();
+        if (root == null) return;
+        foreach (var (path, reasons) in CannotCompile)
+        {
+            var script = Regex.Match(File.ReadAllText(Path.Combine(root, path)), "<script>(.*?)</script>", RegexOptions.Singleline).Groups[1].Value;
+            var lua = JsToLua.Compile(script, out var problems);
+            var all = string.Join(" ", problems);
+            var missing = reasons.Where(r => !all.Contains(r, StringComparison.Ordinal)).ToList();
+            check(lua == null && missing.Count == 0,
+                lua != null ? $"js->lua: {path} compiled, but it draws on a canvas and cannot"
+                : missing.Count > 0 ? $"js->lua: {path} is refused but does not name {string.Join(", ", missing)}"
+                : $"js->lua: {path} is refused at compile time, naming {string.Join(", ", reasons)}");
+        }
     }
 
     /// <summary>Null when the two runs agree, else the first few writes that differ.</summary>

@@ -347,6 +347,64 @@ explicit test for it would have found it. It is now implemented properly rather 
 
 ---
 
+#### What two agents found that a differential test could not (2026-09-21)
+
+The six pages passed, which says the transpiler handles *what those pages happen to do*. Two agents
+went at it from outside — one auditing the translation against JavaScript semantics, one completing
+the prelude until the Atmo pages ran — and between them found **thirty-odd defects the passing test
+could not see.** Worth stating plainly: a green differential suite over a fixed corpus is evidence
+about the corpus, not about the language.
+
+**The ones that were silently wrong — all now fixed, and each pinned by a snippet run both ways:**
+
+| | what it did |
+|---|---|
+| an inner `let total = 0` sharing a name with a top-level one | **assigned the outer binding**, corrupting state in a part of the page that never mentions it |
+| a nested `function draw()` | overwrote and destroyed the outer `draw` for the rest of the page |
+| `var` inside an `if` or a `for` | died at the block's end, where JavaScript scopes it to the function |
+| `??` | compiled to `||`, so `0 ?? 5` gave 5 |
+| loose `==` | compiled as strict |
+| `this` outside a getter | emitted a nil global |
+| an assignment to a computed index used as a value | evaluated the index twice |
+
+The first three are one fix: **every scope declares its own hoisted names up front** — function
+declarations and `var`s at any depth below it, plus the `let`/`const` in its own statement list —
+and a declaration assigns only when *that* scope hoisted it. That is simultaneously JavaScript's
+hoisting, its function-scoped `var`, and correct shadowing.
+
+**Loose equality is the interesting one.** It has no short Lua equivalent and coerces across types.
+But every loose comparison across all six pages is `x == null`, meaning "null or undefined" — and
+Lua's `nil` is exactly both. So that form compiles exactly and every other loose comparison is
+reported, which is a one-character fix for whoever wrote it.
+
+**And the ones that compiled and then failed at run time**, which is worse than refusing: a
+`continue` followed by a `let` (Lua will not jump into a local's scope), a `continue` after a
+sibling loop (the label counter was a high-water mark, not a stack), `arr.length = 0`, a literal as
+the object of a member access, and `Date`/`Array` promised by the compiler and defined by nothing.
+
+**The biggest single restoration of the contract was the method manifest.** `js_m` dispatched by
+name at run time, so a page calling `splice`, `shift`, `charCodeAt`, `Math.log2` or `Object.values`
+compiled cleanly and died on a console with nothing in its own source to point at. The method name
+is known statically, so it is now checked against what the prelude defines — and it earned itself
+immediately: **`05-script.lua` uses `appendChild`, `getContext('2d')` and `clearRect`**, so it is
+refused by name instead of failing in game. A test compares the manifest against `JsPrelude.lua`,
+since the two drifting apart would hand back the failure it was added to remove.
+
+**A VM bug worth knowing before anything emits varargs: in this Lua, `...` does not survive a
+numeric `for` in the same function.** After one runs, `select("#", ...)` over-counts and
+`select(i, ...)` returns values nobody passed — and `table.pack(...)` after a loop is wrong too. It
+depends on how many locals are live before the loop, which points at the loop's control registers
+overlapping the vararg area. Every prelude function that reads `...` now reads it **before** any
+loop. The transpiler emits no varargs today; this is the note for the day it does.
+
+**Still open, all in the prelude and none reached by these pages:** `js_num(nil)` gives 0 where
+`Number(undefined)` is `NaN`, so a typo becomes a plausible number rather than a visible one;
+`parseInt('12px')` gives NaN; `replaceAll` is not always global; a `fromIndex` argument is ignored;
+`toString(16)` ignores its radix; `Object.assign` returns a new table instead of mutating its first
+argument; `NaN` does not poison `Math.min`. Each is listed with its demonstration in the audit.
+
+---
+
 #### What the DOM-write mapping actually has to cover, counted (2026-09-21)
 
 Measured across every page in the repository before designing it, because the size of the problem
