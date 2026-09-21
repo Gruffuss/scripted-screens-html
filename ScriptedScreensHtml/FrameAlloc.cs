@@ -128,7 +128,14 @@ internal static class FrameAlloc
     private static long _grown;
     private static int _falls;
 
-    /// <summary>Once per frame, from the plugin.</summary>
+    /// <summary>
+    /// Once per frame, from the plugin, and ONLY while diagnostics are on.
+    ///
+    /// `GC.GetTotalMemory(false)` looks like a counter read and is not one on Mono. Called every
+    /// frame unconditionally it measured about **1 ms a frame** in game against a 2.5 GB heap - 7%
+    /// of the frame - and it ran with every console switched off, because the plugin's Update runs
+    /// regardless. An instrument that costs more than the thing it measures has to be opt-in.
+    /// </summary>
     internal static void SampleHeap()
     {
         var now = GC.GetTotalMemory(false);

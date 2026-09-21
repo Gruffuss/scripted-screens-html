@@ -74,7 +74,11 @@ public sealed class ScriptedScreensHtmlPlugin : ModBehaviour
     // allocation rate needs every frame: a sample taken seconds apart hides the collections between.
     private void Update()
     {
-        FrameAlloc.SampleHeap();
+        // Only while something is reading it. GC.GetTotalMemory is not a counter read on Mono, and
+        // this ran every frame whether or not a console was on, whether or not diagnostics were
+        // enabled - measured in game as about 1 ms a frame against a 2.5 GB heap, which is 7% of a
+        // frame, paid by everyone, to feed a number nobody was looking at.
+        if (HtmlConfig.Diagnostics) FrameAlloc.SampleHeap();
         HtmlSurface.ReportIfDue();
     }
 
