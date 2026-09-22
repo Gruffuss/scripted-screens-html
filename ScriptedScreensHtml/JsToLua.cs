@@ -684,9 +684,46 @@ internal sealed class JsToLua
                     : "js_regex(" + Quote(re.Raw.Substring(1, re.Raw.LastIndexOf('/') - 1))
                       + ", " + Quote(re.Raw.Substring(re.Raw.LastIndexOf('/') + 1)) + ")";
 
+            case TemplateLiteral tpl:
+                return Template(tpl);
+
+            case TaggedTemplateExpression:
+                // A tag is a function taking the pieces and the values separately, which is a
+                // different thing from a template and worth naming rather than lumping in with
+                // "TaggedTemplateExpression is not translatable".
+                return Fail(e, "a tagged template");
+
             default:
                 return Fail(e, e.Type.ToString());
         }
+    }
+
+    /// <summary>
+    /// A template literal: the quasis are the structure and the expressions are the holes.
+    /// </summary>
+    /// <remarks>
+    /// Concatenation, not <c>js_add</c>. Every hole in a template is string-coerced by definition -
+    /// <c>`${1}${2}`</c> is "12", not 3 - so routing it through the <c>+</c> operator's translation
+    /// would silently turn the common numeric case into arithmetic. <c>js_str</c> is the same
+    /// coercion the rest of the prelude uses, so a number formats identically here and in
+    /// <c>'a' + x</c>.
+    ///
+    /// A literal piece is emitted quoted rather than through js_str: it is already a string, and
+    /// keeping it literal is what lets the compiler see the structure it is going to need.
+    /// </remarks>
+    private string Template(TemplateLiteral tpl)
+    {
+        var parts = new List<string>(tpl.Quasis.Count + tpl.Expressions.Count);
+        for (var i = 0; i < tpl.Quasis.Count; i++)
+        {
+            var cooked = tpl.Quasis[i].Value.Cooked ?? tpl.Quasis[i].Value.Raw ?? string.Empty;
+            // An empty piece contributes nothing - `${a}${b}` has three of them - and dropping it
+            // keeps the emitted line readable.
+            if (cooked.Length > 0) parts.Add(Quote(cooked));
+            if (i < tpl.Expressions.Count) parts.Add("js_str(" + Expr(tpl.Expressions[i]) + ")");
+        }
+        // An empty template is still a string, and `` produces no parts at all.
+        return parts.Count == 0 ? "\"\"" : parts.Count == 1 ? parts[0] : string.Join(" .. ", parts);
     }
 
     /// <summary>

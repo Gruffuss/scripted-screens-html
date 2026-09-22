@@ -102,7 +102,9 @@ internal static class JsToLuaTests
     private static readonly (string Name, string Source)[] MustRefuse =
     {
         ("a class", "class A { go() { return 1; } } var a = new A();"),
-        ("a template literal", "var x = 2; var s = `two is ${x}`;"),
+        // A TAGGED template is still refused: a tag is a function taking the pieces and the
+        // values separately, which is a different thing from a template and not translated.
+        ("a tagged template", "function tag(p, v){ return p[0]; } var s = tag`a${1}b`;"),
         ("destructuring", "var o = { a: 1 }; var { a } = o;"),
         ("array destructuring", "var xs = [1, 2]; var [a, b] = xs;"),
         ("a switch", "var x = 1; switch (x) { case 1: x = 2; break; }"),
@@ -127,6 +129,23 @@ internal static class JsToLuaTests
     /// </summary>
     private static readonly (string Name, string Source)[] MustMatch =
     {
+        // Template literals. The second one is the whole reason they cannot go through the `+`
+        // translation: every hole in a template is string-coerced, so `${1}${2}` is "12". Routing it
+        // through js_add would quietly make it 3 - arithmetic where the page wrote markup.
+        ("a template literal interpolates",
+         @"const n = 3, u = 'kPa'; out(`level ${n} ${u}`);"),
+        ("a template coerces, it does not add",
+         @"out(`${1}${2}`);"),
+        ("a template with no holes is its text",
+         @"out(`plain text`);"),
+        ("an empty template is the empty string",
+         @"out(`` + 'x');"),
+        ("a template hole may be any expression",
+         @"const a = [1,2,3]; out(`n=${a.length} half=${6/2} f=${(1.5).toFixed(1)}`);"),
+        ("templates nest",
+         @"const w = 40; out(`style=""width:${`${w}%`}""`);"),
+        ("a template holds a number the way + does",
+         @"const x = 0.1 + 0.2; out(`${x}` + '|' + ('' + x));"),
         ("an inner let shadows, not assigns",
          @"let total = 0; function tally(xs){ let total = 0; for (let j=0;j<xs.length;j++) total += xs[j]; return total; } var t = tally([1,2,3]); out(t + '/' + total);"),
         ("a nested function shadows, not replaces",
