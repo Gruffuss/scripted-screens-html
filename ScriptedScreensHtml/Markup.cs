@@ -66,7 +66,19 @@ internal sealed class Markup
         public readonly Expression Test;
         public readonly List<Part> Then;
         public readonly List<Part> Else;
-        public Choice(Expression test, List<Part> then, List<Part> otherwise) { Test = test; Then = then; Else = otherwise; }
+        /// <summary>
+        /// This choice's place in the shape vector, fixed when it is built.
+        /// </summary>
+        /// <remarks>
+        /// Not derived from a walk, and that is the whole point. Writing the skeleton descends only
+        /// into the side being TAKEN, while working out which shape a hole needs descends into both
+        /// - so two walks numbering choices as they meet them disagree, and a shape vector built by
+        /// one is read wrongly by the other. Measured: 44 choices produced 5 usable shapes and most
+        /// holes appeared to be in none of them.
+        /// </remarks>
+        public readonly int Index;
+        public Choice(int index, Expression test, List<Part> then, List<Part> otherwise)
+        { Index = index; Test = test; Then = then; Else = otherwise; }
     }
 
     /// <summary>
@@ -126,6 +138,8 @@ internal sealed class Markup
     private readonly List<Dictionary<string, Expression>> _bindings = new();
     /// <summary>Guards a helper that calls itself, directly or round a ring.</summary>
     private readonly HashSet<string> _inlining = new(StringComparer.Ordinal);
+    /// <summary>Numbers each choice as it is built, so every walk agrees on which is which.</summary>
+    private int _choices;
     /// <summary>Names currently being resolved, so one defined in terms of itself terminates.</summary>
     private readonly HashSet<string> _resolving = new(StringComparer.Ordinal);
     /// <summary>Parameters of open helpers that the caller did not supply: undefined, not unknown.</summary>
@@ -271,7 +285,7 @@ internal sealed class Markup
             _holes.Add(whole);
             return;
         }
-        into.Add(new Choice(test, then, otherwise));
+        into.Add(new Choice(_choices++, test, then, otherwise));
     }
 
     /// <summary>Whether a branch changes the shape of the markup rather than a value inside it.</summary>
@@ -446,7 +460,7 @@ internal sealed class Markup
     private readonly HashSet<string> _registers = new(StringComparer.Ordinal);
 
     /// <summary>The registration position an expression reads, rather than a value it computes.</summary>
-    private Part? AsCounter(Expression e)
+    private Counter? AsCounter(Expression e)
     {
         switch (e)
         {
@@ -485,11 +499,34 @@ internal sealed class Markup
     // ---- the skeleton ----------------------------------------------------------------------------
 
     /// <summary>
-    /// A sentinel standing in for a hole. Chosen to survive the HTML parser unchanged wherever a
-    /// value can appear - text, an attribute, a style property - and to be findable afterwards
-    /// without a chance of matching the page's own content.
+    /// A sentinel standing in for a hole: a distinctive NUMBER, not a marker.
     /// </summary>
-    internal static string Sentinel(int index) => "H" + index.ToString(CultureInfo.InvariantCulture) + "";
+    /// <remarks>
+    /// It has to survive wherever a value can appear, and most of those places are numeric. A marker
+    /// like <c>H3</c> reads fine as text and makes <c>width:H3px</c>
+    /// unparseable, so the element lays out at the wrong size and the sentinel never reaches the
+    /// scene at all - which is the half of the mapping that matters, because a length is what most
+    /// holes are.
+    ///
+    /// A number works in every position: <c>width:987653px</c> parses, lays out, and arrives in the
+    /// scene as 987653; in text it arrives as "987653". Either way it is findable in the slot table
+    /// by value, which is what makes the mapping fall out of machinery that already exists rather
+    /// than needing the DOM walked and each property's kind inferred.
+    ///
+    /// The base is far outside any plausible page value and the range allows ten thousand holes,
+    /// against 345 on the largest page measured.
+    /// </remarks>
+    internal const int SentinelBase = 987650;
+
+    internal static string Sentinel(int index)
+        => (SentinelBase + index).ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>The hole a sentinel value stands for, or -1 when this is not one.</summary>
+    internal static int HoleOf(double value)
+    {
+        var n = (int)value - SentinelBase;
+        return n >= 0 && n < 10000 && value == (int)value ? n : -1;
+    }
 
     /// <summary>
     /// The markup as text, with each hole replaced by its sentinel.
@@ -502,7 +539,6 @@ internal sealed class Markup
     internal string Skeleton(IReadOnlyList<bool>? taken = null, int rows = 1)
     {
         var sb = new StringBuilder();
-        var choice = 0;
         // Counted here rather than during the analysis: a registration inside a repeat happens once
         // per row, so its index only exists while the markup is being written out.
         var counts = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -529,8 +565,7 @@ internal sealed class Markup
                         break;
                     case Choice c2:
                         {
-                            var take = taken == null || choice >= taken.Count || taken[choice];
-                            choice++;
+                            var take = taken == null || c2.Index >= taken.Count || taken[c2.Index];
                             Write(take ? c2.Then : c2.Else);
                             break;
                         }
@@ -549,25 +584,76 @@ internal sealed class Markup
     /// </summary>
     internal List<(string List, int Index, Expression Value)> Registered { get; } = new();
 
-    /// <summary>How many choices the markup contains, so a caller knows how many shapes there are.</summary>
-    internal int Choices
+    /// <summary>
+    /// Which way each choice has to go for a given hole to appear, keyed by choice index.
+    /// </summary>
+    /// <remarks>
+    /// A page with 44 choices does not have 2^44 shapes: a hole sits on exactly one path through
+    /// them, and a choice it is not under does not constrain it at all. So the shapes worth emitting
+    /// are the distinct constraint sets of the holes, which for a real page is tens rather than
+    /// trillions. Without this the caller emits one shape and finds most holes missing - measured at
+    /// 275 of 309 on AtmoDark - and the obvious conclusion from that number is the wrong one.
+    /// </remarks>
+    internal Dictionary<int, bool>? PathTo(int hole)
     {
-        get
-        {
-            var n = 0;
-            Count(Parts);
-            return n;
+        return Walk(Parts, new Dictionary<int, bool>());
 
-            void Count(List<Part> parts)
+        Dictionary<int, bool>? Walk(List<Part> parts, Dictionary<int, bool> under)
+        {
+            foreach (var part in parts)
             {
-                foreach (var part in parts)
+                switch (part)
                 {
-                    if (part is Choice c) { n++; Count(c.Then); Count(c.Else); }
-                    else if (part is Repeat r) Count(r.Body);
+                    case Hole h when h.Index == hole:
+                        return under;
+                    case Choice c:
+                        {
+                            var thenSide = new Dictionary<int, bool>(under) { [c.Index] = true };
+                            if (Walk(c.Then, thenSide) is { } found) return found;
+                            var elseSide = new Dictionary<int, bool>(under) { [c.Index] = false };
+                            if (Walk(c.Else, elseSide) is { } other) return other;
+                            break;
+                        }
+                    case Repeat r when Walk(r.Body, under) is { } inside:
+                        return inside;
                 }
             }
+            return null;
         }
     }
+
+    /// <summary>
+    /// The distinct shapes worth emitting: one per set of choices some hole needs, plus the default.
+    /// </summary>
+    internal List<bool[]> Shapes()
+    {
+        var count = Choices;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var shapes = new List<bool[]>();
+
+        // The all-first-side shape always goes in: it is the page as the markup reads, and a hole
+        // under no choice at all belongs to it.
+        Add(new Dictionary<int, bool>());
+        for (var hole = 0; hole < _holes.Count; hole++)
+            if (PathTo(hole) is { Count: > 0 } path) Add(path);
+        return shapes;
+
+        void Add(Dictionary<int, bool> path)
+        {
+            var taken = new bool[count];
+            // A choice the hole does not sit under keeps its first side; only the ones on its own
+            // path are forced, so two holes under the same branch share one shape.
+            for (var i = 0; i < count; i++) taken[i] = !path.TryGetValue(i, out var side) || side;
+            var key = string.Create(count, taken, (span, from) =>
+            {
+                for (var i = 0; i < from.Length; i++) span[i] = from[i] ? '1' : '0';
+            });
+            if (seen.Add(key)) shapes.Add(taken);
+        }
+    }
+
+    /// <summary>How many choices the markup contains, so a caller knows how many shapes there are.</summary>
+    internal int Choices => _choices;
 
     private static IEnumerable<Node> Everything(Node n)
     {

@@ -23,6 +23,7 @@ internal static class Program
     private static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--css") { ScriptedScreensHtml.Bench.CorpusCss.Run(args); return 0; }
+        if (args.Length > 0 && args[0] == "--holes") return ScriptedScreensHtml.Bench.Holes.Run(args);
         if (args.Length > 0 && args[0] == "--retained")
         {
             var rp = args.Length > 1 ? args[1] : "../ScriptedScreensHtml/examples/07-game.lua";
@@ -318,7 +319,7 @@ internal static class Program
     }
 
     /// <summary>The page out of a chip file: the first long-bracket string that starts with a tag.</summary>
-    private static string? PageOf(string lua)
+    internal static string? PageOf(string lua)
     {
         var m = Regex.Match(lua, @"\[(=*)\[\s*<(.*?)\]\1\]", RegexOptions.Singleline);
         return m.Success ? "<" + m.Groups[2].Value : null;

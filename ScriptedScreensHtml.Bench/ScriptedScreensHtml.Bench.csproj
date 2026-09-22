@@ -36,7 +36,12 @@
     <Compile Include="..\ScriptedScreensHtml\ScriptHost.cs" />
     <Compile Include="..\ScriptedScreensHtml\JsEngine.cs" />
     <Compile Include="..\ScriptedScreensHtml\DomWrites.cs" />
+    <Compile Include="..\ScriptedScreensHtml\Motion.cs" />
+    <Compile Include="..\ScriptedScreensHtml\DomSlots.cs" />
+    <Compile Include="..\ScriptedScreensHtml\MarkupSlots.cs" />
+    <Compile Include="..\ScriptedScreensHtml\Markup.cs" />
     <Compile Include="Check.cs" />
+    <Compile Include="Holes.cs" />
     <Compile Include="CorpusCss.cs" />
     <Compile Include="Js.cs" />
     <Compile Include="Stubs.cs" />
