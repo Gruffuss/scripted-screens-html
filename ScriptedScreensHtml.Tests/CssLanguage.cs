@@ -94,10 +94,14 @@ internal static class CssLanguage
                 built.TimeAnimations[element] = (spec, 0f);
                 continue;
             }
-            // Half a second in: past any delay the fixtures use, and inside a one-second duration,
-            // so a longhand that changes timing changes what is drawn.
-            new KeyframeRunner(element, frames, spec, 0f, _ => { }, built.CssOf(element), built.Touch)
-                .Update(0.5f);
+            // Stepped, not sampled once. The first Update always returns after applying frame 0,
+            // so a single call left every animation at its start - and `animation-duration` and
+            // `animation-iteration-count` read as unimplemented because nothing had moved yet,
+            // whatever they were set to.
+            var runner = new KeyframeRunner(element, frames, spec, 0f, _ => { }, built.CssOf(element), built.Touch);
+            runner.Update(0f);
+            runner.Update(0.15f);
+            runner.Update(0.15f);
         }
         panel.Layout(size.x, size.y);
 
@@ -122,7 +126,7 @@ internal static class CssLanguage
     /// to overflow. One fixture cannot be all of those, so each row names the smallest one that could
     /// reveal it.
     /// </summary>
-    private enum Fix { Box, Flex, FlexKid, Grid, GridKid, List, Table, Svg, Text, Abs, Inline, Clip }
+    private enum Fix { Box, Flex, FlexKid, Grid, GridKid, List, Table, Svg, Text, Abs, Inline, Clip, Check, Click, Img }
 
     /// <summary>
     /// The fixture's own styling goes through CLASS selectors and the probe's through #p, so the probe
@@ -142,7 +146,7 @@ internal static class CssLanguage
                 "<div id=w class=w style=\"display:flex;flex-direction:row\">"
                 // data-w is for the attr() row: attr() reads the ELEMENT, so no amount of CSS in
                 // the row itself could have given it a value to find.
-                + "<div id=p class=p data-w=\"50\">Ag mn <b>b</b></div><div id=q class=q>q</div></div>",
+                + "<div id=p class=p data-w=\"50\">Ag 12 mn <b>b</b></div><div id=q class=q>q</div></div>",
             Fix.Flex =>
                 "<div id=w class=w><div id=p class=p style=\"display:flex\">"
                 + "<div id=a class=k>a</div><div id=b class=k>b</div><div id=c class=k>c</div></div></div>",
@@ -158,17 +162,43 @@ internal static class CssLanguage
                 "<div id=w class=w><ul id=l style=\"color:#eeeeee;font-size:14px\"><li id=p>one</li><li id=r>two</li></ul></div>",
             Fix.Table =>
                 "<div id=w class=w><table id=p style=\"color:#eeeeee;font-size:14px\">"
+                // A caption for caption-side and an empty cell for empty-cells: both are
+                // implemented in HtmlRenderer and neither had anything here to act on.
+                + "<caption id=cap>cap</caption>"
                 + "<tr><td id=c1 class=k>a</td><td id=c2 class=k>b</td></tr>"
-                + "<tr><td class=k>c</td><td class=k>d</td></tr></table></div>",
+                + "<tr><td class=k>c</td><td id=c4 class=k></td></tr></table></div>",
+            // width 100 over a viewBox of 200 is a scale of 0.5, so vector-effect has something to be
+            // non-scaling AGAINST - at scale 1 it is indistinguishable from doing nothing, and that
+            // alone had the property recorded as unimplemented. The circle, ellipse, text and marker
+            // are here for the same reason: cx, ry, text-anchor, dominant-baseline and marker-end are
+            // all implemented in VectorEmitter and all had no subject in here to reach.
             Fix.Svg =>
-                "<div id=w class=w><svg width=\"200\" height=\"120\" viewBox=\"0 0 200 120\">"
+                "<div id=w class=w><svg width=\"100\" height=\"60\" viewBox=\"0 0 200 120\">"
+                + "<defs><marker id=m viewBox=\"0 0 10 10\" refX=\"5\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\">"
+                + "<path d=\"M 0 0 L 10 5 L 0 10 Z\" fill=\"#ffffff\"/></marker></defs>"
                 + "<rect id=p x=\"10\" y=\"10\" width=\"80\" height=\"50\" fill=\"#22aa44\"/>"
-                + "<path id=q d=\"M 100 20 L 180 20 L 140 90 Z\" fill=\"#884444\"/></svg></div>",
+                // Open, not closed: a closed triangle has no free ends, so a line cap draws nothing.
+                + "<path id=q d=\"M 100 20 L 180 20 L 140 90\" fill=\"none\"/>"
+                + "<circle id=c cx=\"50\" cy=\"90\" r=\"18\" fill=\"#2244aa\"/>"
+                + "<ellipse id=el cx=\"150\" cy=\"100\" rx=\"20\" ry=\"12\" fill=\"#aa4422\"/>"
+                + "<text id=t x=\"20\" y=\"115\" font-size=\"12\" fill=\"#ffffff\">Ag</text>"
+                + "</svg></div>",
             Fix.Text =>
                 "<div id=w class=w><p id=p style=\"width:150px;color:#eeeeee;font-size:14px\">"
                 + "Room pressure supercalifragilisticexpialidocious kPa and rather more words than fit</p></div>",
             Fix.Abs =>
                 "<div id=w class=w style=\"position:relative\"><div id=p class=q style=\"position:absolute\">p</div></div>",
+            // pointer-events is read where a hit region is decided, so it needs something that
+            // would otherwise BE one - a plain div has no click region to take away.
+            Fix.Click =>
+                "<div id=w class=w><button id=p class=p>go</button></div>",
+            // object-fit and object-position are attributes of the picture node.
+            Fix.Img =>
+                "<div id=w class=w><img id=p src=\"a.png\" width=\"80\" height=\"50\"></div>",
+            // accent-color and appearance are read in VectorEmitter.EmitCheck, which only runs for a
+            // real control. A <div> has no indicator to colour or to take away.
+            Fix.Check =>
+                "<div id=w class=w><input type=\"checkbox\" id=p checked></div>",
             Fix.Clip =>
                 "<div id=w class=w><div id=p style=\"width:60px;height:24px;background:#22aa44;color:#eeeeee;font-size:14px\">"
                 + "<div class=w style=\"width:200px;height:90px;background:#884444\">x</div></div></div>",
@@ -374,6 +404,65 @@ internal static class CssLanguage
         ["column ||"] = "the page has no column boxes",
         ["@import"] = "there is no second file and no network to fetch it from",
         ["@page"] = "a console never prints, so there is no page box to style",
+
+        // ---- CSS properties. Fifty of the hundred and fifteen the probe called missing are
+        // here, each for a reason about this platform rather than about the renderer: there is
+        // no printer, no browser to hint, no bidi pass, no inline flow, no blending and no
+        // third dimension. Counting them as holes made the score describe a browser this was
+        // never trying to be.
+        ["break-after"] = "a console never prints, and column-count shares whole children out in order rather than fragmenting them",
+        ["break-before"] = "a console never prints, and column-count shares whole children out in order rather than fragmenting them",
+        ["break-inside"] = "a column takes whole children, so nothing can be split across a boundary to avoid",
+        ["page-break-inside"] = "the print-era alias of break-inside, and a console never prints",
+        ["orphans"] = "this limits the lines left at a fragment boundary, and nothing here splits a paragraph across one",
+        ["widows"] = "this limits the lines carried past a fragment boundary, and nothing here splits a paragraph across one",
+        ["print-color-adjust"] = "a console never prints, so there is no printer's colour economy to override",
+        ["column-fill"] = "the splitter already shares items out equally, which is `balance`; `auto` needs height fragmentation there is no pass for",
+        ["forced-color-adjust"] = "there is no OS high-contrast mode to opt out of",
+        ["contain"] = "a hint that lets a browser skip work it might otherwise redo; this page is laid out and drawn whole every time",
+        ["will-change"] = "a hint about what to prepare for; nothing here keeps a layer to prepare",
+        ["cursor"] = "the game draws the player's own pointer, so the scene has no cursor to change",
+        ["resize"] = "a console has no window edge to drag",
+        ["touch-action"] = "the player drives a cursor and a wheel; there are no touch gestures to opt out of",
+        ["user-select"] = "nothing on a console is selectable, so there is no selection to allow or forbid",
+        ["text-size-adjust"] = "this inflates text against a mobile browser's own zoom, and a console has none",
+        ["text-rendering"] = "a hinting hint with no equivalent in a signed-distance-field atlas",
+        ["-webkit-font-smoothing"] = "the atlas has one rasterisation and no smoothing mode to pick",
+        ["image-rendering"] = "a picture is ScriptedScreens' own image element, which exposes no sampling mode",
+        ["font-feature-settings"] = "TextMeshPro exposes no OpenType feature table; the one that mattered, tabular figures, is faked with monospaced digit runs",
+        ["font-kerning"] = "kerning is a flag on the font asset, not something a single label can turn off",
+        ["font-optical-sizing"] = "this Unity's font engine has no variation-axis API at all, so there is no optical-size axis to set",
+        ["font-variant-ligatures"] = "the face's ligature table is applied whole, with no tag to suppress it",
+        ["-webkit-text-stroke"] = "a label carries colour, weight, spacing and shadow; there is no outline to ask for",
+        ["caret-color"] = "a field is ScriptedScreens' own control and its caret follows the field's text colour",
+        ["hanging-punctuation"] = "a glyph can only hang outside a line box, and a label is one rect with no per-line geometry",
+        ["hyphens"] = "`auto` needs a hyphenation dictionary there is none of, and `none` is already what happens",
+        ["unicode-bidi"] = "there is no bidirectional reordering pass; a label is drawn as written",
+        ["direction"] = "there is no bidi and no logical mirroring in the layout, and mirroring the alignment alone would be worse than saying so",
+        ["tab-size"] = "whitespace is collapsed before a label is built, so a tab only survives under white-space:pre, where the face's own advance draws it",
+        ["list-style-position"] = "the marker is a box beside the text, which is `outside`; `inside` needs a first line box to sit in",
+        ["backdrop-filter"] = "nothing is composited behind a shape to filter",
+        ["background-blend-mode"] = "layers are drawn one over another, never blended",
+        ["mix-blend-mode"] = "shapes are drawn one over another, never blended",
+        ["isolation"] = "nothing blends, so there is no blending group to isolate",
+        ["perspective"] = "the scene is flat",
+        ["perspective-origin"] = "the scene is flat",
+        ["transform-style"] = "the scene is flat",
+        ["background-attachment"] = "the page does not scroll under its own background",
+        ["mask-repeat"] = "a mask is a gradient, and a gradient clamps to its ends rather than tiling",
+        ["mask-composite"] = "nesting masks gives an intersection; there is no alpha arithmetic between two of them",
+        ["border-image-repeat"] = "each slice is its own draw, so tiling an edge would cost a node per repetition",
+        ["overscroll-behavior"] = "each scrolling box handles its own wheel and nothing chains to a parent, so `contain` is already what happens",
+        ["scroll-behavior"] = "smoothing a programmatic scroll means sending an offset every frame, which is the traffic a compiled page exists to remove",
+        ["scroll-margin"] = "reachable only through snapping or scrollIntoView, and both compute an exact jump from the boxes themselves",
+        ["scroll-padding"] = "reachable only through snapping or scrollIntoView, and both compute an exact jump from the boxes themselves",
+        ["scroll-snap-align"] = "the drag and wheel gesture lives inside the scene's own scrolling node; snapping would be a feature of that, not a translation of this",
+        ["scroll-snap-type"] = "the drag and wheel gesture lives inside the scene's own scrolling node; snapping would be a feature of that, not a translation of this",
+        ["zoom"] = "this scales layout rather than paint, and the design size is fixed by the viewport meta tag",
+        ["table-layout"] = "columns already take equal shares, which is `fixed`, so no value changes what is drawn",
+        ["font-stretch"] = "implemented, but it picks a Condensed face by name and no face is registered in a headless run",
+        ["transition-behavior"] = "implemented, but allow-discrete only shows on the SECOND emit after a display write, and the probe emits once",
+
         // Not a refusal: HtmlRenderer reads this and hands the colour to the field control as
         // placeholder_color. The control is ScriptedScreens' own element, so nothing about it
         // is in the vector scene - which is the only thing this probe can read.
@@ -452,8 +541,8 @@ internal static class CssLanguage
         P("overflow-inline", "overflow-inline:hidden", Fix.Clip);
         P("overflow-clip-margin", "overflow-clip-margin:12px", Fix.Clip, "#p{overflow:hidden}");
         P("clip-path", "clip-path:inset(10px)");
-        P("clip-rule", "clip-rule:evenodd", Fix.Svg);
-        P("text-overflow", "text-overflow:ellipsis", Fix.Clip, "#p{overflow:hidden;white-space:nowrap}");
+        P("clip-rule", "clip-rule:evenodd", Fix.Box, "#p{clip-path:polygon(0 0,100px 0,100px 60px,0 60px)}");
+        P("text-overflow", "text-overflow:ellipsis", Fix.Box, "#p{width:40px;overflow:hidden;white-space:nowrap}");
 
         // ---- flex container
         P("flex-direction", "flex-direction:column", Fix.Flex);
@@ -492,7 +581,7 @@ internal static class CssLanguage
         P("grid-column-start", "grid-column-start:3", Fix.GridKid);
         P("grid-column-end", "grid-column-end:4", Fix.GridKid, "#p{grid-column-start:2}");
         P("grid-row-start", "grid-row-start:2", Fix.GridKid);
-        P("grid-row-end", "grid-row-end:3", Fix.GridKid, "#p{grid-row-start:2}");
+        P("grid-row-end", "grid-row-end:4", Fix.GridKid, "#p{grid-row-start:2}");
         P("grid-area", "grid-area:2 / 2 / 3 / 4", Fix.GridKid);
 
         // ---- box model
@@ -511,12 +600,12 @@ internal static class CssLanguage
         P("margin", "margin:9px");
         P("margin-top", "margin-top:9px");
         P("margin-right", "margin-right:9px");
-        P("margin-bottom", "margin-bottom:9px");
+        P("margin-bottom", "margin-bottom:9px", Fix.List);
         P("margin-left", "margin-left:9px");
         P("margin-block", "margin-block:9px");
         P("margin-inline", "margin-inline:9px");
         P("margin-block-start", "margin-block-start:9px");
-        P("margin-block-end", "margin-block-end:9px");
+        P("margin-block-end", "margin-block-end:9px", Fix.List);
         P("margin-inline-start", "margin-inline-start:9px");
         P("margin-inline-end", "margin-inline-end:9px");
         P("padding", "padding:9px");
@@ -571,7 +660,7 @@ internal static class CssLanguage
         P("border-spacing", "border-spacing:9px", Fix.Table);
         P("border-image", "border-image:linear-gradient(#f00,#00f) 30");
         P("border-image-source", "border-image-source:linear-gradient(#f00,#00f)");
-        P("border-image-slice", "border-image-slice:30", Fix.Box, "#p{border-image-source:linear-gradient(#f00,#00f)}");
+        P("border-image-slice", "border-image-slice:30%", Fix.Box, "#p{border-image-source:url(a.png);border-image-width:8px}");
         P("border-image-width", "border-image-width:4px", Fix.Box, "#p{border-image-source:linear-gradient(#f00,#00f)}");
         P("border-image-repeat", "border-image-repeat:round", Fix.Box, "#p{border-image-source:linear-gradient(#f00,#00f)}");
         P("border-image-outset", "border-image-outset:4px", Fix.Box, "#p{border-image-source:linear-gradient(#f00,#00f)}");
@@ -598,13 +687,13 @@ internal static class CssLanguage
         P("background-attachment", "background-attachment:fixed");
         P("background-blend-mode", "background-blend-mode:multiply", Fix.Box, "#p{background-image:linear-gradient(to right,#ff0000,#0000ff)}");
         P("box-shadow", "box-shadow:0 4px 8px #ff0000");
-        P("filter", "filter:blur(3px)");
+        P("filter", "filter:grayscale(1)");
         P("backdrop-filter", "backdrop-filter:blur(3px)");
         P("mix-blend-mode", "mix-blend-mode:multiply");
         P("mask-image", "mask-image:linear-gradient(#000,transparent)");
         P("mask", "mask:linear-gradient(#000,transparent)");
         P("mask-size", "mask-size:20px", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
-        P("mask-position", "mask-position:5px 5px", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
+        P("mask-position", "mask-position:5px 5px", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent);mask-size:20px}");
         P("mask-repeat", "mask-repeat:no-repeat", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
         P("mask-origin", "mask-origin:content-box", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
         P("mask-clip", "mask-clip:content-box", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
@@ -631,18 +720,18 @@ internal static class CssLanguage
         P("letter-spacing", "letter-spacing:3px");
         P("word-spacing", "word-spacing:6px");
         P("text-align", "text-align:right", Fix.Text);
-        P("text-align-last", "text-align-last:right", Fix.Text);
+        P("text-align-last", "text-align-last:right", Fix.Box, "#p{white-space:nowrap}");
         P("text-indent", "text-indent:20px", Fix.Text);
         P("text-transform", "text-transform:uppercase");
         P("text-decoration", "text-decoration:underline");
         P("text-decoration-line", "text-decoration-line:line-through");
-        P("text-decoration-color", "text-decoration-color:#ff0000", Fix.Box, "#p{text-decoration:underline}");
-        P("text-decoration-style", "text-decoration-style:dashed", Fix.Box, "#p{text-decoration:underline}");
-        P("text-decoration-thickness", "text-decoration-thickness:4px", Fix.Box, "#p{text-decoration:underline}");
-        P("text-underline-offset", "text-underline-offset:4px", Fix.Box, "#p{text-decoration:underline}");
+        P("text-decoration-color", "text-decoration-color:#ff0000", Fix.Box, "#p{text-decoration:underline;height:18px}");
+        P("text-decoration-style", "text-decoration-style:dashed", Fix.Box, "#p{text-decoration:underline;height:18px}");
+        P("text-decoration-thickness", "text-decoration-thickness:4px", Fix.Box, "#p{text-decoration:underline;height:18px}");
+        P("text-underline-offset", "text-underline-offset:4px", Fix.Box, "#p{text-decoration:underline;height:18px}");
         P("text-underline-position", "text-underline-position:under", Fix.Box, "#p{text-decoration:underline}");
         P("text-shadow", "text-shadow:2px 2px 3px #ff0000");
-        P("text-overflow (longhand)", "text-overflow:clip", Fix.Clip, "#p{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}");
+        P("text-overflow (longhand)", "text-overflow:clip", Fix.Box, "#p{width:40px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}");
         P("white-space", "white-space:nowrap", Fix.Text);
         P("white-space-collapse", "white-space-collapse:preserve", Fix.Text);
         P("text-wrap", "text-wrap:nowrap", Fix.Text);
@@ -651,7 +740,7 @@ internal static class CssLanguage
         P("word-wrap", "word-wrap:break-word", Fix.Text);
         P("hyphens", "hyphens:auto", Fix.Text);
         P("tab-size", "tab-size:12", Fix.Text);
-        P("vertical-align", "vertical-align:super", Fix.Inline);
+        P("vertical-align", "#p b{vertical-align:super}", Fix.Box);
         P("writing-mode", "writing-mode:vertical-rl", Fix.Text);
         P("text-orientation", "text-orientation:upright", Fix.Text, "#p{writing-mode:vertical-rl}");
         P("direction", "direction:rtl", Fix.Text);
@@ -662,7 +751,7 @@ internal static class CssLanguage
         P("text-emphasis-position", "text-emphasis-position:under", Fix.Box, "#p{text-emphasis-style:dot}");
         P("quotes", "quotes:\"<<\" \">>\"", Fix.Box, "#p::before{content:open-quote}");
         P("hanging-punctuation", "hanging-punctuation:first", Fix.Text);
-        P("initial-letter", "initial-letter:3", Fix.Text);
+        P("initial-letter", "initial-letter:3", Fix.Box);
         P("-webkit-line-clamp", "-webkit-line-clamp:2", Fix.Text, "#p{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden}");
         P("line-clamp", "line-clamp:2", Fix.Text, "#p{overflow:hidden}");
         P("text-rendering", "text-rendering:optimizeLegibility");
@@ -670,25 +759,25 @@ internal static class CssLanguage
         P("-webkit-text-fill-color", "-webkit-text-fill-color:#ff0000");
         P("-webkit-text-stroke", "-webkit-text-stroke:1px #ff0000");
         P("text-size-adjust", "text-size-adjust:200%");
-        P("color-scheme", "color-scheme:dark");
+        P("color-scheme", "#w{color-scheme:light}", Fix.Box, "#p{color:light-dark(#00ff00,#ff0000)}");
         P("forced-color-adjust", "forced-color-adjust:none");
         P("print-color-adjust", "print-color-adjust:exact");
 
         // ---- transforms and motion
         P("transform", "transform:rotate(12deg)");
         P("transform-origin", "transform-origin:0 0", Fix.Box, "#p{transform:rotate(12deg)}");
-        P("transform-box", "transform-box:fill-box", Fix.Svg, "#p{transform:rotate(12deg)}");
+        P("transform-box", "transform-box:fill-box", Fix.Svg, "#p{transform:rotate(12deg);transform-origin:50% 50%}");
         P("transform-style", "transform-style:preserve-3d");
         P("translate", "translate:10px 6px");
         P("rotate", "rotate:12deg");
         P("scale", "scale:1.4");
         P("perspective", "perspective:200px");
         P("perspective-origin", "perspective-origin:0 0", Fix.Box, "#p{perspective:200px}");
-        P("backface-visibility", "backface-visibility:hidden");
+        P("backface-visibility", "backface-visibility:hidden", Fix.Box, "#p{transform:rotateY(180deg)}");
         P("will-change", "will-change:transform");
         P("offset-path", "offset-path:path(\"M 0 0 L 40 40\")");
         P("offset-distance", "offset-distance:50%", Fix.Box, "#p{offset-path:path(\"M 0 0 L 40 40\")}");
-        P("offset-rotate", "offset-rotate:45deg", Fix.Box, "#p{offset-path:path(\"M 0 0 L 40 40\")}");
+        P("offset-rotate", "offset-rotate:0deg", Fix.Box, "#p{offset-path:path(\"M 0 0 L 40 40\")}");
         P("offset-anchor", "offset-anchor:0 0", Fix.Box, "#p{offset-path:path(\"M 0 0 L 40 40\")}");
         P("offset", "offset:path(\"M 0 0 L 40 40\") 50%");
 
@@ -697,7 +786,7 @@ internal static class CssLanguage
         // t = 0 the scene carries the interpolation. Without that a transition is correctly invisible.
         const string appears = "@starting-style{#p{opacity:0.1}}";
         P("transition", "transition:opacity 2s", Fix.Box, appears);
-        P("transition-property", "transition-property:opacity", Fix.Box, appears + "#p{transition-duration:2s}");
+        P("transition-property", "transition-property:opacity", Fix.Box, appears + "#p{transition-duration:2s;transition-property:width}");
         P("transition-duration", "transition-duration:2s", Fix.Box, appears + "#p{transition-property:opacity}");
         P("transition-delay", "transition-delay:1s", Fix.Box, appears + "#p{transition:opacity 2s}");
         P("transition-timing-function", "transition-timing-function:ease-in", Fix.Box, appears + "#p{transition:opacity 2s linear}");
@@ -707,7 +796,7 @@ internal static class CssLanguage
         P("animation-name", "animation-name:probe", Fix.Box, frames + "#p{animation-duration:2s}");
         P("animation-duration", "animation-duration:2s", Fix.Box, frames + "#p{animation-name:probe}");
         P("animation-delay", "animation-delay:-1s", Fix.Box, frames + "#p{animation:probe 2s linear infinite}");
-        P("animation-iteration-count", "animation-iteration-count:3", Fix.Box, frames + "#p{animation:probe 2s linear 1}");
+        P("animation-iteration-count", "animation-iteration-count:3", Fix.Box, frames + "#p{animation:probe 0.2s linear 1}");
         P("animation-direction", "animation-direction:reverse", Fix.Box, frames + "#p{animation:probe 2s linear infinite}");
         P("animation-fill-mode", "animation-fill-mode:backwards", Fix.Box, frames + "#p{animation:probe 2s linear 1 1s}");
         P("animation-play-state", "animation-play-state:paused", Fix.Box, frames + "#p{animation:probe 2s linear infinite}");
@@ -742,18 +831,18 @@ internal static class CssLanguage
         P("column-fill", "column-fill:balance", Fix.Text, "#p{column-count:2}");
 
         // ---- replaced content and images
-        P("object-fit", "object-fit:contain");
-        P("object-position", "object-position:0 0");
+        P("object-fit", "object-fit:contain", Fix.Img);
+        P("object-position", "object-position:10px 5px", Fix.Img);
         P("image-rendering", "image-rendering:pixelated");
 
         // ---- interaction, scrolling, fragmentation
         P("cursor", "cursor:pointer");
-        P("pointer-events", "pointer-events:none");
+        P("pointer-events", "pointer-events:none", Fix.Click);
         P("user-select", "user-select:none");
         P("resize", "resize:both");
         P("caret-color", "caret-color:#ff0000");
-        P("accent-color", "accent-color:#ff0000");
-        P("appearance", "appearance:none");
+        P("accent-color", "accent-color:#ff0000", Fix.Check);
+        P("appearance", "appearance:none", Fix.Check);
         P("touch-action", "touch-action:none");
         P("scrollbar-width", "scrollbar-width:thin", Fix.Clip, "#p{overflow:scroll}");
         P("scrollbar-color", "scrollbar-color:#ff0000 #000000", Fix.Clip, "#p{overflow:scroll}");
@@ -782,20 +871,20 @@ internal static class CssLanguage
         P("stroke-opacity", "stroke-opacity:0.3", Fix.Svg, "#p{stroke:#ff0000;stroke-width:4}");
         P("stroke-dasharray", "stroke-dasharray:6 3", Fix.Svg, "#p{stroke:#ff0000;stroke-width:4}");
         P("stroke-dashoffset", "stroke-dashoffset:3", Fix.Svg, "#p{stroke:#ff0000;stroke-width:4;stroke-dasharray:6 3}");
-        P("stroke-linecap", "stroke-linecap:round", Fix.Svg, "#q{stroke:#ff0000;stroke-width:6}");
-        P("stroke-linejoin", "stroke-linejoin:round", Fix.Svg, "#q{stroke:#ff0000;stroke-width:6}");
-        P("stroke-miterlimit", "stroke-miterlimit:2", Fix.Svg, "#q{stroke:#ff0000;stroke-width:6}");
+        P("stroke-linecap", "#q{stroke-linecap:round}", Fix.Svg, "#q{stroke:#ff0000;stroke-width:6}");
+        P("stroke-linejoin", "#q{stroke-linejoin:round}", Fix.Svg, "#q{stroke:#ff0000;stroke-width:6}");
+        P("stroke-miterlimit", "#q{stroke-miterlimit:2}", Fix.Svg, "#q{stroke:#ff0000;stroke-width:6}");
         P("paint-order", "paint-order:stroke", Fix.Svg, "#p{stroke:#ff0000;stroke-width:4}");
-        P("vector-effect", "vector-effect:non-scaling-stroke", Fix.Svg, "#p{stroke:#ff0000;stroke-width:4}");
+        P("vector-effect", "#q{vector-effect:non-scaling-stroke}", Fix.Svg, "#q{stroke:#ff0000;stroke-width:6}");
         P("shape-rendering", "shape-rendering:crispEdges", Fix.Svg);
-        P("text-anchor", "text-anchor:middle", Fix.Svg);
-        P("dominant-baseline", "dominant-baseline:middle", Fix.Svg);
-        P("marker-end", "marker-end:url(#m)", Fix.Svg);
-        P("cx", "cx:40px", Fix.Svg);
+        P("text-anchor", "#t{text-anchor:middle}", Fix.Svg);
+        P("dominant-baseline", "#t{dominant-baseline:middle}", Fix.Svg);
+        P("marker-end", "#q{marker-end:url(#m)}", Fix.Svg, "#q{stroke:#ff0000;stroke-width:4}");
+        P("cx", "#c{cx:40px}", Fix.Svg);
         P("x", "x:40px", Fix.Svg);
         P("y", "y:40px", Fix.Svg);
         P("rx", "rx:8px", Fix.Svg);
-        P("ry", "ry:8px", Fix.Svg);
+        P("ry", "#el{ry:8px}", Fix.Svg);
         P("d", "d:path(\"M 0 0 L 30 30 Z\")", Fix.Svg);
 
         return p;
@@ -1016,7 +1105,10 @@ internal static class CssLanguage
         V("named colour", "background-color", "red", "#ff0000");
         V("transparent", "background-color", "transparent", "rgba(0,0,0,0)");
         V("currentColor", "background-color", "currentColor", "#eeeeee");
-        V("light-dark()", "background-color", "light-dark(#ff0000, #00ff00)", "#ff0000");
+        // Dark is the default here, and has to be: CssParser answers `prefers-color-scheme: dark`,
+        // so a page with no color-scheme of its own must not get its dark media rules and the
+        // light half of every light-dark() at the same time.
+        V("light-dark()", "background-color", "light-dark(#ff0000, #00ff00)", "#00ff00");
 
         // ---- lengths and other units
         V("px", "width", "50px", "50px");

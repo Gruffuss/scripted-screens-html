@@ -33,7 +33,10 @@ internal static class StyleApplier
     /// <summary>Per page, from HtmlRenderer.Build: everything the LAST page told this class.
     /// color-scheme belongs here - it is set by a declaration and was never cleared, so one page's
     /// `color-scheme: dark` picked the dark half of every later page's light-dark().</summary>
-    internal static void ForgetReported() { Reported.Clear(); ColorSchemeDark = false; }
+    // Dark is the default because CssParser.Discrete answers `prefers-color-scheme: dark`, and a
+    // page that declares no color-scheme must not get its dark media rules and its light
+    // light-dark() halves at the same time. A console is a lit panel in a dark room.
+    internal static void ForgetReported() { Reported.Clear(); ColorSchemeDark = true; }
 
     /// <summary>
     /// A property the cascade no longer sets (its rule stopped matching) goes back to its initial
@@ -326,7 +329,10 @@ internal static class StyleApplier
             // is a visible instruction - the subtree is not painted - and there is nothing here
             // that skips a subtree, so saying nothing would draw it in full.
             case "content-visibility":
-                if (v == "hidden") Unknown(d, warn);
+                // ponytail: `hidden` hides the whole element, where CSS keeps its own background and
+                // border and hides only its contents. Closer than painting it in full, which is what
+                // warning and doing nothing amounted to.
+                if (v == "hidden") s.visibility = Visibility.Hidden;
                 break;
             case "background":
             case "background-color":
@@ -446,7 +452,11 @@ internal static class StyleApplier
             // text-wrap is the same wrapping switch under its modern name (balance/pretty still wrap)
             case "text-wrap": case "text-wrap-mode": s.whiteSpace = v == "nowrap" ? WhiteSpace.NoWrap : WhiteSpace.Normal; break;
             case "white-space-collapse": if (v.StartsWith("preserve", StringComparison.Ordinal)) s.whiteSpace = WhiteSpace.NoWrap; break;
-            case "color-scheme": ColorSchemeDark = v.Contains("dark") && !v.Contains("light"); break;
+            // `light dark` declares support for BOTH and is what every dark-capable page writes;
+            // the old test read it as light-only. It has to agree with CssParser.Discrete, which
+            // answers `prefers-color-scheme: dark` - otherwise a page gets its dark media rules and
+            // the light half of every light-dark(), which looks like the page's own mistake.
+            case "color-scheme": ColorSchemeDark = v.Contains("dark"); break;
             case "initial-letter":
             {
                 // initial-letter: <lines> [<sink>]: the drop cap spans that many lines of the paragraph (line height taken as 1.2em)
@@ -688,7 +698,6 @@ internal static class StyleApplier
         ["perspective"] = "the scene is 2D",
         ["perspective-origin"] = "the scene is 2D",
         ["transform-style"] = "the scene is 2D",
-        ["transform-box"] = "a transform always turns about its own border box",
         ["border-collapse"] = "table borders are drawn per cell",
         ["border-spacing"] = "table cells are laid out without separation",
         ["caption-side"] = "a caption stays where it is written",
@@ -698,26 +707,19 @@ internal static class StyleApplier
         ["column-span"] = "a column-spanning element is laid out in its column",
         ["clear"] = "there is no float line to clear",
         ["direction"] = "the page is laid out left to right",
-        ["vertical-align"] = "an inline box sits on the line, not above or below it",
         ["overflow-wrap"] = "a long word is not broken; word-break: break-all is",
         ["word-wrap"] = "a long word is not broken; word-break: break-all is",
         ["tab-size"] = "a tab is drawn at the face's own width",
-        ["quotes"] = "content: open-quote uses the plain marks",
-        ["initial-letter"] = "there is no inline flow to sink a letter into",
+        ["quotes"] = "content: open-quote is not understood, so a quote pair set here would change nothing",
         ["list-style-position"] = "a marker always sits outside the item",
-        ["text-orientation"] = "glyphs are always drawn upright",
+        ["text-orientation"] = "a vertical label is the whole line turned, so its glyphs turn with it and cannot be set upright one by one",
         ["text-emphasis-style"] = "there are no emphasis marks",
         ["text-emphasis-color"] = "there are no emphasis marks",
         ["text-emphasis-position"] = "there are no emphasis marks",
         ["offset-rotate"] = "an element on an offset-path keeps its own rotation",
-        ["vector-effect"] = "a stroke always scales with its shape",
         ["marker"] = "line markers are not drawn",
-        ["marker-start"] = "line markers are not drawn",
-        ["marker-mid"] = "line markers are not drawn",
-        ["marker-end"] = "line markers are not drawn",
         ["zoom"] = "set the design size with <meta name=\"viewport\" content=\"width=N\">",
         // Each of these was parsed, put in the record, and read by nothing - the worst outcome.
-        ["text-align-last"] = "a label carries one alignment; only text-align is drawn",
         ["font-variant"] = "small caps are not drawn; use text-transform: uppercase with a smaller size",
         ["font-variant-caps"] = "small caps are not drawn; use text-transform: uppercase with a smaller size",
         ["column-fill"] = "columns are filled in order, never balanced",
@@ -761,7 +763,7 @@ internal static class StyleApplier
     internal static float ViewportW { get => OffThread.Active ? OffThread.Job.ViewportW : _viewportW; set { if (OffThread.Active) OffThread.Job.ViewportW = value; else _viewportW = value; } }
     internal static float ViewportH { get => OffThread.Active ? OffThread.Job.ViewportH : _viewportH; set { if (OffThread.Active) OffThread.Job.ViewportH = value; else _viewportH = value; } }
     private static float _emSize = 16f, _rootFontSize = 16f, _viewportW = 460f, _viewportH = 460f;
-    private static bool _colorSchemeDark;
+    private static bool _colorSchemeDark = true;
 
     /// <summary>A number in px (or the bare number of a percentage). Units: px pt em rem vw vh; calc().</summary>
     public static float Num(string v)
