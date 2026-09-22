@@ -22,6 +22,7 @@ It is why the project's rule is to fail toward a loud refusal rather than toward
 | 5c | **A `className` state that changes anything but x/y compiles as a state that draws nothing.** | `PageCompiler.cs` | `el.className = 'alarm'` against `.alarm { background:#f00 }` compiles, logs a state binding, and never changes colour. |
 | 5d | **`DomWrites` misses writes inside non-top-level function declarations.** | `DomWrites.cs` | No write means no `Unmapped` entry, so the page compiles and the animation is simply dead. |
 | 5e | **`style.opacity`/`transform` on an element whose group carries no id bind to slots the compiler has just proved do not exist.** | `DomSlots.cs` | The chip computes and sends them every frame for the life of the console and the renderer ignores them. |
+| 5f | **Twelve probe fixtures cannot reveal the property they test**, so CSS coverage is understated. | `CssLanguage.cs` | `margin-bottom` on a fixed-height item in a row, `grid-row-end` where start 2 / end 3 *is* the baseline, `object-fit` with no image present, the SVG properties probed on a `rect`. A measurement that reads worse than the truth wastes the same time as one that reads better. |
 | 5 | **`getComputedStyle` returns the element's own inline style.** A value that came from the stylesheet reads as nil. | `JsPrelude.lua` | Wrong answer rather than no answer. Should either resolve the cascade or refuse. |
 
 ---
@@ -60,6 +61,20 @@ It is why the project's rule is to fail toward a loud refusal rather than toward
 | 31 | **`DOM.known` was read and never assigned, so the missing-element reader added the same day could not fire.** | `JsPrelude.lua` / `CompiledPage.cs` | The characteristic bug with the halves swapped: #6 added a reader for a table nothing wrote, and the producer's own guard tested a set nobody filled. Both halves now exist. |
 | 32 | **`SENDNOTE` was read exactly once per page.** | `CompiledRun.cs` | The first success was reported and every later send failure was written and never read — the same silence the note was added to remove. Every distinct note is now reported. |
 | 33 | **`HtmlConfig.AblateSend` is bound, shown in the settings UI, and read by nothing.** | `HtmlConfig.cs` | **Still open.** Switching it on changes nothing, so the ablation measurement returns the un-ablated number — i.e. it reports the send path costs zero. Measurements taken with it are suspect, including ones quoted in CLAUDE.md. |
+
+| 34 | **`@supports` blocks were taken unconditionally, `not` included.** | `CssParser.cs` | A page's `@supports not (...) { fallback }` was applied *on top of* the rules it was the fallback for — and being later in the sheet, it won. The probe row for it was green only because of this. |
+| 35 | **`[attr=v s]` silently matched nothing.** | `CssParser.cs` | The `s` flag was never stripped, so the value became `"Hello World" s`. The `i` flag was stripped and then compared case-sensitively anyway. |
+| 36 | **`colspan` only worked on a cell that carried an `id`.** | `HtmlRenderer.cs` | The row builder looked each cell up in `ById` and skipped it when absent — which is almost every cell. |
+| 37 | **`CssParser.ReportedPseudos` was a process-global, never cleared.** | `CssParser.cs` | #10 verbatim, in a second file. The first page reported its gaps and every page after it looked clean. |
+| 38 | **`@property`'s `initial-value` was stored and then ignored.** | `CssParser.cs` | The resolver read it and set `unresolved = true` regardless, and the caller drops an unresolved declaration — so a *declared* custom property behaved exactly like an undefined one. |
+| 39 | **`<a>` was coloured with or without `href`.** | `HtmlRenderer.cs` | A browser colours `a:any-link`. |
+| 40 | **`display: flex` overwrote a cascaded `flex-direction`.** | `StyleApplier.cs` | It set `Row` as a side effect, and inline styles apply last — so `<div style="display:flex">` plus a rule `flex-direction: column` laid out as a row, every time. |
+| 41 | **A `background-image` gradient was dropped whenever a `background` colour shorthand also matched.** | `VectorEmitter.cs` | The emitter took the shorthand first, found a colour, and never looked at the longhand. This alone is why six background properties read as unsupported. |
+| 42 | **`outline-width` + `outline-color` with no `outline-style` drew an outline a browser does not.** | `StyleApplier.cs` | The initial `outline-style` is `none`; the style was read only to cancel an outline, never to make one. |
+| 43 | **A named `justify-items`/`justify-self` was ignored in any auto-sized grid column.** | `GridLayout.cs` | An `|| contentCol` overruled it. |
+| 44 | **`grid-template-areas` was parsed for names only**, so a page relying on it for the grid's shape laid out in one column. | `GridLayout.cs` | |
+| 45 | **A tiled gradient emitted one shape AND one gradient def per tile.** | `VectorEmitter.cs` | A 4px `background-size` over a panel wanted 1,250 of each. Capped at 64 with a warning. Found before it shipped, not after. |
+| 46 | **`MarkupSlots` broke the mod build.** | `MarkupSlots.cs` — mine | `OffThread.Boxes` is null until a surface has run once; the analyzer caught it and `TreatWarningsAsErrors` turned it into a build failure the tests project did not see. |
 
 ---
 

@@ -111,6 +111,21 @@ internal static class DomSlots
         ["borderRadius"] = "rx",
         ["font-size"] = "size",
         ["fontSize"] = "size",
+        // The border and visibility family. Each maps onto a key the scene already exposes, and the
+        // guard below refuses when this element does not emit one - `s` and `sw` only exist on a box
+        // that actually draws a stroke, so a page setting a border colour on something that has no
+        // border is told rather than writing into nothing.
+        ["border-color"] = "s",
+        ["borderColor"] = "s",
+        ["border-width"] = "sw",
+        ["borderWidth"] = "sw",
+        ["border-top-left-radius"] = "rx",
+        ["borderTopLeftRadius"] = "rx",
+        ["border-top-right-radius"] = "rx",
+        ["borderTopRightRadius"] = "rx",
+        // `visibility: hidden` keeps the box and stops the paint, which is what fill opacity is.
+        ["visibility"] = "fo",
+        ["opacity"] = "fo",
     };
 
     /// <summary>Properties carried by the element's wrapping group rather than its own node.</summary>

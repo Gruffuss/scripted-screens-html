@@ -90,7 +90,10 @@ internal static class MarkupSlots
             // lookups are native ECalls and throw outside the player. The boxes the emitter reads
             // have to be captured from the freshly laid-out tree first, or it emits the previous
             // shape's geometry for the skeleton's elements.
-            OffThread.Capture(built.Root, built, OffThread.Boxes, new List<VisualElement>());
+            // Boxes is null until a surface has run once. Compiling before that would emit every
+            // element at the origin, so the holes would map to slots on shapes nobody can see.
+            if (OffThread.Boxes is not { } boxes) return null;
+            OffThread.Capture(built.Root, built, boxes, new List<VisualElement>());
             var wasActive = OffThread.Active;
             OffThread.Active = true;
             VectorEmitter.Output output;

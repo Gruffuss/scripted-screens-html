@@ -65,8 +65,8 @@ internal static class StyleApplier
             case "right": s.right = none; break;
             case "bottom": s.bottom = none; break;
             case "inset": s.top = s.right = s.bottom = s.left = none; break;
-            case "display": s.display = none; s.flexDirection = none; break;
-            case "flex-direction": s.flexDirection = none; break;
+            case "display": s.display = none; s.flexDirection = none; s.FlexDirectionNamed = false; break;
+            case "flex-direction": s.flexDirection = none; s.FlexDirectionNamed = false; break;
             case "flex-wrap": s.flexWrap = none; break;
             case "flex-grow": s.flexGrow = none; break;
             case "flex-shrink": s.flexShrink = none; break;
@@ -156,11 +156,14 @@ internal static class StyleApplier
                 }
                 s.display = v == "none" ? DisplayStyle.None : DisplayStyle.Flex;
                 // CSS: a flex container lays out in a row unless told otherwise; a block (or
-                // grid, whose children are placed absolutely) stacks. Later declarations win.
-                if (v == "flex" || v == "inline-flex") s.flexDirection = FlexDirection.Row;
+                // grid, whose children are placed absolutely) stacks. "Told otherwise" is any
+                // flex-direction the cascade named, whatever order it arrived in - an inline
+                // style="display:flex" is applied last and used to undo a rule's column.
+                if ((v == "flex" || v == "inline-flex") && !s.FlexDirectionNamed) s.flexDirection = FlexDirection.Row;
                 break;
             case "flex-direction":
                 s.flexDirection = v switch { "row" => FlexDirection.Row, "row-reverse" => FlexDirection.RowReverse, "column-reverse" => FlexDirection.ColumnReverse, _ => FlexDirection.Column };
+                s.FlexDirectionNamed = true;
                 break;
             case "flex-wrap": s.flexWrap = v == "wrap" ? Wrap.Wrap : v == "wrap-reverse" ? Wrap.WrapReverse : Wrap.NoWrap; break;
             case "flex-flow":
@@ -217,9 +220,12 @@ internal static class StyleApplier
                 break;
             case "align-self": s.alignSelf = AlignOf(v); break;
             case "align-content": s.alignContent = AlignOf(v); break;
+            // The layout has one overflow, not one per axis, so a clip on either axis clips the box.
+            // Erring toward clipping matches what the author asked for on the axis they named; the
+            // other axis of a box that already fits is not observable.
             case "overflow":
-            case "overflow-y": s.overflow = v == "hidden" || v == "clip" || v == "scroll" || v == "auto" ? Overflow.Hidden : Overflow.Visible; break;
-            case "overflow-x": break;
+            case "overflow-y":
+            case "overflow-x": s.overflow = v == "hidden" || v == "clip" || v == "scroll" || v == "auto" ? Overflow.Hidden : Overflow.Visible; break;
             case "visibility": s.visibility = v == "hidden" ? UnityEngine.UIElements.Visibility.Hidden : UnityEngine.UIElements.Visibility.Visible; break;
             case "opacity": s.opacity = Num(v); break;
 
@@ -551,8 +557,73 @@ internal static class StyleApplier
         "cx", "cy", "r", "rx", "ry", "x", "y", "d", "path-length", // svg geometry as CSS: every declaration on a shape becomes its attribute in the collector
     };
 
+    /// <summary>
+    /// Properties that change what a BROWSER paints and that this renderer drops. Each says why, once
+    /// per page, naming itself.
+    /// </summary>
+    /// <remarks>
+    /// The split from <see cref="Elsewhere"/> is the whole point. That set holds two very different
+    /// things that were being treated alike: properties another stage really does read (gap, grid-*,
+    /// box-shadow, clip-path), and properties nothing reads at all. For the first, silence is
+    /// correct. For the second it is the worst outcome there is - the page sets `background-blend-mode`
+    /// or `border-collapse`, nothing complains, and the console quietly looks wrong.
+    ///
+    /// Not listed, deliberately: a property whose effect a console cannot have in the first place.
+    /// `cursor`, `user-select`, `resize`, `caret-color`, `scroll-behavior`, `touch-action`,
+    /// `will-change`, `text-rendering`, the print and page-break family. Ignoring those IS correct,
+    /// and a warning for them would be noise an author cannot act on - which is how a warning list
+    /// stops being read.
+    /// </remarks>
+    private static readonly Dictionary<string, string> Dropped = new(StringComparer.Ordinal)
+    {
+        ["all"] = "resets every property, which the cascade here cannot undo",
+        ["appearance"] = "the controls are drawn, not native, so there is no native look to remove",
+        ["accent-color"] = "the drawn controls carry their own colour",
+        ["backdrop-filter"] = "nothing is composited behind a shape to filter",
+        ["background-attachment"] = "the page does not scroll under its background",
+        ["background-blend-mode"] = "layers are drawn one over another, never blended",
+        ["mix-blend-mode"] = "shapes are drawn one over another, never blended",
+        ["backface-visibility"] = "the scene is 2D",
+        ["perspective"] = "the scene is 2D",
+        ["perspective-origin"] = "the scene is 2D",
+        ["transform-style"] = "the scene is 2D",
+        ["transform-box"] = "a transform always turns about its own border box",
+        ["border-collapse"] = "table borders are drawn per cell",
+        ["border-spacing"] = "table cells are laid out without separation",
+        ["caption-side"] = "a caption stays where it is written",
+        ["empty-cells"] = "an empty cell is drawn like any other",
+        ["table-layout"] = "columns are always sized from their content",
+        ["columns"] = "the shorthand is not split; set column-count",
+        ["column-span"] = "a column-spanning element is laid out in its column",
+        ["clear"] = "there is no float line to clear",
+        ["direction"] = "the page is laid out left to right",
+        ["vertical-align"] = "an inline box sits on the line, not above or below it",
+        ["overflow-wrap"] = "a long word is not broken; word-break: break-all is",
+        ["word-wrap"] = "a long word is not broken; word-break: break-all is",
+        ["tab-size"] = "a tab is drawn at the face's own width",
+        ["quotes"] = "content: open-quote uses the plain marks",
+        ["initial-letter"] = "there is no inline flow to sink a letter into",
+        ["list-style-position"] = "a marker always sits outside the item",
+        ["text-orientation"] = "glyphs are always drawn upright",
+        ["text-emphasis-style"] = "there are no emphasis marks",
+        ["text-emphasis-color"] = "there are no emphasis marks",
+        ["text-emphasis-position"] = "there are no emphasis marks",
+        ["offset-rotate"] = "an element on an offset-path keeps its own rotation",
+        ["vector-effect"] = "a stroke always scales with its shape",
+        ["marker"] = "line markers are not drawn",
+        ["marker-start"] = "line markers are not drawn",
+        ["marker-mid"] = "line markers are not drawn",
+        ["marker-end"] = "line markers are not drawn",
+        ["zoom"] = "set the design size with <meta name=\"viewport\" content=\"width=N\">",
+    };
+
     private static void Unknown(CssDeclaration d, Action<string>? warn)
     {
+        if (Dropped.TryGetValue(d.Name, out var why))
+        {
+            if (Reported.Add(d.Name)) warn?.Invoke($"css: \"{d.Name}: {d.Value}\" is not drawn - {why}");
+            return;
+        }
         if (Elsewhere.Contains(d.Name))
             return;
         if (Reported.Add(d.Name + ":" + d.Value))

@@ -468,9 +468,43 @@ function js_date(ms)
 end
 
 -- Only a pattern of plain characters ever reaches here: JsToLua reports anything with regular
--- expression syntax in it rather than pretending a Lua pattern is a regex.
+-- expression syntax in it rather than pretending a Lua pattern is a regex. So a match IS a plain
+-- substring search, and test and exec are exact rather than approximations.
+--
+-- The two methods are closures on the object because js_m calls whatever it finds without a
+-- receiver, which is the same reason js_date is built this way. A regex literal with no syntax in
+-- it is rare enough that two closures at the literal cost nothing worth measuring.
 function js_regex(pattern, flags)
-  return { __regex = true, source = pattern, global = flags:find("g") ~= nil }
+  flags = flags or ""
+  local re
+  re = { __regex = true, source = pattern, flags = flags, lastIndex = 0,
+         global = flags:find("g", 1, true) ~= nil,
+         ignoreCase = flags:find("i", 1, true) ~= nil }
+  local function found(s)
+    s = js_str(s)
+    local needle = re.ignoreCase and pattern:lower() or pattern
+    local hay = re.ignoreCase and s:lower() or s
+    local from = re.global and (re.lastIndex + 1) or 1
+    if from > #hay + 1 then return nil end
+    local a, b = hay:find(needle, from, true)
+    return a, b, s
+  end
+  re.test = function(s)
+    local a, b = found(s)
+    if a == nil then re.lastIndex = 0 return false end
+    if re.global then re.lastIndex = b end
+    return true
+  end
+  re.exec = function(s)
+    local a, b, text = found(s)
+    if a == nil then re.lastIndex = 0 return nil end
+    if re.global then re.lastIndex = b end
+    local m = js_array({ [0] = sub(text, a, b) }, 1)
+    m.index = a - 1
+    m.input = text
+    return m
+  end
+  return re
 end
 
 -- ---- method dispatch ------------------------------------------------------------------------------
@@ -485,6 +519,10 @@ end
 -- arrow function, which by definition ignores `this`.
 
 local StringMethods, ArrayMethods, NumberMethods = {}, {}, {}
+-- Methods every object has, kept apart from ArrayMethods so the array path - the hot one - is
+-- unchanged, and consulted only after it misses.
+local ObjectMethods = {}
+ObjectMethods.hasOwnProperty = function(obj, key) return rawget(obj, key) ~= nil end
 
 function js_m(obj, name, ...)
   if type(obj) == "table" then
@@ -500,7 +538,7 @@ function js_m(obj, name, ...)
     end
     local viaIndex = obj[name]
     if type(viaIndex) == "function" then return viaIndex(...) end
-    local m = ArrayMethods[name]
+    local m = ArrayMethods[name] or ObjectMethods[name]
     if m then return m(obj, ...) end
   elseif type(obj) == "string" then
     local m = StringMethods[name]
@@ -988,6 +1026,34 @@ Math = {
   end,
 }
 
+-- The hyperbolics, from exp, which is how they are defined. `fround` is deliberately absent: it
+-- needs the exponent of a double and this Lua has no frexp, so there is no way to round to float32
+-- precision here that would not be an approximation of a rounding.
+Math.sinh = function(v) return (math.exp(v) - math.exp(-v)) / 2 end
+Math.cosh = function(v) return (math.exp(v) + math.exp(-v)) / 2 end
+Math.tanh = function(v)
+  if v > 20 then return 1 end
+  if v < -20 then return -1 end
+  local a, b = math.exp(v), math.exp(-v)
+  return (a - b) / (a + b)
+end
+Math.asinh = function(v) return math.log(v + math.sqrt(v * v + 1)) end
+Math.acosh = function(v) return math.log(v + math.sqrt(v * v - 1)) end
+Math.atanh = function(v) return 0.5 * math.log((1 + v) / (1 - v)) end
+Math.expm1 = function(v) return math.exp(v) - 1 end
+Math.log1p = function(v) return math.log(1 + v) end
+
+-- The low 32 bits of a 32-bit product, signed. Split into halves because the full product of two
+-- 32-bit numbers passes 2^53, where a double stops being exact and the answer would quietly differ
+-- from the browser's by a few units in the last place.
+Math.imul = function(a, b)
+  local x, y = to_uint32(a), to_uint32(b)
+  local xl, xh = x % 65536, floor(x / 65536)
+  local yl, yh = y % 65536, floor(y / 65536)
+  -- the high-by-high term is 2^32 and falls off the end
+  return to_int32((xl * yl + ((xl * yh + xh * yl) % 65536) * 65536) % 4294967296)
+end
+
 function Math.min(...)
   local best
   for i = 1, select("#", ...) do
@@ -1027,12 +1093,52 @@ Number = {
   parseFloat = function(v) return tonumber(v) or (0 / 0) end,
   isInteger = function(v) return type(v) == "number" and v == v and abs(v) ~= math.huge and v == floor(v) end,
   MAX_SAFE_INTEGER = 9007199254740991,
+  MIN_SAFE_INTEGER = -9007199254740991,
+  EPSILON = 2.220446049250313e-16,
+  MAX_VALUE = 1.7976931348623157e308,
+  MIN_VALUE = 5e-324,
+  POSITIVE_INFINITY = math.huge,
+  NEGATIVE_INFINITY = -math.huge,
+  NaN = 0 / 0,
+  isSafeInteger = function(v)
+    return type(v) == "number" and v == v and abs(v) ~= math.huge
+           and v == floor(v) and abs(v) <= 9007199254740991
+  end,
 }
 Number.parseInt = function(v, base) return parseInt(v, base) end
 setmetatable(Number, { __call = function(_, v) return js_num(v) end })
 
 setmetatable({}, {})
 String = setmetatable({}, { __call = function(_, v) return js_str(v) end })
+
+-- Codepoints to text, UTF-8 encoded by hand rather than through `utf8.char`, which the interpreter
+-- the game embeds is not guaranteed to have - and a prelude that fails to parse takes down every
+-- page rather than only the one that called this.
+local function utf8char(code)
+  code = floor(js_num(code))
+  if code < 0 or code ~= code then return "" end
+  if code < 128 then return string.char(code) end
+  if code < 2048 then
+    return string.char(192 + floor(code / 64), 128 + code % 64)
+  end
+  if code < 65536 then
+    return string.char(224 + floor(code / 4096), 128 + floor(code / 64) % 64, 128 + code % 64)
+  end
+  return string.char(240 + floor(code / 262144), 128 + floor(code / 4096) % 64,
+                     128 + floor(code / 64) % 64, 128 + code % 64)
+end
+
+String.fromCodePoint = function(...)
+  local parts = {}
+  for i = 1, select("#", ...) do parts[i] = utf8char((select(i, ...))) end
+  return concat(parts)
+end
+-- fromCharCode takes UTF-16 code units. Anything outside the basic plane arrives as a surrogate
+-- pair, which this does not recombine: a page passing one gets two replacement-shaped sequences
+-- rather than the character. Every console page in this repository passes plain ASCII.
+String.fromCharCode = String.fromCodePoint
+-- No String.raw: the only syntax that reaches it is a tagged template, which the transpiler
+-- refuses, so defining it would add a name nothing can call.
 Boolean = setmetatable({}, { __call = function(_, v) return js_truthy(v) end })
 
 function isNaN(v) local n = js_num(v) return n ~= n end
@@ -1077,6 +1183,52 @@ Object = {
   hasOwn = function(t, key)
     if type(t) ~= "table" then return false end
     return rawget(t, key) ~= nil
+  end,
+  -- Like freeze: a shim that returns its argument. Nothing is made unwritable, because a rejected
+  -- write is strict mode throwing and a translated page has no strict mode to throw from.
+  seal = function(t) return t end,
+  -- SameValue: NaN equals itself and the two zeros do not, which is the only reason this exists
+  -- alongside `===`.
+  is = function(a, b)
+    if a ~= a and b ~= b then return true end
+    if a == 0 and b == 0 then return (1 / a) == (1 / b) end
+    return a == b
+  end,
+  create = function(proto, props)
+    local t = {}
+    if type(proto) == "table" then setmetatable(t, { __index = proto }) end
+    if type(props) == "table" then
+      for k, d in pairs(props) do if type(d) == "table" then rawset(t, k, d.value) end end
+    end
+    return t
+  end,
+  getPrototypeOf = function(t)
+    local mt = getmetatable(t)
+    if mt == nil then return nil end
+    local idx = rawget(mt, "__index")
+    if type(idx) == "table" then return idx end
+    return mt
+  end,
+  setPrototypeOf = function(t, proto)
+    if type(t) == "table" then setmetatable(t, type(proto) == "table" and { __index = proto } or nil) end
+    return t
+  end,
+  -- Every own key, `length` included, which is where this differs from Object.keys.
+  getOwnPropertyNames = function(t)
+    local out, n = {}, 0
+    if type(t) == "table" then for k in pairs(t) do out[n] = js_str(k) n = n + 1 end end
+    return js_array(out, n)
+  end,
+  -- A data descriptor only. A descriptor with get or set would need an accessor grafted onto
+  -- whatever metatable the object already has, and half of that - storing get() once as a value -
+  -- is the plausible-looking wrong answer this whole prelude is written to avoid. So it says so.
+  defineProperty = function(t, key, desc)
+    if type(t) ~= "table" or type(desc) ~= "table" then return t end
+    if desc.get ~= nil or desc.set ~= nil then
+      error("Object.defineProperty with a getter or setter is not supported on a compiled page")
+    end
+    rawset(t, key, desc.value)
+    return t
   end,
 }
 
@@ -1161,11 +1313,11 @@ function js_tabular(s)
   return (s:gsub('%d+', function(run) return '<mspace=0.6em>' .. run .. '</mspace>' end))
 end
 
-DOM = { writes = {}, order = {}, missing = {}, listeners = {} }
+DOM = { writes = {}, order = {}, missing = {}, listeners = {}, captures = 0 }
 
 function DOM.reset()
   DOM.writes, DOM.order, DOM.missing = {}, {}, {}
-  DOM.listeners = {}
+  DOM.listeners, DOM.captures = {}, 0
 end
 
 -- A page assigning `undefined` has still written: `log.scrollTop = log.scrollHeight` does exactly
@@ -1186,6 +1338,18 @@ local function record(id, key, value)
   DOM.writes[slot] = value == nil and UNDEFINED or value
 end
 
+-- The page's own markup, as the compiler laid it out: every element's id in document order, and
+-- its tag and class attribute. Without these the only tree a compiled page can see is the one its
+-- script built, so a page querying its OWN document got an empty list rather than an answer - and,
+-- worse, `classList.contains` on a markup element answered false for a class that was right there
+-- in the HTML.
+--
+-- Read rather than copied into each element, so they can be filled in by the chunk AFTER this
+-- prelude has run and after `document.body` and its two siblings already exist.
+TAG = TAG or {}
+CLASS = CLASS or {}
+NODES = NODES or {}
+
 -- classList is a view over className, as it is in the DOM: adding a class writes className, which
 -- is an ordinary recorded write, so a page that styles by class reaches the scene the same way one
 -- that assigns className does. Derived from className on every call rather than cached, because a
@@ -1193,7 +1357,7 @@ end
 local function classList(el)
   local function read()
     local names, seen = {}, {}
-    for word in js_str(rawget(el, "__props").className or ""):gmatch("%S+") do
+    for word in js_str(rawget(el, "__props").className or CLASS[rawget(el, "__id")] or ""):gmatch("%S+") do
       if not seen[word] then seen[word] = true names[#names + 1] = word end
     end
     return names, seen
@@ -1218,6 +1382,17 @@ local function classList(el)
       write(kept)
     end,
     contains = function(c) local _, seen = read() return seen[js_str(c)] == true end,
+    -- Swaps in place, so the class keeps its position. Returns false when the old name was not
+    -- there, which is what a page tests to know whether anything happened.
+    replace = function(old, new)
+      local names, seen = read()
+      old, new = js_str(old), js_str(new)
+      if not seen[old] then return false end
+      for i = 1, #names do if names[i] == old then names[i] = new end end
+      write(names)
+      return true
+    end,
+    item = function(i) local names = read() return names[js_num(i) + 1] end,
     -- force is a tri-state: absent means toggle, present means set. `false` is a value here, so it
     -- cannot be tested for truthiness the way an optional argument usually is.
     toggle = function(c, force)
@@ -1228,6 +1403,13 @@ local function classList(el)
       return want
     end,
   }
+  -- `length` and `list[0]` are derived on read like everything else here, so they follow a direct
+  -- assignment to className rather than going stale the moment a page makes one.
+  setmetatable(cl, { __index = function(_, key)
+    if key == "length" then return #(read()) end
+    if type(key) == "number" then return (read())[key + 1] end
+    return nil
+  end })
   return cl
 end
 
@@ -1263,7 +1445,22 @@ ElementMeta.__index = function(el, key)
   return rawget(el, "__props")[key]
 end
 ElementMeta.__newindex = function(el, key, value)
-  rawget(el, "__props")[key] = value
+  -- `el.onclick = fn` registers a handler; it is not a value the scene can draw. It used to be
+  -- recorded as an ordinary write to a slot no scene carries, so a page written in the property
+  -- form - which is most short pages - had every button dead and nothing said so. Assigning null
+  -- removes the handler, as it does in a browser.
+  -- Every handler property a browser has is `on` followed by lower-case letters, so requiring that
+  -- keeps an ordinary property like `onceDone` out of the event registry.
+  local props = rawget(el, "__props")
+  if type(key) == "string" and #key > 2 and sub(key, 1, 2) == "on" and key:match("^on%l+$") ~= nil
+     and (type(value) == "function" or (value == nil and type(props[key]) == "function")) then
+    local id, kind = rawget(el, "__id"), sub(key, 3)
+    if type(props[key]) == "function" then DOM.off(id, kind, props[key]) end
+    props[key] = value
+    if value ~= nil then DOM.on(id, kind, value) end
+    return
+  end
+  props[key] = value
   record(rawget(el, "__id"), key, value)
 end
 
@@ -1304,11 +1501,21 @@ StyleMeta.__index = function(st, key)
   return rawget(st, "__props")[key]
 end
 StyleMeta.__newindex = function(st, key, value)
+  -- `style.cssText = 'width:5px;top:2px'` is a whole declaration block, not one property, so it is
+  -- split and each half written where the compiler bound it. Assigning it used to land on a slot
+  -- called `style.cssText`, which no scene has ever carried.
+  if key == "cssText" then
+    for name, v in js_str(value):gmatch("([^:;]+):([^;]*)") do
+      st[cssKey((name:gsub("^%s+", ""):gsub("%s+$", "")))] = (v:gsub("^%s+", ""):gsub("%s+$", ""))
+    end
+    return
+  end
   rawget(st, "__props")[key] = value
   record(rawget(st, "__id"), "style." .. key, value)
 end
 
 local elements = {}
+local created = 0
 
 local function element(id)
   local el = elements[id]
@@ -1328,13 +1535,20 @@ document = {
   end,
   querySelector = function() return nil end,
   querySelectorAll = function() return js_array({}, 0) end,
-  addEventListener = function(kind, fn) DOM.on("document", kind, fn) end,
-  removeEventListener = function(kind, fn) DOM.off("document", kind, fn) end,
+  addEventListener = function(kind, fn, options) DOM.on("document", kind, fn, options) end,
+  removeEventListener = function(kind, fn, options) DOM.off("document", kind, fn, options) end,
   body = element("body"),
+  head = element("head"),
   documentElement = element("html"),
+  -- One node PER CALL. It used to be one per tag, so `createElement('div')` twice handed back the
+  -- same node: a page building rows in a loop appended one element to itself and every write to
+  -- either copy landed on the other. None of them has a shape in the scene either way - the layout
+  -- ran before they existed - which DOM.missing reports.
   createElement = function(tag)
-    local el = element("__new_" .. tag)
-    rawset(el, "__tag", js_str(tag):lower())
+    tag = js_str(tag):lower()
+    created = created + 1
+    local el = element("__new" .. created .. "_" .. tag)
+    rawset(el, "__tag", tag)
     return el
   end,
 }
@@ -1343,6 +1557,10 @@ document = {
 -- in the scene whichever namespace it claims, so an SVG node and an HTML node are the same kind of
 -- nothing. Kept separate only so a page that builds SVG runs instead of stopping at the call.
 document.createElementNS = function(_, tag) return document.createElement(tag) end
+
+-- The body, as in a browser with nothing focused. Moved by focus() and blur() above; nothing on the
+-- console moves it, because a compiled page has no text field of its own to type into.
+document.activeElement = document.body
 
 -- ---- the tree, the attributes, and the boxes there are none of -----------------------------------
 --
@@ -1473,6 +1691,19 @@ function ElementMethods.replaceWith(el, ...)
   for i = list.n, 1, -1 do insertAt(parent, list[i], at) end
 end
 
+-- The four positions, as one call. insertAdjacentHTML and insertAdjacentText are deliberately NOT
+-- here: both take markup or text rather than a node, and neither has anything to become in a model
+-- with no text nodes and no run-time parser, so the compiler goes on refusing them by name.
+function ElementMethods.insertAdjacentElement(el, where, node)
+  where = js_str(where):lower()
+  if where == "beforebegin" then ElementMethods.before(el, node)
+  elseif where == "afterbegin" then ElementMethods.prepend(el, node)
+  elseif where == "beforeend" then insertAt(el, node)
+  elseif where == "afterend" then ElementMethods.after(el, node)
+  else return nil end
+  return node
+end
+
 -- A clone is a NEW node, so it gets an id of its own: sharing the original's would make every
 -- write to either one land on the other. The scene has no shape for it, as for anything created.
 local cloneCount = 0
@@ -1514,7 +1745,7 @@ end
 function ElementMethods.getAttribute(el, name)
   name = js_str(name)
   if name == "id" then return rawget(el, "__id") end
-  if name == "class" then return rawget(el, "__props").className end
+  if name == "class" then return ElementReads.className(el) end
   local t = rawget(el, "__attrs")
   local v = t ~= nil and t[name] or nil
   if v == nil then return nil end
@@ -1556,11 +1787,34 @@ local DatasetMeta = {
 
 -- ---- events, selectors and boxes ---------------------------------------------------------------
 
-function ElementMethods.addEventListener(el, kind, fn) DOM.on(rawget(el, "__id"), kind, fn) end
-function ElementMethods.removeEventListener(el, kind, fn) DOM.off(rawget(el, "__id"), kind, fn) end
+function ElementMethods.addEventListener(el, kind, fn, options) DOM.on(rawget(el, "__id"), kind, fn, options) end
+function ElementMethods.removeEventListener(el, kind, fn, options) DOM.off(rawget(el, "__id"), kind, fn, options) end
 function ElementMethods.dispatchEvent(el, ev)
   DOM.fire(rawget(el, "__id"), ev ~= nil and ev.type or nil, 0, 0)
   return true
+end
+
+-- `el.click()` is a real click as far as the page is concerned - the handlers run and the event
+-- bubbles - it simply did not come from the player, so it carries no coordinates. That is what a
+-- browser does too.
+function ElementMethods.click(el) DOM.fire(rawget(el, "__id"), "click", 0, 0) end
+
+-- Focus moves within the chunk and fires the events a page listens for; it does NOT change what is
+-- drawn, because `:focus` was resolved once at compile time and the scene has no state for it. So a
+-- page that tracks focus itself works, and one that expects a focus ring from CSS does not get one.
+function ElementMethods.focus(el)
+  local was = document.activeElement
+  if was == el then return end
+  document.activeElement = el
+  if was ~= nil then DOM.fire(rawget(was, "__id"), "blur", 0, 0) end
+  DOM.fire(rawget(el, "__id"), "focus", 0, 0)
+end
+
+-- Focus returns to the body, as it does in a browser, rather than to nothing.
+function ElementMethods.blur(el)
+  if document.activeElement ~= el or el == document.body then return end
+  document.activeElement = document.body
+  DOM.fire(rawget(el, "__id"), "blur", 0, 0)
 end
 
 -- Only the selector shapes a compiled page can be answered about: `#id`, `.class`, a tag name, `*`,
@@ -1570,12 +1824,25 @@ local function trimmed(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
 
 local function matchesOne(el, sel)
   if sel == "" or sel == "*" then return true end
-  local head = sub(sel, 1, 1)
-  if head == "#" then return rawget(el, "__id") == sub(sel, 2) end
-  if head == "." then return rawget(el, "__classList").contains(sub(sel, 2)) end
   if sel:find("[%s>+~%[:]") ~= nil then return false end
-  local tag = rawget(el, "__tag")
-  return tag ~= nil and tag == sel:lower()
+  if sub(sel, 1, 1) == "#" then
+    if sel:find("[.#]", 2) ~= nil then return false end
+    return rawget(el, "__id") == sub(sel, 2)
+  end
+  -- A compound of one optional tag and any number of classes: `li`, `.hot`, `li.hot`, `.a.b`.
+  -- Anything else - an id inside a compound, an attribute test - is refused rather than guessed at,
+  -- because a selector this cannot answer has to read as "no" and not as "everything".
+  if sel:find("#", 1, true) ~= nil then return false end
+  local tag = sel:match("^[%w_-]*")
+  if tag ~= "" then
+    local own = rawget(el, "__tag") or TAG[rawget(el, "__id")]
+    if own == nil or own ~= tag:lower() then return false end
+  end
+  local cl = rawget(el, "__classList")
+  for name in sel:gmatch("%.([%w_-]+)") do
+    if not cl.contains(name) then return false end
+  end
+  return true
 end
 
 local function matchesAny(el, selector)
@@ -1615,59 +1882,148 @@ local function collect(el, sel, out, n)
   if list == nil then return n end
   for i = 1, #list do
     local kid = list[i]
-    if matchesOne(kid, sel) then out[n] = kid n = n + 1 end
+    if matchesAny(kid, sel) then out[n] = kid n = n + 1 end
     n = collect(kid, sel, out, n)
   end
   return n
 end
 
-function ElementMethods.getElementsByTagName(el, tag)
-  local out = {}
-  return js_array(out, collect(el, js_str(tag), out, 0))
+-- Is `id` somewhere below `rootId`? Up the compiled PARENT chain, which is the page's own tree.
+local function isUnder(id, rootId)
+  local at, guard = PARENT[id], 0
+  while at ~= nil and guard < 64 do
+    if at == rootId then return true end
+    at = PARENT[at]
+    guard = guard + 1
+  end
+  return false
 end
 
--- Several names mean an element carrying ALL of them, so the first narrows and the rest filter.
-function ElementMethods.getElementsByClassName(el, names)
-  names = js_str(names)
-  local first = names:match("%S+")
-  if first == nil then return js_array({}, 0) end
-  local out = {}
-  local n = collect(el, "." .. first, out, 0)
-  for one in names:gmatch("%S+") do
-    if one ~= first then
-      local kept = 0
-      for i = 0, n - 1 do
-        if rawget(out[i], "__classList").contains(one) then out[kept] = out[i] kept = kept + 1 end
-      end
-      for i = kept, n - 1 do out[i] = nil end
-      n = kept
+-- The page's own markup, in document order, plus anything the script appended below it. NODES is
+-- the compiler's list of every element it laid out; while it is empty - the offline harness, or a
+-- page compiled before it existed - a query finds only what the script built, exactly as before.
+local function collectMarkup(rootId, sel, out, n)
+  for i = 1, #NODES do
+    local id = NODES[i]
+    if rootId == nil or isUnder(id, rootId) then
+      local el = element(id)
+      if matchesAny(el, sel) then out[n] = el n = n + 1 end
+      n = collect(el, sel, out, n)
     end
+  end
+  return n
+end
+
+-- `contains`, `querySelector` and `querySelectorAll` were in the compiler's manifest and defined
+-- nowhere, so a page using any of the three compiled cleanly and then died on the console. They
+-- search the tree the SCRIPT built, which is the same limit the two getElementsBy* have.
+function ElementMethods.contains(el, node)
+  local at, guard = node, 0
+  while type(at) == "table" and guard < 64 do
+    if at == el then return true end
+    guard = guard + 1
+    at = ElementReads.parentNode(at)
+  end
+  return false
+end
+
+function ElementMethods.querySelectorAll(el, selector)
+  local out = {}
+  selector = js_str(selector)
+  -- The markup below this element first, in document order, then this element's own script-built
+  -- children - which collectMarkup cannot have reached, since it starts one level down.
+  local n = collectMarkup(rawget(el, "__id"), selector, out, 0)
+  return js_array(out, collect(el, selector, out, n))
+end
+
+function ElementMethods.querySelector(el, selector)
+  return ElementMethods.querySelectorAll(el, selector)[0]
+end
+
+function ElementMethods.getElementsByTagName(el, tag)
+  return ElementMethods.querySelectorAll(el, js_str(tag))
+end
+
+-- Several names mean an element carrying ALL of them, which is what a compound of classes means to
+-- the selector matcher - so the list becomes `.a.b` and there is only one search.
+function ElementMethods.getElementsByClassName(el, names)
+  local sel = ""
+  for one in js_str(names):gmatch("%S+") do sel = sel .. "." .. one end
+  if sel == "" then return js_array({}, 0) end
+  return ElementMethods.querySelectorAll(el, sel)
+end
+
+-- Document-wide: the page's own markup in document order, and - only while the compiler has given
+-- it no markup to walk - whatever the script built under the root, so nothing regresses off-console.
+document.querySelectorAll = function(selector)
+  local out = {}
+  selector = js_str(selector)
+  local n = collectMarkup(nil, selector, out, 0)
+  if #NODES == 0 then
+    n = collect(document.documentElement, selector, out, n)
+    n = collect(document.body, selector, out, n)
   end
   return js_array(out, n)
 end
 
-document.getElementsByTagName = function(tag) return ElementMethods.getElementsByTagName(document.documentElement, tag) end
-document.getElementsByClassName = function(names) return ElementMethods.getElementsByClassName(document.documentElement, names) end
+document.getElementsByTagName = function(tag) return document.querySelectorAll(js_str(tag)) end
+document.getElementsByClassName = function(names)
+  local sel = ""
+  for one in js_str(names):gmatch("%S+") do sel = sel .. "." .. one end
+  if sel == "" then return js_array({}, 0) end
+  return document.querySelectorAll(sel)
+end
 
 -- `#id` is the one selector a compiled page can always answer, because an id is exactly what the
--- scene binds its slots by. Everything else is still nil, as it was.
+-- scene binds its slots by; the rest need the compiler's node list.
 document.querySelector = function(selector)
   selector = js_str(selector)
   if sub(selector, 1, 1) == "#" and selector:find("[%s.,>+~%[:]") == nil then
     return document.getElementById(sub(selector, 2))
   end
-  return nil
+  return document.querySelectorAll(selector)[0]
 end
 
--- One table, shared, and every field zero. See the note at the head of this section: there is no
--- layout in the chunk to measure. A page that needs a real box needs a scene expression instead.
-local ZERO_RECT = { x = 0, y = 0, width = 0, height = 0, top = 0, left = 0, right = 0, bottom = 0 }
-function ElementMethods.getBoundingClientRect() return ZERO_RECT end
+-- The boxes the COMPILER measured, baked into the chunk as `BOXES[id] = { x, y, w, h, cw, ch }` in
+-- page coordinates: the border box's position and size, then the content box's size. The layout ran
+-- once, before any of this existed, so these are the real numbers rather than an approximation -
+-- and an element the compiler did not measure (anything the script created) keeps the zeros a
+-- browser gives a detached node.
+--
+-- Optional seventh and eighth entries are the offset from the offsetParent. Without them
+-- offsetLeft and offsetTop answer nil rather than a page coordinate that would be wrong the moment
+-- anything above the element is positioned.
+BOXES = BOXES or {}
 
-local function zero() return 0 end
-ElementReads.offsetWidth, ElementReads.offsetHeight = zero, zero
-ElementReads.clientWidth, ElementReads.clientHeight = zero, zero
-ElementReads.offsetLeft, ElementReads.offsetTop = zero, zero
+local ZERO_RECT = { x = 0, y = 0, width = 0, height = 0, top = 0, left = 0, right = 0, bottom = 0 }
+
+-- Made once per element and kept: `getBoundingClientRect()` inside a render function is on the
+-- per-frame path, and a table per call is garbage per frame.
+function ElementMethods.getBoundingClientRect(el)
+  local b = BOXES[rawget(el, "__id")]
+  if b == nil then return ZERO_RECT end
+  local r = rawget(el, "__rect")
+  if r == nil then
+    r = { x = b[1], y = b[2], width = b[3], height = b[4],
+          left = b[1], top = b[2], right = b[1] + b[3], bottom = b[2] + b[4] }
+    rawset(el, "__rect", r)
+  end
+  return r
+end
+
+local function boxed(index, fallback)
+  return function(el)
+    local b = BOXES[rawget(el, "__id")]
+    if b == nil then return fallback end
+    local v = b[index]
+    if v == nil then return fallback end
+    return v
+  end
+end
+
+ElementReads.offsetWidth, ElementReads.offsetHeight = boxed(3, 0), boxed(4, 0)
+ElementReads.clientWidth, ElementReads.clientHeight = boxed(5, 0), boxed(6, 0)
+ElementReads.offsetLeft, ElementReads.offsetTop = boxed(7, nil), boxed(8, nil)
 -- Deliberately NOT scrollHeight or scrollTop. `log.scrollTop = log.scrollHeight` is the idiom for
 -- pinning a log to its foot, and the record of that write reading `undefined` is what says the page
 -- asked for something a compiled page does not have. A zero would make it look answered.
@@ -1699,9 +2055,55 @@ end
 ElementReads.firstElementChild = ElementReads.firstChild
 ElementReads.lastElementChild = ElementReads.lastChild
 
+-- There are no text nodes here, so every child is an element and the two sibling families are the
+-- same walk. Over the tree the script built; the page's own markup is shapes in a scene by now.
+local function siblingOf(el, step)
+  local up = ElementReads.parentNode(el)
+  if up == nil then return nil end
+  local list = rawget(up, "__kids")
+  if list == nil then return nil end
+  for i = 1, #list do if list[i] == el then return list[i + step] end end
+  return nil
+end
+
+ElementReads.nextSibling = function(el) return siblingOf(el, 1) end
+ElementReads.previousSibling = function(el) return siblingOf(el, -1) end
+ElementReads.nextElementSibling = ElementReads.nextSibling
+ElementReads.previousElementSibling = ElementReads.previousSibling
+
+-- The element's own id, which is what it is keyed by - `el.id` read back nothing at all before,
+-- because nothing had ever assigned the property. A page that assigns it gets its own value back;
+-- it does not rename the element, since the scene's slots are bound to the compiled id.
+ElementReads.id = function(el) return rawget(el, "__props").id or rawget(el, "__id") end
+
+-- Node.ELEMENT_NODE. Everything this model holds is an element: there are no text or comment nodes.
+ElementReads.nodeType = function() return 1 end
+
+-- Enough of a NamedNodeMap to be counted and read. Built per call rather than kept, because it has
+-- to follow setAttribute and className, and nothing reads it on a per-frame path.
+ElementReads.attributes = function(el)
+  local out, n = {}, 0
+  out[n] = { name = "id", value = rawget(el, "__id") } n = n + 1
+  local className = rawget(el, "__props").className
+  if className ~= nil and className ~= "" then
+    out[n] = { name = "class", value = js_str(className) } n = n + 1
+  end
+  local t = rawget(el, "__attrs")
+  if t ~= nil then
+    for name, value in pairs(t) do out[n] = { name = name, value = js_str(value) } n = n + 1 end
+  end
+  return js_array(out, n)
+end
+
 ElementReads.tagName = function(el)
-  local tag = rawget(el, "__tag")
+  local tag = rawget(el, "__tag") or TAG[rawget(el, "__id")]
   return tag ~= nil and tag:upper() or nil
+end
+
+ElementReads.className = function(el)
+  local own = rawget(el, "__props").className
+  if own ~= nil then return own end
+  return CLASS[rawget(el, "__id")]
 end
 ElementReads.nodeName = ElementReads.tagName
 
@@ -1750,32 +2152,82 @@ local function listeners(id, kind, make)
   return list
 end
 
-function DOM.on(id, kind, fn)
-  if fn == nil or id == nil then return end
-  local list = listeners(id, js_str(kind), true)
-  list[#list + 1] = fn
+-- A listener registered with no options is stored as the function itself, which is every listener
+-- on every page in this repository and costs one array slot. One registered WITH options is stored
+-- as a small record instead, and the two are told apart by type at dispatch - so `capture` and
+-- `once` cost a page that does not use them nothing at all.
+local function entryFn(h) if type(h) == "table" then return h.fn end return h end
+local function entryCapture(h) return type(h) == "table" and h.capture == true end
+
+-- `capture` is read off the third argument, which is a boolean in the old form and an options
+-- object in the current one. It used to be ignored outright, so a page registering a capturing
+-- listener got a bubbling one and the difference showed only as a handler firing in the wrong order.
+local function optionsOf(options)
+  if options == true then return true, false end
+  if type(options) == "table" then return js_truthy(options.capture), js_truthy(options.once) end
+  return false, false
 end
 
-function DOM.off(id, kind, fn)
+-- DOM.captures counts the capturing listeners that exist anywhere. It is zero on every ordinary
+-- page, and DOM.fire skips the whole downward walk while it is, so the phase costs nothing until
+-- something asks for it.
+function DOM.on(id, kind, fn, options)
+  if fn == nil or id == nil then return end
+  local capture, once = optionsOf(options)
+  local list = listeners(id, js_str(kind), true)
+  -- A browser ignores a repeat registration of the same function at the same phase.
+  for i = 1, #list do
+    if entryFn(list[i]) == fn and entryCapture(list[i]) == capture then return end
+  end
+  if capture or once then
+    list[#list + 1] = { fn = fn, capture = capture, once = once }
+    if capture then DOM.captures = DOM.captures + 1 end
+  else
+    list[#list + 1] = fn
+  end
+end
+
+function DOM.off(id, kind, fn, options)
+  local capture = optionsOf(options)
   local list = listeners(id, js_str(kind), false)
   if list == nil then return end
-  for i = #list, 1, -1 do if list[i] == fn then table.remove(list, i) end end
+  for i = #list, 1, -1 do
+    local h = list[i]
+    if entryFn(h) == fn and entryCapture(h) == capture then
+      if entryCapture(h) then DOM.captures = DOM.captures - 1 end
+      table.remove(list, i)
+    end
+  end
 end
+
+-- Modifier keys as they were at the moment the player acted. The host fills this in before it calls
+-- `event`; nothing else may, because a value nobody set would be a plausible `false` rather than an
+-- answer. It exists as one table for the life of the chunk so delivering an event allocates nothing.
+MODS = MODS or { shift = false, ctrl = false, alt = false, meta = false }
+
+-- Events that do not bubble, which is the whole of the list a console page can receive. Getting
+-- this wrong is invisible until a page puts a `focus` handler on a container and it fires.
+local NoBubble = { focus = true, blur = true, mouseenter = true, mouseleave = true }
 
 -- Only what a handler actually reads. A page that wants more gets `nil` rather than a wrong number,
 -- which is the honest answer for a page with no layout: a compiled scene has no boxes to measure.
+-- `key` and `code` are deliberately absent: no keyboard event reaches a console page at all, and a
+-- MouseEvent has neither in a browser either.
 local function make_event(id, kind, x, y)
   local ev
   ev = {
     type = kind,
     target = document.getElementById(id),
     currentTarget = document.getElementById(id),
-    bubbles = true, cancelable = true, defaultPrevented = false,
+    bubbles = not NoBubble[kind], cancelable = true, defaultPrevented = false,
+    eventPhase = 0, timeStamp = js_now and js_now() or 0, isTrusted = true,
     button = 0, buttons = (kind == "mousedown") and 1 or 0,
     clientX = x or 0, clientY = y or 0,
     pageX = x or 0, pageY = y or 0,
     offsetX = x or 0, offsetY = y or 0,
     x = x or 0, y = y or 0,
+    shiftKey = MODS.shift == true, ctrlKey = MODS.ctrl == true,
+    altKey = MODS.alt == true, metaKey = MODS.meta == true,
     preventDefault = function() ev.defaultPrevented = true end,
     stopPropagation = function() ev.__stop = true end,
     stopImmediatePropagation = function() ev.__stop = true ev.__now = true end,
@@ -1783,28 +2235,63 @@ local function make_event(id, kind, x, y)
   return ev
 end
 
---- Fires one event at `id` and up its ancestors, as a browser does.
+-- One element's handlers for one phase. Returns true when the walk must stop immediately.
+-- At the target both capturing and bubbling listeners run, in registration order, as they do in a
+-- browser; on the way down only capturing ones, on the way back up only the rest.
+local function deliver(ev, at, kind, phase)
+  local list = listeners(at, kind, false)
+  if list == nil then return false end
+  ev.eventPhase = phase
+  ev.currentTarget = document.getElementById(at)
+  -- Over a snapshot: a handler may add or remove listeners while this runs, and the runner page
+  -- does exactly that (a jump re-registers). Mutating the list under the loop skips handlers.
+  local snapshot, n = {}, #list
+  for i = 1, n do snapshot[i] = list[i] end
+  for i = 1, n do
+    local h = snapshot[i]
+    local fn = entryFn(h)
+    if fn ~= nil and (phase == 2 or entryCapture(h) == (phase == 1)) then
+      -- Removed BEFORE it runs, so a handler that re-registers itself gets a listener of its own
+      -- rather than having the registration wiped by this line.
+      if type(h) == "table" and h.once then DOM.off(at, kind, fn, h) end
+      fn(ev)
+      if ev.__now then return true end
+    end
+  end
+  return false
+end
+
+-- `up` levels above `id`, or nil past the root. The capture phase needs the chain from the root
+-- down, and walking it this way costs O(depth^2) on a chain that is never more than a handful deep
+-- while allocating nothing - which a path list per event would not.
+local function ancestorAt(id, up)
+  local at, guard = id, 0
+  while up > 0 and at ~= nil and guard < 64 do at = PARENT[at] up = up - 1 guard = guard + 1 end
+  return at
+end
+
+--- Fires one event at `id`, down to it and back up, as a browser does.
 function DOM.fire(id, kind, x, y)
   if id == nil or kind == nil then return nil end
   kind = js_str(kind)
   local ev = make_event(id, kind, x, y)
-  local at, guard = id, 0
+
+  if DOM.captures > 0 then
+    local depth, at, guard = 0, PARENT[id], 0
+    while at ~= nil and guard < 64 do depth = depth + 1 at = PARENT[at] guard = guard + 1 end
+    for up = depth, 1, -1 do
+      local step = ancestorAt(id, up)
+      if step == nil then break end
+      if deliver(ev, step, kind, 1) or ev.__stop then return ev end
+    end
+  end
+
+  if deliver(ev, id, kind, 2) or ev.__stop or not ev.bubbles then return ev end
+
+  local at, guard = PARENT[id], 0
   while at ~= nil and guard < 64 do
     guard = guard + 1
-    local list = listeners(at, kind, false)
-    if list ~= nil then
-      ev.currentTarget = document.getElementById(at)
-      -- Over a snapshot: a handler may add or remove listeners while this runs, and the runner page
-      -- does exactly that (a jump re-registers). Mutating the list under the loop skips handlers.
-      local snapshot, n = {}, #list
-      for i = 1, n do snapshot[i] = list[i] end
-      for i = 1, n do
-        local fn = snapshot[i]
-        if fn ~= nil then fn(ev) end
-        if ev.__now then return ev end
-      end
-    end
-    if ev.__stop then return ev end
+    if deliver(ev, at, kind, 3) or ev.__stop then return ev end
     at = PARENT[at]
   end
   return ev
@@ -1859,6 +2346,11 @@ function requestAnimationFrame(fn) Pending.frame[#Pending.frame + 1] = fn return
 function setInterval(fn, ms) Pending.timers[#Pending.timers + 1] = { fn = fn, ms = ms } return #Pending.timers end
 function setTimeout(fn, ms) Pending.timers[#Pending.timers + 1] = { fn = fn, ms = ms, once = true } return #Pending.timers end
 
+-- A microtask runs before the next render in a browser and on the next frame here, which is the
+-- finest grain a chunk driven once a frame has. Worth knowing for ordering against a timer set in
+-- the same breath; nothing else about it differs.
+function queueMicrotask(fn) return setTimeout(fn, 0) end
+
 -- Cancelling is emptying the slot, not removing it: the handle a page holds is the index it was
 -- given, and closing the gap would silently renumber every timer set after it. clearInterval was a
 -- no-op here, so a page that started a poll and then stopped it kept polling for ever.
@@ -1884,8 +2376,8 @@ end
 -- fired - but nothing delivers a resize or a key here: the host sends a click at a scene region and
 -- DOM.fire walks PARENT up from it, and PARENT has no entry above the page root. So a window
 -- listener is stored and stays silent, which lets the page run rather than stopping it at the call.
-function addEventListener(kind, fn) DOM.on("window", kind, fn) end
-function removeEventListener(kind, fn) DOM.off("window", kind, fn) end
+function addEventListener(kind, fn, options) DOM.on("window", kind, fn, options) end
+function removeEventListener(kind, fn, options) DOM.off("window", kind, fn, options) end
 window.addEventListener = addEventListener
 window.removeEventListener = removeEventListener
 document.dispatchEvent = function(ev) DOM.fire("document", ev ~= nil and ev.type or nil, 0, 0) return true end

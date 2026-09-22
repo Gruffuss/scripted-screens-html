@@ -177,11 +177,42 @@ eq(document.createElementNS('http://www.w3.org/2000/svg', 'rect').tagName, 'RECT
 PARENT['leaf'] = 'trunk'
 eq(js_m(document.getElementById('leaf'), 'closest', '#trunk'), document.getElementById('trunk'), 'closest via PARENT')
 
--- DOM: boxes are zero, and say so
-eq(js_m(el, 'getBoundingClientRect').width, 0, 'rect width')
-eq(el.offsetWidth, 0, 'offsetWidth')
+-- DOM: an element the compiler measured answers with its real box; one it did not - anything the
+-- script created - keeps the zeros a browser gives a detached node.
+eq(js_m(el, 'getBoundingClientRect').width, 0, 'rect width with no box')
+eq(el.offsetWidth, 0, 'offsetWidth with no box')
+eq(el.offsetLeft, nil, 'offsetLeft stays undefined without an offset parent')
+BOXES['box'] = { 8, 12, 100, 20, 96, 16 }
+eq(js_m(el, 'getBoundingClientRect').width, 100, 'rect width from BOXES')
+eq(js_m(el, 'getBoundingClientRect').bottom, 32, 'rect bottom from BOXES')
+eq(js_m(el, 'getBoundingClientRect') == js_m(el, 'getBoundingClientRect'), true, 'rect is made once')
+eq(el.offsetWidth, 100, 'offsetWidth from BOXES')
+eq(el.clientWidth, 96, 'clientWidth is the content box')
 eq(el.scrollHeight, nil, 'scrollHeight stays undefined')
 eq(js_m(getComputedStyle(el), 'getPropertyValue', 'font-size'), '12px', 'getComputedStyle reads own style')
+
+-- DOM: the reads that used to answer nothing
+eq(el.id, 'box', 'id')
+eq(el.nodeType, 1, 'nodeType')
+eq(js_m(one, 'matches', 'span.hot'), true, 'matches tag and class')
+eq(js_m(one, 'matches', 'div.hot'), false, 'matches wrong tag')
+eq(js_m(one, 'matches', 'span#other'), false, 'a compound with an id is refused, not guessed')
+eq(js_m(parent, 'contains', one), true, 'contains a child')
+eq(js_m(one, 'contains', parent), false, 'contains is not upside down')
+eq(js_m(parent, 'querySelector', '.hot'), one, 'querySelector')
+eq(js_m(parent, 'querySelectorAll', 'span').length, 1, 'querySelectorAll')
+eq(one.nextSibling, parent.children[2], 'nextSibling')
+eq(js_m(parent, 'insertAdjacentElement', 'afterbegin', document.createElement('em')).tagName, 'EM', 'insertAdjacentElement')
+eq(parent.children[0].tagName, 'EM', 'insertAdjacentElement afterbegin')
+-- one node per CALL: two createElement('div') used to hand back the same element
+eq(document.createElement('div') == document.createElement('div'), false, 'createElement is per call')
+eq(document.head ~= nil, true, 'document.head')
+el.className = 'card wide'
+eq(el.classList.length, 2, 'classList.length')
+eq(el.classList[0], 'card', 'classList index')
+eq(js_m(el.classList, 'replace', 'card', 'panel'), true, 'classList.replace')
+eq(el.className, 'panel wide', 'classList.replace keeps position')
+eq(el.attributes.length, 3, 'attributes counts id, class and what setAttribute left')
 
 -- events
 local fired = 0
@@ -191,7 +222,145 @@ eq(fired, 1, 'dispatchEvent')
 addEventListener('resize', function() end)
 eq(DOM.listeners['window'] ~= nil, true, 'window listener kept')
 
+-- the event object: what a handler reads, and the modifier keys the host fills in
+local seen
+js_m(el, 'addEventListener', 'mousedown', function(ev) seen = ev end)
+MODS.shift = true
+DOM.fire('box', 'mousedown', 3, 4)
+eq(seen.type, 'mousedown', 'event.type')
+eq(seen.target, el, 'event.target')
+eq(seen.currentTarget, el, 'event.currentTarget')
+eq(seen.clientX + seen.clientY, 7, 'event coordinates')
+eq(seen.shiftKey, true, 'event.shiftKey follows MODS')
+eq(seen.ctrlKey, false, 'event.ctrlKey')
+eq(seen.eventPhase, 2, 'eventPhase at the target')
+eq(seen.bubbles, true, 'a click bubbles')
+MODS.shift = false
+
+-- once, capture and the phases, over a two-level chain
+PARENT['kid'] = 'box'
+local order = ''
+local kid = document.getElementById('kid')
+js_m(el, 'addEventListener', 'click', function() order = order .. 'A' end, true)
+js_m(kid, 'addEventListener', 'click', function() order = order .. 'B' end)
+js_m(el, 'addEventListener', 'click', function() order = order .. 'C' end)
+DOM.fire('kid', 'click', 0, 0)
+eq(order, 'ABC', 'capture runs before the target, bubble after')
+local onceRan = 0
+js_m(kid, 'addEventListener', 'click', function() onceRan = onceRan + 1 end, { once = true })
+DOM.fire('kid', 'click', 0, 0)
+DOM.fire('kid', 'click', 0, 0)
+eq(onceRan, 1, 'once fires once')
+-- removing a capturing listener needs the flag, as it does in a browser
+local cap = function() order = order .. 'X' end
+js_m(el, 'addEventListener', 'click', cap, true)
+js_m(el, 'removeEventListener', 'click', cap)
+order = ''
+DOM.fire('kid', 'click', 0, 0)
+eq(order, 'AXBC', 'removeEventListener without the capture flag leaves it alone')
+js_m(el, 'removeEventListener', 'click', cap, true)
+order = ''
+DOM.fire('kid', 'click', 0, 0)
+eq(order, 'ABC', 'removeEventListener with the flag takes it')
+
+-- the property form of a handler is a listener, not a value written to the scene
+local propRan = 0
+local btn = document.getElementById('btn')
+btn.onclick = function() propRan = propRan + 1 end
+js_m(btn, 'click')
+eq(propRan, 1, 'onclick fires')
+eq(DOM.writes['btn.onclick'], nil, 'onclick is not written to the scene')
+btn.onclick = nil
+js_m(btn, 'click')
+eq(propRan, 1, 'onclick cleared')
+
+-- focus moves within the chunk and fires both events; it does not bubble
+local focusLog = ''
+local fa, fb = document.getElementById('fa'), document.getElementById('fb')
+js_m(fa, 'addEventListener', 'focus', function() focusLog = focusLog .. 'in' end)
+js_m(fa, 'addEventListener', 'blur', function() focusLog = focusLog .. 'out' end)
+js_m(fa, 'focus')
+eq(document.activeElement, fa, 'activeElement follows focus')
+js_m(fb, 'focus')
+eq(focusLog, 'inout', 'focus then blur')
+eq(js_m(document.getElementById('fa'), 'contains', fa), true, 'the same element comes back by id')
+
 -- a bound method is made once and kept, not per access
 eq(el.appendChild == el.appendChild, true, 'bound method is stable')
+
+-- the page's own markup, as the compiler hands it over: the node list, the tags and the classes.
+-- Without these the only tree a compiled page can see is the one its script built.
+NODES = { 'app', 'card', 'title', 'row' }
+PARENT['card'] = 'app' PARENT['title'] = 'card' PARENT['row'] = 'card'
+TAG['app'] = 'div' TAG['card'] = 'section' TAG['title'] = 'h1' TAG['row'] = 'p'
+CLASS['card'] = 'panel wide' CLASS['row'] = 'row'
+local card = document.getElementById('card')
+eq(card.tagName, 'SECTION', 'tagName from the markup')
+eq(card.className, 'panel wide', 'className from the markup')
+eq(js_m(card, 'getAttribute', 'class'), 'panel wide', 'getAttribute class from the markup')
+eq(card.classList.contains('wide'), true, 'classList sees the markup class')
+eq(js_m(card, 'matches', 'section.panel'), true, 'matches the markup')
+eq(js_m(document.getElementById('title'), 'closest', '.panel'), card, 'closest through the markup')
+eq(document.querySelectorAll('p').length, 1, 'document.querySelectorAll by tag')
+eq(document.querySelector('.panel'), card, 'document.querySelector by class')
+eq(document.getElementsByTagName('h1').length, 1, 'document.getElementsByTagName')
+eq(document.getElementsByClassName('panel wide').length, 1, 'document.getElementsByClassName')
+eq(js_m(card, 'querySelectorAll', '*').length, 2, 'querySelectorAll below an element')
+eq(js_m(card, 'querySelectorAll', '*')[0], document.getElementById('title'), 'in document order')
+eq(js_m(document.getElementById('title'), 'querySelectorAll', '*').length, 0, 'a leaf has no descendants')
+-- a class the SCRIPT writes wins over the markup's, as assigning className does in a browser
+card.className = 'panel'
+eq(card.classList.contains('wide'), false, 'a written className replaces the markup one')
+
+-- style.cssText is a whole block, split into the properties the compiler bound
+js_m(el.style, 'setProperty', 'width', '1px')
+el.style.cssText = 'width: 5px; top:2px'
+eq(el.style.width, '5px', 'cssText width')
+eq(el.style.top, '2px', 'cssText top')
+eq(DOM.writes['box.style.cssText'], nil, 'cssText is not a slot')
+
+-- Math, Number and Object, the tail a page reaches for
+eq(math.floor(Math.sinh(1) * 1000 + 0.5), 1175, 'sinh')
+eq(math.floor(Math.cosh(1) * 1000 + 0.5), 1543, 'cosh')
+eq(math.floor(Math.tanh(1) * 1000 + 0.5), 762, 'tanh')
+eq(math.floor(Math.asinh(1) * 1000 + 0.5), 881, 'asinh')
+eq(Math.acosh(1), 0.0, 'acosh')
+eq(math.floor(Math.atanh(0.5) * 1000 + 0.5), 549, 'atanh')
+eq(math.floor(Math.expm1(1) * 1000 + 0.5), 1718, 'expm1')
+eq(math.floor(Math.log1p(1) * 1000 + 0.5), 693, 'log1p')
+-- the browser's own answers, which is the point: a 32-bit product that a double cannot hold
+eq(Math.imul(3, 4), 12, 'imul small')
+eq(Math.imul(-5, 12), -60, 'imul negative')
+eq(Math.imul(0xffffffff, 5), -5, 'imul wraps')
+eq(Math.imul(0x7fffffff, 0x7fffffff), 1, 'imul overflows to one')
+eq(Number.isSafeInteger(9007199254740991), true, 'isSafeInteger edge')
+eq(Number.isSafeInteger(9007199254740993), false, 'isSafeInteger past it')
+eq(Object.is(0 / 0, 0 / 0), true, 'Object.is NaN')
+-- Lua's integer 0 has no sign, so the two zeros are only distinguishable as floats; a page writing
+-- `-0` gets an integer and Object.is answers true where a browser answers false.
+eq(Object.is(0.0, -0.0), false, 'Object.is zeros')
+eq(Object.is(1, 1), true, 'Object.is equal')
+local proto = { greet = 1 }
+local made = Object.create(proto)
+eq(made.greet, 1, 'Object.create proto')
+eq(Object.getPrototypeOf(made), proto, 'Object.getPrototypeOf')
+eq(Object.getOwnPropertyNames(proto).length, 1, 'getOwnPropertyNames')
+eq(Object.seal(proto), proto, 'Object.seal returns its argument')
+eq(js_m({ z = 1 }, 'hasOwnProperty', 'z'), true, 'hasOwnProperty yes')
+eq(js_m({ z = 1 }, 'hasOwnProperty', 'q'), false, 'hasOwnProperty no')
+eq(String.fromCharCode(65, 66), 'AB', 'fromCharCode')
+eq(String.fromCodePoint(960), string.char(207, 128), 'fromCodePoint encodes UTF-8')
+
+-- RegExp: only a literal pattern ever reaches the prelude, so both answers are exact
+local re = js_regex('lo', '')
+eq(re.test('hello'), true, 'regex test hit')
+eq(re.test('heck'), false, 'regex test miss')
+eq(re.exec('hello').index, 3, 'regex exec index')
+eq(re.exec('hello')[0], 'lo', 'regex exec match')
+eq(js_regex('LO', 'i').test('hello'), true, 'regex ignoreCase')
+local g = js_regex('a', 'g')
+eq(g.exec('aba').index, 0, 'global exec first')
+eq(g.exec('aba').index, 2, 'global exec advances')
+eq(g.exec('aba'), nil, 'global exec ends')
 
 if fails == 0 then print('all prelude checks pass') else print(fails .. ' FAILED') os.exit(1) end

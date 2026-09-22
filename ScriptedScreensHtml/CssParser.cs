@@ -298,7 +298,9 @@ internal static class CssParser
                 {
                     // One screen, one design width: a media query is decided once, here.
                     var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
-                    if (header.StartsWith("supports", StringComparison.OrdinalIgnoreCase) || MediaMatches(header.Substring(5)))
+                    if (header.StartsWith("supports", StringComparison.OrdinalIgnoreCase)
+                        ? SupportsMatches(header.Substring(8), warn)
+                        : MediaMatches(header.Substring(5), warn))
                     {
                         foreach (var r in ParseStylesheet(inner, warn, keyframes))
                         {
@@ -318,7 +320,7 @@ internal static class CssParser
                     if (header.StartsWith("container", StringComparison.OrdinalIgnoreCase))
                     {
                         var paren = header.IndexOf('(');
-                        take = paren >= 0 && MediaMatches(header.Substring(paren));
+                        take = paren >= 0 && MediaMatches(header.Substring(paren), warn);
                     }
                     else if (header.StartsWith("scope", StringComparison.OrdinalIgnoreCase))
                     {
@@ -513,11 +515,12 @@ internal static class CssParser
             {
                 var header = sel.Substring(1).Trim();
                 var kind = header.Split(' ', '(')[0].ToLowerInvariant();
-                if (kind == "media" && !MediaMatches(header.Substring(5))) continue;
+                if (kind == "media" && !MediaMatches(header.Substring(5), warn)) continue;
+                if (kind == "supports" && !SupportsMatches(header.Substring(8), warn)) continue;
                 if (kind == "container")
                 {
                     var paren = header.IndexOf('(');
-                    if (paren < 0 || !MediaMatches(header.Substring(paren))) continue;
+                    if (paren < 0 || !MediaMatches(header.Substring(paren), warn)) continue;
                 }
                 if (kind == "starting-style")
                     ParseRule("&", nbody, selectors, StartingRules, ref order, warn, keyframes);
@@ -657,13 +660,21 @@ internal static class CssParser
     }
 
     /// <summary>
-    /// A media query list against the design size: min/max-width/height, orientation,
-    /// screen/all (true), print (false), "not", "and", commas. Unknown features are false,
-    /// as in a browser.
+    /// A media query list against the console: media types, `not`/`only`/`and`/commas, the
+    /// `min-`/`max-` prefixes, the range syntax (`width >= 400px`, `200px &lt; width &lt; 600px`)
+    /// and the discrete features in <see cref="Discrete"/>.
     /// </summary>
-    public static bool MediaMatches(string query)
+    /// <remarks>
+    /// An unknown feature is false, as in a browser - but in a browser that is because the
+    /// browser genuinely lacks it, and here it is usually because nobody has answered it yet.
+    /// Either way the author's whole block vanishes, so it says which feature did it, once.
+    /// The one-argument overload exists because ScriptHost binds this as a Func&lt;string,bool&gt;.
+    /// </remarks>
+    public static bool MediaMatches(string query) => MediaMatches(query, null);
+
+    public static bool MediaMatches(string query, Action<string>? warn)
     {
-        foreach (var alternative in query.Split(','))
+        foreach (var alternative in SplitTopLevel(query, ','))
         {
             var q = alternative.Trim().ToLowerInvariant();
             if (q.Length == 0) continue;
@@ -675,29 +686,159 @@ internal static class CssParser
             {
                 var c = clause.Trim().Trim('(', ')').Trim();
                 if (c == "screen" || c == "all" || c.Length == 0) continue;
-                if (c == "print") { ok = false; break; }
+                if (c == "print" || c == "speech" || c == "tty" || c == "tv" || c == "projection" || c == "handheld") { ok = false; break; }
                 var colon = c.IndexOf(':');
-                if (colon < 0) { ok = false; break; }
-                var feature = c.Substring(0, colon).Trim();
-                var value = c.Substring(colon + 1).Trim();
-                var n = Px(value);
-                var pass = feature switch
-                {
-                    "min-width" => ViewportWidth >= n,
-                    "max-width" => ViewportWidth <= n,
-                    "width" => Math.Abs(ViewportWidth - n) < 0.5f,
-                    "min-height" => ViewportHeight >= n,
-                    "max-height" => ViewportHeight <= n,
-                    "height" => Math.Abs(ViewportHeight - n) < 0.5f,
-                    "orientation" => value == "landscape" ? ViewportWidth >= ViewportHeight : ViewportWidth < ViewportHeight,
-                    "min-aspect-ratio" or "max-aspect-ratio" or "aspect-ratio" => AspectClause(feature, value),
-                    _ => false,
-                };
+                var pass = colon < 0 && (c.IndexOf('<') >= 0 || c.IndexOf('>') >= 0 || c.IndexOf('=') >= 0)
+                    ? RangeClause(c, warn)
+                    : Feature(colon < 0 ? c : c.Substring(0, colon).Trim(), colon < 0 ? null : c.Substring(colon + 1).Trim(), warn);
                 if (!pass) { ok = false; break; }
             }
             if (ok != negate) return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// The range syntax: `width >= 400px`, `400px &lt;= width`, `200px &lt; width &lt; 600px`,
+    /// `width = 400px`. The feature is whichever operand is not a quantity.
+    /// </summary>
+    private static bool RangeClause(string c, Action<string>? warn)
+    {
+        var operands = new List<string>();
+        var ops = new List<string>();
+        var sb = new StringBuilder();
+        for (var i = 0; i < c.Length; i++)
+        {
+            if (c[i] != '<' && c[i] != '>' && c[i] != '=') { sb.Append(c[i]); continue; }
+            var op = c[i].ToString();
+            if (i + 1 < c.Length && c[i + 1] == '=') { op += "="; i++; }
+            operands.Add(sb.ToString().Trim());
+            sb.Clear();
+            ops.Add(op);
+        }
+        operands.Add(sb.ToString().Trim());
+        if (ops.Count == 0 || ops.Count > 2 || operands.Count != ops.Count + 1) return false;
+        var at = operands.FindIndex(o => o.Length > 0 && float.IsNaN(Px(o)) && !char.IsDigit(o[0]) && o[0] != '.' && o[0] != '-');
+        if (at < 0) return false;
+        var name = operands[at];
+        var mine = FeatureNumber(name);
+        if (float.IsNaN(mine)) { Unknown(name, warn); return false; }
+        for (var i = 0; i < ops.Count; i++)
+        {
+            // `a < feature` is `feature > a`, so an operator on the feature's left is flipped
+            var other = i < at ? operands[i] : operands[i + 1];
+            var op = i < at ? Flip(ops[i]) : ops[i];
+            var want = Operand(name, other);
+            if (float.IsNaN(want)) return false;
+            var eps = name.EndsWith("aspect-ratio", StringComparison.Ordinal) ? 0.01f : 0.5f;
+            var pass = op switch
+            {
+                "<" => mine < want,
+                "<=" => mine <= want + eps,
+                ">" => mine > want,
+                ">=" => mine >= want - eps,
+                _ => Math.Abs(mine - want) < eps,
+            };
+            if (!pass) return false;
+        }
+        return true;
+    }
+
+    private static string Flip(string op) => op switch { "<" => ">", "<=" => ">=", ">" => "<", ">=" => "<=", _ => op };
+
+    /// <summary>One `(feature)` or `(feature: value)` clause; <paramref name="value"/> null is the boolean form.</summary>
+    private static bool Feature(string name, string? value, Action<string>? warn)
+    {
+        if (name.StartsWith("-webkit-", StringComparison.Ordinal)) name = name.Substring(8);
+        else if (name.StartsWith("-moz-", StringComparison.Ordinal)) name = name.Substring(5);
+        var cmp = 0;
+        if (name.StartsWith("min-", StringComparison.Ordinal)) { cmp = 1; name = name.Substring(4); }
+        else if (name.StartsWith("max-", StringComparison.Ordinal)) { cmp = -1; name = name.Substring(4); }
+        if (name == "device-pixel-ratio") name = "resolution";
+
+        var mine = FeatureNumber(name);
+        if (!float.IsNaN(mine))
+        {
+            if (value == null) return mine != 0f;
+            var want = Operand(name, value);
+            if (float.IsNaN(want)) return false;
+            var eps = name.EndsWith("aspect-ratio", StringComparison.Ordinal) ? 0.01f : 0.5f;
+            return cmp > 0 ? mine >= want - eps : cmp < 0 ? mine <= want + eps : Math.Abs(mine - want) < eps;
+        }
+
+        if (Discrete(name) is { } answer)
+            // the boolean form asks whether the feature is "on", which for a preference means a preference was expressed
+            return value == null ? answer is not ("none" or "no-preference") : value == answer;
+
+        Unknown(name, warn);
+        return false;
+    }
+
+    /// <summary>The console's own value for a range-capable feature, NaN when it has none.</summary>
+    private static float FeatureNumber(string name) => name switch
+    {
+        "width" or "device-width" => ViewportWidth,
+        "height" or "device-height" => ViewportHeight,
+        "aspect-ratio" or "device-aspect-ratio" => ViewportHeight > 0f ? ViewportWidth / ViewportHeight : float.NaN,
+        "resolution" => 1f,                                  // the page is drawn as vectors: one device pixel per CSS pixel
+        "color" => 8f,                                       // bits per colour channel
+        "color-index" or "monochrome" or "grid" => 0f,       // not a palette, not monochrome, not a character grid
+        _ => float.NaN,
+    };
+
+    /// <summary>
+    /// The console as a media-query respondent. It is a lit panel in a dark ship, so the
+    /// scheme is dark; the game's crosshair is a real pointer that can rest on a box, so
+    /// hover and a fine pointer are true; nothing here carries a user preference, so every
+    /// preference answers with its neutral value. Null means the feature is not answerable.
+    /// </summary>
+    private static string? Discrete(string name) => name switch
+    {
+        "orientation" => ViewportWidth >= ViewportHeight ? "landscape" : "portrait",
+        "prefers-color-scheme" => "dark",
+        "prefers-reduced-motion" or "prefers-reduced-transparency" or "prefers-reduced-data" or "prefers-contrast" => "no-preference",
+        "forced-colors" or "inverted-colors" => "none",
+        "hover" or "any-hover" => "hover",
+        "pointer" or "any-pointer" => "fine",
+        "scripting" => "enabled",
+        "update" => "fast",
+        "display-mode" => "fullscreen",
+        "dynamic-range" or "video-dynamic-range" => "standard",
+        "overflow-block" or "overflow-inline" => "scroll",
+        "color-gamut" => "srgb",
+        "scan" => "progressive",
+        _ => null,
+    };
+
+    private static readonly HashSet<string> ReportedMedia = new(StringComparer.Ordinal);
+
+    private static void Unknown(string feature, Action<string>? warn)
+    {
+        if (ReportedMedia.Add(feature))
+            warn?.Invoke($"css: @media ({feature}) is not something a console can answer, so that block is skipped");
+    }
+
+    /// <summary>A written value in the feature's own unit: a ratio, dppx, or px.</summary>
+    private static float Operand(string name, string text)
+    {
+        var v = text.Trim();
+        if (name.EndsWith("aspect-ratio", StringComparison.Ordinal))
+        {
+            var parts = v.Split('/');
+            var b = parts.Length > 1 ? Px(parts[1]) : 1f;
+            return b == 0f ? float.NaN : Px(parts[0]) / b;
+        }
+        if (name == "resolution")
+        {
+            if (v.EndsWith("dppx", StringComparison.OrdinalIgnoreCase)) return Px(v.Substring(0, v.Length - 4));
+            if (v.EndsWith("dpcm", StringComparison.OrdinalIgnoreCase)) return Px(v.Substring(0, v.Length - 4)) / 37.795275f;
+            if (v.EndsWith("dpi", StringComparison.OrdinalIgnoreCase)) return Px(v.Substring(0, v.Length - 3)) / 96f;
+            if (v.EndsWith("x", StringComparison.OrdinalIgnoreCase)) return Px(v.Substring(0, v.Length - 1));
+        }
+        // a media query's em is the initial font size, never the element's: there is no element yet
+        if (v.EndsWith("rem", StringComparison.OrdinalIgnoreCase)) return Px(v.Substring(0, v.Length - 3)) * 16f;
+        if (v.EndsWith("em", StringComparison.OrdinalIgnoreCase)) return Px(v.Substring(0, v.Length - 2)) * 16f;
+        return Px(v);
     }
 
     /// <summary>A px length or plain number as a float, NaN otherwise. Unity-free on purpose: this file is tested headless.</summary>
@@ -708,13 +849,87 @@ internal static class CssParser
         return float.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : float.NaN;
     }
 
-    private static bool AspectClause(string feature, string value)
+    /// <summary>
+    /// An @supports condition: `not`, `and`, `or`, parentheses, and `selector(...)` answered
+    /// by actually parsing the selector. `font-tech()`/`font-format()` are false - no font
+    /// here is loaded by technology. A plain `(property: value)` leaf is TRUE, because this
+    /// parser does accept every declaration; whether the value then DRAWS is a different
+    /// question, and COVERAGE.md's rather than this one's.
+    /// </summary>
+    /// <remarks>
+    /// `not` is the half that mattered. Taken unconditionally - which is what happened before
+    /// this existed - a page's `@supports not (...)` fallback was applied on top of the rules
+    /// it was the fallback FOR, and being later in the sheet it won.
+    /// </remarks>
+    internal static bool SupportsMatches(string condition, Action<string>? warn)
     {
-        var parts = value.Split('/');
-        if (parts.Length != 2 || float.IsNaN(Px(parts[0])) || float.IsNaN(Px(parts[1])) || Px(parts[1]) == 0f) return false;
-        var want = Px(parts[0]) / Px(parts[1]);
-        var have = ViewportWidth / ViewportHeight;
-        return feature == "min-aspect-ratio" ? have >= want : feature == "max-aspect-ratio" ? have <= want : Math.Abs(have - want) < 0.01f;
+        var cond = condition.Trim();
+        if (cond.Length == 0) return true;
+
+        var any = SplitKeyword(cond, " or ");
+        if (any.Count > 1)
+        {
+            foreach (var part in any)
+                if (SupportsMatches(part, warn)) return true;
+            return false;
+        }
+        var all = SplitKeyword(cond, " and ");
+        if (all.Count > 1)
+        {
+            foreach (var part in all)
+                if (!SupportsMatches(part, warn)) return false;
+            return true;
+        }
+        if (cond.StartsWith("not ", StringComparison.OrdinalIgnoreCase)) return !SupportsMatches(cond.Substring(4), warn);
+        if (cond.StartsWith("not(", StringComparison.OrdinalIgnoreCase)) return !SupportsMatches(cond.Substring(3), warn);
+        if (cond.StartsWith("selector(", StringComparison.OrdinalIgnoreCase))
+            return ParseSelector(Inside(cond, 8).Trim(), null) != null;
+        if (cond.StartsWith("font-tech(", StringComparison.OrdinalIgnoreCase) || cond.StartsWith("font-format(", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (cond[0] != '(') return true;
+
+        var inner = Inside(cond, 0);
+        // `(a: b)` is a declaration; anything else in parentheses is a condition of its own
+        return inner.IndexOf(':') > 0 && SplitKeyword(inner, " and ").Count == 1 && SplitKeyword(inner, " or ").Count == 1
+               && !inner.TrimStart().StartsWith("not", StringComparison.OrdinalIgnoreCase)
+            ? true
+            : SupportsMatches(inner, warn);
+    }
+
+    /// <summary>The text between the parenthesis at or after <paramref name="from"/> and its match.</summary>
+    private static string Inside(string s, int from)
+    {
+        var open = s.IndexOf('(', from);
+        if (open < 0) return string.Empty;
+        var depth = 0;
+        for (var i = open; i < s.Length; i++)
+        {
+            if (s[i] == '(') depth++;
+            else if (s[i] == ')' && --depth == 0) return s.Substring(open + 1, i - open - 1);
+        }
+        return s.Substring(open + 1);
+    }
+
+    /// <summary>Split on a keyword outside parentheses.</summary>
+    private static List<string> SplitKeyword(string s, string keyword)
+    {
+        var parts = new List<string>();
+        var depth = 0;
+        var start = 0;
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (s[i] == '(') depth++;
+            else if (s[i] == ')') depth--;
+            else if (depth == 0 && i + keyword.Length <= s.Length
+                     && string.Compare(s, i, keyword, 0, keyword.Length, StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                parts.Add(s.Substring(start, i - start));
+                start = i + keyword.Length;
+                i += keyword.Length - 1;
+            }
+        }
+        parts.Add(s.Substring(start));
+        return parts;
     }
 
     /// <summary>Body of a @keyframes block: "from { } 50% { } to { }". Frames sorted by percent.</summary>
@@ -839,6 +1054,13 @@ internal static class CssParser
                 generalNext = true;
                 continue;
             }
+            if (part == "||")
+            {
+                // The column combinator addresses a <col>'s cells. Nothing here models a
+                // column, and swallowing it silently made a tag selector named "||".
+                warn?.Invoke($"css: selector \"{text}\" skipped: the column combinator || is not supported");
+                return null;
+            }
             var compound = new CssCompound { ChildOfPrevious = childNext, SiblingOfPrevious = siblingNext, GeneralSiblingOfPrevious = generalNext };
             childNext = false;
             siblingNext = false;
@@ -911,6 +1133,8 @@ internal static class CssParser
             }
             if (ch == '[' || ch == '(') depth++;
             else if (ch == ']' || ch == ')') depth--;
+            // `||` is a combinator; a single `|` is a namespace separator and stays glued on
+            if (depth == 0 && ch == '|' && i + 1 < text.Length && text[i + 1] == '|') { Flush(); parts.Add("||"); i++; continue; }
             if (depth == 0 && (ch == '>' || ch == '+' || ch == '~')) { Flush(); parts.Add(ch.ToString()); continue; }
             if (depth == 0 && char.IsWhiteSpace(ch)) { Flush(); continue; }
             sb.Append(ch);
@@ -926,6 +1150,7 @@ internal static class CssParser
         for (var i = 0; i < body.Length; i++)
             if (body[i] == '=') { op = i; break; }
         string name, value = string.Empty, kind = "exists";
+        var cmp = StringComparison.Ordinal;
         if (op < 0) name = body;
         else
         {
@@ -934,7 +1159,14 @@ internal static class CssParser
             kind = last switch { '~' => "word", '|' => "dash", '^' => "prefix", '$' => "suffix", '*' => "contains", _ => "equals" };
             name = kind == "equals" ? before : before.Substring(0, before.Length - 1);
             value = body.Substring(op + 1).Trim();
-            if (value.EndsWith(" i", StringComparison.OrdinalIgnoreCase)) value = value.Substring(0, value.Length - 2).Trim();
+            // `[a=v i]` / `[a=v s]`: the flag sits after the value, outside its quotes. An
+            // unquoted value cannot hold a space, so the space before the flag identifies it -
+            // without that test `[data-k=xs]` loses its s.
+            if (value.Length > 2 && (value[value.Length - 1] is 'i' or 'I' or 's' or 'S') && char.IsWhiteSpace(value[value.Length - 2]))
+            {
+                if (value[value.Length - 1] is 'i' or 'I') cmp = StringComparison.OrdinalIgnoreCase;
+                value = value.Substring(0, value.Length - 2).Trim();
+            }
             if (value.Length >= 2 && (value[0] == '"' || value[0] == '\'') && value[value.Length - 1] == value[0]) value = value.Substring(1, value.Length - 2);
         }
         UsedAttributes.Add(name.Trim());
@@ -947,16 +1179,23 @@ internal static class CssParser
             return kind switch
             {
                 "exists" => true,
-                "equals" => have == value,
-                "word" => Array.IndexOf(have.Split(' ', StringSplitOptions.RemoveEmptyEntries), value) >= 0,
-                "dash" => have == value || have.StartsWith(value + "-", StringComparison.Ordinal),
-                "prefix" => value.Length > 0 && have.StartsWith(value, StringComparison.Ordinal),
-                "suffix" => value.Length > 0 && have.EndsWith(value, StringComparison.Ordinal),
-                "contains" => value.Length > 0 && have.Contains(value, StringComparison.Ordinal),
+                "equals" => string.Equals(have, value, cmp),
+                "word" => Word(have, value, cmp),
+                "dash" => string.Equals(have, value, cmp) || have.StartsWith(value + "-", cmp),
+                "prefix" => value.Length > 0 && have.StartsWith(value, cmp),
+                "suffix" => value.Length > 0 && have.EndsWith(value, cmp),
+                "contains" => value.Length > 0 && have.Contains(value, cmp),
                 _ => false,
             };
         });
         return true;
+    }
+
+    private static bool Word(string have, string want, StringComparison cmp)
+    {
+        foreach (var w in have.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            if (string.Equals(w, want, cmp)) return true;
+        return false;
     }
 
     /// <summary>
@@ -1030,6 +1269,12 @@ internal static class CssParser
                 // marker span), ::placeholder (the field's placeholder, colour only); other
                 // pseudo-elements skip the rule.
                 if (name is "-webkit-input-placeholder" or "-moz-placeholder" or "-ms-input-placeholder") name = "placeholder";
+                // Nothing generates a node for ::first-line, ::backdrop or a scrollbar part, so
+                // a rule naming one is parsed and never applies. Left that way deliberately:
+                // ::backdrop needs a modal, which :modal already never matches, and the webkit
+                // scrollbar parts do nothing in a non-webkit browser either. ::first-line is
+                // the one real gap of the three - see the report, not a warning, because these
+                // selectors still match if a generator is ever added for them.
                 if (name is not ("before" or "after" or "marker" or "placeholder" or "first-letter" or "first-line" or "backdrop" or "details-content" or "-webkit-scrollbar" or "-webkit-scrollbar-thumb" or "-webkit-scrollbar-track"))
                 {
                     if (!NeverMatches(name, warn)) return false;
@@ -1064,17 +1309,40 @@ internal static class CssParser
                 case "only-of-type":
                     compound.Pseudos.Add(n => TypeCount(n) == 1);
                     break;
+                case "nth-child":
                 case "nth-of-type":
                 case "nth-last-of-type":
                 case "nth-last-child":
                 {
-                    var (a, b) = ParseNth(arg);
+                    // `:nth-child(An+B of S)`: the siblings counted are only those matching S,
+                    // so the element must match it too before its position means anything.
+                    var expr = arg;
+                    List<CssSelector>? of = null;
+                    var ofAt = OfKeyword(arg);
+                    if (ofAt >= 0)
+                    {
+                        of = new List<CssSelector>();
+                        foreach (var part in SplitTopLevel(arg.Substring(ofAt + 4), ','))
+                            if (ParseSelector(part.Trim(), warn) is { } inner) of.Add(inner);
+                        if (of.Count == 0) return false;
+                        expr = arg.Substring(0, ofAt);
+                    }
+                    var (a, b) = ParseNth(expr);
                     var ofType = name.EndsWith("of-type", StringComparison.Ordinal);
                     var fromEnd = name.StartsWith("nth-last", StringComparison.Ordinal);
                     compound.Pseudos.Add(n =>
                     {
-                        var idx = ofType ? TypeIndex(n) : ElementIndex(n);
-                        var cnt = ofType ? TypeCount(n) : ElementCount(n);
+                        int idx, cnt;
+                        if (of != null)
+                        {
+                            IndexAmong(n, of, out idx, out cnt);
+                            if (idx < 0) return false;
+                        }
+                        else
+                        {
+                            idx = ofType ? TypeIndex(n) : ElementIndex(n);
+                            cnt = ofType ? TypeCount(n) : ElementCount(n);
+                        }
                         var k = (fromEnd ? cnt - 1 - idx : idx) + 1;
                         if (a == 0) return k == b;
                         var m = k - b;
@@ -1122,18 +1390,6 @@ internal static class CssParser
                         foreach (var (childOnly, sel) in wants)
                             if (AnyDescendant(n, sel, childOnly)) return true;
                         return false;
-                    });
-                    break;
-                }
-                case "nth-child":
-                {
-                    var (a, b) = ParseNth(arg);
-                    compound.Pseudos.Add(n =>
-                    {
-                        var k = ElementIndex(n) + 1;
-                        if (a == 0) return k == b;
-                        var m = k - b;
-                        return m % a == 0 && m / a >= 0;
                     });
                     break;
                 }
@@ -1234,15 +1490,60 @@ internal static class CssParser
     /// </summary>
     private static bool NeverMatches(string name, Action<string>? warn)
     {
-        if (!name.StartsWith("-", StringComparison.Ordinal)
+        var part = name is "scroll-marker" or "scroll-marker-group" or "scroll-button" or "column";
+        if (!part && !name.StartsWith("-", StringComparison.Ordinal)
             && name is not ("selection" or "host" or "host-context" or "slotted" or "part" or "cue" or "cue-region"
                 or "file-selector-button" or "spelling-error" or "grammar-error" or "highlight" or "target-text"
                 or "view-transition" or "view-transition-group" or "view-transition-image-pair"
                 or "view-transition-old" or "view-transition-new" or "picker" or "picker-icon" or "checkmark"))
             return false;
         if (ReportedPseudos.Add(name))
-            warn?.Invoke($"css: \"{name}\" matches nothing here: no text selection, shadow tree or browser widget internals");
+            warn?.Invoke(part
+                ? $"css: \"{name}\" matches nothing here: the page has no such box to paint"
+                : $"css: \"{name}\" matches nothing here: no text selection, shadow tree or browser widget internals");
         return true;
+    }
+
+    /// <summary>
+    /// Forget which pseudos and media features have already been reported. Without this they
+    /// are process-global: the first page reports the gap and every page after it looks clean,
+    /// which is exactly the bug StyleApplier.ForgetReported exists to avoid.
+    /// </summary>
+    public static void ForgetReported()
+    {
+        ReportedPseudos.Clear();
+        ReportedMedia.Clear();
+    }
+
+    /// <summary>Index of the ` of ` keyword at the top level of an nth-child argument, or -1.</summary>
+    private static int OfKeyword(string arg)
+    {
+        var depth = 0;
+        for (var i = 0; i + 4 <= arg.Length; i++)
+        {
+            if (arg[i] == '(' || arg[i] == '[') depth++;
+            else if (arg[i] == ')' || arg[i] == ']') depth--;
+            else if (depth == 0 && string.Compare(arg, i, " of ", 0, 4, StringComparison.OrdinalIgnoreCase) == 0) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>Position of <paramref name="n"/> among the siblings matching <paramref name="of"/>, and how many there are. Index -1 when it is not one of them.</summary>
+    private static void IndexAmong(HtmlNode n, List<CssSelector> of, out int index, out int count)
+    {
+        index = -1;
+        count = 0;
+        if (n.Parent == null) { index = 0; count = 1; return; }
+        foreach (var c in n.Parent.Children)
+        {
+            if (c.IsText) continue;
+            var hit = false;
+            foreach (var s in of)
+                if (s.Matches(c)) { hit = true; break; }
+            if (!hit) continue;
+            if (c == n) index = count;
+            count++;
+        }
     }
 
     private static int TypeIndex(HtmlNode n)

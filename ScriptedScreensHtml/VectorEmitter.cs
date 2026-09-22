@@ -504,7 +504,14 @@ internal static class VectorEmitter
         {
             var bg = rs.backgroundColor;
             css.TryGetValue("background", out var bgCss);
-            if (bgCss == null) css.TryGetValue("background-image", out bgCss);
+            // The record keeps the shorthand and the longhand separately, so `.p{background:#22aa44}`
+            // plus `#p{background-image:linear-gradient(...)}` left the gradient unread: the
+            // shorthand was found first and it names a colour. A longhand that actually carries a
+            // picture is the one the cascade means, whichever rule set it.
+            if (css.TryGetValue("background-image", out var bgImage)
+                && (Gradient(bgImage.TrimStart()) || UrlOf(bgImage) != null))
+                bgCss = bgImage;
+            if (bgCss == null) bgCss = bgImage;
             if (cornerPath != null && tw == null && bg.a > 0.002f && (bgCss == null || !bgCss.Contains("gradient(")) && UrlOf(bgCss ?? string.Empty) == null)
             {
                 // corner-shape: the box outline as a path with bevelled, scooped or notched corners
@@ -593,6 +600,35 @@ internal static class VectorEmitter
                     .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=@").Append(gid).Append(" fat==").Append(tw.P).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
+            else if (bgCss != null && Gradient(bgCss)
+                     && BackgroundTiles(ctx, css, rs, w, h, out var blx, out var bly, out var blw, out var blh, out var bnx, out var bny))
+            {
+                // background-size / -position / -origin / -repeat on a single gradient layer: the
+                // colour fills the box, the gradient sits at its own size and tiles from its anchor
+                if (bg.a > 0.002f || shadow.Length > 0)
+                {
+                    ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
+                        .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=").AppendHex(bg.a > 0.002f ? bg : new Color(0f, 0f, 0f, 1f / 255f)).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
+                    ctx.Out.Nodes++;
+                }
+                var tileDef = bgCss.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) ? RadialDef(ctx, bgCss)
+                    : bgCss.StartsWith("conic-gradient", StringComparison.OrdinalIgnoreCase) ? ConicDef(ctx, bgCss)
+                    : null;
+                for (var ty = 0; ty < bny; ty++)
+                    for (var tx = 0; tx < bnx; tx++)
+                    {
+                        var gx = x + blx + tx * blw;
+                        var gy = y + bly + ty * blh;
+                        if (tileDef != null)
+                        {
+                            ctx.Body.Append(indent).Append("R x=").AppendNum(gx).Append(" y=").AppendNum(gy).Append(" w=").AppendNum(blw).Append(" h=").AppendNum(blh)
+                                .Append(" f=@").Append(tileDef).Append('\n');
+                            ctx.Out.Nodes++;
+                        }
+                        else if (bgCss.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase))
+                            GradientBox(ctx, bgCss, gx, gy, blw, blh, F(blw), F(blh), rs, indent, ve, xform, string.Empty);
+                    }
+            }
             else if (bgCss != null && bgCss.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase))
             {
                 GradientBox(ctx, bgCss, x, y, w, h, ws ?? F(w), hs ?? F(h), rs, indent, ve, xform, shadow);
@@ -631,14 +667,14 @@ internal static class VectorEmitter
                 ctx.Out.Nodes++;
             }
 
-            if (Outline(css, out var ow, out var oc, out var ooff) && ow > 0.01f && oc.a > 0.002f)
+            if (Outline(css, out var ow, out var oc, out var ooff, out var ostyle) && ow > 0.01f && oc.a > 0.002f)
             {
                 // Outside the border box, offset by outline-offset, stroke centred on its path.
                 var od = ooff + ow * 0.5f;
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x - od).Append(" y=").AppendNum(y - od)
                     .Append(" w=").AppendNum(w + 2f * od).Append(" h=").AppendNum(h + 2f * od)
                     .AppendRadius(rs, w + 2f * od, h + 2f * od, od).Append(" f=none s=").AppendHex(oc).Append(" sw=").AppendNum(ow)
-                    .Append('\n');
+                    .Append(DashFor(ostyle, ow)).Append('\n');
                 ctx.Out.Nodes++;
             }
 
@@ -705,7 +741,7 @@ internal static class VectorEmitter
                 // middle of the next, so the sides meet cleanly with butt caps.
                 SideArcs(ctx, indent, x, y, w, h, bw, rs, new[] { rs.borderTopColor, rs.borderRightColor, rs.borderBottomColor, rs.borderLeftColor });
             }
-            else if (bw > 0.01f && rs.borderTopColor.a > 0.002f && sameWidth)
+            else if (bw > 0.01f && rs.borderTopColor.a > 0.002f && sameWidth && sameColour)
             {
                 // A stroke is centred on its path: inset by half the width so it stays inside the box.
                 var half = bw * 0.5f;
@@ -1281,6 +1317,13 @@ internal static class VectorEmitter
                 return null;
             var xf = ctx.RentXform(depth);
             xf.Ax = offset?.Ax ?? x + w * 0.5f; xf.Ay = offset?.Ay ?? y + h * 0.5f;
+            // transform-origin: the point the G turns and scales about. Only looked up for an
+            // element that actually has a transform, which is a small minority of any page.
+            if (offset == null && ctx.Built.CssOf(ve).TryGetValue("transform-origin", out var torigin))
+            {
+                Origin(torigin, w, h, out var oax, out var oay);
+                xf.Ax = x + oax; xf.Ay = y + oay;
+            }
             xf.Tx = tx; xf.Ty = ty; xf.R = r; xf.Sx = sx; xf.Sy = sy;
             xf._ox = offset?.Dx ?? 0f; xf._oy = offset?.Dy ?? 0f; xf._or = offset?.Rot ?? 0f;
             xf._offset = offset;
@@ -1537,6 +1580,103 @@ internal static class VectorEmitter
         var py = ys.Count > 0 ? ys[0] : plain.Count > (xs.Count > 0 ? 0 : 1) ? plain[xs.Count > 0 ? 0 : 1] : "top";
         lx = Pos(px, w, lw);
         ly = Pos(py, h, lh);
+    }
+
+    /// <summary><c>transform-origin</c> as a point inside the box; the default is its centre.</summary>
+    private static void Origin(string v, float w, float h, out float ax, out float ay)
+    {
+        ax = w * 0.5f; ay = h * 0.5f;
+        var seen = 0;
+        foreach (var part in v.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            switch (part)
+            {
+                case "left": ax = 0f; continue;
+                case "right": ax = w; continue;
+                case "top": ay = 0f; continue;
+                case "bottom": ay = h; continue;
+                case "center": seen++; continue;   // whichever axis is still unspoken keeps its centre
+                default:
+                    var full = seen == 0 ? w : h;
+                    var at = part.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(part) / 100f * full : StyleApplier.Num(part);
+                    if (seen == 0) ax = at; else ay = at;
+                    seen++;
+                    continue;
+            }
+        }
+    }
+
+    /// <summary>A background value that paints a gradient rather than a colour or a picture.</summary>
+    private static bool Gradient(string bg) =>
+        bg.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase)
+        || bg.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase)
+        || bg.StartsWith("conic-gradient", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The <c>background-size</c> / <c>-position</c> / <c>-position-x</c> / <c>-position-y</c> /
+    /// <c>-origin</c> / <c>-repeat</c> longhands as one tile's box and how many tiles cover the
+    /// element. False - and nothing else touched - when the page names none of them, which is the
+    /// ordinary case and must stay free.
+    /// </summary>
+    /// <remarks>
+    /// A comma-separated layer spells the same thing in its own tail and <see cref="LayerBox"/>
+    /// already reads it; a single layer spells it in longhands, and nothing read those at all, so a
+    /// gradient simply filled its box however the page sized it. The tail is composed here and
+    /// handed to the same parser rather than a second one being written.
+    /// </remarks>
+    private static bool BackgroundTiles(Ctx ctx, Dictionary<string, string> css, OffThread.Box rs, float w, float h,
+                                        out float lx, out float ly, out float lw, out float lh,
+                                        out int nx, out int ny)
+    {
+        lx = 0f; ly = 0f; lw = w; lh = h; nx = 1; ny = 1;
+        var hasSize = css.TryGetValue("background-size", out var size);
+        var hasPos = css.TryGetValue("background-position", out var pos);
+        var hasX = css.TryGetValue("background-position-x", out var posX);
+        var hasY = css.TryGetValue("background-position-y", out var posY);
+        var hasOrigin = css.TryGetValue("background-origin", out var origin);
+        var hasRepeat = css.TryGetValue("background-repeat", out var repeat);
+        // background-repeat on its own cannot change anything: with no size the tile IS the
+        // positioning area, so one copy fills it either way - and this runs per element per frame.
+        if (!hasSize && !hasPos && !hasX && !hasY && !hasOrigin) return false;
+
+        // background-origin: the box the position and a percentage size are measured in.
+        var o = hasOrigin ? origin!.Trim() : "padding-box";
+        var il = o == "border-box" ? 0f : rs.borderLeftWidth + (o == "content-box" ? rs.paddingLeft : 0f);
+        var it = o == "border-box" ? 0f : rs.borderTopWidth + (o == "content-box" ? rs.paddingTop : 0f);
+        var ir = o == "border-box" ? 0f : rs.borderRightWidth + (o == "content-box" ? rs.paddingRight : 0f);
+        var ib = o == "border-box" ? 0f : rs.borderBottomWidth + (o == "content-box" ? rs.paddingBottom : 0f);
+        var aw = Mathf.Max(1f, w - il - ir);
+        var ah = Mathf.Max(1f, h - it - ib);
+
+        var posText = hasPos ? pos!.Trim()
+            : hasX || hasY ? (hasX ? posX!.Trim() : "left") + " " + (hasY ? posY!.Trim() : "top")
+            : string.Empty;
+        var sizeText = hasSize ? size!.Trim() : string.Empty;
+        // cover and contain are proportions of a picture; a gradient has none, so both fill the area
+        if (sizeText is "cover" or "contain" or "auto") sizeText = string.Empty;
+        var tail = sizeText.Length > 0 ? posText + "/" + sizeText : posText;
+        LayerBox(tail, aw, ah, out lx, out ly, out lw, out lh);
+        if (lw <= 0.01f || lh <= 0.01f) return false;
+        lx += il; ly += it;
+
+        var r = hasRepeat ? repeat!.Trim() : "repeat";
+        var tileX = r is "repeat" or "repeat-x" or "round" or "space";
+        var tileY = r is "repeat" or "repeat-y" or "round" or "space";
+        // A browser tiles outward from the anchor in both directions; walk back to the first tile
+        // that still touches the box, then forward until it is covered.
+        if (tileX && lw < aw) { var back = Mathf.Floor((lx - il) / lw); lx -= back * lw; nx = Mathf.CeilToInt((w - lx) / lw); }
+        if (tileY && lh < ah) { var back = Mathf.Floor((ly - it) / lh); ly -= back * lh; ny = Mathf.CeilToInt((h - ly) / lh); }
+        nx = Mathf.Max(1, nx);
+        ny = Mathf.Max(1, ny);
+        // Each tile is a shape (and a gradient tile is a def as well), so a fine repeat - a 2px hatch
+        // over a whole panel - would be thousands of both. Draw one and say so rather than quietly
+        // spend the frame on it. ponytail: 64 tiles; a real pattern needs an image layer, not this.
+        if (nx * ny > 64)
+        {
+            Warn(ctx, "html: background-repeat would need " + (nx * ny) + " tiles at this background-size; drawn once");
+            nx = 1; ny = 1;
+        }
+        return true;
     }
 
     /// <summary>border-style dashed/dotted (from the shorthand or the property) as a dash pattern in border widths.</summary>
@@ -1865,7 +2005,18 @@ internal static class VectorEmitter
             // TextMeshPro draws the plain forms itself, wrapped lines included
             if ((deco.line & 1) != 0) text = "<u>" + text + "</u>";
             if ((deco.line & 2) != 0) text = "<s>" + text + "</s>";
+            // ...but only in the text's own colour, weight and place. A wrapping label cannot have
+            // its decoration drawn as geometry (there is no per-line measure), so a colour, style or
+            // thickness asked for on one is dropped - say so rather than draw a plain underline and
+            // leave the author looking for the red dashes they asked for.
+            if (deco.line != 0 && (deco.colour != null || deco.style != "solid" || deco.thickness > 0f))
+                Warn(ctx, "html: text-decoration-color / -style / -thickness is not drawn on a label that wraps; the plain line is");
         }
+        // font-style: italic. The renderer folds a real weight face into style.face and leaves the
+        // italic bit here precisely so it can still be drawn; nothing read it, so `font-style` was
+        // accepted by the cascade and then never reached the glyphs. TextMeshPro shears them.
+        if (rs.unityFontStyleAndWeight is FontStyle.Italic or FontStyle.BoldAndItalic && text.Length > 0)
+            text = "<i>" + text + "</i>";
         // Scene text escapes (vector mod 0.10.1.0): backslash first, then the quote; a line
         // break in the text becomes the two characters backslash-n.
         text = text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n");
@@ -4455,9 +4606,9 @@ internal static class VectorEmitter
     }
 
     /// <summary>outline / outline-width / outline-color / outline-offset; false for none.</summary>
-    private static bool Outline(Dictionary<string, string> css, out float width, out Color colour, out float offset)
+    private static bool Outline(Dictionary<string, string> css, out float width, out Color colour, out float offset, out string style)
     {
-        width = 0f; colour = Color.white; offset = 0f;
+        width = 0f; colour = Color.white; offset = 0f; style = "none";
         var any = false;
         if (css.TryGetValue("outline", out var shorthand))
         {
@@ -4465,7 +4616,7 @@ internal static class VectorEmitter
             if (v == "none" || v == "0") return false;
             foreach (var part in SplitParts(v))
             {
-                if (part is "solid" or "dashed" or "dotted" or "double" or "auto") { any = true; continue; }
+                if (part is "solid" or "dashed" or "dotted" or "double" or "auto") { style = part == "auto" ? "solid" : part; any = true; continue; }
                 if (StyleApplier.IsNumber(part) || part.EndsWith("px", StringComparison.OrdinalIgnoreCase)) { width = StyleApplier.Num(part); any = true; }
                 else if (StyleApplier.TryColor(part, out var c)) { colour = c; any = true; }
             }
@@ -4473,9 +4624,11 @@ internal static class VectorEmitter
         }
         if (css.TryGetValue("outline-width", out var wv)) { width = StyleApplier.Num(wv); any = true; }
         if (css.TryGetValue("outline-color", out var cv) && StyleApplier.TryColor(cv, out var cc)) { colour = cc; any = true; }
-        if (css.TryGetValue("outline-style", out var sv) && sv.Trim() == "none") return false;
+        if (css.TryGetValue("outline-style", out var sv)) { style = sv.Trim() == "auto" ? "solid" : sv.Trim(); any = true; }
         if (css.TryGetValue("outline-offset", out var ov)) offset = StyleApplier.Num(ov);
-        return any;
+        // outline-style's initial value is none, so a width and a colour with no style draw nothing -
+        // as in a browser. Before this the style was read only to cancel an outline, never to make one.
+        return any && style is not ("none" or "hidden");
     }
 
     private static List<string> SplitParts(string v)

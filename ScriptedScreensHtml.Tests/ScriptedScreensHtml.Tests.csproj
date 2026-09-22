@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
     <Import Project="..\StationeersLuaAddonTemplate-main\Stationeers.VS.User.props" Condition="Exists('..\StationeersLuaAddonTemplate-main\Stationeers.VS.User.props')" />
     <PropertyGroup>
         <OutputType>Exe</OutputType>
@@ -55,6 +55,7 @@
         <Compile Include="Corpus.cs" />
         <Compile Include="Language.cs" />
         <Compile Include="ClassTests.cs" />
+        <Compile Include="CssTests.cs" />
         <Compile Include="SyntaxTests.cs" />
         <Compile Include="MarkupProbe.cs" />
         <Compile Include="PreludeRuntime.cs" />

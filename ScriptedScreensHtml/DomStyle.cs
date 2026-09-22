@@ -188,6 +188,14 @@ internal sealed class ElementStyle
         }
     }
 
+    /// <summary>
+    /// The cascade named <c>flex-direction</c> (or <c>flex-flow</c>) on this element, so
+    /// <c>display: flex</c> must not overwrite it with its Row default. An inline
+    /// <c>style="display:flex"</c> is applied after a <c>#id{flex-direction:column}</c> rule wins
+    /// it, and without this the row came back every time - a browser cascades the two separately.
+    /// </summary>
+    internal bool FlexDirectionNamed { get; set; }
+
     public StyleEnum<FlexDirection> flexDirection
     {
         get => Or(_flexDirection);

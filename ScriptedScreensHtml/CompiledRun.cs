@@ -75,6 +75,7 @@ internal sealed class CompiledRun
     internal bool Click(string id, float x, float y)
     {
         if (_event == null) return false;
+        ChipHost.Modifiers(_env);
         var any = ChipHost.RunEvent(_state, _event, id, "mousedown", x, y);
         any |= ChipHost.RunEvent(_state, _event, id, "mouseup", x, y);
         any |= ChipHost.RunEvent(_state, _event, id, "click", x, y);
@@ -86,7 +87,9 @@ internal sealed class CompiledRun
     /// <summary>One pointer event, for the types a page uses to track a held button.</summary>
     internal bool Pointer(string id, string kind, float x, float y)
     {
-        if (_event == null || !ChipHost.RunEvent(_state, _event, id, kind, x, y)) return false;
+        if (_event == null) return false;
+        ChipHost.Modifiers(_env);
+        if (!ChipHost.RunEvent(_state, _event, id, kind, x, y)) return false;
         _events++;
         return true;
     }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
@@ -279,6 +279,7 @@ internal static class HtmlRenderer
         CssParser.PropertyInitials.Clear();
         CssParser.StartingRules.Clear();
         CssParser.UsedAttributes.Clear();
+        CssParser.ForgetReported();
         _placeholdersSeen = false;
         _building = true;
         try { return BuildInner(source, font, result, doc, rules, script, Warn); }
@@ -789,7 +790,7 @@ internal static class HtmlRenderer
         }
 
         Register(ve, node, result);
-        TagDefaults(ve, node.Tag!);
+        TagDefaults(ve, node);
         if (node.Tag is "pre" or "code" or "kbd" or "samp")
         {
             // A monospace default that a page rule can still override: it is written into the
@@ -833,7 +834,8 @@ internal static class HtmlRenderer
         if (!mixed)
         {
             var list = node.Tag == "ul" || node.Tag == "ol";
-            var ordinal = 0;
+            // <ol start=5> begins there; <li value=9> moves the count and the rest follow it
+            var ordinal = node.Tag == "ol" && int.TryParse(node.Attr("start"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var startAt) ? startAt - 1 : 0;
             if (node.Tag == "details")
                 AddDisclosure(node, rules);
             // Inline content between blocks (text, <b>, a ::before, a span) flows as one line
@@ -851,7 +853,10 @@ internal static class HtmlRenderer
             foreach (var child in node.Children)
             {
                 if (list && child.Tag == "li")
+                {
+                    if (int.TryParse(child.Attr("value"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var at)) ordinal = at - 1;
                     AddMarker(child, node, result.CssOf(ve), ++ordinal, rules);
+                }
                 var inline = child.IsText ? child.Text.Trim().Length > 0 : (Inline.Contains(child.Tag!) && !Blockified(child, rules) && IsInlineOnly(child, rules)) || (child.Attr("data-pseudo") is { } dp && dp != "details-content") || child.Attr("data-marker") != null;
                 // the children of a flex or grid container are items, never gathered into a line box (CSS blockifies them)
                 if (inline && !itemsContainer && node.Tag is not ("table" or "tr" or "ul" or "ol" or "select" or "svg"))
@@ -1651,7 +1656,7 @@ internal static class HtmlRenderer
         // measure cells in a second pass if a real page needs them.
         var ve = new VisualElement();
         Register(ve, node, result);
-        TagDefaults(ve, node.Tag!);
+        TagDefaults(ve, node);
         ApplyStyles(ve, node, rules, result);
         parent.Add(ve);
         HtmlNode? bottomCaption = null;
@@ -1725,6 +1730,14 @@ internal static class HtmlRenderer
     private static void AppendRow(VisualElement table, HtmlNode tr, int columns, List<CssRule> rules, Result result, List<string?>? colWidths = null)
     {
         var colIndex = 0;
+        // A row narrower than the table cannot say so with flex-grow: shares of a row are
+        // shares of whatever that row happens to hold, so a lone cell filled it whatever its
+        // colspan said - which is why colspan drew nothing. Such a row is sized by its share
+        // of the TABLE instead. A row that fills the table keeps the grow model exactly.
+        var spanned = 0;
+        foreach (var cell in tr.Children)
+            if (cell.Tag == "td" || cell.Tag == "th") spanned += Span(cell);
+        var short_ = spanned < columns && columns > 0;
         var row = new VisualElement();
         row.style.flexDirection = FlexDirection.Row;
         row.style.alignItems = Align.Stretch;
@@ -1742,13 +1755,25 @@ internal static class HtmlRenderer
             colIndex += Span(cell);
             if (w != null && cell.Attr("style")?.Contains("width") != true)
                 cell.Attributes["style"] = "width:" + (w.EndsWith("%", StringComparison.Ordinal) || w.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? w : w + "px") + ";" + (cell.Attr("style") ?? string.Empty);
+            // The cell's element is the one Append just added. Looking it up by id instead
+            // meant colspan worked only on cells that happened to carry an id - which is
+            // almost none of them, so a spanning cell silently took one column's width.
+            var before = row.childCount;
             Append(row, cell, rules, result);
-            var id = cell.Attr("id");
-            if (id == null || !result.ById.TryGetValue(id, out var cve)) continue;
+            if (row.childCount <= before) continue;
+            var cve = row[row.childCount - 1];
             if (!result.CssOf(cve).ContainsKey("width"))
             {
-                cve.style.flexGrow = Span(cell);
-                cve.style.flexBasis = result.CssOf(table).ContainsKey("width") ? 0 : StyleKeyword.Auto;
+                if (short_)
+                {
+                    cve.style.flexGrow = 0;
+                    cve.style.flexBasis = new Length(100f * Span(cell) / columns, LengthUnit.Percent);
+                }
+                else
+                {
+                    cve.style.flexGrow = Span(cell);
+                    cve.style.flexBasis = result.CssOf(table).ContainsKey("width") ? 0 : StyleKeyword.Auto;
+                }
             }
             cve.style.flexShrink = 1;
         }
@@ -2476,10 +2501,10 @@ internal static class HtmlRenderer
     }
 
     /// <summary>The handful of user-agent defaults that make plain HTML look like HTML.</summary>
-    private static void TagDefaults(VisualElement ve, string tag)
+    private static void TagDefaults(VisualElement ve, HtmlNode node)
     {
         var s = ve.style;
-        switch (tag)
+        switch (node.Tag)
         {
             case "body": s.fontSize = 16; s.color = Color.white; break; // a browser's defaults, so a page with no font-size still has text
             case "h1": s.fontSize = 28; s.unityFontStyleAndWeight = FontStyle.Bold; s.marginTop = 8; s.marginBottom = 8; break;
@@ -2490,7 +2515,8 @@ internal static class HtmlRenderer
             case "b": case "strong": s.unityFontStyleAndWeight = FontStyle.Bold; break;
             case "i": case "em": s.unityFontStyleAndWeight = FontStyle.Italic; break;
             case "hr": s.height = 1; s.backgroundColor = new Color(1, 1, 1, 0.3f); s.marginTop = 6; s.marginBottom = 6; break;
-            case "a": s.color = new Color(0.31f, 0.63f, 1f); break;
+            // a browser colours a:any-link, not every <a>: an anchor with no href is ordinary text
+            case "a": if (node.Attr("href") != null) s.color = new Color(0.31f, 0.63f, 1f); break;
             case "ul": case "ol": s.paddingLeft = 16; s.marginTop = 4; s.marginBottom = 4; break;
             case "li": s.marginBottom = 2; break;
             case "th": s.unityFontStyleAndWeight = FontStyle.Bold; s.paddingTop = 2; s.paddingBottom = 2; s.paddingLeft = 4; s.paddingRight = 4; break;
@@ -2623,7 +2649,11 @@ internal static class HtmlRenderer
             for (var n = node; n != null && found == null; n = n.Parent)
                 if (n.Vars != null && n.Vars.TryGetValue(name, out var v)) found = v;
             if (found == null && fallback != null) { found = ResolveVarsCore(fallback, node, out var fbBad); if (fbBad) unresolved = true; }
-            if (found == null) { unresolved = true; found = CssParser.PropertyInitials.TryGetValue(name, out var initial) ? initial : string.Empty; }
+            // @property --name { initial-value } IS a value, so a var() naming it resolves.
+            // Marking it unresolved dropped the whole declaration, which is what an undefined
+            // custom property deserves and a declared one does not.
+            if (found == null && CssParser.PropertyInitials.TryGetValue(name, out var initial)) found = initial;
+            if (found == null) { unresolved = true; found = string.Empty; }
             sb.Append(found);
             i = j + 1;
         }
@@ -2738,7 +2768,7 @@ internal static class HtmlRenderer
                 StyleApplier.Reset(ve, old);
                 reset = true;
             }
-            if (reset && node.Tag != null) TagDefaults(ve, node.Tag);
+            if (reset && node.Tag != null) TagDefaults(ve, node);
         }
         node.Cascaded = names;
         StyleApplier.EmSize = InheritedFontSize(node.Parent, result);

@@ -90,6 +90,7 @@ internal sealed class GridLayout
         var areasText = Get(css, "grid-template-areas");
         // grid: the grid-template forms, or "auto-flow [dense] [size] / cols" (row flow) and "rows / auto-flow [dense] [size]"
         string? autoRowsFromGrid = null;
+        string? autoFlowFromGrid = null;
         var template = Get(css, "grid-template");
         if (template == null && Get(css, "grid") is { } gridShort && gridShort != "none")
         {
@@ -104,8 +105,8 @@ internal sealed class GridLayout
             }
             else if (right.StartsWith("auto-flow", StringComparison.Ordinal))
             {
-                // ponytail: column flow is laid out as row flow; the rows keep their sizes
                 rowsText ??= left;
+                autoFlowFromGrid = "column";
                 var size = right.Substring(9).Replace("dense", string.Empty).Trim();
                 if (size.Length > 0) colsText ??= size;
             }
@@ -125,9 +126,14 @@ internal sealed class GridLayout
             else rowsText ??= rowsPart;
         }
         var areas = ParseAreas(areasText);
-        var cols = ParseTracks(colsText ?? "auto");
+        // grid-template-areas defines the explicit grid, not only the names in it: two strings of
+        // two cells are a 2x2 grid even with no grid-template-columns. Without this the areas were
+        // parsed, used for grid-area lookups only, and a page that placed nothing by name laid out
+        // in one column - the declaration accepted and the shape ignored.
+        AreaShape(areasText, out var areaCols, out var areaRows);
+        var cols = ParseTracks(colsText ?? (areaCols > 0 ? Repeat("auto", areaCols) : "auto"));
         if (cols.Count == 0) cols.Add(new Track { Auto = true });
-        var rowsSpec = ParseTracks(rowsText ?? string.Empty);
+        var rowsSpec = ParseTracks(rowsText ?? (areaRows > 0 ? Repeat("auto", areaRows) : string.Empty));
         var autoRow = ParseTracks(Get(css, "grid-auto-rows") ?? autoRowsFromGrid ?? "auto");
         var autoRowTrack = autoRow.Count > 0 ? autoRow[0] : new Track { Auto = true };
 
@@ -172,6 +178,29 @@ internal sealed class GridLayout
             }
             items[i] = it;
         }
+        // grid-auto-flow: column fills the first column downward, then opens another. The explicit
+        // rows bound the column's height (one row when the page names none, as in a browser), and
+        // the columns it opens are sized by grid-auto-columns.
+        var columnFlow = (Get(css, "grid-auto-flow") ?? autoFlowFromGrid ?? "row").IndexOf("column", StringComparison.Ordinal) >= 0;
+        if (columnFlow)
+        {
+            var autoCol = ParseTracks(Get(css, "grid-auto-columns") ?? "auto");
+            var autoColTrack = autoCol.Count > 0 ? autoCol[0] : new Track { Auto = true };
+            var perColumn = Mathf.Max(1, rowsSpec.Count);
+            var placed = 0;
+            for (var i = 0; i < items.Count; i++)
+            {
+                var it = items[i];
+                if (it.Col >= 0 || it.Row >= 0) continue;   // an explicitly placed item keeps its cell
+                it.Row = placed % perColumn;
+                it.Col = placed / perColumn;
+                placed += Mathf.Max(1, it.RowSpan);
+                items[i] = it;
+            }
+            while (cols.Count < (placed + perColumn - 1) / perColumn) cols.Add(autoColTrack);
+            ncols = cols.Count;
+        }
+
         var occupied = new HashSet<(int r, int c)>();
         var cursorR = 0; var cursorC = 0;
         var rowCount = rowsSpec.Count;
@@ -261,8 +290,10 @@ internal sealed class GridLayout
             if (autoRows > 0 && free > 0.5f)
                 for (var r = 0; r < rows.Count; r++) if (rows[r].Auto) rowH[r] += free / autoRows;
         }
-        var alignItems = (Get(css, "align-items") ?? "stretch").Trim();
-        var justifyItems = (Get(css, "justify-items") ?? "stretch").Trim();
+        // place-items / place-self are "align justify", one value meaning both.
+        Place(Get(css, "place-items"), out var placeAlign, out var placeJustify);
+        var alignItems = (Get(css, "align-items") ?? placeAlign ?? "stretch").Trim();
+        var justifyItems = (Get(css, "justify-items") ?? placeJustify ?? "stretch").Trim();
         static float Factor(string v) => v is "center" ? 0.5f : v is "end" or "flex-end" or "self-end" or "last baseline" ? 1f : 0f;
         static bool Stretches(string v) => v is "stretch" or "normal" or "auto";
 
@@ -290,10 +321,14 @@ internal sealed class GridLayout
             // align-items / justify-items (and the self forms): a child that does not stretch keeps its
             // own size and sits at the start, centre or end of its cell, measured from the layout
             var ccss = _built.CssOf(it.Ve);
-            var alignSelf = (Get(ccss, "align-self") ?? alignItems).Trim();
-            var justifySelf = (Get(ccss, "justify-self") ?? justifyItems).Trim();
+            Place(Get(ccss, "place-self"), out var selfAlign, out var selfJustify);
+            var alignSelf = (Get(ccss, "align-self") ?? selfAlign ?? alignItems).Trim();
+            var justifySelf = (Get(ccss, "justify-self") ?? selfJustify ?? justifyItems).Trim();
             var ownH = Stretches(alignSelf) || !fixedRow;
-            var ownW = Stretches(justifySelf) || contentCol;
+            // An auto column is already sized to its content, so stretching into it is free - but
+            // only while the item was going to stretch. A named justify says keep your own width and
+            // sit at that end of the cell, and `|| contentCol` was overruling it in every auto column.
+            var ownW = Stretches(justifySelf);
             var childH = it.Ve.layout.height; if (float.IsNaN(childH)) childH = 0f;
             var childW = it.Ve.layout.width; if (float.IsNaN(childW)) childW = 0f;
             // Rounded because the layout runs on a whole-pixel grid (YGConfigSetPointScaleFactor(1)):
@@ -462,6 +497,37 @@ internal sealed class GridLayout
 
     /// <summary>grid-column / grid-row to (start index or -1 for auto, span, explicit end line or 0).</summary>
     /// <summary>grid-template-areas: each quoted string is a row of cell names; a name's rectangle is its area (0-based row/col, spans).</summary>
+    /// <summary>place-items / place-self: "align justify", one value meaning both. Null when unset.</summary>
+    private static void Place(string? v, out string? align, out string? justify)
+    {
+        align = null; justify = null;
+        if (v == null) return;
+        var parts = v.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) return;
+        align = parts[0];
+        justify = parts.Length > 1 ? parts[1] : parts[0];
+    }
+
+    /// <summary>The explicit grid a grid-template-areas value describes: widest row, and how many rows.</summary>
+    private static void AreaShape(string? text, out int cols, out int rows)
+    {
+        cols = 0; rows = 0;
+        if (text == null) return;
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, "\"([^\"]*)\"|'([^']*)'"))
+        {
+            var cells = (m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (cells.Length > cols) cols = cells.Length;
+            rows++;
+        }
+    }
+
+    private static string Repeat(string track, int n)
+    {
+        var sb = new System.Text.StringBuilder(n * (track.Length + 1));
+        for (var i = 0; i < n; i++) { if (i > 0) sb.Append(' '); sb.Append(track); }
+        return sb.ToString();
+    }
+
     private static Dictionary<string, (int row, int col, int rows, int cols)> ParseAreas(string? text)
     {
         var areas = new Dictionary<string, (int row, int col, int rows, int cols)>(StringComparer.Ordinal);

@@ -231,6 +231,27 @@ internal static class ChipHost
         => environment is Lua.LuaTable env && env[name].TryRead<Lua.LuaFunction>(out var fn) ? fn : null;
 
     /// <summary>
+    /// The modifier keys as they are right now, into the table the prelude builds an event from.
+    /// </summary>
+    /// <remarks>
+    /// Read from the game rather than defaulted, because a <c>shiftKey</c> nobody ever set would be
+    /// a plausible <c>false</c> on every event - the failure this project keeps recording - and a
+    /// page branching on it would take the same branch for ever with nothing to say why.
+    ///
+    /// Called from the input dispatch, on the main thread, which is the only place
+    /// <c>UnityEngine.Input</c> may be read. The table is the chunk's own and is mutated in place,
+    /// so delivering an event still allocates nothing.
+    /// </remarks>
+    internal static void Modifiers(object? environment)
+    {
+        if (environment is not Lua.LuaTable env || !env["MODS"].TryRead<Lua.LuaTable>(out var mods)) return;
+        mods["shift"] = UnityEngine.Input.GetKey(UnityEngine.KeyCode.LeftShift) || UnityEngine.Input.GetKey(UnityEngine.KeyCode.RightShift);
+        mods["ctrl"] = UnityEngine.Input.GetKey(UnityEngine.KeyCode.LeftControl) || UnityEngine.Input.GetKey(UnityEngine.KeyCode.RightControl);
+        mods["alt"] = UnityEngine.Input.GetKey(UnityEngine.KeyCode.LeftAlt) || UnityEngine.Input.GetKey(UnityEngine.KeyCode.RightAlt);
+        mods["meta"] = UnityEngine.Input.GetKey(UnityEngine.KeyCode.LeftCommand) || UnityEngine.Input.GetKey(UnityEngine.KeyCode.RightCommand);
+    }
+
+    /// <summary>
     /// Delivers one event - a click, a press - to a compiled page's own handlers.
     /// </summary>
     /// <remarks>

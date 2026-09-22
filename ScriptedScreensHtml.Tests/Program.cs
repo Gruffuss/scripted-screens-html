@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using System;
 using System.Collections.Generic;
 using ScriptedScreensHtml;
@@ -74,7 +74,7 @@ Console.WriteLine("CssParser");
     Check(sel.Chain.Count == 2 && sel.Chain[0].Id == "main" && sel.Chain[1].Classes.Count == 2, "descendant chain #main .row.big");
     Check(sel.Specificity == 10000 + 200, $"specificity ids/classes (got {sel.Specificity})");
     Check(rules[3].Declarations[0].Value == "1px solid red", "!important stripped");
-    Check(warnings.Count == 0, $"@media with an unknown feature is dropped silently, :hover does not warn (got {warnings.Count})");
+    Check(warnings.Count == 1, $"@media with an unknown feature warns once and then matches nothing, :hover does not warn (got {warnings.Count})");
 
     CssParser.ViewportWidth = 640f; CssParser.ViewportHeight = 640f;
     var media = CssParser.ParseStylesheet("@media (min-width: 600px) { .w { color: red } } @media screen and (max-width: 300px) { .n { color: red } } @media not print { .p { color: red } }", warnings.Add);
@@ -434,6 +434,7 @@ ScriptedScreensHtml.Tests.ClassTests.Run(Check);
 ScriptedScreensHtml.Tests.SyntaxTests.Run(Check);
 ScriptedScreensHtml.Tests.PreludeRuntime.Run(Check);
 ScriptedScreensHtml.Tests.CompiledPageTests.Run(Check);
+ScriptedScreensHtml.Tests.CssTests.Run(Check);
 
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");
 return failures.Count == 0 ? 0 : 1;
