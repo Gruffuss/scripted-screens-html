@@ -3913,6 +3913,7 @@ internal static class VectorEmitter
         string? source = null;
         var sliceText = "100%";
         string? widthText = null;
+        string? outsetText = null;
         var fill = false;
         if (css.TryGetValue("border-image", out var shorthand))
         {
@@ -3926,7 +3927,13 @@ internal static class VectorEmitter
             else if (s != "none") { var sp = s.IndexOf(' '); source = sp > 0 ? s.Substring(0, sp) : s; s = sp > 0 ? s.Substring(sp + 1) : string.Empty; }
             var slash = s.IndexOf('/');
             var slicePart = slash >= 0 ? s.Substring(0, slash) : s;
-            if (slash >= 0) widthText = s.Substring(slash + 1).Split('/')[0].Trim();
+            if (slash >= 0)
+            {
+                var after = s.Substring(slash + 1).Split('/');
+                widthText = after[0].Trim();
+                // `slice / width / outset` - the third part was being thrown away with the split.
+                if (after.Length > 1 && after[1].Trim().Length > 0) outsetText = after[1].Trim();
+            }
             slicePart = slicePart.Replace("round", string.Empty).Replace("repeat", string.Empty).Replace("stretch", string.Empty).Replace("space", string.Empty);
             if (slicePart.Contains("fill")) { fill = true; slicePart = slicePart.Replace("fill", string.Empty); }
             if (slicePart.Trim().Length > 0) sliceText = slicePart.Trim();
@@ -3934,9 +3941,30 @@ internal static class VectorEmitter
         if (css.TryGetValue("border-image-source", out var bis)) source = bis.Trim();
         if (css.TryGetValue("border-image-slice", out var bisl)) { sliceText = bisl.Replace("fill", string.Empty).Trim(); fill |= bisl.Contains("fill"); }
         if (css.TryGetValue("border-image-width", out var biw)) widthText = biw.Trim();
+        if (css.TryGetValue("border-image-outset", out var bio)) outsetText = bio.Trim();
         if (source == null || source == "none") return false;
 
         var bw = new[] { rs.borderTopWidth, rs.borderRightWidth, rs.borderBottomWidth, rs.borderLeftWidth };
+
+        // border-image-outset pushes the border image area OUTSIDE the border box, which is how a
+        // glow or a frame is made to overhang its element. A bare number is a multiple of that
+        // side's border width, a length is itself. Applied before anything is placed, so every
+        // slice, the gradient stroke and the corner geometry all follow from the enlarged box.
+        if (outsetText != null)
+        {
+            var op = outsetText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (op.Length > 0)
+            {
+                var o = new float[4];
+                for (var i = 0; i < 4; i++)
+                {
+                    var t = StyleApplier.SideOf(op, i);
+                    o[i] = StyleApplier.IsNumber(t) ? StyleApplier.Num(t) * bw[i] : StyleApplier.Num(t);
+                }
+                x -= o[3]; y -= o[0];
+                w += o[1] + o[3]; h += o[0] + o[2];
+            }
+        }
         if (widthText != null)
         {
             var wp = widthText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -4606,11 +4634,21 @@ internal static class VectorEmitter
         var dy = -Mathf.Cos(rad) * len * 0.5f / h;
         var cx = bx + bw * 0.5f; var cy = by + bh * 0.5f;
         var id = ctx.NextId("mask");
+        // mask-mode / mask-type: luminance. A stop's ALPHA is the mask here, so a luminance mask -
+        // the SVG default, and how a black-to-white gradient is written - masked nothing at all,
+        // since every one of its stops is fully opaque. Rewriting each stop as white at its own
+        // brightness gives the same result through the one channel the scene reads.
+        var luminance = all != null
+            && ((all.TryGetValue("mask-mode", out var mm) && mm.Trim().Equals("luminance", StringComparison.OrdinalIgnoreCase))
+                || (all.TryGetValue("mask-type", out var mt) && mt.Trim().Equals("luminance", StringComparison.OrdinalIgnoreCase)));
+
         ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").AppendNum(cx - dx).Append(" y1=").AppendNum(cy - dy).Append(" x2=").AppendNum(cx + dx).Append(" y2=").AppendNum(cy + dy).Append(" stops=[");
         for (var i = 0; i < g.stops.Count; i++)
         {
             if (i > 0) ctx.Defs.Append(',');
-            ctx.Defs.Append('[').AppendNum(g.stops[i].at).Append(',').AppendHex(g.stops[i].c).Append(']');
+            var sc = g.stops[i].c;
+            if (luminance) sc = new Color(1f, 1f, 1f, sc.a * (0.2126f * sc.r + 0.7152f * sc.g + 0.0722f * sc.b));
+            ctx.Defs.Append('[').AppendNum(g.stops[i].at).Append(',').AppendHex(sc).Append(']');
         }
         ctx.Defs.Append("]\n");
         return id;

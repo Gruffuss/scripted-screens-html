@@ -761,6 +761,17 @@ internal static class CssParser
     /// <summary>Where a container query's complaints go: the page's warning list, installed with <see cref="ContainerInfo"/>.</summary>
     internal static Action<string>? ContainerWarn;
 
+    /// <summary>
+    /// Point the parser at the page about to be cascaded. One call rather than two field writes so
+    /// that a build with no caller still compiles: the analyzers reject both a never-assigned field
+    /// and one explicitly set to its own default.
+    /// </summary>
+    internal static void InstallContainers(Func<HtmlNode, (Dictionary<string, string> css, float width, float height)?>? info, Action<string>? warn)
+    {
+        ContainerInfo = info;
+        ContainerWarn = warn;
+    }
+
     /// <summary>Whether these cascaded declarations make the element a size query container.</summary>
     internal static bool IsQueryContainer(Dictionary<string, string> css) => ContainerTypeOf(css) != null;
 

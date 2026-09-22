@@ -125,7 +125,7 @@ internal static class CssLanguage
     /// to overflow. One fixture cannot be all of those, so each row names the smallest one that could
     /// reveal it.
     /// </summary>
-    private enum Fix { Box, Flex, FlexKid, Grid, GridKid, List, Table, Svg, Text, Abs, Inline, Clip, Check, Click, Img }
+    private enum Fix { Box, Flex, FlexKid, Grid, GridKid, List, Table, Svg, Text, Abs, Inline, Clip, Check, Click, Img, Column }
 
     /// <summary>
     /// The fixture's own styling goes through CLASS selectors and the probe's through #p, so the probe
@@ -187,6 +187,12 @@ internal static class CssLanguage
                 + "Room pressure supercalifragilisticexpialidocious kPa and rather more words than fit</p></div>",
             Fix.Abs =>
                 "<div id=w class=w style=\"position:relative\"><div id=p class=q style=\"position:absolute\">p</div></div>",
+            // column-span is read on a CHILD of a multi-column box, and the multi-column
+            // splitter only has children to span across when the markup gives it some.
+            Fix.Column =>
+                "<div id=w class=w style=\"column-count:2\">"
+                + "<div class=k>a</div><div id=p class=k>p</div>"
+                + "<div class=k>c</div><div class=k>d</div></div>",
             // pointer-events is read where a hit region is decided, so it needs something that
             // would otherwise BE one - a plain div has no click region to take away.
             Fix.Click =>
@@ -700,7 +706,7 @@ internal static class CssLanguage
         P("mask-repeat", "mask-repeat:no-repeat", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
         P("mask-origin", "mask-origin:content-box", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
         P("mask-clip", "mask-clip:content-box", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
-        P("mask-mode", "mask-mode:luminance", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
+        P("mask-mode", "mask-mode:luminance", Fix.Box, "#p{mask-image:linear-gradient(#ffffff,#000000)}");
         P("mask-composite", "mask-composite:subtract", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
 
         // ---- typography
@@ -804,7 +810,7 @@ internal static class CssLanguage
         P("animation-fill-mode", "animation-fill-mode:backwards", Fix.Box, frames + "#p{animation:probe 2s linear 1 1s}");
         P("animation-play-state", "animation-play-state:paused", Fix.Box, frames + "#p{animation:probe 2s linear infinite}");
         P("animation-timing-function", "animation-timing-function:ease-in", Fix.Box, frames + "#p{animation:probe 2s linear infinite}");
-        P("animation-composition", "animation-composition:add", Fix.Box, frames + "#p{animation:probe 2s linear infinite}");
+        P("animation-composition", "animation-composition:add", Fix.Box, frames + "#p{animation:probe 2s linear 1;transform:translateX(20px)}");
 
         // ---- lists, counters and generated content
         P("content", "#p::before{content:\"XX\"}", Fix.Box);
@@ -830,7 +836,7 @@ internal static class CssLanguage
         P("column-rule-width", "column-rule-width:4px", Fix.Text, "#p{column-count:2;column-rule:1px solid #ff0000}");
         P("column-rule-style", "column-rule-style:dashed", Fix.Text, "#p{column-count:2;column-rule:1px solid #ff0000}");
         P("column-rule-color", "column-rule-color:#ff0000", Fix.Text, "#p{column-count:2;column-rule:1px solid #00ff00}");
-        P("column-span", "column-span:all", Fix.Text, "#p{column-count:2}");
+        P("column-span", "column-span:all", Fix.Column);
         P("column-fill", "column-fill:balance", Fix.Text, "#p{column-count:2}");
 
         // ---- replaced content and images
@@ -890,7 +896,8 @@ internal static class CssLanguage
         P("y", "y:40px", Fix.Svg);
         P("rx", "rx:8px", Fix.Svg);
         P("ry", "#el{ry:8px}", Fix.Svg);
-        P("d", "d:path(\"M 0 0 L 30 30 Z\")", Fix.Svg);
+        // `d` applies to a <path>; #p is the fixture's rect, which has none to replace.
+        P("d", "#q{d:path(\"M 20 20 L 160 100\")}", Fix.Svg, "#q{stroke:#ff0000;stroke-width:4}");
 
         return p;
     }

@@ -984,6 +984,31 @@ internal static class HtmlRenderer
         "font-family", "font-size", "font-weight", "font-style", "text-anchor", "dominant-baseline", "letter-spacing", "color",
     };
 
+    /// <summary>
+    /// The bare path data inside a CSS <c>d: path("…")</c>, or null for a value with no attribute form.
+    /// </summary>
+    /// <remarks>
+    /// The CSS property and the SVG attribute of the same name are spelled differently - the
+    /// attribute is the data itself, the property wraps it in <c>path()</c> - and the cascade copies
+    /// property over attribute by name. So the wrapper travelled all the way to the scene and drew
+    /// nothing. Returning null for `none` or a `shape()` leaves the attribute standing, which is
+    /// what a browser does with a value it cannot use.
+    /// </remarks>
+    private static string? PathValue(string v)
+    {
+        v = v.Trim();
+        if (!v.StartsWith("path(", StringComparison.OrdinalIgnoreCase)) return null;
+        var close = v.LastIndexOf(')');
+        if (close <= 5) return null;
+        var inner = v.Substring(5, close - 5).Trim();
+        // path() may carry a fill-rule first: path(evenodd, "M …"). The rule is `fill-rule`'s job.
+        var comma = inner.IndexOf(',');
+        if (comma > 0 && inner.IndexOf('"') > comma) inner = inner.Substring(comma + 1).Trim();
+        return inner.Length >= 2 && (inner[0] == '"' || inner[0] == '\'') && inner[inner.Length - 1] == inner[0]
+            ? inner.Substring(1, inner.Length - 2)
+            : inner;
+    }
+
     /// <summary>A shape's own bounding box in viewBox units, for transform-box: fill-box.</summary>
     private static Rect ShapeBox(HtmlNode c)
     {
@@ -1211,7 +1236,15 @@ internal static class HtmlRenderer
                     // CSS rules and inline style over the attribute of the same name (geometry, paint-order, markers...), as the cascade says
                     foreach (var kv in own)
                         if (Array.IndexOf(SvgInherited, kv.Key.ToLowerInvariant()) < 0 && kv.Key.ToLowerInvariant() is not ("opacity" or "transform" or "transform-origin" or "transform-box" or "style" or "display" or "visibility" or "clip-path" or "class" or "id"))
-                            shape.Attributes[kv.Key] = kv.Value;
+                            // `d` is the one geometry property whose CSS spelling differs from its
+                            // attribute: the attribute is bare path data, the property wraps it in
+                            // path(). Copied verbatim it reached the scene as d="path( M 0 0 ... )"
+                            // and drew nothing. Anything else - `none`, a shape() - has no attribute
+                            // form, so dropping it leaves the attribute standing, which is what CSS
+                            // does with a value it cannot use.
+                            shape.Attributes[kv.Key] = kv.Key.Equals("d", StringComparison.OrdinalIgnoreCase)
+                                ? PathValue(kv.Value) ?? shape.Attr("d") ?? string.Empty
+                                : kv.Value;
                     if (m2 != null) shape.Attributes["__m"] = MatrixText(m2);
                                         if (clipTarget != null) clipTarget.Children!.Add(shape);
                     else svg.Shapes.Add(shape);
