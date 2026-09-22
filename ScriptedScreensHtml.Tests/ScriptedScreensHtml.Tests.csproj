@@ -43,6 +43,7 @@
         <Compile Include="..\ScriptedScreensHtml\VectorEmitter.cs" />
         <Compile Include="..\ScriptedScreensHtml.Bench\Stubs.cs" />
         <Compile Include="CssLanguage.cs" />
+        <Compile Include="DomLanguage.cs" />
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />
         <Compile Include="Probe2.cs" />

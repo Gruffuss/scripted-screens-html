@@ -17,6 +17,7 @@ if (args.Length > 0 && args[0] == "--motion") { ScriptedScreensHtml.Tests.Motion
 if (args.Length > 0 && args[0] == "--corpus") { ScriptedScreensHtml.Tests.Corpus.Run(args); return 0; }
 if (args.Length > 0 && args[0] == "--language") { ScriptedScreensHtml.Tests.Language.Run(args); return 0; }
 if (args.Length > 0 && args[0] == "--csslanguage") { ScriptedScreensHtml.Tests.CssLanguage.Run(args); return 0; }
+if (args.Length > 0 && args[0] == "--domlanguage") { ScriptedScreensHtml.Tests.DomLanguage.Run(args); return 0; }
 if (args.Length > 0 && args[0] == "--markup") { ScriptedScreensHtml.Tests.MarkupProbe.Run(args); return 0; }
 if (args.Length > 0 && args[0] == "--domwrites") { ScriptedScreensHtml.Tests.JsToLuaTests.Report(); return 0; }
 Console.WriteLine("HtmlParser");
