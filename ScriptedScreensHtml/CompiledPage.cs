@@ -117,6 +117,13 @@ internal static class CompiledPage
         /// <summary>Writes that have no slot, each with the reason. A page with any of these is not compiled.</summary>
         public readonly List<string> Unmapped = new();
         public readonly List<string> Problems = new();
+        /// <summary>
+        /// Slots the scene carries as expressions of <c>t</c> rather than as values: motion the page
+        /// wrote per frame that <see cref="Motion"/> proved is a closed form of time. The chip never
+        /// computes these and never sends them - the renderer evaluates them on its own worker, which
+        /// is the difference between a page that costs something every frame and one that does not.
+        /// </summary>
+        public readonly Dictionary<string, string> Expressions = new(StringComparer.Ordinal);
         public bool Ok => Lua != null && Problems.Count == 0 && Unmapped.Count == 0;
     }
 
@@ -161,6 +168,13 @@ internal static class CompiledPage
 
         var (writes, notes) = DomWrites.Of(script);
         foreach (var n in notes) result.Problems.Add(n);
+
+        // Motion first, because a write it can express is not a binding at all. Anything left here is
+        // genuinely data - it depends on an event, on state, or on something outside the page - and
+        // that is the only kind of number the chip should ever send.
+        var (motion, _) = Motion.Of(script);
+        var expressed = new Dictionary<string, Motion.Found>(StringComparer.Ordinal);
+        foreach (var f in motion) expressed[f.Id + "." + f.Property] = f;
 
         // One binding per distinct (element, property) a running page writes. Setup writes are
         // already in the geometry by the time this runs, so they are not bound to anything.
@@ -238,6 +252,12 @@ internal static class CompiledPage
                 var mapped = DomSlots.Map(id, w.Property, box.Value, available);
                 if (!mapped.Mapped) { result.Unmapped.Add($"line {w.Line}: {key} - {mapped.Problem}"); continue; }
 
+                // Motion goes into the scene instead of into a binding. Every slot it covers is one
+                // the chip never writes, so a page whose motion is wholly expressible sends nothing.
+                if (expressed.TryGetValue(key, out var found)
+                    && Express(found, mapped, Reading(w.Property), result.Expressions))
+                    continue;
+
                 result.Bindings.Add(new Binding(key, mapped.Slots, mapped.Bias, Reading(w.Property)));
             }
         }
@@ -245,6 +265,54 @@ internal static class CompiledPage
         result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), prelude, viewport, parents, target, element);
         return result;
     }
+
+    /// <summary>
+    /// Puts one write's motion into the scene, as an expression per slot. False when it cannot go
+    /// there, and the write stays a value the chip sends.
+    /// </summary>
+    /// <remarks>
+    /// Three things have to line up, and each failure is ordinary rather than a bug.
+    ///
+    /// <b>The slots must exist.</b> <see cref="DomSlots"/> answers where a write WOULD land, and for a
+    /// transform that is the wrapping group's translate - which only has an addressable name when the
+    /// emitter gave that group an id. A page whose group is anonymous keeps its binding.
+    ///
+    /// <b>Every part must be expressible.</b> A transform carries two numbers and the scene writes
+    /// them as one pair, so half of it cannot be an expression while the other half is a slot. Either
+    /// both axes are closed forms or neither moves into the scene.
+    ///
+    /// <b>The bias comes along.</b> The scene is in absolute coordinates and CSS is not, so a slot
+    /// that a value would have reached as <c>v + bias</c> reaches the scene as <c>(expr) + bias</c> -
+    /// and one write may drive several slots, each with a bias of its own.
+    /// </remarks>
+    private static bool Express(Motion.Found found, DomSlots.Result mapped, Kind read,
+                                Dictionary<string, string> into)
+    {
+        // Only geometry and opacity. Text is drawn from a string and a colour is not a scalar, so
+        // neither has anything the expression language could evaluate.
+        if (read is not (Kind.Length or Kind.Translate)) return false;
+        if (mapped.NeedsGroup || mapped.Slots.Length == 0) return false;
+
+        if (read == Kind.Translate)
+        {
+            if (found.Parts.Length != 2 || mapped.Slots.Length != 2) return false;
+            // Only the axes this write sets have to be expressible. A `translateX` says nothing
+            // about y, so y keeps whatever the scene emitted and the write still leaves entirely.
+            for (var i = 0; i < 2; i++)
+                if (found.Touches[i] && found.Parts[i] == null) return false;
+            for (var i = 0; i < 2; i++)
+                if (found.Parts[i] != null) into[mapped.Slots[i]] = Shift(found.Parts[i]!, mapped.Bias[i]);
+            return true;
+        }
+
+        if (found.Parts.Length != 1 || found.Parts[0] == null) return false;
+        for (var i = 0; i < mapped.Slots.Length; i++) into[mapped.Slots[i]] = Shift(found.Parts[0]!, mapped.Bias[i]);
+        return true;
+    }
+
+    /// <summary>An expression moved into absolute scene coordinates.</summary>
+    private static string Shift(string expr, double bias)
+        => bias == 0 ? expr : "(" + expr + ")+" + Num(bias);
 
     /// <summary>What shape of CSS value a property carries.</summary>
     private static Kind Reading(string property) => property switch

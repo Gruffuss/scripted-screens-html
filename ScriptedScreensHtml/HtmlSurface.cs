@@ -514,101 +514,11 @@ internal sealed class HtmlSurface : MonoBehaviour
     }
 
     /// <summary>
-    /// Gives every unnamed element under <paramref name="root"/> a name a slot can be made from.
+    /// Marks the elements whose wrapping transform group has to carry its id. Lives on the renderer
+    /// so the headless bench runs the same setup the game does - a scene measured without it differs
+    /// from the real one in exactly the place a compiled page writes.
     /// </summary>
-    /// <remarks>
-    /// A synthetic name starts with <c>__</c>, which the slot namer rejects deliberately - those are
-    /// this mod's own inventions and nothing outside should address them. But an element a class
-    /// moves has to be addressable or the state has nowhere to write, so the ones under a
-    /// class-written element are renamed after their position in the document: stable across
-    /// sessions, unlike the synthetic counter, and unlikely to collide with anything an author wrote.
-    /// </remarks>
-    private static void Nameable(VisualElement root, HtmlRenderer.Result built, string prefix)
-    {
-        Walk(root, prefix);
-
-        void Walk(VisualElement ve, string path)
-        {
-            for (var i = 0; i < ve.childCount; i++)
-            {
-                var child = ve[i];
-                var here = path + "_" + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                if (child.name != null && child.name.StartsWith("__", StringComparison.Ordinal)
-                    && !built.ById.ContainsKey(here))
-                {
-                    built.ById.Remove(child.name);
-                    child.name = here;
-                    built.ById[here] = child;
-                    if (built.NodeOf.TryGetValue(child, out var node)) node.Attributes["id"] = here;
-                }
-                Walk(child, child.name ?? here);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Marks the elements whose wrapping transform group has to carry its id, so a compiled page
-    /// can address their translate, rotation and scale by name. Only the ones a script really
-    /// drives, and only those it drives <b>after</b> the page has loaded - a transform written once
-    /// during setup is already in the geometry by the time anything is emitted.
-    /// </summary>
-    /// <remarks>
-    /// Deliberately not "name every wrapper". The renderer registers an identified node in
-    /// <c>scene.Identified</c> and keeps its whole prop array, so that would retain hundreds per
-    /// page - which is the cost this whole redesign exists to remove.
-    /// </remarks>
-    private static void NameDrivenGroups(HtmlRenderer.Result built)
-    {
-        built.NamedGroups.Clear();
-        if (string.IsNullOrWhiteSpace(built.Script)) return;
-        try
-        {
-            var (writes, _) = DomWrites.Of(built.Script);
-
-            // Everything a script drives, so a key with a zero value is still emitted and still has
-            // a slot. A bar that animates up from 0% has every corner radius clamped to nothing at
-            // the moment it is translated, and without this it would have no rx to come back into.
-            foreach (var w in writes)
-            {
-                if (!w.Runtime) continue;
-                if (w.Id != null) built.Driven.Add(w.Id);
-                else if (w.Prefix is { Length: >= 2 } family)
-                    foreach (var id in built.ById.Keys)
-                        if (id.Length > family.Length && id.StartsWith(family, StringComparison.Ordinal))
-                            built.Driven.Add(id);
-            }
-
-            // An element a CLASS moves needs a name of its own. `#player.duck .helmet` shifts a
-            // descendant that the markup never named, so it carries a synthetic `__div42` - which
-            // the slot namer rejects, leaving the state with nothing to write. Every element under
-            // one whose class is written gets a stable, addressable name instead, derived from its
-            // position in the document so it is the same next session.
-            foreach (var w in writes)
-            {
-                if (!w.Runtime || w.Property != "className" || w.Id == null) continue;
-                if (built.ById.TryGetValue(w.Id, out var root) && root != null) Nameable(root, built, w.Id);
-            }
-
-            foreach (var w in writes)
-            {
-                if (!w.Runtime || w.Property is not ("style.transform" or "style.opacity" or "className")) continue;
-                if (w.Id != null) { built.NamedGroups.Add(w.Id); continue; }
-                // A family written through one expression - `$('pb' + i)` over fourteen pebbles.
-                // Every member already exists in the page under its own id, so the family resolves
-                // to real elements here and needs no lookup at run time. A prefix short enough to
-                // catch unrelated elements is ignored rather than guessed at.
-                if (w.Prefix is { Length: >= 2 } prefix)
-                    foreach (var id in built.ById.Keys)
-                        if (id.Length > prefix.Length && id.StartsWith(prefix, StringComparison.Ordinal))
-                            built.NamedGroups.Add(id);
-            }
-        }
-        catch (System.Exception ex)
-        {
-            // A page whose script cannot be analysed still runs; it just gets no named groups.
-            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: could not read the script's writes: {ex.Message}");
-        }
-    }
+    private static void NameDrivenGroups(HtmlRenderer.Result built) => HtmlRenderer.NameDrivenGroups(built);
 
     // ---- a compiled page keeps nothing it no longer uses ------------------------------------------
 
@@ -1278,6 +1188,11 @@ internal sealed class HtmlSurface : MonoBehaviour
                 // so the chunk's set_props lands on the surface this page already draws.
                 _compiled = CompiledRun.Start(PageKey, holder, _built!, _panel!, layout, _slotScratch,
                                               (Surface, ElementId, "html:" + ElementId));
+                // The page's motion goes into the structure as expressions of t, so nothing computes
+                // or sends it again. This has to happen before the template is compared and sent -
+                // it IS the structure - and the slots it covers leave the value table with it.
+                if (_compiled is { Expressions.Count: > 0 })
+                    template = Motion.Bake(template, _compiled.Expressions, _slotScratch);
                 // Everything above needed the page; from here nothing does. Released after the
                 // structure has been emitted, never before - the scene is what the chip writes into.
                 if (_compiled != null) _releasePending = true;
@@ -2472,7 +2387,16 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (string.IsNullOrEmpty(DataElementId) || State is not SS.BoardState state || !IsCurrent)
             return;
         var map = new SS.UiValue { Type = SS.UiValueType.Map, Map = props.ToArray() };
-        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, DataElementId, "html:" + ElementId, map, null);
+        // snap, because a browser snaps. A value assignment moves a box at once unless a CSS
+        // transition says otherwise, and a transition is compiled INTO the scene as an expression by
+        // the emitter - so the renderer easing on top of that is a second animation nobody asked for.
+        //
+        // It also costs far more than it looks. An eased payload opens a blend window as long as the
+        // gap between payloads, and the scene counts as ANIMATED for that whole window - so a console
+        // fed twice a second never stops being animated and rebuilds its mesh at up to 60 Hz for
+        // ever. Snapped values open no window: the scene goes static between payloads and a tick
+        // costs exactly one rebuild.
+        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, DataElementId, "html:" + ElementId, map, null, snap: true);
     }
 
     private static void Flatten(List<SS.UiProp> into, string key, SS.UiValue v)

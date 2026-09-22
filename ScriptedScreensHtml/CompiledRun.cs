@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -94,6 +95,17 @@ internal sealed class CompiledRun
     /// <summary>The chip's Lua state, so the caller can notice when it is replaced.</summary>
     internal object State => _state;
 
+    /// <summary>
+    /// Slots the scene should carry as expressions of <c>t</c> rather than as values.
+    /// </summary>
+    /// <remarks>
+    /// The page's motion, worked out at compile time. Nothing writes these and nothing sends them:
+    /// the caller substitutes each into the template before the structure goes out, and the renderer
+    /// evaluates them on its own worker for the rest of the console's life.
+    /// </remarks>
+    internal IReadOnlyDictionary<string, string> Expressions { get; private set; }
+        = new Dictionary<string, string>(StringComparer.Ordinal);
+
     /// <summary>Why a page did not compile: every list that has something in it, capped and counted.</summary>
     private static string Reasons(CompiledPage.Result r)
     {
@@ -162,9 +174,10 @@ internal sealed class CompiledRun
         }
 
         ScriptedScreensHtmlPlugin.Log?.LogInfo(
-            $"html: \"{page}\" is running compiled - {compiled.Bindings.Count} slot binding(s); " +
+            $"html: \"{page}\" is running compiled - {compiled.Bindings.Count} slot binding(s), " +
+            $"{compiled.Expressions.Count} slot(s) as scene expressions; " +
             "the page no longer lays out, runs a script or translates");
-        return new CompiledRun(state, env, frame, page);
+        return new CompiledRun(state, env, frame, page) { Expressions = compiled.Expressions };
     }
 
     /// <summary>

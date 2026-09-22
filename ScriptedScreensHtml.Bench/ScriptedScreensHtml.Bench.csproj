@@ -35,6 +35,7 @@
     <Compile Include="..\ScriptedScreensHtml\VectorEmitter.cs" />
     <Compile Include="..\ScriptedScreensHtml\ScriptHost.cs" />
     <Compile Include="..\ScriptedScreensHtml\JsEngine.cs" />
+    <Compile Include="..\ScriptedScreensHtml\DomWrites.cs" />
     <Compile Include="Check.cs" />
     <Compile Include="Js.cs" />
     <Compile Include="Stubs.cs" />

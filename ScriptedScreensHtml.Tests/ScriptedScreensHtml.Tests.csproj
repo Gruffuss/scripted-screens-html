@@ -20,12 +20,15 @@
         <Compile Include="..\ScriptedScreensHtml\DomWrites.cs" />
         <Compile Include="..\ScriptedScreensHtml\DomSlots.cs" />
         <Compile Include="..\ScriptedScreensHtml\CompiledPage.cs" />
+        <Compile Include="..\ScriptedScreensHtml\Motion.cs" />
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />
         <Compile Include="Probe2.cs" />
         <Compile Include="Probe3.cs" />
         <Compile Include="Probe4.cs" />
         <Compile Include="JsBench.cs" />
+        <Compile Include="MotionProbe.cs" />
+        <Compile Include="MotionTests.cs" />
         <Compile Include="JsToLuaTests.cs" />
         <Compile Include="CompiledPageTests.cs" />
     </ItemGroup>

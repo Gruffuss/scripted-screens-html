@@ -2900,4 +2900,102 @@ internal static class HtmlRenderer
             case "animation-play-state": { var t = 0; anim.ApplyToken(v, ref t); break; }
         }
     }
+
+    /// <summary>
+    /// Gives every unnamed element under <paramref name="root"/> a name a slot can be made from.
+    /// </summary>
+    /// <remarks>
+    /// A synthetic name starts with <c>__</c>, which the slot namer rejects deliberately - those are
+    /// this mod's own inventions and nothing outside should address them. But an element a class
+    /// moves has to be addressable or the state has nowhere to write, so the ones under a
+    /// class-written element are renamed after their position in the document: stable across
+    /// sessions, unlike the synthetic counter, and unlikely to collide with anything an author wrote.
+    /// </remarks>
+    internal static void Nameable(VisualElement root, HtmlRenderer.Result built, string prefix)
+    {
+        Walk(root, prefix);
+
+        void Walk(VisualElement ve, string path)
+        {
+            for (var i = 0; i < ve.childCount; i++)
+            {
+                var child = ve[i];
+                var here = path + "_" + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if (child.name != null && child.name.StartsWith("__", StringComparison.Ordinal)
+                    && !built.ById.ContainsKey(here))
+                {
+                    built.ById.Remove(child.name);
+                    child.name = here;
+                    built.ById[here] = child;
+                    if (built.NodeOf.TryGetValue(child, out var node)) node.Attributes["id"] = here;
+                }
+                Walk(child, child.name ?? here);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Marks the elements whose wrapping transform group has to carry its id, so a compiled page
+    /// can address their translate, rotation and scale by name. Only the ones a script really
+    /// drives, and only those it drives <b>after</b> the page has loaded - a transform written once
+    /// during setup is already in the geometry by the time anything is emitted.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not "name every wrapper". The renderer registers an identified node in
+    /// <c>scene.Identified</c> and keeps its whole prop array, so that would retain hundreds per
+    /// page - which is the cost this whole redesign exists to remove.
+    /// </remarks>
+    internal static void NameDrivenGroups(HtmlRenderer.Result built)
+    {
+        built.NamedGroups.Clear();
+        if (string.IsNullOrWhiteSpace(built.Script)) return;
+        try
+        {
+            var (writes, _) = DomWrites.Of(built.Script);
+
+            // Everything a script drives, so a key with a zero value is still emitted and still has
+            // a slot. A bar that animates up from 0% has every corner radius clamped to nothing at
+            // the moment it is translated, and without this it would have no rx to come back into.
+            foreach (var w in writes)
+            {
+                if (!w.Runtime) continue;
+                if (w.Id != null) built.Driven.Add(w.Id);
+                else if (w.Prefix is { Length: >= 2 } family)
+                    foreach (var id in built.ById.Keys)
+                        if (id.Length > family.Length && id.StartsWith(family, StringComparison.Ordinal))
+                            built.Driven.Add(id);
+            }
+
+            // An element a CLASS moves needs a name of its own. `#player.duck .helmet` shifts a
+            // descendant that the markup never named, so it carries a synthetic `__div42` - which
+            // the slot namer rejects, leaving the state with nothing to write. Every element under
+            // one whose class is written gets a stable, addressable name instead, derived from its
+            // position in the document so it is the same next session.
+            foreach (var w in writes)
+            {
+                if (!w.Runtime || w.Property != "className" || w.Id == null) continue;
+                if (built.ById.TryGetValue(w.Id, out var root) && root != null) Nameable(root, built, w.Id);
+            }
+
+            foreach (var w in writes)
+            {
+                if (!w.Runtime || w.Property is not ("style.transform" or "style.opacity" or "className")) continue;
+                if (w.Id != null) { built.NamedGroups.Add(w.Id); continue; }
+                // A family written through one expression - `$('pb' + i)` over fourteen pebbles.
+                // Every member already exists in the page under its own id, so the family resolves
+                // to real elements here and needs no lookup at run time. A prefix short enough to
+                // catch unrelated elements is ignored rather than guessed at.
+                if (w.Prefix is { Length: >= 2 } prefix)
+                    foreach (var id in built.ById.Keys)
+                        if (id.Length > prefix.Length && id.StartsWith(prefix, StringComparison.Ordinal))
+                            built.NamedGroups.Add(id);
+            }
+        }
+        catch (System.Exception ex)
+        {
+            // A page whose script cannot be analysed still runs; it just gets no named groups.
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: could not read the script's writes: {ex.Message}");
+        }
+    }
+
 }

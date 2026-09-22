@@ -13,6 +13,7 @@ void Check(bool ok, string what)
 if (args.Length > 0 && args[0] == "--probe") { Probe.Run(); return 0; }
 if (args.Length > 1 && args[0] == "--why") { ScriptedScreensHtml.Tests.Probe4.Run(args[1]); return 0; }
 if (args.Length > 0 && args[0] == "--jsbench") { JsBench.Run(); return 0; }
+if (args.Length > 0 && args[0] == "--motion") { ScriptedScreensHtml.Tests.MotionProbe.Run(args); return 0; }
 if (args.Length > 0 && args[0] == "--domwrites") { ScriptedScreensHtml.Tests.JsToLuaTests.Report(); return 0; }
 Console.WriteLine("HtmlParser");
 {
@@ -386,6 +387,7 @@ if (args.Length > 0 && args[0] == "--probe2") { Probe2.Run(); return 0; }
 if (args.Length > 0 && args[0] == "--probe3") { Probe3.Run(); return 0; }
 Console.WriteLine("JsToLua");
 ScriptedScreensHtml.Tests.JsToLuaTests.Run(Check);
+ScriptedScreensHtml.Tests.MotionTests.Run(Check);
 ScriptedScreensHtml.Tests.CompiledPageTests.Run(Check);
 
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");

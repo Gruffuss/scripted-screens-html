@@ -47,6 +47,9 @@ internal static class Program
         ResolvedStyle.DefaultFace = face;
         HtmlRenderer.SurfaceAspect = 1f;
         var built = HtmlRenderer.Build(html, face);
+        // The same setup the surface does before it emits. Without it no transform group is named,
+        // so the bench's scene differs from the game's in exactly the place a compiled page writes.
+        HtmlRenderer.NameDrivenGroups(built);
         foreach (var w in built.Warnings) Console.WriteLine("  warn: " + w);
         var root = built.Root;
         var panel = new Panel(root);
