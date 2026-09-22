@@ -114,10 +114,90 @@ internal static class StyleApplier
         }
     }
 
+    /// <summary>
+    /// Where <see cref="Unit"/> reports a value it could not read, since it cannot be given one.
+    /// </summary>
+    /// <remarks>
+    /// Forty-odd length properties reach Unit through Len/LenFor/Num, none of which carry a warn
+    /// callback, and a failed parse returned 0f - so `width: attr(data-w px)`, `width: 10qq` and
+    /// `gap: var(--never-declared)` all became ZERO with nothing in the log. That is the silent
+    /// acceptance this project keeps finding: the page draws, it draws wrongly, and the author has
+    /// no line to act on. Threading a parameter through every one of those call sites would be a
+    /// large diff for one report; a thread-static sink set for the duration of one Apply is small
+    /// and costs nothing when nothing fails.
+    ///
+    /// ThreadStatic because layout runs on a worker: a plain static would cross two pages' warnings.
+    /// </remarks>
+    [ThreadStatic] private static Action<string>? _lengthWarn;
+    [ThreadStatic] private static string? _lengthProp;
+
+    [ThreadStatic] private static bool _probing;
+    [ThreadStatic] private static VisualElement? _probe;
+
+    /// <summary>
+    /// Answers <c>@supports (name: value)</c> by trying the declaration and seeing whether anything
+    /// read it.
+    /// </summary>
+    /// <remarks>
+    /// The switch in <see cref="Apply"/> IS the list of what is supported, and a second list kept
+    /// beside it would drift the first time a property was added to one and not the other. So the
+    /// question is answered by asking the code: apply it to a scratch element nobody looks at and
+    /// watch for the report. Once per @supports condition at parse time, which is nothing.
+    ///
+    /// When the scratch element cannot be made, the answer is the OLD one - yes. Failing toward
+    /// "supported" applies an enhancement that may do nothing; failing toward "unsupported" would
+    /// start dropping every guarded block on a page, which is far worse and much harder to see.
+    /// </remarks>
+    internal static bool Supports(string name, string value)
+    {
+        try { _probe ??= new VisualElement(); }
+        catch (Exception) { return true; }
+
+        var ok = true;
+        var was = _probing;
+        _probing = true;
+        try { Apply(_probe, new CssDeclaration(name, value), _ => ok = false); }
+        catch (Exception) { ok = false; }
+        finally { _probing = was; }
+        return ok;
+    }
+
+    /// <summary>Lets CssParser ask this file what it supports without referencing Unity.</summary>
+    internal static void InstallSupportsOracle() => CssParser.SupportsOracle = Supports;
+
+    /// <summary>
+    /// Words that reach a length parser legitimately, where returning 0 is the intended answer and
+    /// a warning would be noise.
+    /// </summary>
+    /// <summary>Every value `display` has, so one it does not have is reported rather than drawn.</summary>
+    private static readonly HashSet<string> Displays = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "none", "block", "inline", "inline-block", "flex", "inline-flex", "grid", "inline-grid",
+        "contents", "flow-root", "list-item", "table", "inline-table", "table-row", "table-cell",
+        "table-row-group", "table-header-group", "table-footer-group", "table-column",
+        "table-column-group", "table-caption", "ruby", "ruby-base", "ruby-text",
+        "inherit", "initial", "unset", "revert", "revert-layer",
+    };
+
+    private static readonly HashSet<string> LengthWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "auto", "none", "normal", "inherit", "initial", "unset", "revert", "revert-layer",
+        "min-content", "max-content", "fit-content", "stretch", "available", "thin", "medium",
+        "thick", "baseline", "center", "left", "right", "top", "bottom", "start", "end", "",
+    };
+
     public static void Apply(VisualElement ve, CssDeclaration d, Action<string>? warn)
     {
         var v = d.Value.Trim();
         var s = ve.style;
+        _lengthWarn = warn;
+        _lengthProp = d.Name;
+        try { ApplyInner(ve, d, warn, v, s); }
+        finally { _lengthWarn = null; _lengthProp = null; }
+    }
+
+    private static void ApplyInner(VisualElement ve, CssDeclaration d, Action<string>? warn, string v, IStyle s)
+    {
         switch (d.Name)
         {
             // Box
@@ -152,6 +232,10 @@ internal static class StyleApplier
                 // inline / inline-block: the layout has no inline flow, and an element that
                 // reached here is already its own box, so the value is accepted as-is.
                 // transition-behavior: allow-discrete holds display: none until the transition ends (Tweens)
+                // A value that is not a display at all falls to the default arm below and would be
+                // drawn as `flex`, silently - and it would also make @supports claim to support it,
+                // which is what turns a mistyped guard into a dropped fallback.
+                if (!Displays.Contains(v)) { Unknown(d, warn); break; }
                 lock (Tweens.Shared)
                 {
                     if (v == "none" && Tweens.AllowDiscrete.Contains(ve)) { Tweens.PendingHide.Add(ve); break; }
@@ -648,6 +732,11 @@ internal static class StyleApplier
 
     private static void Unknown(CssDeclaration d, Action<string>? warn)
     {
+        // @supports is asking a question, not styling anything: answer it and leave `Reported`
+        // alone. Going through the de-duplicating path would make the SECOND query about the same
+        // declaration answer "supported", since the report is swallowed and the probe sees no
+        // warning - the process-global failure shape this file has now produced three times.
+        if (_probing) { warn?.Invoke(string.Empty); return; }
         if (Dropped.TryGetValue(d.Name, out var why))
         {
             if (Reported.Add(d.Name)) warn?.Invoke($"css: \"{d.Name}: {d.Value}\" is not drawn - {why}");
@@ -723,7 +812,13 @@ internal static class StyleApplier
         else if (Ends(v, "deg")) { v = v.Slice(0, v.Length - 3); }
         else if (Ends(v, "rad")) { v = v.Slice(0, v.Length - 3); scale = 180f / Mathf.PI; }
         else if (Ends(v, "turn")) { v = v.Slice(0, v.Length - 4); scale = 360f; }
-        return float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f * scale : 0f;
+        if (float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f)) return f * scale;
+        // 0 is what a browser uses for an invalid length too, so the DRAWING is not the defect -
+        // the silence was. Reported once per property and value so a page cannot flood the log.
+        if (_lengthWarn is { } warn && !LengthWords.Contains(v.ToString())
+            && (_probing || Reported.Add("len:" + _lengthProp + ":" + v.ToString())))
+            warn.Invoke($"css: \"{_lengthProp}: {v.ToString()}\" is not a length this understands, so it is 0");
+        return 0f;
     }
 
     private static bool Ends(ReadOnlySpan<char> v, string suffix) => v.EndsWith(suffix.AsSpan(), StringComparison.OrdinalIgnoreCase);

@@ -572,6 +572,9 @@ OUT = PAGE.RESULT
     {
         "head", "title", "meta", "link", "style", "script", "base", "template", "noscript",
         "colgroup", "datalist", "map", "optgroup", "br", "wbr",
+        // A <dialog> without `open` is display:none in a browser, and the fixture writes it
+        // without one. Drawing it would be the bug.
+        "dialog",
     };
 
     private static void Elements(string root)

@@ -140,7 +140,9 @@ internal static class CssLanguage
         {
             Fix.Box or Fix.FlexKid =>
                 "<div id=w class=w style=\"display:flex;flex-direction:row\">"
-                + "<div id=p class=p>Ag mn <b>b</b></div><div id=q class=q>q</div></div>",
+                // data-w is for the attr() row: attr() reads the ELEMENT, so no amount of CSS in
+                // the row itself could have given it a value to find.
+                + "<div id=p class=p data-w=\"50\">Ag mn <b>b</b></div><div id=q class=q>q</div></div>",
             Fix.Flex =>
                 "<div id=w class=w><div id=p class=p style=\"display:flex\">"
                 + "<div id=a class=k>a</div><div id=b class=k>b</div><div id=c class=k>c</div></div></div>",
@@ -244,19 +246,44 @@ internal static class CssLanguage
     }
 
     /// <summary>One document holding something for every selector to reach for.</summary>
+    /// <remarks>
+    /// The STATE pseudo-classes need the state to be present, and that is not decoration: a probe
+    /// that compares emitted scenes cannot tell a selector nobody implemented from one that is
+    /// implemented and correctly does not match. Both draw the baseline. So `:hover` was reported
+    /// missing for as long as no element in here carried `data-hover`, and seventeen rows read as
+    /// gaps while their code sat in CssParser. Anything driven by interaction is spelled out below.
+    ///
+    /// The attribute names are the renderer's own: HtmlSurface sets data-hover / data-active /
+    /// data-focus / data-touched / data-modal / data-popover-open as the player uses the page, and
+    /// CssParser matches on exactly those. Writing them by hand here is the same state a console is
+    /// in when someone is pointing at it.
+    /// </remarks>
     private static string Dom(string sheet) =>
         "<html><head><meta name=\"viewport\" content=\"width=400\"><style>"
-        + "li,p,a,em,input,td,summary,div{color:#cccccc;font-size:14px}" + sheet
+        + "li,p,a,em,input,td,summary,div,progress{color:#cccccc;font-size:14px}" + sheet
         + "</style></head><body><div id=root lang=\"en-GB\" dir=\"rtl\" style=\"width:300px\">"
-        + "<ul id=list><li id=one class=\"a b\" data-k=\"x y\" title=\"Hello World\">one</li>"
+        + "<ul id=list><li id=one class=\"a b\" data-k=\"x y\" title=\"Hello World\" "
+        + "data-hover data-active>one</li>"
         + "<li id=two class=a>two</li><li id=three>three</li><li id=four>four</li></ul>"
         + "<p id=para>para <span id=kid>kid</span> tail</p>"
         + "<a id=link href=\"#x\">link</a><em id=hollow></em><b id=bold>bold</b>"
-        + "<form id=f><input id=req required><input id=num type=\"number\" min=\"1\" max=\"5\" value=\"9\">"
+        + "<form id=f><input id=req required data-focus>"
+        // Out of range on purpose, and touched, so :invalid / :out-of-range / :user-invalid have a
+        // subject. Their opposites need a DIFFERENT field - one input cannot be both.
+        + "<input id=num type=\"number\" min=\"1\" max=\"5\" value=\"9\" data-touched>"
+        + "<input id=ok type=\"number\" min=\"1\" max=\"5\" value=\"3\" data-touched>"
         + "<input id=ph placeholder=\"type here\"><input id=off disabled><input id=on checked>"
         + "<input id=ro readonly value=\"v\"></form>"
+        // A <progress> with no value is what :indeterminate actually reaches in CSS. A text input
+        // never can be, so the row pointed at one could only ever have failed.
+        + "<progress id=prog max=\"100\"></progress>"
         + "<details id=det open><summary id=sum>s</summary>body</details>"
-        + "<dialog id=dlg open>d</dialog>"
+        + "<dialog id=dlg open data-modal>d</dialog>"
+        + "<div id=pop popover data-popover-open>p</div>"
+        // A box that actually scrolls, for the scrollbar parts: they paint only where there is
+        // something to scroll, exactly as a browser's do.
+        + "<div id=scroll style=\"overflow:scroll;width:60px;height:30px\">"
+        + "<div style=\"width:200px;height:200px\">x</div></div>"
         + "<table id=t><tr><td id=cell>c</td><td id=cell2>c2</td></tr></table></div></body></html>";
 
     // ---- 3. at-rules ---------------------------------------------------------------------
@@ -267,12 +294,12 @@ internal static class CssLanguage
         var have = 0;
         var missing = new List<(string, string)>();
 
-        foreach (var (name, sheet, css) in cases)
+        foreach (var (name, sheet, css, fix) in cases)
         {
             try
             {
-                var with = Scene(Page(Fix.Box, Rule(css), sheet), out var warn);
-                if (with != BaseOf(Fix.Box, string.Empty)) { have++; continue; }
+                var with = Scene(Page(fix, Rule(css), sheet), out var warn);
+                if (with != BaseOf(fix, string.Empty)) { have++; continue; }
                 missing.Add((name, warn.Count > 0 ? Short(warn[warn.Count - 1]) : "the block changed nothing"));
             }
             catch (Exception ex) { missing.Add((name, "threw: " + ex.GetType().Name)); }
@@ -298,21 +325,21 @@ internal static class CssLanguage
         var have = 0;
         var missing = new List<(string, string)>();
 
-        foreach (var (name, property, wrote, meant, fix) in cases)
+        foreach (var (name, property, wrote, meant, fix, extra) in cases)
         {
             try
             {
-                var got = Scene(Page(fix, Rule(property + ":" + wrote), string.Empty), out var warn);
+                var got = Scene(Page(fix, Rule(property + ":" + wrote), extra), out var warn);
                 if (meant.StartsWith("~", StringComparison.Ordinal))
                 {
                     if (got.Contains(meant.Substring(1), StringComparison.Ordinal)) have++;
-                    else missing.Add((name, got == BaseOf(fix, string.Empty) ? "ignored" : "drew something else"));
+                    else missing.Add((name, got == BaseOf(fix, extra) ? "ignored" : "drew something else"));
                     continue;
                 }
-                var want = Scene(Page(fix, Rule(property + ":" + meant), string.Empty), out _);
-                if (want == BaseOf(fix, string.Empty)) { missing.Add((name, "BAD ROW: the reference draws nothing either")); continue; }
+                var want = Scene(Page(fix, Rule(property + ":" + meant), extra), out _);
+                if (want == BaseOf(fix, extra)) { missing.Add((name, "BAD ROW: the reference draws nothing either")); continue; }
                 if (got == want) { have++; continue; }
-                missing.Add((name, got == BaseOf(fix, string.Empty) ? "ignored"
+                missing.Add((name, got == BaseOf(fix, extra) ? "ignored"
                     : warn.Count > 0 ? Short(warn[warn.Count - 1]) : "parsed to something else"));
             }
             catch (Exception ex) { missing.Add((name, "threw: " + ex.GetType().Name)); }
@@ -323,12 +350,52 @@ internal static class CssLanguage
 
     // ---- reporting -----------------------------------------------------------------------
 
+    /// <summary>
+    /// The rows where drawing nothing is the RIGHT answer, so the score is not read as a gap.
+    /// </summary>
+    /// <remarks>
+    /// This distinction is not bookkeeping. The probe compares emitted scenes, and a selector that
+    /// is correctly refused draws exactly what a selector nobody implemented draws - so without a
+    /// list of the deliberate ones, every honest refusal reads as a hole and the number understates
+    /// the platform. It understated it by seventeen until the fixture carried the states the
+    /// interaction pseudo-classes need; these are what is left, and each is a thing a compiled page
+    /// genuinely does not have.
+    ///
+    /// Kept out of the score rather than folded into it: counting a correct refusal as a success is
+    /// the opposite error, and would hide a real gap if the reason ever stopped being true.
+    /// </remarks>
+    private static readonly Dictionary<string, string> Deliberate = new(StringComparer.Ordinal)
+    {
+        [":visited"] = "a console has no browsing history",
+        [":target"] = "a console has no URL fragment",
+        ["::first-line"] = "where a line breaks is only known after layout",
+        ["::selection"] = "nothing selects text on a console",
+        ["::file-selector-button"] = "no file picker exists",
+        ["column ||"] = "the page has no column boxes",
+        ["@import"] = "there is no second file and no network to fetch it from",
+        ["@page"] = "a console never prints, so there is no page box to style",
+        // Not a refusal: HtmlRenderer reads this and hands the colour to the field control as
+        // placeholder_color. The control is ScriptedScreens' own element, so nothing about it
+        // is in the vector scene - which is the only thing this probe can read.
+        ["::placeholder"] = "handed to ScriptedScreens' own field as placeholder_color, so it is not in the scene",
+    };
+
     private static void Report(string title, int have, int total, List<(string Name, string Why)> missing)
     {
-        Console.WriteLine($"{title}: {have} of {total} ({100.0 * have / total:0}%)\n");
-        if (missing.Count == 0) { Console.WriteLine("  nothing missing"); return; }
+        var refused = missing.Where(m => Deliberate.ContainsKey(m.Name)).ToList();
+        var gaps = missing.Where(m => !Deliberate.ContainsKey(m.Name)).ToList();
+        Console.WriteLine($"{title}: {have} of {total} ({100.0 * have / total:0}%)"
+                          + (refused.Count > 0 ? $", plus {refused.Count} that are not gaps" : "") + "\n");
+        if (refused.Count > 0)
+        {
+            Console.WriteLine("not a gap:");
+            foreach (var (name, _) in refused.OrderBy(m => m.Name, StringComparer.Ordinal))
+                Console.WriteLine($"  {name,-40} {Deliberate[name]}");
+            Console.WriteLine();
+        }
+        if (gaps.Count == 0) { Console.WriteLine("  nothing missing"); return; }
         Console.WriteLine("NOT drawn:");
-        foreach (var (name, why) in missing.OrderBy(m => m.Name, StringComparer.Ordinal))
+        foreach (var (name, why) in gaps.OrderBy(m => m.Name, StringComparer.Ordinal))
             Console.WriteLine($"  {name,-40} {why}");
     }
 
@@ -810,16 +877,16 @@ internal static class CssLanguage
         S(":read-write", "#req:read-write");
         S(":placeholder-shown", "#ph:placeholder-shown");
         S(":default", "#on:default");
-        S(":indeterminate", "#req:indeterminate");
-        S(":valid", "#num:valid");
+        S(":indeterminate", "#prog:indeterminate");
+        S(":valid", "#ok:valid");
         S(":invalid", "#num:invalid");
-        S(":in-range", "#num:in-range");
+        S(":in-range", "#ok:in-range");
         S(":out-of-range", "#num:out-of-range");
-        S(":user-valid", "#num:user-valid");
+        S(":user-valid", "#ok:user-valid");
         S(":user-invalid", "#num:user-invalid");
         S(":open", "#det:open");
         S(":modal", "#dlg:modal");
-        S(":popover-open", "#dlg:popover-open");
+        S(":popover-open", "#pop:popover-open");
         S(":lang()", "#one:lang(en)");
         S(":dir()", "#one:dir(rtl)");
         S(":scope", ":scope");
@@ -836,7 +903,7 @@ internal static class CssLanguage
         S("::backdrop", "#dlg::backdrop", "background-color:#ff0000");
         S("::details-content", "#det::details-content", "color:#ff0000");
         S("::file-selector-button", "#req::file-selector-button", "color:#ff0000");
-        S("::-webkit-scrollbar", "#root::-webkit-scrollbar", "background-color:#ff0000");
+        S("::-webkit-scrollbar", "#scroll::-webkit-scrollbar", "background-color:#ff0000");
 
         // ---- escapes and specificity
         S("escaped class", ".a\\/b, #one");
@@ -846,48 +913,49 @@ internal static class CssLanguage
         return s;
     }
 
-    private static List<(string Name, string Sheet, string Css)> AtRuleList() => new()
+    private static List<(string Name, string Sheet, string Css, Fix Fix)> AtRuleList() => new()
     {
-        ("@media (min-width)", "@media (min-width:10px){#p{background-color:#ff0000}}", ""),
-        ("@media (max-width)", "@media (max-width:9999px){#p{background-color:#ff0000}}", ""),
-        ("@media (width)", "@media (width:400px){#p{background-color:#ff0000}}", ""),
-        ("@media (min-height)", "@media (min-height:10px){#p{background-color:#ff0000}}", ""),
-        ("@media (orientation)", "@media (orientation:landscape){#p{background-color:#ff0000}}", ""),
-        ("@media (aspect-ratio)", "@media (min-aspect-ratio:1/2){#p{background-color:#ff0000}}", ""),
-        ("@media screen", "@media screen{#p{background-color:#ff0000}}", ""),
-        ("@media not print", "@media not print{#p{background-color:#ff0000}}", ""),
-        ("@media and", "@media screen and (min-width:10px){#p{background-color:#ff0000}}", ""),
-        ("@media comma", "@media print, screen{#p{background-color:#ff0000}}", ""),
-        ("@media (prefers-color-scheme)", "@media (prefers-color-scheme:dark){#p{background-color:#ff0000}}", ""),
-        ("@media (prefers-reduced-motion)", "@media (prefers-reduced-motion:no-preference){#p{background-color:#ff0000}}", ""),
-        ("@media (hover)", "@media (hover:none){#p{background-color:#ff0000}}", ""),
-        ("@media (pointer)", "@media (pointer:coarse){#p{background-color:#ff0000}}", ""),
-        ("@media (resolution)", "@media (min-resolution:1dppx){#p{background-color:#ff0000}}", ""),
-        ("@media range syntax", "@media (400px <= width){#p{background-color:#ff0000}}", ""),
-        ("@supports", "@supports (display:flex){#p{background-color:#ff0000}}", ""),
-        ("@supports not", "@supports not (display:nonsense){#p{background-color:#ff0000}}", ""),
-        ("@supports selector()", "@supports selector(:has(a)){#p{background-color:#ff0000}}", ""),
-        ("@font-face", "@font-face{font-family:\"Probe\";src:url(Barlow-Bold.ttf)}", "font-family:Probe"),
-        ("@keyframes", "@keyframes probe{from{opacity:0.2}to{opacity:1}}", "animation:probe 2s linear infinite"),
-        ("@layer named", "@layer base{#p{background-color:#ff0000}}", ""),
-        ("@layer anonymous", "@layer{#p{background-color:#ff0000}}", ""),
-        ("@scope", "@scope(.w){#p{background-color:#ff0000}}", ""),
-        ("@container", "@container (min-width:10px){#p{background-color:#ff0000}}", "container-type:inline-size"),
-        ("@property", "@property --probe{syntax:\"<color>\";inherits:false;initial-value:#ff0000}", "background-color:var(--probe)"),
-        ("@starting-style", "@starting-style{#p{opacity:0.1}}", "opacity:1;transition:opacity 2s"),
-        ("@counter-style", "@counter-style probe{system:cyclic;symbols:\"**\";suffix:\" \"}", "#p{list-style-type:probe}"),
-        ("@page", "@page{margin:2cm}", ""),
-        ("@import", "@import url(probe.css);", ""),
-        ("@charset", "@charset \"utf-8\";#p{background-color:#ff0000}", ""),
-        ("@namespace", "@namespace svg url(http://www.w3.org/2000/svg);#p{background-color:#ff0000}", ""),
-        ("@nest / nesting", "#p{&.p{background-color:#ff0000}}", ""),
-        ("@media nested in a rule", "#p{@media (min-width:10px){background-color:#ff0000}}", ""),
+        ("@media (min-width)", "@media (min-width:10px){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media (max-width)", "@media (max-width:9999px){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media (width)", "@media (width:400px){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media (min-height)", "@media (min-height:10px){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media (orientation)", "@media (orientation:landscape){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media (aspect-ratio)", "@media (min-aspect-ratio:1/2){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media screen", "@media screen{#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media not print", "@media not print{#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media and", "@media screen and (min-width:10px){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media comma", "@media print, screen{#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media (prefers-color-scheme)", "@media (prefers-color-scheme:dark){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media (prefers-reduced-motion)", "@media (prefers-reduced-motion:no-preference){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media (hover)", "@media (hover:hover){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media (pointer)", "@media (pointer:fine){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media (resolution)", "@media (min-resolution:1dppx){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media range syntax", "@media (400px <= width){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@supports", "@supports (display:flex){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@supports not", "@supports not (display:nonsense){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@supports selector()", "@supports selector(:has(a)){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@font-face", "@font-face{font-family:\"Probe\";src:url(Barlow-Bold.ttf)}", "font-family:Probe", Fix.Box),
+        ("@keyframes", "@keyframes probe{from{opacity:0.2}to{opacity:1}}", "animation:probe 2s linear infinite", Fix.Box),
+        ("@layer named", "@layer base{#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@layer anonymous", "@layer{#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@scope", "@scope(.w){#p{background-color:#ff0000}}", "", Fix.Box),
+        ("@container", "@container (min-width:10px){#p{background-color:#ff0000}}", "container-type:inline-size", Fix.Box),
+        ("@property", "@property --probe{syntax:\"<color>\";inherits:false;initial-value:#ff0000}", "background-color:var(--probe)", Fix.Box),
+        ("@starting-style", "@starting-style{#p{opacity:0.1}}", "opacity:1;transition:opacity 2s", Fix.Box),
+        ("@counter-style", "@counter-style probe{system:cyclic;symbols:\"**\";suffix:\" \"}", "#p{list-style-type:probe}", Fix.List),
+        ("@page", "@page{margin:2cm}", "", Fix.Box),
+        ("@import", "@import url(probe.css);", "", Fix.Box),
+        ("@charset", "@charset \"utf-8\";#p{background-color:#ff0000}", "", Fix.Box),
+        ("@namespace", "@namespace svg url(http://www.w3.org/2000/svg);#p{background-color:#ff0000}", "", Fix.Box),
+        ("@nest / nesting", "#p{&.p{background-color:#ff0000}}", "", Fix.Box),
+        ("@media nested in a rule", "#p{@media (min-width:10px){background-color:#ff0000}}", "", Fix.Box),
     };
 
-    private static List<(string Name, string Property, string Wrote, string Meant, Fix Fix)> ValueList()
+    private static List<(string Name, string Property, string Wrote, string Meant, Fix Fix, string Extra)> ValueList()
     {
-        var v = new List<(string, string, string, string, Fix)>();
-        void V(string name, string prop, string wrote, string meant, Fix fix = Fix.Box) => v.Add((name, prop, wrote, meant, fix));
+        var v = new List<(string, string, string, string, Fix, string)>();
+        void V(string name, string prop, string wrote, string meant, Fix fix = Fix.Box, string extra = "")
+            => v.Add((name, prop, wrote, meant, fix, extra));
 
         // ---- math functions
         V("calc() +", "width", "calc(30px + 20px)", "50px");
@@ -918,12 +986,12 @@ internal static class CssLanguage
         V("atan2()", "transform", "rotate(calc(1deg * atan2(1, 1)))", "rotate(45deg)");
 
         // ---- custom properties
-        V("var()", "width", "var(--probe)", "50px", Fix.Box);
+        V("var()", "width", "var(--probe)", "50px", Fix.Box, ":root{--probe:50px}");
         V("var() fallback", "width", "var(--nope, 50px)", "50px");
         V("var() nested fallback", "width", "var(--nope, var(--also-nope, 50px))", "50px");
         V("var() in calc()", "width", "calc(var(--nope, 30px) + 20px)", "50px");
         V("attr()", "width", "attr(data-w px)", "50px");
-        V("env() fallback", "width", "env(safe-area-inset-left, 50px)", "50px");
+        V("env() fallback", "width", "env(probe-nothing-defines-this, 50px)", "50px");
 
         // ---- colour syntaxes
         V("#rgb", "background-color", "#f00", "#ff0000");

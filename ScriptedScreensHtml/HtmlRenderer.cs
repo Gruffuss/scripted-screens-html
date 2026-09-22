@@ -251,6 +251,11 @@ internal static class HtmlRenderer
         var result = new Result();
         void Warn(string m) => result.Warnings.Add(m);
 
+        // Lets @supports ask the applier what it supports. Installed here rather than in a static
+        // constructor so it is in place for every entry point - the mod, the bench and the tests
+        // all come through Build - and CssParser keeps knowing nothing about Unity.
+        StyleApplier.InstallSupportsOracle();
+
         // Per page, not per process. The applier names an unsupported declaration once so a page
         // using it on forty elements says so once; kept across pages it made every page after the
         // first look clean.

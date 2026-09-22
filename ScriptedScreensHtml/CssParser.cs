@@ -924,10 +924,39 @@ internal static class CssParser
 
         var inner = Inside(cond, 0);
         // `(a: b)` is a declaration; anything else in parentheses is a condition of its own
-        return inner.IndexOf(':') > 0 && SplitKeyword(inner, " and ").Count == 1 && SplitKeyword(inner, " or ").Count == 1
-               && !inner.TrimStart().StartsWith("not", StringComparison.OrdinalIgnoreCase)
-            ? true
-            : SupportsMatches(inner, warn);
+        if (inner.IndexOf(':') > 0 && SplitKeyword(inner, " and ").Count == 1 && SplitKeyword(inner, " or ").Count == 1
+            && !inner.TrimStart().StartsWith("not", StringComparison.OrdinalIgnoreCase))
+        {
+            var colon = inner.IndexOf(':');
+            return Declares(inner.Substring(0, colon).Trim(), inner.Substring(colon + 1).Trim());
+        }
+        return SupportsMatches(inner, warn);
+    }
+
+    /// <summary>
+    /// Whether a declaration does anything here - the question <c>@supports (a: b)</c> asks.
+    /// </summary>
+    /// <remarks>
+    /// This returned TRUE for every declaration, including nonsense, and that is not a harmless
+    /// over-claim: it makes the FALLBACK form always wrong. An author writing the standard
+    ///
+    ///   @supports not (backdrop-filter: blur(4px)) { .panel { background: #222 } }
+    ///
+    /// had their fallback silently dropped, on a renderer that does not do backdrop-filter - so the
+    /// one arm that would have drawn something was the one thrown away. The positive form was
+    /// harmless by comparison: it applies an enhancement that then does nothing.
+    ///
+    /// The answer has to come from the code that applies declarations, which is Unity-side, and
+    /// CssParser is deliberately Unity-free (it is what lets the whole front end be tested
+    /// headlessly). So the applier installs itself here instead of being called directly. With no
+    /// oracle installed the old answer stands, which keeps the headless tests working unchanged.
+    /// </remarks>
+    internal static Func<string, string, bool>? SupportsOracle;
+
+    private static bool Declares(string name, string value)
+    {
+        if (name.StartsWith("--", StringComparison.Ordinal)) return true;   // any custom property
+        return SupportsOracle?.Invoke(name, value) ?? true;
     }
 
     /// <summary>The text between the parenthesis at or after <paramref name="from"/> and its match.</summary>
