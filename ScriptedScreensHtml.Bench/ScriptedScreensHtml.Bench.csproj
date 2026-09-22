@@ -36,6 +36,9 @@
     <Compile Include="..\ScriptedScreensHtml\ScriptHost.cs" />
     <Compile Include="..\ScriptedScreensHtml\JsEngine.cs" />
     <Compile Include="..\ScriptedScreensHtml\DomWrites.cs" />
+    <Compile Include="..\ScriptedScreensHtml\PageCompiler.cs" />
+    <Compile Include="..\ScriptedScreensHtml\CompiledPage.cs" />
+    <Compile Include="..\ScriptedScreensHtml\JsToLua.cs" />
     <Compile Include="..\ScriptedScreensHtml\Motion.cs" />
     <Compile Include="..\ScriptedScreensHtml\DomSlots.cs" />
     <Compile Include="..\ScriptedScreensHtml\MarkupSlots.cs" />

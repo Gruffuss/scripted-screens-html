@@ -33,6 +33,11 @@ internal static class PageCompiler
 
         var absolute = Absolute(built);
 
+        // Every innerHTML write, reduced to structure plus holes and each hole resolved to the slot
+        // it lands on. Done before the script is translated because the translation depends on it:
+        // a write whose holes are known becomes a handful of slot writes instead of a document.
+        var markup = Markup(built, panel, size);
+
         return CompiledPage.Compile(
             built.Script,
             available,
@@ -47,6 +52,8 @@ internal static class PageCompiler
             (size.x, size.y),
             Parents(built),
             Structure(built, absolute),
+            markup.Lookup,
+            markup.Bindings,
             // The scene's own resting value for a slot, so a state can carry what it does NOT move
             // and therefore be leavable. Numbers only: a state that changes text or colour restores
             // through its own entry, and inventing a base for those would guess.
@@ -81,6 +88,85 @@ internal static class PageCompiler
                 mine = name;
             }
             for (var i = 0; i < ve.childCount; i++) Walk(ve[i], mine);
+        }
+    }
+
+    /// <summary>
+    /// Every <c>innerHTML</c> write in the page, with each of its holes resolved to a scene slot.
+    /// </summary>
+    /// <remarks>
+    /// The expensive half of compiling markup: each distinct shape the page can take is put into the
+    /// tree, laid out and emitted, and the slots are read back. That is several layout passes per
+    /// write - once, at load, against a page that would otherwise rebuild its whole document at its
+    /// tick rate for the life of the console.
+    /// </remarks>
+    private static (JsToLua.HoleLookup Lookup, List<(string Key, string Slot, bool IsNumber)> Bindings)
+        Markup(HtmlRenderer.Result built, Panel panel, Vector2 size)
+    {
+        var byElement = new Dictionary<string, Dictionary<int, MarkupSlots.Landing>>(StringComparer.Ordinal);
+        var bindings = new List<(string, string, bool)>();
+        if (string.IsNullOrWhiteSpace(built.Script)) return (Nothing, bindings);
+
+        Acornima.Ast.Script ast;
+        try { ast = new Acornima.Parser().ParseScript(built.Script); }
+        catch (Exception) { return (Nothing, bindings); }
+
+        foreach (var (id, value) in InnerHtmlWrites(ast))
+        {
+            if (byElement.ContainsKey(id)) continue;          // one plan per element
+            var shape = ScriptedScreensHtml.Markup.Of(value, ast);
+            if (shape.Problems.Count > 0) continue;           // reported by the translator itself
+
+            var landed = MarkupSlots.ResolveAll(id, shape, built, panel, size);
+            if (landed.Count == 0) continue;
+            byElement[id] = landed;
+            foreach (var pair in landed)
+                bindings.Add((id + ".innerHTML#" + pair.Key.ToString(CultureInfo.InvariantCulture),
+                              pair.Value.Slot, pair.Value.IsNumber));
+        }
+
+        return (Look, bindings);
+
+        JsToLua.HolePlan? Look(string id, int hole)
+            => byElement.TryGetValue(id, out var map) && map.TryGetValue(hole, out var landing)
+                ? new JsToLua.HolePlan(landing.Slot, landing.IsNumber, landing.Before, landing.After)
+                : null;
+    }
+
+    private static JsToLua.HolePlan? Nothing(string id, int hole) => null;
+
+    /// <summary>Every `x.innerHTML = …` in a script, with the element it targets.</summary>
+    private static IEnumerable<(string Id, Acornima.Ast.Expression Value)> InnerHtmlWrites(Acornima.Ast.Node root)
+    {
+        var names = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var node in Every(root))
+            if (node is Acornima.Ast.VariableDeclarator
+                { Id: Acornima.Ast.Identifier v, Init: Acornima.Ast.CallExpression { Arguments.Count: 1 } call }
+                && call.Arguments[0] is Acornima.Ast.StringLiteral lit)
+                names[v.Name] = lit.Value;
+
+        foreach (var node in Every(root))
+        {
+            if (node is not Acornima.Ast.AssignmentExpression
+                { Left: Acornima.Ast.MemberExpression { Property: Acornima.Ast.Identifier { Name: "innerHTML" }, Object: { } owner } } a)
+                continue;
+            var id = owner switch
+            {
+                Acornima.Ast.CallExpression { Arguments.Count: 1 } c when c.Arguments[0] is Acornima.Ast.StringLiteral s => s.Value,
+                Acornima.Ast.Identifier n when names.TryGetValue(n.Name, out var held) => held,
+                _ => null,
+            };
+            if (id != null) yield return (id, a.Right);
+        }
+    }
+
+    private static IEnumerable<Acornima.Ast.Node> Every(Acornima.Ast.Node n)
+    {
+        yield return n;
+        foreach (var child in n.ChildNodes)
+        {
+            if (child == null) continue;
+            foreach (var d in Every(child)) yield return d;
         }
     }
 

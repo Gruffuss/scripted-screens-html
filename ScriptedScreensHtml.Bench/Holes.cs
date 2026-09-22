@@ -135,8 +135,29 @@ internal static class Holes
                                   + (pair.Value.IsNumber ? "" : $"  text \"{Short(pair.Value.Before)}…{Short(pair.Value.After)}\""));
         }
         if (!any) Console.WriteLine("  no innerHTML write reduced far enough to resolve");
+
+        // The end-to-end question, which nothing short of this answers: does the page COMPILE now?
+        // Resolving holes is only worth anything if the compiler then accepts the page.
+        var slots = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+        OffThread.Active = true;
+        try
+        {
+            var output = VectorEmitter.Emit(built, built.Root, size.x, size.y);
+            SceneSlots.Split(output.Chars, output.Length, slots);
+        }
+        finally { OffThread.Active = false; }
+
+        var compiled = PageCompiler.Compile(built, panel, size, slots);
+        Console.WriteLine();
+        Console.WriteLine($"  compiles: {(compiled.Ok ? "YES" : "no")}"
+                          + $"  ({compiled.Bindings.Count} binding(s), {compiled.Problems.Count} problem(s), "
+                          + $"{compiled.Unmapped.Count} unmapped)");
+        foreach (var p in compiled.Problems.Take(4)) Console.WriteLine("    ! " + Short120(p));
+        foreach (var u in compiled.Unmapped.Take(4)) Console.WriteLine("    ? " + Short120(u));
         return 0;
     }
+
+    private static string Short120(string s) => s.Length <= 120 ? s : s.Substring(0, 119) + "~";
 
     private static string Short(string? s) => s == null ? "" : s.Length <= 14 ? s : s.Substring(0, 13) + "~";
 

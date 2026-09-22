@@ -26,6 +26,37 @@ internal static class HtmlConfig
 
     // The bench measures the interpreter, so it always runs the interpreter: BENCH_V8=1 to compare.
     internal static bool UseV8 => Environment.GetEnvironmentVariable("BENCH_V8") == "1";
+
+    /// <summary>The in-game compile probe, which the bench drives itself rather than by config.</summary>
+    internal static bool CompileProbe => false;
+}
+
+/// <summary>
+/// The compiled page's runtime, read from disk rather than from an embedded resource.
+/// </summary>
+/// <remarks>
+/// In the mod it is embedded, because a page cannot be compiled without it and a file in a mod
+/// folder can be deleted or lost in a Workshop update. Here the file IS the source of truth and
+/// reading it means the bench measures the prelude as it stands, not as it was when last built.
+/// </remarks>
+internal static class CompileProbe
+{
+    private static string? _prelude;
+
+    internal static string? Prelude(out string? error)
+    {
+        error = null;
+        if (_prelude != null) return _prelude;
+        var d = AppContext.BaseDirectory;
+        for (var i = 0; i < 9 && d != null; i++)
+        {
+            var path = System.IO.Path.Combine(d, "ScriptedScreensHtml", "JsPrelude.lua");
+            if (System.IO.File.Exists(path)) return _prelude = System.IO.File.ReadAllText(path);
+            d = System.IO.Path.GetDirectoryName(d);
+        }
+        error = "JsPrelude.lua not found on disk";
+        return null;
+    }
 }
 
 internal static class FontLibrary

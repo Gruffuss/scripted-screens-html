@@ -187,13 +187,15 @@ internal static class CompiledPage
                                    (double Width, double Height)? viewport = null,
                                    IReadOnlyDictionary<string, string>? parents = null,
                                    Tree? tree = null,
+                                   JsToLua.HoleLookup? holes = null,
+                                   IReadOnlyList<(string Key, string Slot, bool IsNumber)>? holeBindings = null,
                                    Func<string, double?>? baseOf = null,
                                    (string Surface, string Element, string Scene)? target = null,
                                    string element = "VDATA")
     {
         var result = new Result();
 
-        var lua = JsToLua.Compile(script, out var problems);
+        var lua = JsToLua.Compile(script, out var problems, holes);
         foreach (var p in problems) result.Problems.Add(p);
         if (lua == null) return result;
 
@@ -292,6 +294,15 @@ internal static class CompiledPage
                 result.Bindings.Add(new Binding(key, mapped.Slots, mapped.Bias, Reading(w.Property)));
             }
         }
+
+        // The markup holes, as bindings the existing runtime already knows how to write. Keyed
+        // `innerHTML#3` so they sit beside the element's other writes and need no new mechanism -
+        // and deliberately NOT a new DOM function, because every name added to the runtime is one
+        // more thing that can be registered and not defined.
+        if (holeBindings != null)
+            foreach (var (key, slot, isNumber) in holeBindings)
+                result.Bindings.Add(new Binding(key, new[] { slot }, new double[1],
+                                                isNumber ? Kind.Length : Kind.Text));
 
         result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), prelude, viewport, parents, tree, target, element);
         return result;

@@ -142,9 +142,34 @@ internal sealed class JsToLua
     /// Compiles a page's script to Lua. Returns null when something in it cannot be translated, and
     /// <paramref name="problems"/> then names each one with its line.
     /// </summary>
-    internal static string? Compile(string source, out IReadOnlyList<string> problems)
+    /// <summary>Where one hole of an element's markup writes, or null when it reaches no slot.</summary>
+    internal readonly struct HolePlan
+    {
+        public readonly string Slot;
+        public readonly bool IsNumber;
+        /// <summary>The constant text either side of the hole, for a label like `"x " + v + " kPa"`.</summary>
+        public readonly string? Before, After;
+        public HolePlan(string slot, bool isNumber, string? before = null, string? after = null)
+        { Slot = slot; IsNumber = isNumber; Before = before; After = after; }
+    }
+
+    /// <summary>
+    /// Answers, for an element and a hole index, where that hole writes.
+    /// </summary>
+    /// <remarks>
+    /// Supplied by the caller rather than worked out here, because the answer needs the page laid
+    /// out and emitted and this file is deliberately Unity-free. The indices line up because both
+    /// sides ask <see cref="Markup"/> the same question about the same syntax tree.
+    /// </remarks>
+    internal delegate HolePlan? HoleLookup(string elementId, int hole);
+
+    private HoleLookup? _holes;
+
+    internal static string? Compile(string source, out IReadOnlyList<string> problems,
+                                    HoleLookup? holes = null)
     {
         var c = new JsToLua();
+        c._holes = holes;
         problems = c._problems;
         Script ast;
         try
@@ -162,7 +187,16 @@ internal sealed class JsToLua
         // written later - so an in-order check would report a name the page does define. This
         // over-approximates scope deliberately: it exists to catch a typo or an unsupported global,
         // not to reproduce block scoping.
+        c._script = ast;
         c.Declared(ast);
+        // Which name holds which element, so `frame.innerHTML` knows it is writing to #frame. The
+        // same shape DomWrites resolves, kept here because the markup rewrite needs it before any
+        // line is emitted.
+        foreach (var node in Walk(ast))
+            if (node is VariableDeclarator { Id: Identifier v, Init: CallExpression { Arguments.Count: 1 } call }
+                && call.Arguments[0] is StringLiteral lit
+                && call.Callee is Identifier or MemberExpression)
+                c._elements[v.Name] = lit.Value;
 
         // Everything the script's own scope binds is forward-declared and then assigned where it
         // stood. Two reasons, and the second is the one that bites: JavaScript hoists a function
@@ -754,8 +788,70 @@ internal sealed class JsToLua
         }
     }
 
+    /// <summary>
+    /// <c>el.innerHTML = …</c>, as writes to the slots its holes land on rather than a document.
+    /// </summary>
+    /// <remarks>
+    /// This is what compiling innerHTML MEANS. The obvious translation - build the same string in
+    /// Lua and hand it to the same parser - moves the work rather than removing it: the chip would
+    /// allocate a whole document every tick and the page would still be re-parsed. Here the literal
+    /// markup became scene structure at compile time and only the interpolated values are left, so
+    /// a tick writes a handful of numbers.
+    ///
+    /// A hole the compiler could not place is REPORTED rather than dropped. Dropping it would draw a
+    /// page that is almost right, with one reading frozen at whatever it was when the page loaded,
+    /// which is the hardest kind of wrong to notice.
+    /// </remarks>
+    private bool InnerHtml(AssignmentExpression a)
+    {
+        if (_holes == null || _script == null) return false;
+        if (a.Left is not MemberExpression { Computed: false, Property: Identifier { Name: "innerHTML" }, Object: { } owner })
+            return false;
+
+        var id = ElementId(owner);
+        if (id == null) return false;
+
+        var markup = Markup.Of(a.Right, _script);
+        if (markup.Problems.Count > 0)
+        {
+            foreach (var problem in markup.Problems) _problems.Add(problem);
+            return true;
+        }
+
+        var wrote = 0;
+        for (var hole = 0; hole < markup.Holes.Count; hole++)
+        {
+            if (_holes(id, hole) is not { } plan) continue;
+            var value = Expr(markup.Holes[hole]);
+            // A text slot holds the whole label, so the constant words either side of the hole
+            // travel with it. Writing the value alone would delete them.
+            if (!plan.IsNumber && (plan.Before is { Length: > 0 } || plan.After is { Length: > 0 }))
+                value = Quote(plan.Before ?? string.Empty) + " .. js_str(" + value + ") .. " + Quote(plan.After ?? string.Empty);
+            Line("DOM.bind(" + Quote(id) + ", " + Quote("innerHTML#" + hole.ToString(CultureInfo.InvariantCulture))
+                 + ", " + value + ")");
+            wrote++;
+        }
+
+        if (wrote < markup.Holes.Count)
+            Unsupported(a, (markup.Holes.Count - wrote) + " of " + markup.Holes.Count
+                           + " values in this markup reach no slot, so they would never be drawn");
+        return true;
+    }
+
+    /// <summary>The element id a write targets, through the page's own getElementById wrapper.</summary>
+    private string? ElementId(Expression owner)
+    {
+        if (owner is CallExpression { Arguments.Count: 1 } call && call.Arguments[0] is StringLiteral s) return s.Value;
+        return owner is Identifier name && _elements.TryGetValue(name.Name, out var id) ? id : null;
+    }
+
+    /// <summary>Names bound to one element, so `frame.innerHTML` resolves to the id `frame` holds.</summary>
+    private readonly Dictionary<string, string> _elements = new(StringComparer.Ordinal);
+    private Script? _script;
+
     private void Assign(AssignmentExpression a)
     {
+        if (InnerHtml(a)) return;
         // `arr.length = 0` is how JavaScript clears an array, and `.length` reads as js_len(), which
         // is a call and cannot be assigned to. Reported rather than emitted: truncating an array
         // properly means dropping the elements past the new length too, and a page that grows one

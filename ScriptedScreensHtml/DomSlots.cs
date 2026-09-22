@@ -166,6 +166,12 @@ internal static class DomSlots
                 ? Result.Ok(id)
                 : Result.No($"\"{id}\" draws no text, so there is no slot to write");
 
+        // `innerHTML#3` - one hole of a markup write, already resolved to its slot by MarkupSlots.
+        // The slot name IS the answer, so this only has to hand it back; the work happened when the
+        // page was laid out with that hole's sentinel in it.
+        if (property.StartsWith("innerHTML#", StringComparison.Ordinal))
+            return Result.No("a markup hole is bound by the compiler, not mapped here");
+
         if (property == "innerHTML")
             return Result.No("innerHTML replaces structure, which is a state to enumerate rather than a value to write");
 
