@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UIElements;
@@ -131,7 +131,8 @@ internal sealed class GridLayout
         // parsed, used for grid-area lookups only, and a page that placed nothing by name laid out
         // in one column - the declaration accepted and the shape ignored.
         AreaShape(areasText, out var areaCols, out var areaRows);
-        var cols = ParseTracks(colsText ?? (areaCols > 0 ? Repeat("auto", areaCols) : "auto"));
+        // With no grid-template-columns the single column is IMPLICIT, so grid-auto-columns sizes it.
+        var cols = ParseTracks(colsText ?? (areaCols > 0 ? Repeat("auto", areaCols) : Get(css, "grid-auto-columns") ?? "auto"));
         if (cols.Count == 0) cols.Add(new Track { Auto = true });
         var rowsSpec = ParseTracks(rowsText ?? (areaRows > 0 ? Repeat("auto", areaRows) : string.Empty));
         var autoRow = ParseTracks(Get(css, "grid-auto-rows") ?? autoRowsFromGrid ?? "auto");
@@ -242,14 +243,27 @@ internal sealed class GridLayout
         // auto columns take their content's width (measured from the layout, which sizes them
         // to content); fr columns share what is left
         var colW = Resolve(cols, w, colGap, false, out _);
-        foreach (var it in items)
-        {
-            if (it.ColSpan != 1 || it.Col >= cols.Count || !cols[it.Col].Auto) continue;
-            var iw = it.Ve.layout.width;
-            if (float.IsNaN(iw)) continue;
-            colW[it.Col] = Mathf.Max(colW[it.Col], iw);
-        }
-        if (definiteWidth && cols.Exists(c => c.Auto))
+        var stretched = new bool[cols.Count];
+        // CSS Grid 12.8: a grid with a definite width and justify-content: normal grows its AUTO
+        // tracks to fill it. A single auto column is therefore the whole width, and measuring its
+        // content instead is not merely wrong - `display: grid` with no template (the common
+        // vertical stack) shrink-wrapped every child to its text.
+        //
+        // Only the single-column case: with two auto columns the track has to be content-sized
+        // first, and the item's own width is what that reads - so writing the track back onto the
+        // item would make the next pass measure a different number and the two would alternate.
+        var stretchAll = definiteWidth && cols.Count == 1 && cols[0].Auto
+                         && (Get(css, "justify-content") ?? "normal").Trim() is "normal" or "stretch";
+        if (stretchAll) { colW[0] = w; stretched[0] = true; }
+        else
+            foreach (var it in items)
+            {
+                if (it.ColSpan != 1 || it.Col >= cols.Count || !cols[it.Col].Auto) continue;
+                var iw = it.Ve.layout.width;
+                if (float.IsNaN(iw)) continue;
+                colW[it.Col] = Mathf.Max(colW[it.Col], iw);
+            }
+        if (definiteWidth && cols.Exists(c => c.Auto) && !stretchAll)
         {
             var fixedSum = 0f; var frSum = 0f;
             foreach (var c in cols) if (c.Fr > 0f) frSum += c.Fr;
@@ -317,7 +331,8 @@ internal sealed class GridLayout
                 chh += rowH[r] + (r > it.Row ? rowGap : 0f);
                 if (rows[r].Auto && !definiteHeight) fixedRow = false;
             }
-            var contentCol = it.ColSpan == 1 && it.Col < cols.Count && cols[it.Col].Auto;
+            // a stretched auto track is no longer content-sized: its item fills it, as in a browser
+            var contentCol = it.ColSpan == 1 && it.Col < cols.Count && cols[it.Col].Auto && !stretched[it.Col];
             // align-items / justify-items (and the self forms): a child that does not stretch keeps its
             // own size and sits at the start, centre or end of its cell, measured from the layout
             var ccss = _built.CssOf(it.Ve);

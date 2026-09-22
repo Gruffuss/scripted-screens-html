@@ -465,7 +465,16 @@ internal sealed class Tweens
         if (overridden)
             return (o.dur, o.ease, 0f);
 
-        if (!built.CssOf(ve).TryGetValue("transition", out var css))
+        var css = built.CssOf(ve);
+        var hasShort = css.TryGetValue("transition", out var shorthand);
+        // The longhands, which a page is as likely to write as the shorthand (Tailwind emits
+        // transition-property + transition-duration). Reading only `transition` meant those pages
+        // never tweened at all, and nothing said so.
+        css.TryGetValue("transition-property", out var lProp);
+        css.TryGetValue("transition-duration", out var lDur);
+        css.TryGetValue("transition-delay", out var lDelay);
+        css.TryGetValue("transition-timing-function", out var lEase);
+        if (!hasShort && lProp == null && lDur == null)
             return (0f, Easing.Default, 0f);
 
         var layout = prev.LayoutDiffers(cur);
@@ -473,29 +482,59 @@ internal sealed class Tweens
         var transform = prev.TransformDiffers(cur);
         var colour = prev.ColourDiffers(cur);
         var offset = prev.OffsetDiffers(cur);
-        foreach (var item in css.Split(','))
+
+        var names = lProp?.Split(',');
+        var items = hasShort ? shorthand!.Split(',') : null;
+        var count = Math.Max(items?.Length ?? 0, names?.Length ?? 0);
+        if (count == 0) count = 1;
+        for (var k = 0; k < count; k++)
         {
-            var parts = CssParser.SplitTopLevel(item.Trim(), ' ').FindAll(p => p.Length > 0).ToArray();
-            if (parts.Length < 2) continue;
-            var prop = parts[0].ToLowerInvariant();
+            var prop = "all";
+            var dur = 0f;
+            var delay = 0f;
+            var ease = Easing.Default;
+            if (items != null && k < items.Length)
+            {
+                var times = 0;
+                var named = false;
+                foreach (var raw in CssParser.SplitTopLevel(items[k].Trim(), ' '))
+                {
+                    var part = raw.Trim();
+                    if (part.Length == 0) continue;
+                    if (IsTime(part)) { if (times++ == 0) dur = Seconds(part); else delay = Seconds(part); }
+                    else if (Easing.TryParse(part, out var e)) ease = e;
+                    else if (!named) { prop = part.ToLowerInvariant(); named = true; }
+                }
+            }
+            // a longhand overrides the shorthand's component, cycling its list as CSS does
+            if (names is { Length: > 0 }) prop = names[k % names.Length].Trim().ToLowerInvariant();
+            if (lDur != null) dur = Seconds(Nth(lDur, k));
+            if (lDelay != null) delay = Seconds(Nth(lDelay, k));
+            if (lEase != null && Easing.TryParse(Nth(lEase, k), out var le)) ease = le;
+            if (dur <= 0f) continue;
             var matches = prop == "all"
                           || (colour && (prop == "color" || prop == "background-color" || prop == "background" || prop == "border-color"))
                           || (opacity && prop == "opacity")
                           || (offset && (prop == "offset-distance" || prop == "offset"))
                           || (transform && (prop == "transform" || prop == "rotate" || prop == "translate" || prop == "scale"))
                           || (layout && IsLayoutProp(prop));
-            if (!matches) continue;
-            var dur = Seconds(parts[1]);
-            var ease = Easing.Default;
-            var delay = 0f;
-            for (var i = 2; i < parts.Length; i++)
-            {
-                if (Easing.TryParse(parts[i], out var e)) ease = e;
-                else delay = Seconds(parts[i]);
-            }
-            return (dur, ease, delay);
+            if (matches) return (dur, ease, delay);
         }
         return (0f, Easing.Default, 0f);
+    }
+
+    /// <summary>The kth entry of a comma list, cycling, as CSS matches a transition longhand to its property list.</summary>
+    private static string Nth(string list, int k)
+    {
+        var parts = list.Split(',');
+        return parts[k % parts.Length].Trim();
+    }
+
+    /// <summary>"2s", "300ms", "-1s": a time, not a property name or an easing.</summary>
+    private static bool IsTime(string t)
+    {
+        var i = t.Length > 0 && (t[0] == '-' || t[0] == '+') ? 1 : 0;
+        return t.Length > i + 1 && (char.IsDigit(t[i]) || t[i] == '.') && t.EndsWith("s", StringComparison.OrdinalIgnoreCase);
     }
 
     private static float Seconds(string v)

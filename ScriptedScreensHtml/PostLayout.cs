@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UIElements;
@@ -38,6 +39,9 @@ internal static class PostLayout
                 {
                     var horizontal = prop is "width" or "min-width" or "max-width" or "left" or "right";
                     var value = pct / 100f * (horizontal ? cw : chh) + px;
+                    // content-box: the cascade grows a pixel width by padding and border, and a
+                    // calc() carrying a percent never reached that pass
+                    if (prop is "width" or "height") value += ContentExtra(built, ve, prop == "width");
                     SetPx(ve.style, prop, value);
                 }
             }
@@ -130,6 +134,119 @@ internal static class PostLayout
             container.RegisterCallback<GeometryChangedEvent>(_ => AlignBaselines(container));
             built.OnRecascade(container, () => AlignBaselines(container));
         }
+        ContentBoxPercents(built);
+        AspectRatios(built);
+    }
+
+    /// <summary>
+    /// aspect-ratio: the axis the page left auto follows the one it sized. The layout engine has
+    /// no such property, so the declaration was accepted and the box drew at its content size.
+    /// </summary>
+    private static void AspectRatios(HtmlRenderer.Result built)
+    {
+        foreach (var kv in built.NodeOf)
+        {
+            var ve = kv.Key;
+            var css = built.CssOf(ve);
+            if (!css.TryGetValue("aspect-ratio", out var spec)) continue;
+            var ratio = Ratio(spec);
+            if (float.IsNaN(ratio) || ratio <= 0f) continue;
+            var freeH = !css.TryGetValue("height", out var hv) || hv.Trim() == "auto";
+            var freeW = !css.TryGetValue("width", out var wv) || wv.Trim() == "auto";
+            if (!freeH && !freeW) continue;   // both sized: the ratio does not apply
+            var el = ve;
+            void Apply()
+            {
+                if (el.panel == null) return;
+                if (freeH)
+                {
+                    var w = el.layout.width;
+                    if (!float.IsNaN(w) && w > 0f) SetPx(el.style, "height", w / ratio);
+                }
+                else
+                {
+                    var h = el.layout.height;
+                    if (!float.IsNaN(h) && h > 0f) SetPx(el.style, "width", h * ratio);
+                }
+            }
+            ve.RegisterCallback<GeometryChangedEvent>(_ => Apply());
+            built.OnRecascade(ve, Apply);
+        }
+    }
+
+    /// <summary>"3 / 1", "1.5" or "auto" as a width-over-height number; NaN when it is not one.</summary>
+    private static float Ratio(string spec)
+    {
+        var s = spec.Trim();
+        if (s.Length == 0 || s.StartsWith("auto", StringComparison.Ordinal)) return float.NaN;
+        var slash = s.IndexOf('/');
+        var a = StyleApplier.Num(slash >= 0 ? s.Substring(0, slash) : s);
+        var b = slash >= 0 ? StyleApplier.Num(s.Substring(slash + 1)) : 1f;
+        return b > 0f ? a / b : float.NaN;
+    }
+
+    /// <summary>
+    /// A percentage width or height under the default `box-sizing: content-box`.
+    /// The cascade grows a PIXEL width by its padding and border (HtmlRenderer) because the layout
+    /// engine is border-box; a percentage could not be grown there, because the containing block
+    /// was not known yet - so `width: 50%` drew four pixels narrower than a browser for every
+    /// bordered box, and the error compounded down a nesting. Resolved here like a mixed calc().
+    /// </summary>
+    private static void ContentBoxPercents(HtmlRenderer.Result built)
+    {
+        var seen = new HashSet<VisualElement>();
+        foreach (var kv in built.NodeOf)
+        {
+            var ve = kv.Key;
+            if (ve.parent == null) continue;
+            var css = built.CssOf(ve);
+            if (css.TryGetValue("box-sizing", out var sizing) && sizing.Trim() == "border-box") continue;
+            var wpct = css.TryGetValue("width", out var wv) ? Percent(wv) : float.NaN;
+            var hpct = css.TryGetValue("height", out var hv) ? Percent(hv) : float.NaN;
+            if (float.IsNaN(wpct) && float.IsNaN(hpct)) continue;
+            // NOT built.LayoutAttached: that set is how the line-height and grid passes claim an
+            // element, and taking it here would silently switch those off for any box sized in %.
+            if (!seen.Add(ve)) continue;
+            var el = ve;
+            void Apply()
+            {
+                if (el.panel == null || el.parent == null) return;
+                var prs = el.parent.resolvedStyle;
+                if (!float.IsNaN(wpct))
+                {
+                    var cw = el.parent.layout.width - prs.paddingLeft - prs.paddingRight - prs.borderLeftWidth - prs.borderRightWidth;
+                    if (!float.IsNaN(cw)) SetPx(el.style, "width", wpct / 100f * cw + ContentExtra(built, el, true));
+                }
+                if (!float.IsNaN(hpct))
+                {
+                    var ch = el.parent.layout.height - prs.paddingTop - prs.paddingBottom - prs.borderTopWidth - prs.borderBottomWidth;
+                    if (!float.IsNaN(ch)) SetPx(el.style, "height", hpct / 100f * ch + ContentExtra(built, el, false));
+                }
+            }
+            ve.parent.RegisterCallback<GeometryChangedEvent>(_ => Apply());
+            built.OnRecascade(ve, Apply);
+        }
+    }
+
+    /// <summary>The bare number of "50%", else NaN.</summary>
+    private static float Percent(string v)
+    {
+        v = v.Trim();
+        return v.EndsWith("%", StringComparison.Ordinal)
+            && float.TryParse(v.Substring(0, v.Length - 1), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var p)
+            ? p : float.NaN;
+    }
+
+    /// <summary>Padding plus border on one axis when the box is content-box, else 0.</summary>
+    internal static float ContentExtra(HtmlRenderer.Result built, VisualElement ve, bool horizontal = true)
+    {
+        var css = built.CssOf(ve);
+        if (css.TryGetValue("box-sizing", out var sizing) && sizing.Trim() == "border-box") return 0f;
+        var rs = ve.resolvedStyle;
+        var extra = horizontal
+            ? rs.paddingLeft + rs.paddingRight + rs.borderLeftWidth + rs.borderRightWidth
+            : rs.paddingTop + rs.paddingBottom + rs.borderTopWidth + rs.borderBottomWidth;
+        return float.IsNaN(extra) ? 0f : extra;
     }
 
     private static void SetPx(IStyle s, string prop, float v)

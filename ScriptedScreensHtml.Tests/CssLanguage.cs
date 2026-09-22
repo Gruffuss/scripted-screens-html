@@ -61,6 +61,11 @@ internal static class CssLanguage
     private static string Scene(string html, out List<string> warnings)
     {
         var built = HtmlRenderer.Build(html, FontLibrary.Default());
+        // The cascade's warnings AND the emitter's. They are kept in different places and only the
+        // cascade's were being read, so every property the EMITTER refuses - `filter: blur()`, a
+        // clip-path it cannot draw, a text-decoration on a wrapping label - was scored as "accepted,
+        // draws the same". That is the worst bucket in this report, and three of its entries were
+        // really loud refusals filed under it.
         warnings = built.Warnings;
         HtmlRenderer.NameDrivenGroups(built);
         var root = built.Root;
@@ -73,6 +78,29 @@ internal static class CssLanguage
         OffThread.Boxes = boxes;
         var size = new Vector2(built.ViewportWidth, built.ViewportWidth);
         panel.Layout(size.x, size.y);
+        // Run the animations. Without this no KeyframeRunner is ever constructed, so every
+        // `animation-*` longhand reads as missing - eight rows - while the code implementing them is
+        // present and correct. The two that "passed" did so because naming an animation wraps the
+        // element in an identity group, which carries no motion at all.
+        foreach (var (element, spec) in built.Animations)
+        {
+            if (!built.AnimationAttached.Add(element)) continue;
+            if (!built.Keyframes.TryGetValue(spec.Name, out var frames)) continue;
+            // An infinite opacity/transform loop is compiled into the scene as expressions rather
+            // than driven, which is the surface's own rule and has to be the probe's too.
+            if (float.IsPositiveInfinity(spec.Iterations) && !spec.Paused
+                && VectorEmitter.Compilable(frames, built.CssOf(element)))
+            {
+                built.TimeAnimations[element] = (spec, 0f);
+                continue;
+            }
+            // Half a second in: past any delay the fixtures use, and inside a one-second duration,
+            // so a longhand that changes timing changes what is drawn.
+            new KeyframeRunner(element, frames, spec, 0f, _ => { }, built.CssOf(element), built.Touch)
+                .Update(0.5f);
+        }
+        panel.Layout(size.x, size.y);
+
         OffThread.Capture(root, built, boxes, new List<VisualElement>());
         OffThread.Active = true;
         try
@@ -80,6 +108,7 @@ internal static class CssLanguage
             var tweens = new Tweens();
             tweens.Diff(root, built, 0f);
             var output = VectorEmitter.Emit(built, root, size.x, size.y, tweens, 0f, null);
+            warnings.AddRange(output.Warnings);
             return new string(output.Chars, 0, output.Length);
         }
         finally { OffThread.Active = false; }

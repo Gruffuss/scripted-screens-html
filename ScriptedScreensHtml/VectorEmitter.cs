@@ -468,10 +468,17 @@ internal static class VectorEmitter
         else filterShadow = css.TryGetValue("filter", out var fcss2) && Filters(ctx, fcss2, out _, out var fs2) ? fs2 : string.Empty;
         // An always-on group at identity must not turn a rectangular clip into a polygon one.
         var clipXform = xform is { IsIdentity: false } ? xform : null;
-        if ((css.TryGetValue("clip-path", out var cpath) || css.TryGetValue("-webkit-clip-path", out cpath)) && ClipPath(ctx, cpath, x, y, w, h, clipXform, css.TryGetValue("clip-rule", out var clipRule) && clipRule.Trim() == "evenodd") is { } clipId)
+        if (css.TryGetValue("clip-path", out var cpath) || css.TryGetValue("-webkit-clip-path", out cpath))
         {
-            ctx.Body.Append(indent).Append("G clip=").Append(clipId).Append(" {\n");
-            groups++;
+            if (ClipPath(ctx, cpath, x, y, w, h, clipXform, css.TryGetValue("clip-rule", out var clipRule) && clipRule.Trim() == "evenodd") is { } clipId)
+            {
+                ctx.Body.Append(indent).Append("G clip=").Append(clipId).Append(" {\n");
+                groups++;
+            }
+            else if (cpath.Trim() is not ("none" or ""))
+                // Failing to read a clip means the element draws UNCLIPPED - everything, not
+                // nothing - so silence here looks like a layout bug rather than a missing feature.
+                Warn(ctx, $"html: clip-path: {cpath.Trim()} is not drawn; the element is not clipped. inset(), rect(), xywh(), circle(), ellipse() and polygon() are.");
         }
         if ((css.TryGetValue("mask-image", out var mcss) || css.TryGetValue("-webkit-mask-image", out mcss) || css.TryGetValue("mask", out mcss)) && MaskDef(ctx, mcss, x, y, w, h, css, rs) is { } maskId)
         {
@@ -3715,7 +3722,22 @@ internal static class VectorEmitter
             }
             else head.Add(raw.Trim());
         }
-        if (stops.Count < 2 || stops.Exists(s => float.IsNaN(s.at))) return name + css.Substring(open); // px stops: not expanded
+        if (stops.Count < 2) return name + css.Substring(open);
+        // CSS fills in the positions a page left out: the first is 0, the last is 100%, and a run
+        // between two known ones is spread evenly. Bailing out on any of them instead drew ONE
+        // gradient across the whole box - a repeating gradient that silently did not repeat.
+        if (float.IsNaN(stops[0].at)) stops[0] = (0f, stops[0].colour);
+        if (float.IsNaN(stops[stops.Count - 1].at)) stops[stops.Count - 1] = (1f, stops[stops.Count - 1].colour);
+        for (var i = 1; i < stops.Count - 1; i++)
+        {
+            if (!float.IsNaN(stops[i].at)) continue;
+            var next = i;
+            while (next < stops.Count && float.IsNaN(stops[next].at)) next++;
+            if (next >= stops.Count) break;
+            var step = (stops[next].at - stops[i - 1].at) / (next - i + 1);
+            for (var k = i; k < next; k++) stops[k] = (stops[i - 1].at + step * (k - i + 1), stops[k].colour);
+            i = next - 1;
+        }
         var period = stops[stops.Count - 1].at - stops[0].at;
         if (period <= 0.0001f) return name + css.Substring(open);
         var outStops = new List<string>();

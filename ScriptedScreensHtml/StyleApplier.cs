@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -30,7 +30,10 @@ internal static class StyleApplier
     private static readonly HashSet<string> Reported = new(StringComparer.Ordinal);
 
     /// <summary>Starts a fresh page, so its warnings are its own.</summary>
-    internal static void ForgetReported() => Reported.Clear();
+    /// <summary>Per page, from HtmlRenderer.Build: everything the LAST page told this class.
+    /// color-scheme belongs here - it is set by a declaration and was never cleared, so one page's
+    /// `color-scheme: dark` picked the dark half of every later page's light-dark().</summary>
+    internal static void ForgetReported() { Reported.Clear(); ColorSchemeDark = false; }
 
     /// <summary>
     /// A property the cascade no longer sets (its rule stopped matching) goes back to its initial
@@ -231,6 +234,16 @@ internal static class StyleApplier
 
             // Colour and background
             case "color": if (TryColor(v, out var fg)) s.color = fg; else Unknown(d, warn); break;
+            // -webkit-text-fill-color wins over `color` for the glyphs themselves, and every
+            // gradient-text recipe on the web sets it. There is no separate fill here, so it IS
+            // the colour; `transparent` would hide the text, which is what the recipe intends.
+            case "-webkit-text-fill-color": if (TryColor(v, out var tfc)) s.color = tfc; break;
+            // content-visibility: auto is a rendering hint a console does not need, but `hidden`
+            // is a visible instruction - the subtree is not painted - and there is nothing here
+            // that skips a subtree, so saying nothing would draw it in full.
+            case "content-visibility":
+                if (v == "hidden") Unknown(d, warn);
+                break;
             case "background":
             case "background-color":
             case "background-image":
@@ -346,7 +359,8 @@ internal static class StyleApplier
                 s.unityTextAlign = v switch { "center" => TextAnchor.MiddleCenter, "right" or "end" => TextAnchor.MiddleRight, _ => TextAnchor.MiddleLeft };
                 break;
             case "white-space": s.whiteSpace = v == "nowrap" || v == "pre" ? WhiteSpace.NoWrap : WhiteSpace.Normal; break;
-            case "text-wrap-mode": s.whiteSpace = v == "nowrap" ? WhiteSpace.NoWrap : WhiteSpace.Normal; break;
+            // text-wrap is the same wrapping switch under its modern name (balance/pretty still wrap)
+            case "text-wrap": case "text-wrap-mode": s.whiteSpace = v == "nowrap" ? WhiteSpace.NoWrap : WhiteSpace.Normal; break;
             case "white-space-collapse": if (v.StartsWith("preserve", StringComparison.Ordinal)) s.whiteSpace = WhiteSpace.NoWrap; break;
             case "color-scheme": ColorSchemeDark = v.Contains("dark") && !v.Contains("light"); break;
             case "initial-letter":
@@ -359,7 +373,10 @@ internal static class StyleApplier
             case "letter-spacing": s.letterSpacing = Len(v); break;
             // drawn by the emitter; the layout measures the transformed text
             case "text-transform": s.textTransform = v.Trim().ToLowerInvariant(); break;
-            case "word-spacing": s.wordSpacing = Len(v); break;
+            // The LAYOUT takes it (the box is measured with the spacing) but the scene's label has
+            // no word spacing, only cspace - so the box is wide and the text is not. Applied and
+            // reported, because half of it does happen.
+            case "word-spacing": s.wordSpacing = Len(v); if (v != "normal" && Num(v) != 0f) Unknown(d, warn); break;
             case "text-overflow": s.textOverflow = v == "ellipsis" ? TextOverflow.Ellipsis : TextOverflow.Clip; break;
             case "text-shadow":
             {
@@ -615,6 +632,18 @@ internal static class StyleApplier
         ["marker-mid"] = "line markers are not drawn",
         ["marker-end"] = "line markers are not drawn",
         ["zoom"] = "set the design size with <meta name=\"viewport\" content=\"width=N\">",
+        // Each of these was parsed, put in the record, and read by nothing - the worst outcome.
+        ["text-align-last"] = "a label carries one alignment; only text-align is drawn",
+        ["font-variant"] = "small caps are not drawn; use text-transform: uppercase with a smaller size",
+        ["font-variant-caps"] = "small caps are not drawn; use text-transform: uppercase with a smaller size",
+        ["column-fill"] = "columns are filled in order, never balanced",
+        ["border-image-slice"] = "a border image is stretched over the border box; it is not sliced",
+        ["border-image-repeat"] = "a border image is stretched over the border box; it is not tiled",
+        ["border-image-outset"] = "a border image stays inside the border box",
+        ["mask-position"] = "a mask is drawn over the whole box",
+        ["mask-repeat"] = "a mask is drawn over the whole box, never tiled",
+        ["content-visibility"] = "nothing here skips a subtree, so a hidden one is still drawn",
+        ["word-spacing"] = "the label has no word spacing, only letter-spacing; the box is measured with it and the text drawn without",
     };
 
     private static void Unknown(CssDeclaration d, Action<string>? warn)
@@ -667,8 +696,16 @@ internal static class StyleApplier
         else if (v.EndsWith("%".AsSpan(), StringComparison.Ordinal)) v = v.Slice(0, v.Length - 1);
         else if (Ends(v, "rem")) { v = v.Slice(0, v.Length - 3); scale = RootFontSize; }
         else if (Ends(v, "em")) { v = v.Slice(0, v.Length - 2); scale = EmSize; }
+        // The small/large/dynamic viewport units, before vw/vh: "10svh" ends with "vh", so the
+        // plain branch took it and left "10s", which parses as 0. A console's viewport never
+        // grows or shrinks, so all three are the same as vw/vh.
+        else if (Ends(v, "svw") || Ends(v, "lvw") || Ends(v, "dvw")) { v = v.Slice(0, v.Length - 3); scale = ViewportW / 100f; }
+        else if (Ends(v, "svh") || Ends(v, "lvh") || Ends(v, "dvh")) { v = v.Slice(0, v.Length - 3); scale = ViewportH / 100f; }
         else if (Ends(v, "vw")) { v = v.Slice(0, v.Length - 2); scale = ViewportW / 100f; }
         else if (Ends(v, "vh")) { v = v.Slice(0, v.Length - 2); scale = ViewportH / 100f; }
+        // lh / rlh: the line box of this element / of the root. The emitter's own "normal" is 1.2.
+        else if (Ends(v, "rlh")) { v = v.Slice(0, v.Length - 3); scale = RootFontSize * 1.2f; }
+        else if (Ends(v, "lh")) { v = v.Slice(0, v.Length - 2); scale = EmSize * 1.2f; }
         else if (Ends(v, "vmin")) { v = v.Slice(0, v.Length - 4); scale = Mathf.Min(ViewportW, ViewportH) / 100f; }
         else if (Ends(v, "vmax")) { v = v.Slice(0, v.Length - 4); scale = Mathf.Max(ViewportW, ViewportH) / 100f; }
         else if (Ends(v, "pt")) { v = v.Slice(0, v.Length - 2); scale = 4f / 3f; }
@@ -909,6 +946,7 @@ internal static class StyleApplier
         v = v.Trim();
         float deg;
         if (Ends(v, "deg")) deg = Num(v.Slice(0, v.Length - 3));
+        else if (Ends(v, "grad")) deg = Num(v.Slice(0, v.Length - 4)) * 0.9f;   // before rad: "50grad" ends with "rad" too
         else if (Ends(v, "rad")) deg = Num(v.Slice(0, v.Length - 3)) * Mathf.Rad2Deg;
         else if (Ends(v, "turn")) deg = Num(v.Slice(0, v.Length - 4)) * 360f;
         else deg = Num(v);
@@ -1066,22 +1104,48 @@ internal static class StyleApplier
             var rest = _v.Slice(_i);
             var open = rest.IndexOf('(');
             if (open < 0) return false;
-            var close = rest.Slice(open).IndexOf(')');
+            // The MATCHING ')': the first one closes calc( in rotate(calc(1deg * 90)), which took
+            // the argument one character short and turned 90 into 9 - a wrong number, silently.
+            var close = Match(rest, open);
             if (close < 0) return false;
             Name = rest.Slice(0, open).Trim();
-            _args = rest.Slice(open + 1, close - 1);
-            _i += open + close + 1;
+            _args = rest.Slice(open + 1, close - open - 1);
+            _i += close + 1;
             Count = 1;
-            for (var k = 0; k < _args.Length; k++) if (_args[k] == ',') Count++;
+            var depth = 0;
+            for (var k = 0; k < _args.Length; k++)
+            {
+                if (_args[k] == '(') depth++;
+                else if (_args[k] == ')') depth--;
+                else if (_args[k] == ',' && depth == 0) Count++;
+            }
             return true;
+        }
+
+        /// <summary>The index of the ')' matching the '(' at <paramref name="open"/>, or -1.</summary>
+        internal static int Match(ReadOnlySpan<char> s, int open)
+        {
+            var depth = 0;
+            for (var k = open; k < s.Length; k++)
+            {
+                if (s[k] == '(') depth++;
+                else if (s[k] == ')' && --depth == 0) return k;
+            }
+            return -1;
         }
 
         public ReadOnlySpan<char> Arg(int n)
         {
             var start = 0;
+            var depth = 0;
             for (var k = 0; k <= _args.Length; k++)
             {
-                if (k < _args.Length && _args[k] != ',') continue;
+                if (k < _args.Length)
+                {
+                    if (_args[k] == '(') depth++;
+                    else if (_args[k] == ')') depth--;
+                    if (_args[k] != ',' || depth != 0) continue;
+                }
                 if (n == 0) return _args.Slice(start, k - start).Trim();
                 n--;
                 start = k + 1;
@@ -1098,10 +1162,19 @@ internal static class StyleApplier
             var open = v.IndexOf('(', i);
             if (open < 0) yield break;
             var name = v.Substring(i, open - i).Trim().ToLowerInvariant();
-            var close = v.IndexOf(')', open);
+            // the MATCHING ')' and top-level commas only: drop-shadow(0 2px 4px rgb(255,0,0))
+            var close = -1;
+            var depth = 0;
+            for (var k = open; k < v.Length; k++)
+            {
+                if (v[k] == '(') depth++;
+                else if (v[k] == ')' && --depth == 0) { close = k; break; }
+            }
             if (close < 0) yield break;
-            var args = v.Substring(open + 1, close - open - 1).Split(',');
-            for (var k = 0; k < args.Length; k++) args[k] = args[k].Trim();
+            var list = CssParser.SplitTopLevel(v.Substring(open + 1, close - open - 1), ',');
+            var args = new string[Math.Max(1, list.Count)];
+            args[0] = string.Empty;
+            for (var k = 0; k < list.Count; k++) args[k] = list[k].Trim();
             yield return (name, args);
             i = close + 1;
         }
@@ -1420,6 +1493,7 @@ internal static class ColorSpaces
         var open = lower.IndexOf('(');
         if (open <= 0 || !lower.EndsWith(")", StringComparison.Ordinal)) return false;
         var fn = lower.Substring(0, open).Trim();
+        if (fn == "color") return TryColorFunction(v.Substring(open + 1, v.Length - open - 2).Trim(), out color);
         if (fn is not ("rgb" or "rgba" or "hsl" or "hsla" or "hwb" or "lab" or "lch" or "oklab" or "oklch")) return false;
         var inner = v.Substring(open + 1, v.Length - open - 2).Trim();
         var relative = inner.StartsWith("from ", StringComparison.OrdinalIgnoreCase);
@@ -1472,6 +1546,45 @@ internal static class ColorSpaces
             alpha = at.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(at) / 100f : StyleApplier.Num(at);
         }
         color.a = Mathf.Clamp01(alpha);
+        color.r = Mathf.Clamp01(color.r); color.g = Mathf.Clamp01(color.g); color.b = Mathf.Clamp01(color.b);
+        return true;
+    }
+
+    /// <summary>
+    /// color(space c0 c1 c2 [/ alpha]). The wide-gamut RGB spaces are taken as sRGB: a console's
+    /// panel is sRGB, so a browser would clamp them to very nearly these numbers anyway. xyz goes
+    /// through the same matrix lab() uses.
+    /// </summary>
+    private static bool TryColorFunction(string inner, out Color color)
+    {
+        color = Color.white;
+        var tokens = Tokens(inner);
+        if (tokens.Count < 4) return false;
+        var space = tokens[0].ToLowerInvariant();
+        float N(int i)
+        {
+            var t = tokens[i];
+            return t == "none" ? 0f : t.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(t) / 100f : StyleApplier.Num(t);
+        }
+        float c0 = N(1), c1 = N(2), c2 = N(3);
+        switch (space)
+        {
+            case "srgb" or "display-p3" or "a98-rgb" or "prophoto-rgb" or "rec2020":
+                color = new Color(c0, c1, c2); break;
+            case "srgb-linear":
+                color = new Color(ToSrgb(c0), ToSrgb(c1), ToSrgb(c2)); break;
+            case "xyz" or "xyz-d65" or "xyz-d50":
+                color = new Color(
+                    ToSrgb(3.2404542f * c0 - 1.5371385f * c1 - 0.4985314f * c2),
+                    ToSrgb(-0.9692660f * c0 + 1.8760108f * c1 + 0.0415560f * c2),
+                    ToSrgb(0.0556434f * c0 - 0.2040259f * c1 + 1.0572252f * c2));
+                break;
+            default: return false;
+        }
+        var slash = tokens.IndexOf("/");
+        color.a = slash >= 0 && slash + 1 < tokens.Count
+            ? Mathf.Clamp01(tokens[slash + 1].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(tokens[slash + 1]) / 100f : StyleApplier.Num(tokens[slash + 1]))
+            : 1f;
         color.r = Mathf.Clamp01(color.r); color.g = Mathf.Clamp01(color.g); color.b = Mathf.Clamp01(color.b);
         return true;
     }
