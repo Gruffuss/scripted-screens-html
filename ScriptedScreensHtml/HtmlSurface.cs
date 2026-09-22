@@ -39,6 +39,11 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal object? Cartridge;
     /// <summary>Set once this page runs compiled; while it is set the page does no per-frame work.</summary>
     private CompiledRun? _compiled;
+    /// <summary>Where a data key's value lands in the scene, for a page with no script to compile.</summary>
+    private DataSlots? _dataSlots;
+    private List<KeyValuePair<string, SS.UiValue>>? _dataToProve;
+    /// <summary>Data ticks that skipped layout, translate and emit entirely (diagnostics).</summary>
+    private int _dataFastTicks;
     internal object? Visor;
     internal string ElementId = string.Empty;
     /// <summary>The data element's id: the vector mod needs a host of its own for a data payload.</summary>
@@ -985,7 +990,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
                 $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, {(page._hiddenNow ? "hidden, " : string.Empty)}last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
                 + $"(layout {page._lastLayoutMs:0.00} + copy {page._lastCopyMs:0.00}, translate {page._lastTranslateMs:0.0}; page thread {page._workerMsTotal / ReportIntervalSeconds:0.0} ms/s; game thread waited {page._heldMs:0.00} ms), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
-                + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}, gate: {page._gateSkips} skipped, {page.GateWhy()}"
+                + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}, gate: {page._gateSkips} skipped, data-direct: {page._dataFastTicks}, {page.GateWhy()}"
                 + (_perThreadAlloc ? $", allocated per emit: step {page._allocStep / 1024f / Mathf.Max(1, emits):0} KB, layout {page._allocLayout / 1024f / Mathf.Max(1, emits):0} KB, copy {page._allocCopy / 1024f / Mathf.Max(1, emits):0} KB, translate {page._allocTranslate / 1024f / Mathf.Max(1, emits):0} KB, send {page._allocSend / 1024f / Mathf.Max(1, emits):0} KB (of translate: emit {page._allocEmit / 1024f / Mathf.Max(1, emits):0} KB, split {page._allocSplit / 1024f / Mathf.Max(1, emits):0} KB)"
                     // Mono has no per-thread counter, so there is nothing to divide between phases.
                     // Printing the heap delta per phase looked like attribution and was noise.
@@ -1155,6 +1160,16 @@ internal sealed class HtmlSurface : MonoBehaviour
             {
                 _compileTried = _built;
                 _compiled = CompiledRun.Start(PageKey, holder, _built!, _panel!, layout, _slotScratch);
+            }
+            // The emitter has just said what every slot really is, which is the only honest check
+            // available for the data fast path: what it WOULD have written, against what was drawn.
+            if (_dataToProve is { } proving && _dataSlots != null)
+            {
+                _dataToProve = null;
+                _dataSlots.Prove(proving, _slotScratch, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m));
+                if (_dataSlots.Proven && HtmlConfig.Diagnostics)
+                    ScriptedScreensHtmlPlugin.Log?.LogInfo(
+                        $"html \"{ElementId}\": data writes {_dataSlots.Count} slot(s) directly - no layout, translate or emit per tick");
             }
             if (template == _lastTemplate)
             {
@@ -2345,6 +2360,31 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     private void BindById(List<KeyValuePair<string, SS.UiValue>> entries, bool quiet = false)
     {
+        // A page with no script never compiles - there is nothing to translate - so it stayed on the
+        // full path for ever: layout, translate, emit and split on every data tick, twice a second.
+        // When every key in the payload has a proven slot, the value goes straight there and none of
+        // that runs. Proven is the operative word: see DataSlots.Prove.
+        if (_script == null && _dataSlots is { Proven: true } fast && fast.Apply(entries) is { } direct)
+        {
+            SendCompiled(direct);
+            foreach (var kv in direct)
+                _sentValues[kv.Key] = kv.Value is string t ? new SceneSlots.Value(t) : new SceneSlots.Value((float)(double)kv.Value);
+            _dataFastTicks++;
+            return;
+        }
+        if (_script == null && _dataSlots == null && entries.Count > 0 && _built != null)
+        {
+            _dataSlots = DataSlots.Build(
+                entries,
+                id => PageCompiler.BoxFor(_built, id, _slotScratch.Keys),
+                id => _byId.TryGetValue(id, out var ve) && _built.CssOf(ve).ContainsKey("transition"),
+                id => _shapes.ContainsKey(id),
+                _slotScratch.Keys);
+            if (_dataSlots.Problem == null) _dataToProve = new List<KeyValuePair<string, SS.UiValue>>(entries);
+            else if (HtmlConfig.Diagnostics)
+                ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{ElementId}\": data stays on the full path - {_dataSlots.Problem}");
+        }
+
         _dirty = true;
         foreach (var entry in entries)
         {

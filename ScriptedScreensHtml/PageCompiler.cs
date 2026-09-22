@@ -80,6 +80,16 @@ internal static class PageCompiler
         }
     }
 
+    /// <summary>
+    /// One element's box, for a caller that has no compile in flight - the data path, which needs the
+    /// same "where does this sit" answer without translating a script.
+    /// </summary>
+    internal static DomSlots.Box? BoxFor(HtmlRenderer.Result built, string id, ICollection<string> available)
+    {
+        var set = available as HashSet<string> ?? new HashSet<string>(available, StringComparer.Ordinal);
+        return BoxOf(id, built, Absolute(built), set);
+    }
+
     // ---- where things are -----------------------------------------------------------------------
 
     /// <summary>
