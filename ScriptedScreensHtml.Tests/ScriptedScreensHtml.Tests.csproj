@@ -21,6 +21,7 @@
         <Compile Include="..\ScriptedScreensHtml\DomSlots.cs" />
         <Compile Include="..\ScriptedScreensHtml\CompiledPage.cs" />
         <Compile Include="..\ScriptedScreensHtml\Motion.cs" />
+        <Compile Include="..\ScriptedScreensHtml\Markup.cs" />
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />
         <Compile Include="Probe2.cs" />
@@ -32,6 +33,7 @@
         <Compile Include="Corpus.cs" />
         <Compile Include="ClassTests.cs" />
         <Compile Include="SyntaxTests.cs" />
+        <Compile Include="MarkupProbe.cs" />
         <Compile Include="JsToLuaTests.cs" />
         <Compile Include="CompiledPageTests.cs" />
     </ItemGroup>
