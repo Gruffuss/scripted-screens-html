@@ -22,7 +22,8 @@ internal readonly struct CssDeclaration
 /// <summary>
 /// One compound selector: optional tag plus any number of #id and .class parts. A selector
 /// with a descendant combinator is a chain of these, matched right to left up the ancestors.
-/// Pseudo-classes and attribute selectors are not supported; a rule using them is skipped.
+/// Pseudo-classes and attribute tests are extra predicates on the compound; a name may carry
+/// escaped punctuation (`.dark\:bg-x`), which is unescaped only once it is taken as a name.
 /// </summary>
 internal sealed class CssCompound
 {
@@ -411,6 +412,7 @@ internal static class CssParser
             if (i < text.Length)
             {
                 var c = text[i];
+                if (c == '\\') { i++; continue; }
                 if (c == '(' || c == '[') depth++;
                 else if (c == ')' || c == ']') depth--;
                 if (c != sep || depth > 0) continue;
@@ -419,6 +421,46 @@ internal static class CssParser
             start = i + 1;
         }
         return parts;
+    }
+
+    // ---- CSS escapes ----
+    // Tailwind spells a class named `dark:bg-x` as `.dark\:bg-x`, and one named `[&>tr]:border`
+    // as `.\[\&\>tr\]\:border`. So a selector's punctuation is only punctuation when unescaped,
+    // and every scan below has to step over `\x` as one unit. Unescaping early is not an option:
+    // it would turn those names straight back into a pseudo-class and a child combinator.
+
+    /// <summary>Index of the first unescaped <paramref name="want"/>, or -1.</summary>
+    private static int IndexOfBare(string s, char want)
+    {
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (s[i] == '\\') { i++; continue; }
+            if (s[i] == want) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>`\:` and `\[` back to `:` and `[`; `\41 ` and `\1F600` to their character.</summary>
+    private static string Unescape(string s)
+    {
+        if (s.IndexOf('\\') < 0) return s;
+        var sb = new StringBuilder(s.Length);
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (s[i] != '\\' || i + 1 >= s.Length) { sb.Append(s[i]); continue; }
+            var start = ++i;
+            while (i < s.Length && i - start < 6 && Uri.IsHexDigit(s[i])) i++;
+            if (i > start && int.TryParse(s.Substring(start, i - start), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var cp) && cp > 0 && cp <= 0x10FFFF)
+            {
+                sb.Append(char.ConvertFromUtf32(cp));
+                if (i < s.Length && s[i] == ' ') i++; // the space that ends a hex escape is not part of the name
+                i--;
+                continue;
+            }
+            i = start;
+            sb.Append(s[i]);
+        }
+        return sb.ToString();
     }
 
     /// <summary>
@@ -801,27 +843,25 @@ internal static class CssParser
             childNext = false;
             siblingNext = false;
             generalNext = false;
+            // Pseudos come out first, arguments and all: `:not([hidden]).x` has a bracket that
+            // belongs to the :not(), and a tag/class can follow a pseudo (`:where(a,b).x`).
+            SplitCompound(part, out part, out var pseudoText);
+            if (pseudoText.Length > 0 && !ParsePseudos(pseudoText, compound, warn))
+            {
+                warn?.Invoke($"css: selector \"{text}\" skipped: pseudo not supported");
+                return null;
+            }
             // [attr], [attr=v], [attr~=v], [attr|=v], [attr^=v], [attr$=v], [attr*=v]
             int open;
-            while ((open = part.IndexOf('[')) >= 0)
+            while ((open = IndexOfBare(part, '[')) >= 0)
             {
-                var closeAt = part.IndexOf(']', open);
+                var closeAt = IndexOfBare(part.Substring(open + 1), ']');
                 if (closeAt < 0) { warn?.Invoke($"css: selector \"{text}\" skipped: unclosed ["); return null; }
+                closeAt += open + 1;
                 if (!AttributeTest(part.Substring(open + 1, closeAt - open - 1), compound)) { warn?.Invoke($"css: selector \"{text}\" skipped: bad attribute test"); return null; }
                 part = part.Substring(0, open) + part.Substring(closeAt + 1);
             }
             if (part.Length == 0) part = "*";
-            var pseudoAt = PseudoStart(part);
-            if (pseudoAt >= 0)
-            {
-                if (!ParsePseudos(part.Substring(pseudoAt), compound, warn))
-                {
-                    warn?.Invoke($"css: selector \"{text}\" skipped: pseudo not supported");
-                    return null;
-                }
-                part = part.Substring(0, pseudoAt);
-                if (part.Length == 0) part = "*";
-            }
             var i = 0;
             while (i < part.Length)
             {
@@ -830,8 +870,8 @@ internal static class CssParser
                     i++;
                 var start = i;
                 while (i < part.Length && part[i] != '.' && part[i] != '#')
-                    i++;
-                var name = part.Substring(start, i - start);
+                    i += part[i] == '\\' ? 2 : 1;
+                var name = Unescape(part.Substring(start, Math.Min(i, part.Length) - start));
                 if (name.Length == 0)
                     continue;
                 if (kind == '.')
@@ -853,8 +893,22 @@ internal static class CssParser
         var sb = new System.Text.StringBuilder();
         var depth = 0;
         void Flush() { if (sb.Length > 0) { parts.Add(sb.ToString()); sb.Clear(); } }
-        foreach (var ch in text)
+        for (var i = 0; i < text.Length; i++)
         {
+            var ch = text[i];
+            // `.\>x` is a class called ">x", not a child combinator. A hex escape takes its
+            // terminating space with it: Tailwind spells a class named `2xl:flex` `.\32 xl\:flex`,
+            // and splitting there would silently make it a descendant selector matching nothing.
+            if (ch == '\\')
+            {
+                sb.Append(ch);
+                if (i + 1 >= text.Length) continue;
+                if (!Uri.IsHexDigit(text[i + 1])) { sb.Append(text[++i]); continue; }
+                var hex = 0;
+                while (i + 1 < text.Length && hex < 6 && Uri.IsHexDigit(text[i + 1])) { sb.Append(text[++i]); hex++; }
+                if (i + 1 < text.Length && text[i + 1] == ' ') sb.Append(text[++i]);
+                continue;
+            }
             if (ch == '[' || ch == '(') depth++;
             else if (ch == ']' || ch == ')') depth--;
             if (depth == 0 && (ch == '>' || ch == '+' || ch == '~')) { Flush(); parts.Add(ch.ToString()); continue; }
@@ -905,17 +959,38 @@ internal static class CssParser
         return true;
     }
 
-    /// <summary>Index of the first ':' outside parentheses, or -1.</summary>
-    private static int PseudoStart(string part)
+    /// <summary>
+    /// A compound split into its tag/class/id text and its pseudos, each pseudo taken with its
+    /// whole parenthesised argument. Pseudos are not necessarily last (`:where(a,b).x`), and an
+    /// argument may hold brackets and colons of its own that are none of the caller's business.
+    /// </summary>
+    private static void SplitCompound(string part, out string bare, out string pseudos)
     {
-        var depth = 0;
+        var b = new StringBuilder(part.Length);
+        var p = new StringBuilder();
         for (var i = 0; i < part.Length; i++)
         {
-            if (part[i] == '(') depth++;
-            else if (part[i] == ')') depth--;
-            else if (part[i] == ':' && depth == 0) return i;
+            var c = part[i];
+            if (c == '\\') { b.Append(c); if (i + 1 < part.Length) b.Append(part[++i]); continue; }
+            if (c != ':') { b.Append(c); continue; }
+            var start = i++;
+            if (i < part.Length && part[i] == ':') i++;
+            while (i < part.Length && (char.IsLetterOrDigit(part[i]) || part[i] == '-' || part[i] == '_')) i++;
+            if (i < part.Length && part[i] == '(')
+            {
+                var depth = 0;
+                for (; i < part.Length; i++)
+                {
+                    if (part[i] == '\\') { i++; continue; }
+                    if (part[i] == '(') depth++;
+                    else if (part[i] == ')' && --depth == 0) { i++; break; }
+                }
+            }
+            p.Append(part, start, Math.Min(i, part.Length) - start);
+            i--; // the character that ended the pseudo is the next compound's, or the next pseudo's ':'
         }
-        return -1;
+        bare = b.ToString();
+        pseudos = p.ToString();
     }
 
     /// <summary>
@@ -955,7 +1030,12 @@ internal static class CssParser
                 // marker span), ::placeholder (the field's placeholder, colour only); other
                 // pseudo-elements skip the rule.
                 if (name is "-webkit-input-placeholder" or "-moz-placeholder" or "-ms-input-placeholder") name = "placeholder";
-                if (name is not ("before" or "after" or "marker" or "placeholder" or "first-letter" or "first-line" or "backdrop" or "details-content" or "-webkit-scrollbar" or "-webkit-scrollbar-thumb" or "-webkit-scrollbar-track")) return false;
+                if (name is not ("before" or "after" or "marker" or "placeholder" or "first-letter" or "first-line" or "backdrop" or "details-content" or "-webkit-scrollbar" or "-webkit-scrollbar-thumb" or "-webkit-scrollbar-track"))
+                {
+                    if (!NeverMatches(name, warn)) return false;
+                    compound.Pseudos.Add(_ => false);
+                    continue;
+                }
                 compound.PseudoElement = name;
                 continue;
             }
@@ -1136,9 +1216,32 @@ internal static class CssParser
                     compound.Pseudos.Add(_ => false);
                     break;
                 default:
-                    return false;
+                    if (!NeverMatches(name, warn)) return false;
+                    compound.Pseudos.Add(_ => false);
+                    break;
             }
         }
+        return true;
+    }
+
+    private static readonly HashSet<string> ReportedPseudos = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// A pseudo that names something this page has none of: a text selection, a shadow tree, or
+    /// a browser's own widget internals. Keeping the rule and matching nothing is what a browser
+    /// without that vendor's parts does, and it beats dropping the rule - dropping it loses the
+    /// other selectors in the same list. Reported once so the gap is on the record either way.
+    /// </summary>
+    private static bool NeverMatches(string name, Action<string>? warn)
+    {
+        if (!name.StartsWith("-", StringComparison.Ordinal)
+            && name is not ("selection" or "host" or "host-context" or "slotted" or "part" or "cue" or "cue-region"
+                or "file-selector-button" or "spelling-error" or "grammar-error" or "highlight" or "target-text"
+                or "view-transition" or "view-transition-group" or "view-transition-image-pair"
+                or "view-transition-old" or "view-transition-new" or "picker" or "picker-icon" or "checkmark"))
+            return false;
+        if (ReportedPseudos.Add(name))
+            warn?.Invoke($"css: \"{name}\" matches nothing here: no text selection, shadow tree or browser widget internals");
         return true;
     }
 

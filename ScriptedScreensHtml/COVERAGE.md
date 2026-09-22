@@ -127,9 +127,17 @@ Each phase ends with the sweep numbers, not with a description.
    holes with the existing slot machinery. A variable-length list becomes a value (emit at the
    maximum, drive each row's opacity) rather than a separate scene variant.
 
-   This is worth its own phase because of what it costs today: **one `innerHTML` assignment measures
-   2.26 MB** (parse, cascade, tree) on the Atmo page, and the cheaper morph path is still 54 KB. At
-   that page's 2.4 Hz that is ~600 KB/s per console before anything is drawn.
+   **Measured, and the first reading of it was wrong.** A full `innerHTML` parse costs 2.26 MB on the
+   Atmo page, but that happens ONCE - the count stays at exactly 1 over 300 frames and over 900, so
+   it is the cold first call. Steady state is an in-place morph at ~47 KB. The honest per-console
+   arithmetic on .NET is ~118 KB/s of morph plus ~176 KB/s of per-frame interpreter, so ~4.4 MB/s
+   across fifteen consoles - against 41.7 measured in game. Even with Mono's 2-3x that leaves most
+   of it somewhere the bench cannot see.
+
+   So the reason to compile these pages is NOT the parse cost. It is that a compiled page stops
+   dirtying its scene every frame, which takes the renderer from rebuilding at 60 Hz to rebuilding
+   at the page's own 2.4 Hz. That is ~25x on the term that actually dominates, and it is the same
+   conclusion phase 5 reaches from the other direction.
 
 ### Phase 4 — CSS
 

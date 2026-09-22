@@ -21,10 +21,12 @@ internal static class CorpusCss
 {
     internal static void Run(string[] args)
     {
-        var roots = args.Length > 1 ? args.Skip(1).ToArray() : Defaults();
+        var dirs = args.Skip(1).Where(a => !a.StartsWith("--", StringComparison.Ordinal)).ToArray();
+        var roots = dirs.Length > 0 ? dirs : Defaults();
         var byWarning = new Dictionary<string, (int Pages, int Hits)>(StringComparer.Ordinal);
         var pages = 0;
         var failed = 0;
+        var raw = new Dictionary<string, int>(StringComparer.Ordinal);
 
         var face = FontLibrary.Default();
         ResolvedStyle.DefaultFace = face;
@@ -52,6 +54,7 @@ internal static class CorpusCss
                     var here = new HashSet<string>(StringComparer.Ordinal);
                     foreach (var w in built.Warnings)
                     {
+                        raw.TryGetValue(w, out var n0); raw[w] = n0 + 1;
                         var kind = Kind(w);
                         byWarning.TryGetValue(kind, out var had);
                         byWarning[kind] = (had.Pages + (here.Add(kind) ? 1 : 0), had.Hits + 1);
@@ -67,6 +70,11 @@ internal static class CorpusCss
             }
         }
 
+        if (Array.IndexOf(args, "--raw") >= 0)
+        {
+            foreach (var kv in raw.OrderByDescending(k => k.Value)) Console.WriteLine($"{kv.Value,5}  {kv.Key}");
+            return;
+        }
         Console.WriteLine($"{pages} pages laid out, {failed} threw\n");
         Console.WriteLine($"{"unsupported",-58} {"pages",5} {"total",6}");
         foreach (var kv in byWarning.OrderByDescending(k => k.Value.Pages).ThenByDescending(k => k.Value.Hits))

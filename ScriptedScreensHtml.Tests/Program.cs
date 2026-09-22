@@ -220,7 +220,44 @@ void TestBatchG()
     var bd = new HtmlNode { Tag = "span", Parent = HtmlParser.Parse("<dialog></dialog>").Children[0] }; bd.Attributes["data-pseudo"] = "backdrop";
     Check(CssParser.ParseSelector("dialog::backdrop", null)!.Matches(bd), "::backdrop is a pseudo-element");
     Check(warnings.Count == 0, $"no warnings for the G sheet (got {string.Join("; ", warnings)})");
+    TestEscapedSelectors();
     TestBuildRows();
+}
+
+// Tailwind and the design tools write a class named `dark:bg-x` as `.dark\:bg-x`, so a selector's
+// punctuation only counts when unescaped. 763 of the corpus's 823 selector warnings were this.
+void TestEscapedSelectors()
+{
+    var warnings = new List<string>();
+    var doc = HtmlParser.Parse("<div class='dark'><table class='[&>tr]:border-b'><tr class='a/b'><td>x</td></tr></table></div>");
+    var div = doc.Children[0];
+    var table = div.Children[0];
+    var tr = table.Children[0];
+
+    Check(CssParser.ParseSelector(@".\[\&\>tr\]\:border-b", warnings.Add)!.Matches(table), "an escaped class is one name, punctuation and all");
+    Check(CssParser.ParseSelector(@".\[\&\>tr\]\:border-b>tr", warnings.Add)!.Matches(tr), "the unescaped > after it is still a child combinator");
+    Check(CssParser.ParseSelector(@".dark .a\/b", warnings.Add)!.Matches(tr), @"\/ in a class name");
+    Check(!CssParser.ParseSelector(@".dark\:bg-x", warnings.Add)!.Matches(div), @"\: is part of the name, not a pseudo-class");
+    Check(CssParser.ParseSelector(@".\64 ark", warnings.Add)!.Matches(div), "a hex escape and its terminating space");
+
+    // `:not([x])` had its bracket hoisted out of the pseudo before the pseudo was read, which
+    // left `:not()` - an empty argument, which drops the rule - and applied [x] to the compound.
+    var sel = CssParser.ParseSelector("div:not([hidden]):not([aria-busy])", warnings.Add);
+    Check(sel != null && sel.Matches(div), "an attribute test inside :not() stays inside it");
+    div.Attributes["hidden"] = "";
+    Check(sel != null && !sel.Matches(div), ":not([hidden]) stops matching once the attribute is there");
+    // A pseudo is not always last in its compound.
+    Check(CssParser.ParseSelector(":where(div,span).dark", warnings.Add)!.Matches(div), "a class after a functional pseudo");
+    Check(CssParser.ParseSelector(":root:root", warnings.Add) != null, "two bare pseudos in a row are two pseudos, not a pseudo-element");
+    Check(warnings.Count == 0, $"no warnings for escaped selectors (got {string.Join("; ", warnings)})");
+
+    // A browser without that vendor's widget parts keeps the rule and matches nothing; dropping it
+    // would take the other selectors in the same list with it.
+    var never = new List<string>();
+    var rules = CssParser.ParseStylesheet("::selection, .keep { color: red } .s::-webkit-slider-thumb { color: red }", never.Add, new Dictionary<string, CssKeyframes>());
+    Check(rules.Count == 2 && rules[0].Selectors.Count == 2, "::selection parses instead of dropping the rule");
+    Check(!rules[0].Selectors[0].Matches(div) && rules[0].Selectors[1].Matches(HtmlParser.Parse("<p class=keep></p>").Children[0]), "::selection matches nothing, .keep beside it still does");
+    Check(never.Count == 2, $"each never-matching pseudo is named once ({string.Join("; ", never)})");
 }
 
 void TestBuildRows()

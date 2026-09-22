@@ -20,7 +20,17 @@ internal static class StyleApplier
     /// <summary>The vector back-end animates; UI Toolkit lays out only.</summary>
     internal static bool VectorMode = true;
 
+    /// <summary>
+    /// Declarations already named, so one unsupported property does not warn per element that uses
+    /// it. Cleared when a page is built: it is per PAGE, not per process. As a process-global it
+    /// made every page after the first look clean, which in game is harmless (one page per surface)
+    /// and in the corpus sweep silently undercounted how many pages hit a gap - a scoreboard that
+    /// reads better than the truth is worse than no scoreboard.
+    /// </summary>
     private static readonly HashSet<string> Reported = new(StringComparer.Ordinal);
+
+    /// <summary>Starts a fresh page, so its warnings are its own.</summary>
+    internal static void ForgetReported() => Reported.Clear();
 
     /// <summary>
     /// A property the cascade no longer sets (its rule stopped matching) goes back to its initial
@@ -219,7 +229,10 @@ internal static class StyleApplier
             case "background-color":
             case "background-image":
                 if (v == "none" || v == "transparent") { s.backgroundColor = Color.clear; s.backgroundImage = StyleKeyword.None; }
-                else if (v.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase)) Gradient(s, v, warn);
+                // A layered background ("linear-gradient(...) 6px 0/1px 13px no-repeat, #222") is the
+                // emitter's job, layer by layer; here only the colour layer matters. Handing the whole
+                // string to Gradient() made it read the second layer's text as the first one's stops.
+                else if (v.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase) && SplitTopLevelCommas(v).Count == 1) Gradient(s, v, warn);
                 else if (TryColor(v, out var bg)) s.backgroundColor = bg;
                 else if (v.IndexOf("url(", StringComparison.OrdinalIgnoreCase) >= 0 || v.IndexOf("gradient(", StringComparison.OrdinalIgnoreCase) >= 0 || v.IndexOf("image-set(", StringComparison.OrdinalIgnoreCase) >= 0)
                 {

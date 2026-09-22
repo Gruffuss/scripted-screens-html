@@ -251,6 +251,11 @@ internal static class HtmlRenderer
         var result = new Result();
         void Warn(string m) => result.Warnings.Add(m);
 
+        // Per page, not per process. The applier names an unsupported declaration once so a page
+        // using it on forty elements says so once; kept across pages it made every page after the
+        // first look clean.
+        StyleApplier.ForgetReported();
+
         var doc = HtmlParser.Parse(source, Warn);
         result.Document = doc;
 
@@ -274,6 +279,7 @@ internal static class HtmlRenderer
         CssParser.PropertyInitials.Clear();
         CssParser.StartingRules.Clear();
         CssParser.UsedAttributes.Clear();
+        _placeholdersSeen = false;
         _building = true;
         try { return BuildInner(source, font, result, doc, rules, script, Warn); }
         finally { _building = false; }
@@ -1396,6 +1402,8 @@ internal static class HtmlRenderer
     private static readonly List<(string name, HtmlNode scope, int value)> Counters = new();
     /// <summary>True while Build runs: counters advance only then, not when a script rewrites a label later.</summary>
     private static bool _building;
+    /// <summary>This page was already told it is an unrendered template, so it is said once, not per declaration.</summary>
+    private static bool _placeholdersSeen;
     /// <summary>Counter declarations of ::after pseudo-elements, applied when the pseudo is built (after its siblings).</summary>
     private static readonly Dictionary<HtmlNode, List<CssDeclaration>> AfterDecls = new();
 
@@ -2747,6 +2755,15 @@ internal static class HtmlRenderer
             // included) sees the substituted value.
             if (raw.Name.StartsWith("--", StringComparison.Ordinal))
                 continue;
+            // A design tool's export still holding {{ ... }} is a template whose markup was never
+            // rendered, not CSS. Left to the cascade it fails three different ways and names none of
+            // them: `border: 1px solid {{ x }}` reports "{{" and "x" as border values, and
+            // `animation: {{ a }} 2s` reports an animation called "}}" with no @keyframes.
+            if (raw.Value.IndexOf("{{", StringComparison.Ordinal) >= 0)
+            {
+                if (!_placeholdersSeen) { _placeholdersSeen = true; Warn("css: this page still has {{ }} template placeholders - its markup was never rendered, so those declarations are skipped"); }
+                continue;
+            }
             var resolved = HasFn(raw.Value) ? TryResolveVars(raw.Value, node) : raw.Value;
             if (resolved == null) continue; // an undefined var() with no fallback: the declaration is dropped
             var d = HasFn(raw.Value) ? new CssDeclaration(raw.Name, resolved, raw.Important) : raw;

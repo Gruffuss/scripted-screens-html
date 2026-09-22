@@ -96,6 +96,11 @@ internal sealed class JsToLua
         "log2", "getAttribute", "setAttribute", "warn", "error",
         // Map, Set and the other built-in constructors
         "get", "set", "has", "delete", "clear", "values", "getTime", "valueOf",
+        // String and Array, the tail real pages reach for
+        "at", "charCodeAt", "codePointAt", "fill", "findIndex", "findLast", "findLastIndex", "flat",
+        "flatMap", "lastIndexOf", "localeCompare", "reverse", "search", "shift", "splice", "substr",
+        "toExponential", "toLocaleLowerCase", "toLocaleUpperCase", "toPrecision", "trimEnd",
+        "trimStart", "unshift",
     };
 
     /// <summary>Property names the page itself defines, so its own methods are not reported as unknown.</summary>
