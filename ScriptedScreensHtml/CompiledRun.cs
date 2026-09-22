@@ -32,7 +32,6 @@ internal sealed class CompiledRun
     // and guessing which has a bad record on this project. Run is the chip's Lua; drain is reading
     // PAYLOAD back; send is handing the values to the vector mod.
     private long _tRun;
-    private bool _noted;
     /// <summary>Elements already named as undrawable, so each is said once rather than every frame.</summary>
     private readonly HashSet<string> _reported = new(StringComparer.Ordinal);
     private float _nextReport;
@@ -215,11 +214,12 @@ internal sealed class CompiledRun
             // the vector element through ScriptedScreens' API, exactly as a hand-written console
             // does, so the payload never crosses back into C# and this mod is not in the path.
             _tRun += t1 - t0;
-            if (!_noted && ChipHost.NoteIn(_env) is { } note)
-            {
-                _noted = true;
+            // Every DISTINCT note, not just the first. The note exists because every guard in the
+            // send path used to be a silent return; reading it once meant the first success was
+            // reported and every later failure was written and never read, which is the same
+            // silence in a different place.
+            if (ChipHost.NoteIn(_env) is { } note && _reported.Add("note:" + note))
                 ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: \"{_page}\" send path - {note}");
-            }
             // An element the page writes to that the scene has no shape for. Named once each: a page
             // that creates nodes writes to every one of them on every frame, and the point is to say
             // WHICH element is not being drawn, not to say it again forty times a second.

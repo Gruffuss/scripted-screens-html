@@ -620,6 +620,13 @@ end
 --
 -- The handle is taken once and kept. `keep = 1` means take the data and leave the scene alone,
 -- which is what makes this an update rather than a re-upload of the structure.
+-- Which ids the compiled scene has a shape for. The prelude has always tested this before
+-- recording a missing element, and NOTHING EVER ASSIGNED IT - so the test was never true, the
+-- missing table was never written, and the reader added to surface it could not fire. The
+-- project's own characteristic bug, this time with the halves swapped.
+DOM.known = {}
+for id in pairs(BOUND) do DOM.known[id] = true end
+
 local SURF, VEC
 function DOM.flush()
   if not DIRTY then return end
@@ -663,6 +670,13 @@ end
 -- requestAnimationFrame callback and re-registers it every frame, a dashboard sets an interval and
 -- keeps the same one. Both were captured by the prelude rather than run, so this is where they are
 -- finally driven - and then one payload goes out for everything the frame wrote.
+-- The clock `Date.now()` and `performance.now()` read. The prelude asks for `js_now` and nothing
+-- ever defined it, so both answered a hard 0 for ever: a page using the ordinary elapsed-time
+-- idiom - `Date.now() - start` - got zero every frame and froze at its first, with nothing in any
+-- log. It is milliseconds since the scene was applied rather than a wall clock, which is what an
+-- elapsed-time measurement actually needs and all a console can honestly offer.
+function js_now() return (CLOCK or 0) * 1000 end
+
 frame = function(dt)
   CLOCK = (CLOCK or 0) + (dt or 0)
   local t = CLOCK * 1000
@@ -672,13 +686,24 @@ frame = function(dt)
     local fn = pending[#pending]
     Pending.frame = {}                 -- a rAF page re-registers inside the call
     fn(t)
-  else
-    for i = 1, #Pending.timers do
-      local timer = Pending.timers[i]
+  end
+
+  -- Timers run whether or not an animation frame was pending. They used to be the `else` of the
+  -- branch above, which meant a page doing BOTH - a requestAnimationFrame render loop plus a
+  -- setInterval poll, which is the ordinary browser combination - lost every interval callback
+  -- for the life of the console while the animation looked perfectly healthy.
+  for i = 1, #Pending.timers do
+    local timer = Pending.timers[i]
+    if timer.fn ~= nil then            -- nil is how clearInterval empties a slot
       timer.at = (timer.at or 0) + (dt or 0) * 1000
       if timer.at >= (timer.ms or 0) then
         timer.at = 0
-        timer.fn(t)
+        local fn = timer.fn
+        -- A one-shot is cleared BEFORE it runs, so a handler that schedules another timeout gets
+        -- a slot of its own instead of having its registration wiped by this line. `once` was
+        -- recorded by setTimeout and read by nothing, so every timeout repeated for ever.
+        if timer.once then timer.fn = nil end
+        fn(t)
       end
     end
   end
