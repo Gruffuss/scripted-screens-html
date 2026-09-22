@@ -126,6 +126,27 @@ internal sealed class HtmlSurface : MonoBehaviour
             if (dt > 25f) _slowFrames++;
             if (dt > _worstFrame) _worstFrame = dt;
         }
+        // A compiled page is not laid out, scripted, translated or split: its Lua is in the chip and
+        // writes the scene's slots directly, so all this update does is give that Lua a frame.
+        //
+        // ABOVE the _panel guard, and that is the whole point. Releasing the working set nulls the
+        // panel, so a compiled page trips that guard by design - and while this sat below it, every
+        // compiled console silently stopped ticking the moment it was released. The page did not
+        // error and did not go blank; it just stopped moving, and only "sent 1 patches" in the
+        // diagnostics said so.
+        if (_compiled != null && IsCurrent)
+        {
+            // One Update after compiling, so the structure the chip writes into has gone out.
+            if (_releasePending) { _releasePending = false; ReleaseWorkingSet(); }
+            if (_compiled.Tick(Cartridge ?? Board, SendCompiled)) return;
+            // It gave up - the chip recompiled under it, or its frames kept failing. Back to the
+            // interpreter, which is always able to run the page, so the page has to exist again.
+            _compiled = null;
+            if (_released && !Rehydrate()) return;
+            _dirty = true; _dOther++;
+            Wake();
+        }
+
         if (_panel == null)
         {
             // a surface with no page (a capture's clone before its build): its script still runs here
@@ -164,22 +185,6 @@ internal sealed class HtmlSurface : MonoBehaviour
             _ => lod.cull,   // a page only needs a frame the vector mod will draw
         };
         var onScreen = visible || !cull;
-        // A compiled page is not laid out, scripted, translated or split. Its Lua is in the chip
-        // and writes the scene's slots directly, so all this update does is give that Lua a frame.
-        if (_compiled != null)
-        {
-            // One Update after compiling, so the structure the chip writes into has been sent.
-            if (_releasePending) { _releasePending = false; ReleaseWorkingSet(); }
-            if (_compiled.Tick(Cartridge ?? Board, SendCompiled)) return;
-            // It gave up - the chip recompiled under it, or its frames kept failing. Back to the
-            // interpreter, which is always able to run the page.
-            _compiled = null;
-            // It gave up, so the page has to exist again to draw anything at all.
-            if (_released && !Rehydrate()) return;
-            _dirty = true; _dOther++;
-            Wake();
-        }
-
         _hiddenNow = !onScreen;
         if (onScreen != _wasOnScreen)
         {
