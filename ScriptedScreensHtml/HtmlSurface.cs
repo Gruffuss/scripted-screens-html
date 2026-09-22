@@ -656,6 +656,8 @@ internal sealed class HtmlSurface : MonoBehaviour
     private bool _releasePending;
     /// <summary>When the compiled chunk last ran a frame, so it runs at the rate the renderer draws.</summary>
     private float _lastCompiledTick;
+    /// <summary>Reused per send; only the slots whose value actually moved go in it.</summary>
+    private readonly List<SS.UiProp> _propScratch = new(32);
 
     /// <summary>
     /// Puts the page back when something needs it: a capture, a rebuild, or the compiled run giving up.
@@ -1364,14 +1366,25 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         if (State is not SS.BoardState state || values.Count == 0) return;
 
-        var props = new SS.UiProp[values.Count];
-        var i = 0;
+        // Only what moved. The chunk writes every slot it owns each frame - a page's draw() does not
+        // know which numbers changed - so a patch carried all twenty-six every time. The emit path
+        // has always diffed against _sentValues; the compiled path never did.
+        _propScratch.Clear();
         foreach (var pair in values)
-            props[i++] = new SS.UiProp
+        {
+            var now = pair.Value is double d
+                ? new SceneSlots.Value((float)d)
+                : new SceneSlots.Value((string)pair.Value);
+            if (_sentValues.TryGetValue(pair.Key, out var was) && was.Equals(now)) continue;
+            _sentValues[pair.Key] = now;
+            _propScratch.Add(new SS.UiProp
             {
                 Key = pair.Key,
-                Value = pair.Value is double d ? SS.UiValue.FromNumber((float)d) : SS.UiValue.FromString((string)pair.Value),
-            };
+                Value = now.IsNumber ? SS.UiValue.FromNumber(now.Number) : SS.UiValue.FromString(now.Text ?? string.Empty),
+            });
+        }
+        if (_propScratch.Count == 0) return;
+        var props = _propScratch.ToArray();
 
         VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
             new SS.UiValue { Type = SS.UiValueType.Map, Map = props }, null, snap: true);
@@ -2483,9 +2496,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         // that runs. Proven is the operative word: see DataSlots.Prove.
         if (_script == null && _dataSlots is { Proven: true } fast && fast.Apply(entries) is { } direct)
         {
-            SendCompiled(direct);
-            foreach (var kv in direct)
-                _sentValues[kv.Key] = kv.Value is string t ? new SceneSlots.Value(t) : new SceneSlots.Value((float)(double)kv.Value);
+            SendCompiled(direct);   // records what it sent in _sentValues itself
             _dataFastTicks++;
             return;
         }
