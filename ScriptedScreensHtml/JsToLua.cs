@@ -69,14 +69,21 @@ internal sealed class JsToLua
         "undefined", "requestAnimationFrame", "setTimeout", "setInterval", "clearInterval", "Object",
         "location", "Map", "Set", "WeakMap", "WeakSet", "Error", "TypeError", "RangeError", "Array",
         "RegExp", "clearTimeout", "cancelAnimationFrame", "addEventListener", "removeEventListener",
-        "getComputedStyle", "globalThis",
+        "getComputedStyle", "globalThis", "queueMicrotask",
     };
 
     /// <summary>
     /// Names the chunk itself binds. A page declaring one of these would shadow it, and the failure
     /// would be the host finding no entry points at all rather than anything the page could see.
     /// </summary>
-    private static readonly HashSet<string> Reserved = new(StringComparer.Ordinal) { "PAGE", "DOM", "Pending", "UNDEFINED" };
+    private static readonly HashSet<string> Reserved = new(StringComparer.Ordinal)
+    {
+        "PAGE", "PAGE_SYNC", "DOM", "Pending", "UNDEFINED",
+        // The tables the compiler emits for the chunk to read: the element tree, the boxes, the
+        // modifier state. A page declaring one of these would shadow it and the failure would look
+        // like the DOM simply not working.
+        "PARENT", "BOXES", "TAG", "CLASS", "NODES", "MODS",
+    };
 
     /// <summary>
     /// Every method the prelude implements. A page calling anything else would otherwise compile
@@ -119,6 +126,13 @@ internal sealed class JsToLua
         // `repeat` is a Lua keyword, so the prelude spells it StringMethods["repeat"] and the
         // manifest check cannot see it. It goes in by hand or a page calling it is refused.
         "repeat",
+        // Events, focus and the element queries
+        "click", "focus", "blur", "insertAdjacentElement", "item",
+        // Object, Number, Math and String statics
+        "hasOwnProperty", "create", "defineProperty", "getOwnPropertyNames", "getPrototypeOf",
+        "setPrototypeOf", "is", "seal", "isSafeInteger", "parseInt", "sinh", "cosh", "tanh",
+        "asinh", "acosh", "atanh", "expm1", "log1p", "imul", "fromCharCode", "fromCodePoint",
+        "test", "exec",
     };
 
     /// <summary>Property names the page itself defines, so its own methods are not reported as unknown.</summary>
@@ -172,8 +186,21 @@ internal sealed class JsToLua
         // are locals, so without this its frame callback is unreachable from outside it. State goes
         // in as well as functions - a table is by reference and so stays live, which is what lets a
         // compiled page be inspected while it runs.
+        // A SNAPSHOT of the locals, plus a way to take another. The values are copied out once here,
+        // so anything a name holds AFTER the top level has run - which is every value an event
+        // handler, a timer or a frame produces - was invisible to anything reading PAGE. A number is
+        // copied by value, and a page whose counter is a number simply reported its starting value
+        // for ever.
+        //
+        // Found because a coverage probe read PAGE after driving the page and measured 5 of 22 event
+        // members: four of the five that "passed" did so because the value before the tail happened
+        // to equal the expected one, and would have passed with the event system deleted. A test
+        // that passes against a deleted feature is worse than no test.
         c.Line("PAGE = {}");
-        foreach (var n in names) c.Line("PAGE." + n + " = " + n);
+        c.Line("function PAGE_SYNC()");
+        foreach (var n in names) c.Line("  PAGE." + n + " = " + n);
+        c.Line("end");
+        c.Line("PAGE_SYNC()");
 
         return c._problems.Count == 0 ? c._sb.ToString() : null;
     }

@@ -1851,6 +1851,12 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal void PointerMove(Vector2 fraction)
     {
         SavePointer(true, _pressed, fraction);
+        // Where the pointer is, in page coordinates, BEFORE the early return. It used to be
+        // computed only inside PointerMoveOnPage/PointerDownOnPage, which a compiled page never
+        // reaches - so every `event.clientX` and `clientY` a compiled page read was 0. The
+        // coordinates survive the whole chunk path correctly; they simply started at the origin.
+        var here = LayoutSize();
+        _pointerPage = new Vector2(fraction.x * here.x, fraction.y * here.y);
         // A compiled page has no boxes to hit-test and no interpreter to tell: its handlers are in
         // the chip and the click reaches them through the scene's own region, which names the
         // element outright. Running this would only feed the copy nobody is drawing.
@@ -1902,6 +1908,12 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         _pressed = true;
         SavePointer(true, true, fraction);
+        // Where the pointer is, in page coordinates, BEFORE the early return. It used to be
+        // computed only inside PointerMoveOnPage/PointerDownOnPage, which a compiled page never
+        // reaches - so every `event.clientX` and `clientY` a compiled page read was 0. The
+        // coordinates survive the whole chunk path correctly; they simply started at the origin.
+        var here = LayoutSize();
+        _pointerPage = new Vector2(fraction.x * here.x, fraction.y * here.y);
         // A compiled page has no boxes to hit-test and no interpreter to tell: its handlers are in
         // the chip and the click reaches them through the scene's own region, which names the
         // element outright. Running this would only feed the copy nobody is drawing.

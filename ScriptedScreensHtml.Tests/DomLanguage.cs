@@ -81,7 +81,7 @@ internal static class DomLanguage
     }
 
     /// <summary>A case whose answer is the page's own <c>RESULT</c>.</summary>
-    private static Case C(string name, string js, string want) => new(name, js, "OUT = PAGE.RESULT", want);
+    private static Case C(string name, string js, string want) => new(name, js, "PAGE_SYNC() OUT = PAGE.RESULT", want);
 
     /// <summary>A case that needs something to happen, or something only Lua can see, first.</summary>
     private static Case C(string name, string js, string tail, string want) => new(name, js, tail, want);
@@ -318,7 +318,7 @@ internal static class DomLanguage
     /// so the registry, the bubbling walk and the event object are all on the path - which calling a
     /// handler directly would skip.
     /// </summary>
-    private const string Click = "DOM.fire('box', 'click', 3, 4) OUT = PAGE.RESULT";
+    private const string Click = "DOM.fire('box', 'click', 3, 4) PAGE_SYNC() OUT = PAGE.RESULT";
 
     /// <summary>`box` sits inside `app`, which is what makes a bubbling case a bubbling case.</summary>
     private const string Nested = "PARENT['box'] = 'app'\n" + Click;
@@ -346,7 +346,7 @@ internal static class DomLanguage
         C("event.altKey",       Box + "var RESULT; e.addEventListener('click', function (ev) { RESULT = ev.altKey === false ? 'up' : 'down'; });", Click, "up"),
         C("onclick property",   Box + "var RESULT = 0; e.onclick = function () { RESULT = 1; };", Click, "1"),
         C("window.addEventListener", "var RESULT = 0; window.addEventListener('resize', function () { RESULT = 1; });",
-          "DOM.fire('window', 'resize', 0, 0) OUT = PAGE.RESULT", "1"),
+          "DOM.fire('window', 'resize', 0, 0) PAGE_SYNC() OUT = PAGE.RESULT", "1"),
         C("a listener added during dispatch", Box + "var RESULT = 'once'; e.addEventListener('click', function () { e.addEventListener('click', function () { RESULT = 'twice'; }); });", Click, "once"),
     };
 
@@ -381,6 +381,10 @@ internal static class DomLanguage
     /// would report every one of these as working.
     /// </summary>
     private const string Drive = @"
+-- The same loop CompiledPage.Runtime drives, and it has to STAY the same. This was copied before
+-- two bugs in it were fixed and never copied back, so the probe kept measuring the old behaviour:
+-- timers as the `else` of the animation branch (a page that animates ran no timer at all) and a
+-- one-shot that never stopped. A probe that disagrees with production measures the probe.
 local function DRIVE(n, dt)
   for _ = 1, n do
     local pending = Pending.frame
@@ -388,16 +392,23 @@ local function DRIVE(n, dt)
       local fn = pending[#pending]
       Pending.frame = {}
       fn(0)
-    else
-      for i = 1, #Pending.timers do
-        local timer = Pending.timers[i]
+    end
+    for i = 1, #Pending.timers do
+      local timer = Pending.timers[i]
+      if timer.fn ~= nil then
         timer.at = (timer.at or 0) + dt
-        if timer.at >= (timer.ms or 0) then timer.at = 0 timer.fn(0) end
+        if timer.at >= (timer.ms or 0) then
+          timer.at = 0
+          local fn = timer.fn
+          if timer.once then timer.fn = nil end
+          fn(0)
+        end
       end
     end
   end
 end
 DRIVE(4, 100)
+PAGE_SYNC()
 OUT = PAGE.RESULT
 ";
 

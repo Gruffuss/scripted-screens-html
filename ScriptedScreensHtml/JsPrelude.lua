@@ -2213,12 +2213,22 @@ local NoBubble = { focus = true, blur = true, mouseenter = true, mouseleave = tr
 -- which is the honest answer for a page with no layout: a compiled scene has no boxes to measure.
 -- `key` and `code` are deliberately absent: no keyboard event reaches a console page at all, and a
 -- MouseEvent has neither in a browser either.
+-- `window` and `document` are event targets and are not elements, so they are answered with
+-- themselves. Routing them through getElementById would invent an element and, worse, report the
+-- page's scene as missing a shape for something that was never going to have one.
+local function targetFor(id)
+  if id == "window" then return window end
+  if id == "document" then return document end
+  return document.getElementById(id)
+end
+
 local function make_event(id, kind, x, y)
   local ev
+  local at = targetFor(id)
   ev = {
     type = kind,
-    target = document.getElementById(id),
-    currentTarget = document.getElementById(id),
+    target = at,
+    currentTarget = at,
     bubbles = not NoBubble[kind], cancelable = true, defaultPrevented = false,
     eventPhase = 0, timeStamp = js_now and js_now() or 0, isTrusted = true,
     button = 0, buttons = (kind == "mousedown") and 1 or 0,
@@ -2242,7 +2252,7 @@ local function deliver(ev, at, kind, phase)
   local list = listeners(at, kind, false)
   if list == nil then return false end
   ev.eventPhase = phase
-  ev.currentTarget = document.getElementById(at)
+  ev.currentTarget = targetFor(at)
   -- Over a snapshot: a handler may add or remove listeners while this runs, and the runner page
   -- does exactly that (a jump re-registers). Mutating the list under the loop skips handlers.
   local snapshot, n = {}, #list
