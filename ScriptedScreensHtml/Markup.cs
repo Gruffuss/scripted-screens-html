@@ -70,6 +70,38 @@ internal sealed class Markup
     }
 
     /// <summary>
+    /// A callback the page registers while building markup, and the index it gets.
+    /// </summary>
+    /// <remarks>
+    /// Every page of any size has one helper like this:
+    /// <code>const act = (fn) =&gt; { acts.push(fn); return ' data-act="' + (acts.length - 1) + '"'; };</code>
+    /// It builds markup AND wires a click, which is why a purely functional reduction cannot touch
+    /// it - and it was 91 of the 109 things blocking the corpus, all from that one line.
+    ///
+    /// The index is positional in emission order, so it is known at compile time - but only while the
+    /// markup is being written out, not while it is being analysed: a row inside a repeat gets a
+    /// different index on each pass. So the push is a zero-width part that advances a counter when
+    /// the skeleton is written, and the index is a part that reads that counter. Both then fall out
+    /// correctly for a repeated row, which folding a number during analysis would get wrong for every
+    /// row but the first.
+    /// </remarks>
+    internal sealed class Push : Part
+    {
+        public readonly string List;
+        /// <summary>What is being registered - the handler, kept for the compiler to bind.</summary>
+        public readonly Expression Value;
+        public Push(string list, Expression value) { List = list; Value = value; }
+    }
+
+    /// <summary>How many things have been registered so far, less an offset. See <see cref="Push"/>.</summary>
+    internal sealed class Counter : Part
+    {
+        public readonly string List;
+        public readonly int Less;
+        public Counter(string list, int less) { List = list; Less = less; }
+    }
+
+    /// <summary>
     /// A list: <c>xs.map(x =&gt; '...').join('')</c>, which is how every page repeats a row.
     /// </summary>
     /// <remarks>
@@ -94,6 +126,14 @@ internal sealed class Markup
     private readonly List<Dictionary<string, Expression>> _bindings = new();
     /// <summary>Guards a helper that calls itself, directly or round a ring.</summary>
     private readonly HashSet<string> _inlining = new(StringComparer.Ordinal);
+    /// <summary>Names currently being resolved, so one defined in terms of itself terminates.</summary>
+    private readonly HashSet<string> _resolving = new(StringComparer.Ordinal);
+    /// <summary>Parameters of open helpers that the caller did not supply: undefined, not unknown.</summary>
+    private readonly List<string> _unset = new();
+
+    /// <summary>Whether an expression is known to be undefined here, so `a || b` is just b.</summary>
+    private bool IsUndefined(Expression e)
+        => e is Identifier id && _unset.Contains(id.Name) && Bound(id.Name) == null;
 
     /// <summary>Every hole, in the order their sentinels are numbered.</summary>
     internal IReadOnlyList<Expression> Holes => _holes;
@@ -116,6 +156,13 @@ internal sealed class Markup
             else if (node is VariableDeclarator { Id: Identifier v, Init: ArrowFunctionExpression a }) m._functions[v.Name] = a;
             else if (node is VariableDeclarator { Id: Identifier v2, Init: FunctionExpression f }) m._functions[v2.Name] = f;
         m.Parts = m.Reduce(value);
+        // A reduction that produced no markup at all is not a reduction: the page computed its
+        // whole document somewhere this cannot see - a loop building a string, a call into
+        // something opaque - and every literal tag went with it. Said here rather than left for the
+        // caller to notice it got one hole and no structure.
+        if (!Structural(m.Parts))
+            m._problems.Add(Line(value) + "the markup is computed rather than built from literals, "
+                            + "so there is no structure to emit");
         return m;
     }
 
@@ -157,9 +204,19 @@ internal sealed class Markup
                 {
                     var then = new List<Part>(); Walk(c.Consequent, then); Merge(then);
                     var otherwise = new List<Part>(); Walk(c.Alternate, otherwise); Merge(otherwise);
-                    // `cond ? markup : ''` is not really a choice of shapes - it is one shape that is
-                    // sometimes absent, which is the common case and much cheaper to draw.
-                    into.Add(new Choice(c.Test, then, otherwise));
+                    Branch(c, c.Test, then, otherwise, into);
+                    return;
+                }
+
+            case LogicalExpression { Operator: Acornima.Operator.LogicalOr } either when IsUndefined(either.Left):
+                Walk(either.Right, into);
+                return;
+
+            case LogicalExpression { Operator: Acornima.Operator.LogicalOr } fallback:
+                {
+                    var supplied = new List<Part>(); Walk(fallback.Left, supplied); Merge(supplied);
+                    var otherwise2 = new List<Part>(); Walk(fallback.Right, otherwise2); Merge(otherwise2);
+                    Branch(fallback, fallback.Left, supplied, otherwise2, into);
                     return;
                 }
 
@@ -167,7 +224,7 @@ internal sealed class Markup
                 // `cond && markup` is `cond ? markup : ''` written shorter.
                 {
                     var then = new List<Part>(); Walk(and.Right, then); Merge(then);
-                    into.Add(new Choice(and.Left, then, new List<Part>()));
+                    Branch(and, and.Left, then, new List<Part>(), into);
                     return;
                 }
 
@@ -177,11 +234,16 @@ internal sealed class Markup
             case CallExpression call when Inlined(call, into):
                 return;
 
-            case Identifier id when Bound(id.Name) is { } bound:
-                Walk(bound, into);
+            case Identifier id when !_resolving.Contains(id.Name) && Bound(id.Name) is { } held:
+                // `color = color || x` binds a name to an expression that names itself, so the inner
+                // reference has to stop rather than resolve round again for ever.
+                _resolving.Add(id.Name);
+                try { Walk(held, into); }
+                finally { _resolving.Remove(id.Name); }
                 return;
 
             default:
+                if (AsCounter(e) is { } counted) { into.Add(counted); return; }
                 // Anything else is a value: a number, a field, a call this cannot see inside. It goes
                 // in a hole, which is the right answer for almost all of them - a page interpolating
                 // `v.pressure` wants a slot, not structure.
@@ -189,6 +251,43 @@ internal sealed class Markup
                 _holes.Add(e);
                 return;
         }
+    }
+
+    /// <summary>
+    /// A conditional: structure when the branches differ in SHAPE, a value when they do not.
+    /// </summary>
+    /// <remarks>
+    /// This distinction is what makes the whole approach usable. Nearly every ternary on a real page
+    /// picks a colour, a width or a word - <c>(on ? 'var(--cb-live)' : 'transparent')</c> inside a
+    /// style attribute - and treating each as a choice of shapes doubles the number of scenes to emit.
+    /// Measured on one page: 119 choices, which is 2^119 shapes, against the 23 the page really has.
+    /// A branch whose sides contain no markup is a value, and a value is one slot.
+    /// </remarks>
+    private void Branch(Expression whole, Expression test, List<Part> then, List<Part> otherwise, List<Part> into)
+    {
+        if (!Structural(then) && !Structural(otherwise))
+        {
+            into.Add(new Hole(whole, _holes.Count));
+            _holes.Add(whole);
+            return;
+        }
+        into.Add(new Choice(test, then, otherwise));
+    }
+
+    /// <summary>Whether a branch changes the shape of the markup rather than a value inside it.</summary>
+    private static bool Structural(List<Part> parts)
+    {
+        foreach (var part in parts)
+            switch (part)
+            {
+                // A tag opens or closes: elements appear or disappear, which layout has to see.
+                case Fixed f when f.Text.IndexOf('<') >= 0: return true;
+                // A registration is a click handler appearing, which is structure by another name.
+                case Push: return true;
+                case Choice c when Structural(c.Then) || Structural(c.Else): return true;
+                case Repeat: return true;
+            }
+        return false;
     }
 
     /// <summary>
@@ -213,20 +312,25 @@ internal sealed class Markup
 
         // The body has to be one expression - a row builder that branches internally is a choice
         // inside the repeat, which is fine, but a statement body would need running.
+        // A row builder declares a local or two and returns - the same shape as a helper, so it is
+        // reduced the same way. Requiring one bare expression refused eighteen real rows.
+        var bound = new Dictionary<string, Expression>(StringComparer.Ordinal);
+        var parts = new List<Part>();
         var body = fn.Body switch
         {
             Expression x => x,
-            BlockStatement { Body.Count: 1 } b when b.Body[0] is ReturnStatement { Argument: { } r } => r,
+            BlockStatement block => Returned(block, bound, parts),
             _ => null,
         };
         if (body == null)
         {
-            _problems.Add(Line(inner) + "a .map() whose row builder is not a single expression");
+            _problems.Add(Line(inner) + "a .map() whose row builder does more than return markup");
             return false;
         }
 
-        var parts = new List<Part>();
-        Walk(body, parts);
+        _bindings.Add(bound);
+        try { Walk(body, parts); }
+        finally { _bindings.RemoveAt(_bindings.Count - 1); }
         Merge(parts);
         into.Add(new Repeat(list, item.Name, parts));
         return true;
@@ -251,14 +355,19 @@ internal sealed class Markup
             // Parameters and the helper's own locals share one frame, so a local written in terms
             // of a parameter resolves when it is used rather than needing an order here.
             var bound = new Dictionary<string, Expression>(StringComparer.Ordinal);
+            var unset = new List<string>();
             for (var i = 0; i < fn.Params.Count; i++)
-                if (fn.Params[i] is Identifier p && i < call.Arguments.Count && call.Arguments[i] is Expression arg)
-                    bound[p.Name] = arg;
+            {
+                if (fn.Params[i] is not Identifier p) continue;
+                if (i < call.Arguments.Count && call.Arguments[i] is Expression arg) bound[p.Name] = arg;
+                else unset.Add(p.Name);                 // the caller omitted it: undefined, not unknown
+            }
+            foreach (var missing in unset) _unset.Add(missing);
 
             var body = fn.Body switch
             {
                 Expression x => x,
-                BlockStatement block => Returned(block, bound),
+                BlockStatement block => Returned(block, bound, into),
                 _ => null,
             };
             if (body == null)
@@ -269,7 +378,11 @@ internal sealed class Markup
 
             _bindings.Add(bound);
             try { Walk(body, into); }
-            finally { _bindings.RemoveAt(_bindings.Count - 1); }
+            finally
+            {
+                _bindings.RemoveAt(_bindings.Count - 1);
+                foreach (var missing in unset) _unset.Remove(missing);
+            }
             return true;
         }
         finally { _inlining.Remove(name.Name); }
@@ -284,7 +397,7 @@ internal sealed class Markup
     /// substituted into the returned expression, so the result is still one expression and still
     /// static. A body that assigns to anything outside itself is not reducible and says so.
     /// </remarks>
-    private static Expression? Returned(BlockStatement block, Dictionary<string, Expression> into)
+    private Expression? Returned(BlockStatement block, Dictionary<string, Expression> bound, List<Part> parts)
     {
         foreach (var s in block.Body)
         {
@@ -292,11 +405,31 @@ internal sealed class Markup
             {
                 case VariableDeclaration { Kind: VariableDeclarationKind.Const or VariableDeclarationKind.Let } d:
                     foreach (var one in d.Declarations)
-                        if (one.Id is Identifier id && one.Init != null) into[id.Name] = one.Init;
+                        if (one.Id is Identifier id && one.Init != null) bound[id.Name] = one.Init;
                     break;
+
+                // Registering a callback while building markup. The ONLY side effect allowed here,
+                // because it is the only one whose result is positional and so knowable without
+                // running the page. Anything else genuinely needs execution.
+                case ExpressionStatement { Expression: CallExpression
+                    { Callee: MemberExpression { Computed: false, Object: Identifier list, Property: Identifier { Name: "push" } },
+                      Arguments.Count: 1 } push } when push.Arguments[0] is Expression value:
+                    _registers.Add(list.Name);
+                    parts.Add(new Push(list.Name, value));
+                    break;
+
+                // `color = color || 'var(--cb-mark)'` - a default written the way everyone wrote one
+                // before default parameters existed. It rebinds a name this helper owns, which is
+                // not a side effect on anything outside it, so it reduces like a declaration.
+                case ExpressionStatement { Expression: AssignmentExpression
+                    { Operator: Acornima.Operator.Assignment, Left: Identifier target } assign }
+                    when bound.ContainsKey(target.Name) || _unset.Contains(target.Name):
+                    bound[target.Name] = assign.Right;
+                    break;
+
                 case ReturnStatement { Argument: { } r }:
                     // The first return wins and there cannot be a second: any statement that is not
-                    // a declaration or a return ends the reduction above, so nothing follows it.
+                    // one of the above ends the reduction, so nothing follows it.
                     return r;
                 case EmptyStatement:
                     break;
@@ -307,6 +440,24 @@ internal sealed class Markup
             }
         }
         return null;                                   // fell off the end without returning markup
+    }
+
+    /// <summary>Arrays the markup registers callbacks in, so their length is a countable position.</summary>
+    private readonly HashSet<string> _registers = new(StringComparer.Ordinal);
+
+    /// <summary>The registration position an expression reads, rather than a value it computes.</summary>
+    private Part? AsCounter(Expression e)
+    {
+        switch (e)
+        {
+            case MemberExpression { Computed: false, Object: Identifier list, Property: Identifier { Name: "length" } }
+                when _registers.Contains(list.Name):
+                return new Counter(list.Name, 0);
+            case NonLogicalBinaryExpression { Operator: Acornima.Operator.Subtraction, Right: NumericLiteral n } b
+                when AsCounter(b.Left) is Counter c:
+                return new Counter(c.List, c.Less + (int)n.Value);
+        }
+        return null;
     }
 
     /// <summary>What a name stands for, through the helper frames currently open.</summary>
@@ -352,6 +503,10 @@ internal sealed class Markup
     {
         var sb = new StringBuilder();
         var choice = 0;
+        // Counted here rather than during the analysis: a registration inside a repeat happens once
+        // per row, so its index only exists while the markup is being written out.
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        Registered.Clear();
         Write(Parts);
         return sb.ToString();
 
@@ -363,11 +518,20 @@ internal sealed class Markup
                 {
                     case Fixed f: sb.Append(f.Text); break;
                     case Hole h: sb.Append(Sentinel(h.Index)); break;
-                    case Choice c:
+                    case Push p:
+                        counts.TryGetValue(p.List, out var had);
+                        counts[p.List] = had + 1;
+                        Registered.Add((p.List, had, p.Value));
+                        break;
+                    case Counter c:
+                        counts.TryGetValue(c.List, out var now);
+                        sb.Append((now - c.Less).ToString(CultureInfo.InvariantCulture));
+                        break;
+                    case Choice c2:
                         {
                             var take = taken == null || choice >= taken.Count || taken[choice];
                             choice++;
-                            Write(take ? c.Then : c.Else);
+                            Write(take ? c2.Then : c2.Else);
                             break;
                         }
                     case Repeat r:
@@ -377,6 +541,13 @@ internal sealed class Markup
             }
         }
     }
+
+    /// <summary>
+    /// What the last <see cref="Skeleton"/> registered, in order: the list, the index it was given,
+    /// and the expression registered. This is how a click handler written into the markup reaches
+    /// the compiled page, which otherwise has no wiring at all once the builder is compiled away.
+    /// </summary>
+    internal List<(string List, int Index, Expression Value)> Registered { get; } = new();
 
     /// <summary>How many choices the markup contains, so a caller knows how many shapes there are.</summary>
     internal int Choices
