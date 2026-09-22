@@ -71,6 +71,128 @@ internal static class CompiledPageTests
         check(!none.Mapped, "slots: border-color on a borderless element is refused, not mapped to nothing");
     }
 
+    /// <summary>
+    /// A box and its label share an id; the label's slots are named after the element too.
+    /// </summary>
+    /// <remarks>
+    /// The emitter writes an element with a background as two lines carrying one id - the `R` and
+    /// then the `T` - and the second used to fall back to a POSITIONAL name (`L5_f`) nothing could
+    /// address. So `color` on anything with a background was refused, on a renderer that emits
+    /// exactly the slot it needs. The second line is now `<id>__2_<key>`, stable and id-derived.
+    /// The box must keep the bare name, because `background` and every geometry write land there.
+    /// </remarks>
+    private static void LabelSlots(Action<bool, string> check)
+    {
+        // As the emitter wrote it for the probe page, plus an author whose own id is shaped like
+        // the generated name - which must not be allowed to claim the label's slots.
+        const string scene = "SCENE w=400 h=400 fit=stretch\n"
+            + "R x=10 y=12 w=96 h=46 rx=6 f=#22AA44 id=e\n"
+            + "T x=10 y=12 w=137.6 h=46 text=\"hello\" size=14 f=#EEEEEE valign=top id=e\n"
+            + "R x=1 y=2 w=3 h=4 f=#000000 id=e__2\n";
+        var values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+        SceneSlots.Split(scene, values);
+        string Text(string k) => values.TryGetValue(k, out var v) && !v.IsNumber ? v.Text! : "(none)";
+        double N(string k) => values.TryGetValue(k, out var v) && v.IsNumber ? v.Number : double.NaN;
+
+        check(Text("e_f") == "#22AA44" && Text("e__2_f") == "#EEEEEE",
+              $"slots: the box keeps e_f ({Text("e_f")}) and its label is e__2_f ({Text("e__2_f")})");
+        check(Text("e") == "hello" && N("e_size") == 14,
+              $"slots: textContent (e = {Text("e")}) and fontSize (e_size = {N("e_size")}) do not collide and keep their names");
+        check(N("e__2_x") == 10,
+              $"slots: an author's id `e__2` cannot claim the label's slots (e__2_x is {N("e__2_x")}: the label's 10, not the author's 1)");
+
+        var box = new DomSlots.Box(outOfFlow: true, parentX: 0, parentY: 0, hasBackground: true);
+        var keys = values.Keys.ToHashSet(StringComparer.Ordinal);
+        var colour = DomSlots.Map("e", "style.color", box, keys);
+        check(colour.Mapped && colour.Slots.SequenceEqual(new[] { "e__2_f" }),
+              "slots: color on an element with a background lands on the label's fill"
+              + (colour.Mapped ? " (" + string.Join(",", colour.Slots) + ")" : " - " + colour.Problem));
+        var bg = DomSlots.Map("e", "style.background", box, keys);
+        check(bg.Mapped && bg.Slots.SequenceEqual(new[] { "e_f" }), "slots: background still reaches the box's fill");
+        check(DomSlots.Map("e", "textContent", box, keys).Slots.SequenceEqual(new[] { "e" })
+              && DomSlots.Map("e", "style.fontSize", box, keys).Slots.SequenceEqual(new[] { "e_size" }),
+              "slots: textContent and fontSize map to the same slots as before");
+    }
+
+    /// <summary>
+    /// <c>visibility</c> reaches the wrapping group's opacity, and its VALUE is translated.
+    /// </summary>
+    /// <remarks>
+    /// The slot alone is not the feature. DOM.bind falls through to reading a value as a CSS
+    /// length, and length('hidden') is nil - so a slot with no arm is a write that the compiler
+    /// reports as mapped and that does nothing, which is the bug the missing `state` arm was.
+    /// </remarks>
+    private static void VisibilitySlots(string root, Action<bool, string> check)
+    {
+        var available = new HashSet<string>(StringComparer.Ordinal) { "e", "e_x", "e_y", "e_w", "e_h", "e_f", "e_o" };
+        var box = new DomSlots.Box(outOfFlow: true, parentX: 0, parentY: 0, hasBackground: true);
+        var mapped = DomSlots.Map("e", "style.visibility", box, available);
+        check(mapped.Mapped && mapped.Slots.SequenceEqual(new[] { "e_o" }),
+              "slots: visibility lands on the wrapping group's opacity" + (mapped.Mapped ? "" : " - " + mapped.Problem));
+
+        const string script = "var e = document.getElementById('e');\n"
+            + "function tick() { e.style.visibility = 'hidden'; }\nsetInterval(tick, 100);\n";
+        var state = Loaded(root, script, available, box, check, "the visibility page");
+        if (state == null) return;
+        var hidden = Payload(state, Driver(1));
+        check(Num(hidden, "e_o") == 0, hidden.ContainsKey("e_o")
+            ? $"compiled: visibility = hidden writes e_o = {Num(hidden, "e_o")}"
+            : "compiled: visibility = hidden wrote nothing - the word fell through to length('hidden') = nil");
+        var shown = Payload(state, "PAYLOAD, DIRTY = {}, false\nDOM.bind('e', 'style.visibility', 'visible')");
+        check(Num(shown, "e_o") == 1, $"compiled: visibility = visible writes e_o = {Num(shown, "e_o")}");
+    }
+
+    /// <summary>
+    /// <c>right</c> and <c>bottom</c> resolve from the containing block's size: <c>x = parent + parentW - w - right</c>.
+    /// </summary>
+    /// <remarks>
+    /// Refused before, because the value is subtracted rather than added and the bias mechanism
+    /// only added. A far-edge slot now carries a scale of -1, which the chunk applies. Everything
+    /// inside the element rides along with the same sign, as it does for `left`.
+    /// </remarks>
+    private static void FarEdgeSlots(string root, Action<bool, string> check)
+    {
+        var available = new HashSet<string>(StringComparer.Ordinal) { "e", "e_x", "e_y", "e_w", "e_h", "e_f", "k_x", "k_y" };
+        // the containing block at (100, 0) is 300x200; `e` is 50x20 and holds `k` 5 units in from its corner
+        var inside = new[] { ("k", 5.0, 5.0) };
+        var box = new DomSlots.Box(outOfFlow: true, parentX: 100, parentY: 0, hasBackground: true, inside,
+                                   parentW: 300, parentH: 200, w: 50, h: 20);
+        var right = DomSlots.Map("e", "style.right", box, available);
+        check(right.Mapped && right.Slots.SequenceEqual(new[] { "e_x", "k_x" })
+              && right.Bias.SequenceEqual(new[] { 350.0, 355.0 }) && right.Scale.All(s => s == -1),
+              "slots: right maps to e_x and k_x with bias parent + parentW - w and a scale of -1"
+              + (right.Mapped ? $" ({string.Join(",", right.Slots)} +{string.Join(",", right.Bias)} x{string.Join(",", right.Scale)})" : " - " + right.Problem));
+        var unmeasured = DomSlots.Map("e", "style.right", new DomSlots.Box(true, 100, 0, true), available);
+        check(!unmeasured.Mapped, "slots: right is refused, not mapped to the near edge, when the sizes were not measured");
+
+        const string script = "var e = document.getElementById('e');\n"
+            + "function tick() { e.style.right = '10px'; e.style.bottom = '4px'; }\nsetInterval(tick, 100);\n";
+        var state = Loaded(root, script, available, box, check, "the far-edge page");
+        if (state == null) return;
+        var sent = Payload(state, Driver(1));
+        check(Num(sent, "e_x") == 340 && Num(sent, "k_x") == 345,
+              $"compiled: right = 10px puts e_x at {Num(sent, "e_x")} (100 + 300 - 50 - 10 = 340) and k_x rides at {Num(sent, "k_x")}");
+        check(Num(sent, "e_y") == 176, $"compiled: bottom = 4px puts e_y at {Num(sent, "e_y")} (0 + 200 - 20 - 4 = 176)");
+    }
+
+    /// <summary>A small page compiled against a hand-made slot set and loaded, or null with the reason checked.</summary>
+    private static LuaState? Loaded(string root, string script, ICollection<string> available, DomSlots.Box box,
+                                    Action<bool, string> check, string what)
+    {
+        var compiled = CompiledPage.Compile(script, available, _ => box,
+                                            prelude: File.ReadAllText(Path.Combine(root, "JsPrelude.lua")));
+        if (compiled.Lua == null || compiled.Unmapped.Count > 0)
+        {
+            check(false, $"compiled: {what} does not compile - "
+                  + string.Join("; ", (compiled.Lua == null ? compiled.Problems : compiled.Unmapped).Take(2)));
+            return null;
+        }
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        Chunk(state, compiled.Lua, "page");
+        return state;
+    }
+
     internal static void Run(Action<bool, string> check)
     {
         var root = Root();
@@ -108,6 +230,9 @@ internal static class CompiledPageTests
             : $"compiled: {compiled.Unmapped.Count} unmapped - {string.Join("; ", compiled.Unmapped.Take(3))}");
 
         BorderSlots(check);
+        LabelSlots(check);
+        VisibilitySlots(root, check);
+        FarEdgeSlots(root, check);
 
         Dictionary<string, LuaValue> sent;
         LuaValue snap;

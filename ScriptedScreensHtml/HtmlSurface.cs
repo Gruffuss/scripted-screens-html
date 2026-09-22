@@ -773,14 +773,47 @@ internal sealed class HtmlSurface : MonoBehaviour
                 ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{ElementId}\": capture warm-up {Clock.Elapsed.TotalMilliseconds - w0:0} ms, {timedOut} of 6 frames timed out");
             _script.Pump(); // what the last frame queued lands before the capture's emit
         }
+        _emitLabel = "capture emit 1";
         EmitNowInline();
         if (_restore != null)
         {
             // the layout exists now: put the old surface's hover, press and focus back and emit once more
             ApplyRestoredPointer();
             DrainInbox();
+            _emitLabel = "capture emit 2 (dirty after restore)";
             if (_dirty) EmitNowInline();
         }
+        _emitLabel = null;
+    }
+
+    /// <summary>Set by the capture path so the emit it triggers can be told apart in the log.</summary>
+    private string? _emitLabel;
+
+    /// <summary>
+    /// Says whether the scene this surface just produced carries a compiler sentinel.
+    /// </summary>
+    /// <remarks>
+    /// Diagnostic for a bug that only the game reproduces: a capture's clone drew `#0F0000` where
+    /// its heading belongs, while every offline path was clean and the live console was fine. The
+    /// only way to find which emit carries it is to ask each one.
+    /// </remarks>
+    private void ReportSentinels(EmitResult? result, string where)
+    {
+        if (!HtmlConfig.Diagnostics) return;
+        if (result?.Output is not { } o)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{ElementId}\": {where}: no output (template unchanged, so nothing was re-emitted)");
+            return;
+        }
+        var text = new string(o.Chars, 0, o.Length);
+        var n = 0;
+        var at = 0;
+        while ((at = text.IndexOf("#0F0", at, StringComparison.Ordinal)) >= 0) { n++; at += 4; }
+        at = 0;
+        while ((at = text.IndexOf("98765", at, StringComparison.Ordinal)) >= 0) { n++; at += 5; }
+        ScriptedScreensHtmlPlugin.Log?.LogInfo(
+            $"html \"{ElementId}\": {where}: {n} sentinel(s) in {o.Length} chars, {_boxes.Count} boxes, "
+            + $"clone={_restore != null}, compiled={_compiled != null}");
     }
 
     private bool _scriptPending;
@@ -1141,6 +1174,10 @@ internal sealed class HtmlSurface : MonoBehaviour
         _lastLayoutMs = t1 - t0;
         _lastCopyMs = t2 - t1;
         _frameResult = Translate(size, Time.time, OffThread.Globals.Take(), HtmlConfig.Diagnostics, worker: false);
+        // Read here, not after FinishJob: that consumes _frameResult, and a diagnostic that read it
+        // afterwards found null and said nothing - which is how this bug stayed invisible for one
+        // more cycle.
+        if (_emitLabel != null) ReportSentinels(_frameResult, _emitLabel);
         _frameError = null;
         _pageState = PageDone;
         FinishJob();

@@ -84,6 +84,22 @@ internal static class HtmlRenderer
         internal void OnRecascade(VisualElement owner, Action act) => AfterRecascade.Add((owner, act));
 
         /// <summary>
+        /// How a container query reads this page. CssParser's hook is one static shared by every
+        /// page, so it is re-installed before every re-cascade rather than trusted from Build.
+        /// </summary>
+        internal Func<HtmlNode, (Dictionary<string, string> css, float width, float height)?>? ContainerInfo;
+        internal void InstallContainers() => CssParser.InstallContainers(ContainerInfo, Warnings.Add);
+
+        /// <summary>A query container's content box changed: the queries under it may answer differently now.</summary>
+        internal void ContainerResized(VisualElement ve)
+        {
+            InstallContainers();
+            Recascade(ve);
+            PruneForgotten();
+            foreach (var after in AfterRecascade.ToArray()) after.act();
+        }
+
+        /// <summary>
         /// Everything the page keeps per element, dropped when the element is removed. A page that
         /// rebuilds its content with innerHTML every tick otherwise keeps every element it ever had:
         /// the node map grew without bound and is walked on every rebuild, and the retained
@@ -214,6 +230,7 @@ internal static class HtmlRenderer
         {
             if (!NodeOf.TryGetValue(ve, out var node))
                 return;
+            InstallContainers();
             node.Attributes["class"] = classes;
             ve.ClearClassList();
             foreach (var c in classes.Split(' ', StringSplitOptions.RemoveEmptyEntries))
@@ -255,6 +272,21 @@ internal static class HtmlRenderer
         // constructor so it is in place for every entry point - the mod, the bench and the tests
         // all come through Build - and CssParser keeps knowing nothing about Unity.
         StyleApplier.InstallSupportsOracle();
+        // @container: answered against the container's own laid-out content box, by name when the
+        // query gives one. Without this every @container block warns and is skipped - the parser half
+        // has been in place since 5ed23c7 and nothing ever installed its hook.
+        result.ContainerInfo = n =>
+        {
+            if (n.Attr("id") is not { } nid || !result.ById.TryGetValue(nid, out var cve) || cve == null) return null;
+            // Before layout a box has no size, and a query answered against NaN or zero would match
+            // `(min-width: 0)` on every container. No size means no answer, not a small one.
+            if (float.IsNaN(cve.layout.width) || float.IsNaN(cve.layout.height)) return null;
+            var rs = cve.resolvedStyle;
+            return (result.CssOf(cve),
+                cve.layout.width - rs.paddingLeft - rs.paddingRight - rs.borderLeftWidth - rs.borderRightWidth,
+                cve.layout.height - rs.paddingTop - rs.paddingBottom - rs.borderTopWidth - rs.borderBottomWidth);
+        };
+        result.InstallContainers();
 
         // Per page, not per process. The applier names an unsupported declaration once so a page
         // using it on forty elements says so once; kept across pages it made every page after the
@@ -1990,6 +2022,23 @@ internal static class HtmlRenderer
                 Flush();
             }
         }
+        // A query container: when its content box changes, the @container blocks under it may
+        // answer differently, so its subtree is re-cascaded. Per container element only.
+        // ponytail: an element that becomes a container through a later class write gets no
+        // callback, since Flow runs at build.
+        if (CssParser.IsQueryContainer(css))
+        {
+            float lastW = float.NaN, lastH = float.NaN;
+            ve.RegisterCallback<GeometryChangedEvent>(_ =>
+            {
+                var crs = ve.resolvedStyle;
+                var w = ve.layout.width - crs.paddingLeft - crs.paddingRight - crs.borderLeftWidth - crs.borderRightWidth;
+                var h = ve.layout.height - crs.paddingTop - crs.paddingBottom - crs.borderTopWidth - crs.borderBottomWidth;
+                if (Mathf.Abs(w - lastW) < 0.5f && Mathf.Abs(h - lastH) < 0.5f) return;   // NaN the first time, so it always runs once
+                lastW = w; lastH = h;
+                result.ContainerResized(ve);
+            });
+        }
         if (css.TryGetValue("aspect-ratio", out var ar))
         {
             var parts = ar.Split('/');
@@ -3134,7 +3183,7 @@ internal static class HtmlRenderer
 
             foreach (var w in writes)
             {
-                if (!w.Runtime || w.Property is not ("style.transform" or "style.opacity" or "className")) continue;
+                if (!w.Runtime || w.Property is not ("style.transform" or "style.opacity" or "style.visibility" or "className")) continue;
                 if (w.Id != null) { built.NamedGroups.Add(w.Id); continue; }
                 // A family written through one expression - `$('pb' + i)` over fourteen pebbles.
                 // Every member already exists in the page under its own id, so the family resolves

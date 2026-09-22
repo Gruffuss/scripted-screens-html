@@ -55,12 +55,20 @@ internal static class DomSlots
         /// the target of `bootA.style.top`, so two writes compose into one slot.
         /// </summary>
         public readonly IReadOnlyList<(string Id, double Dx, double Dy)> Inside;
+        /// <summary>
+        /// The containing block's size and this element's own, for <c>right</c> and <c>bottom</c>:
+        /// a far-edge position is <c>parent + parentSize - own - value</c>. NaN when the caller did
+        /// not measure them, and those two properties are then refused rather than guessed.
+        /// </summary>
+        public readonly double ParentW, ParentH, W, H;
 
         public Box(bool outOfFlow, double parentX, double parentY, bool hasBackground,
-                   IReadOnlyList<(string Id, double Dx, double Dy)>? inside = null)
+                   IReadOnlyList<(string Id, double Dx, double Dy)>? inside = null,
+                   double parentW = double.NaN, double parentH = double.NaN, double w = double.NaN, double h = double.NaN)
         {
             OutOfFlow = outOfFlow; ParentX = parentX; ParentY = parentY; HasBackground = hasBackground;
             Inside = inside ?? Array.Empty<(string, double, double)>();
+            ParentW = parentW; ParentH = parentH; W = w; H = h;
         }
     }
 
@@ -75,19 +83,34 @@ internal static class DomSlots
         /// coordinates and CSS is not.
         /// </summary>
         public readonly double[] Bias;
+        /// <summary>
+        /// What the written value is multiplied by before the bias is added, per slot. One for
+        /// everything except a far-edge position, where it is minus one: <c>right</c> grows as
+        /// <c>x</c> shrinks. Every consumer of <see cref="Bias"/> has to apply this too.
+        /// </summary>
+        public readonly double[] Scale;
         /// <summary>Why this write cannot be a slot, or null when it can.</summary>
         public readonly string? Problem;
         /// <summary>True when the write needs the element's transform group to carry its id.</summary>
         public readonly bool NeedsGroup;
 
-        private Result(string[] slots, double[] bias, string? problem, bool needsGroup)
+        private Result(string[] slots, double[] bias, string? problem, bool needsGroup, double[]? scale = null)
         {
             Slots = slots; Bias = bias; Problem = problem; NeedsGroup = needsGroup;
+            Scale = scale ?? Ones(slots.Length);
+        }
+
+        private static double[] Ones(int n)
+        {
+            var ones = new double[n];
+            for (var i = 0; i < n; i++) ones[i] = 1;
+            return ones;
         }
 
         public static Result Ok(params string[] slots) => new(slots, new double[slots.Length], null, false);
         public static Result Shifted(string slot, double bias) => new(new[] { slot }, new[] { bias }, null, false);
         public static Result Shifted(string[] slots, double[] bias) => new(slots, bias, null, false);
+        public static Result Scaled(string[] slots, double[] bias, double[] scale) => new(slots, bias, null, false, scale);
         public static Result Group(params string[] slots) => new(slots, new double[slots.Length], null, true);
         public static Result No(string why) => new(Array.Empty<string>(), Array.Empty<double>(), why, false);
         public bool Mapped => Problem == null;
@@ -103,6 +126,10 @@ internal static class DomSlots
         ["height"] = "h",
         ["left"] = "x",
         ["top"] = "y",
+        // Measured from the far edge, so the bias carries the containing block's size and the
+        // element's own, and the value is subtracted - see the far-edge branch below.
+        ["right"] = "x",
+        ["bottom"] = "y",
         ["background"] = "f",
         ["background-color"] = "f",
         ["backgroundColor"] = "f",
@@ -124,9 +151,6 @@ internal static class DomSlots
         ["borderTopLeftRadius"] = "rx",
         ["border-top-right-radius"] = "rx",
         ["borderTopRightRadius"] = "rx",
-        // `visibility: hidden` keeps the box and stops the paint, which is what fill opacity is.
-        ["visibility"] = "fo",
-        ["opacity"] = "fo",
     };
 
 
@@ -140,18 +164,12 @@ internal static class DomSlots
     private static readonly Dictionary<string, string[]> GroupKeys = new(StringComparer.Ordinal)
     {
         ["opacity"] = new[] { "o" },
+        // `visibility: hidden` keeps the box and stops the paint, which is the group's opacity at
+        // zero. The VALUE is a word, not a number, so the runtime has an arm for it; without that
+        // arm the write would read as a length, get nil, and silently do nothing.
+        // ponytail: shares the slot with `opacity`, so a page writing both gets whichever was last
+        ["visibility"] = new[] { "o" },
         ["transform"] = new[] { "t_0", "t_1" },
-    };
-
-    /// <summary>
-    /// <c>right</c> and <c>bottom</c> are positions measured from the far edge, so the scene's
-    /// <c>x</c>/<c>y</c> depends on the parent's size as well as this value. Expressible, but only
-    /// once the compiler emits that arithmetic; refused until then rather than mapped to the wrong
-    /// edge, which would read as the element jumping to the other side of its parent.
-    /// </summary>
-    private static readonly HashSet<string> FarEdge = new(StringComparer.Ordinal)
-    {
-        "right", "bottom",
     };
 
     /// <summary>
@@ -191,9 +209,6 @@ internal static class DomSlots
 
         var css = Dashed(property.Substring("style.".Length));
 
-        if (FarEdge.Contains(css))
-            return Result.No($"`{css}` is measured from the far edge, so its position depends on the parent's size");
-
         if (GroupKeys.TryGetValue(css, out var groupKeys))
         {
             var slots = new string[groupKeys.Length];
@@ -231,11 +246,16 @@ internal static class DomSlots
             return Result.No($"\"{id}\" is in normal flow, so changing its {css} moves its siblings");
 
         // An element that paints a background emits its box and its text as two lines carrying the
-        // same id, and the first one claims `<id>_f`. That is the box's fill, so a `color` write
-        // routed to it would repaint the background instead of the text - silently, and only on the
-        // elements that have both. Refused until the emitter distinguishes them.
+        // same id. The first claims `<id>_f` - the box's fill - and the label, coming second, is
+        // `<id>__2_f` (SceneSlots.SecondSuffix). A `color` write routed to the first would repaint
+        // the background instead of the text, silently, and only on the elements that have both.
         if (css == "color" && box.HasBackground)
-            return Result.No($"\"{id}\" paints a background, so its `f` slot is the box's fill rather than the text's");
+        {
+            var label = id + SceneSlots.SecondSuffix + "_" + key;
+            return available.Contains(label)
+                ? Result.Ok(label)
+                : Result.No($"\"{id}\" paints a background and draws no text over it, so `color` has no slot");
+        }
 
         var name = id + "_" + key;
         if (!available.Contains(name))
@@ -247,7 +267,21 @@ internal static class DomSlots
         if (key is "x" or "y")
         {
             var vertical = key == "y";
+            var far = css is "right" or "bottom";
             var origin = vertical ? box.ParentY : box.ParentX;
+            if (far)
+            {
+                // From the far edge: x = parent + parentSize - own - right. The two sizes are
+                // compile-time facts the caller measured; without them this is refused rather
+                // than mapped to the near edge, which would read as the element jumping across.
+                // ponytail: the element's own size as compiled - a page that also writes its
+                // width or height at run time moves the far edge and the two are not composed.
+                var parentSize = vertical ? box.ParentH : box.ParentW;
+                var own = vertical ? box.H : box.W;
+                if (double.IsNaN(parentSize) || double.IsNaN(own))
+                    return Result.No($"`{css}` is measured from the far edge, and the containing block's size or \"{id}\"'s own was not measured");
+                origin += parentSize - own;
+            }
             var slots = new List<string> { name };
             var bias = new List<double> { origin };
             foreach (var child in box.Inside)
@@ -257,7 +291,10 @@ internal static class DomSlots
                 slots.Add(childSlot);
                 bias.Add(origin + (vertical ? child.Dy : child.Dx));
             }
-            return Result.Shifted(slots.ToArray(), bias.ToArray());
+            if (!far) return Result.Shifted(slots.ToArray(), bias.ToArray());
+            var scale = new double[slots.Count];
+            for (var i = 0; i < scale.Length; i++) scale[i] = -1;
+            return Result.Scaled(slots.ToArray(), bias.ToArray(), scale);
         }
         return Result.Ok(name);
     }

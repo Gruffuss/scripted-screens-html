@@ -31,6 +31,8 @@ internal static class CompiledPage
         public readonly string Key;          // "legA.style.top"
         public readonly string[] Slots;      // legA_y, bootA_y
         public readonly double[] Bias;       // 85, 105
+        /// <summary>Per slot, what the value is multiplied by before the bias: -1 for a far-edge position, else 1.</summary>
+        public readonly double[] Scale;
         /// <summary>
         /// How to read the value the page wrote. A script does not write numbers: it writes CSS, so
         /// a height arrives as <c>"18px"</c> and a transform as <c>"translate(90px,88.7px)"</c>.
@@ -41,9 +43,11 @@ internal static class CompiledPage
         /// <summary>For a <see cref="Kind.State"/> binding: what each reachable class name draws.</summary>
         public readonly IReadOnlyList<StateValues>? States;
 
-        public Binding(string key, string[] slots, double[] bias, Kind read, IReadOnlyList<StateValues>? states = null)
+        public Binding(string key, string[] slots, double[] bias, Kind read, IReadOnlyList<StateValues>? states = null, double[]? scale = null)
         {
             Key = key; Slots = slots; Bias = bias; Read = read; States = states;
+            if (scale == null) { scale = new double[slots.Length]; for (var i = 0; i < scale.Length; i++) scale[i] = 1; }
+            Scale = scale;
         }
     }
 
@@ -58,6 +62,8 @@ internal static class CompiledPage
         Text,
         /// <summary>A colour, which the renderer takes as text and never eases.</summary>
         Colour,
+        /// <summary>`hidden`/`collapse` or `visible`: a word that becomes 0 or 1 on the group's opacity.</summary>
+        Visibility,
         /// <summary>
         /// A class name: not a value but a <b>state</b>. Every class the script can assign is
         /// enumerated at compile time, the page is laid out in each, and the slot values for each
@@ -291,7 +297,7 @@ internal static class CompiledPage
                     && Express(found, mapped, Reading(w.Property), result.Expressions))
                     continue;
 
-                result.Bindings.Add(new Binding(key, mapped.Slots, mapped.Bias, Reading(w.Property)));
+                result.Bindings.Add(new Binding(key, mapped.Slots, mapped.Bias, Reading(w.Property), scale: mapped.Scale));
             }
         }
 
@@ -343,18 +349,19 @@ internal static class CompiledPage
             for (var i = 0; i < 2; i++)
                 if (found.Touches[i] && found.Parts[i] == null) return false;
             for (var i = 0; i < 2; i++)
-                if (found.Parts[i] != null) into[mapped.Slots[i]] = Shift(found.Parts[i]!, mapped.Bias[i]);
+                if (found.Parts[i] != null) into[mapped.Slots[i]] = Shift(found.Parts[i]!, mapped.Bias[i], mapped.Scale[i]);
             return true;
         }
 
         if (found.Parts.Length != 1 || found.Parts[0] == null) return false;
-        for (var i = 0; i < mapped.Slots.Length; i++) into[mapped.Slots[i]] = Shift(found.Parts[0]!, mapped.Bias[i]);
+        for (var i = 0; i < mapped.Slots.Length; i++) into[mapped.Slots[i]] = Shift(found.Parts[0]!, mapped.Bias[i], mapped.Scale[i]);
         return true;
     }
 
-    /// <summary>An expression moved into absolute scene coordinates.</summary>
-    private static string Shift(string expr, double bias)
-        => bias == 0 ? expr : "(" + expr + ")+" + Num(bias);
+    /// <summary>An expression moved into absolute scene coordinates: <c>bias - expr</c> for a far edge.</summary>
+    private static string Shift(string expr, double bias, double scale = 1)
+        => scale < 0 ? Num(bias) + "-(" + expr + ")"
+         : bias == 0 ? expr : "(" + expr + ")+" + Num(bias);
 
     /// <summary>What shape of CSS value a property carries.</summary>
     private static Kind Reading(string property) => property switch
@@ -362,6 +369,7 @@ internal static class CompiledPage
         "className" => Kind.State,
         "textContent" or "innerText" => Kind.Text,
         "style.transform" => Kind.Translate,
+        "style.visibility" => Kind.Visibility,
         "style.color" or "style.background" or "style.backgroundColor" or "style.background-color" => Kind.Colour,
         _ => Kind.Length,
     };
@@ -476,7 +484,11 @@ internal static class CompiledPage
             for (var i = 0; i < b.Slots.Length; i++)
             {
                 if (i > 0) sb.Append(", ");
-                sb.Append("{ ").Append(Quote(b.Slots[i])).Append(", ").Append(Num(b.Bias[i])).Append(" }");
+                sb.Append("{ ").Append(Quote(b.Slots[i])).Append(", ").Append(Num(b.Bias[i]));
+                // A third entry only where the value is negated - a far-edge position - so the
+                // runtime's ordinary write reads `{ slot, bias }` exactly as before.
+                if (b.Scale[i] != 1) sb.Append(", ").Append(Num(b.Scale[i]));
+                sb.Append(" }");
             }
             sb.Append(" } },\n");
             }
@@ -656,9 +668,21 @@ function DOM.bind(id, key, value)
     return
   end
 
+  -- `visibility` is a word on the group's opacity: hidden is 0, anything else is 1. It needs its
+  -- own arm for the same reason `state` did - read as a length, 'hidden' is nil and the write
+  -- silently does nothing, on a slot the compiler reported as mapped.
+  if b.read == 'visibility' then
+    local s = js_str(value)
+    local n = (s == 'hidden' or s == 'collapse') and 0 or 1
+    for i = 1, #b.to do PAYLOAD[b.to[i][1]] = n end
+    DIRTY = true
+    return
+  end
+
   local n = length(value)
   if n == nil then return end
-  for i = 1, #b.to do put(b.to[i][1], n + b.to[i][2]) end
+  -- to[3] is -1 for a far-edge position (`right`, `bottom`) and absent otherwise.
+  for i = 1, #b.to do local to = b.to[i] put(to[1], n * (to[3] or 1) + to[2]) end
 end
 
 -- The two the compiler emits instead of a CSS string. A page writes `x + 'px'` and
@@ -675,7 +699,7 @@ function DOM.num(el, key, n)
   local e = BOUND[rawget(el, '__id')]
   local b = e and e[key]
   if b == nil or b.read ~= 'length' then return end
-  for i = 1, #b.to do PAYLOAD[b.to[i][1]] = n + b.to[i][2] end
+  for i = 1, #b.to do local to = b.to[i] PAYLOAD[to[1]] = n * (to[3] or 1) + to[2] end
   DIRTY = true
 end
 

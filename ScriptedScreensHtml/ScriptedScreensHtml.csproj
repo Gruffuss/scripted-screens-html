@@ -24,7 +24,10 @@
         <!-- CA1031: mod load must never throw into the host.
              CA1812: Unity instantiates MonoBehaviours and Harmony calls patch classes
              reflectively, neither of which the analyzer can see. -->
-        <NoWarn>$(NoWarn);CA1031;CA1812;CA1001;CA2213;CA1307;CA1308;CA2249;CA1305;CA1304;CA1310;CA1865;CA1867;CA1861;CA1846</NoWarn>
+        <NoWarn>$(NoWarn);CA1031;CA1812;CA1001;CA2213;CA1307;CA1308;CA2249;CA1305;CA1304;CA1310;CA1865;CA1867;CA1861;CA1846;CA1508;CA3004</NoWarn>
+        <!-- CA1508 and CA3004 are the flow-analysis analyzers; on this source they take 308 s and 95 s
+             per compile (dotnet build -p:ReportAnalyzer=true, 2026-09-23). Suppressed here so csc
+             skips them: 4m40s -> 1.4s. -->
         <ScriptedScreensDirectory>$(SteamLibraryDirectory)\..\workshop\content\$(StationeersSteamAppId)\3666779631</ScriptedScreensDirectory>
     </PropertyGroup>
     <Target Name="EnsureScriptedScreensDll" BeforeTargets="ResolveAssemblyReferences">

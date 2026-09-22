@@ -7,7 +7,7 @@ So the denominator is **the language**, not the files in this repository. A corp
 Everything below is measured by a probe that can be re-run in a second. No number here is an
 estimate.
 
-**[GAPS.md](GAPS.md) lists every missing item by name** — all 436 lines of it, generated from the
+**[GAPS.md](GAPS.md) lists every missing item by name** — all 255 lines of it, generated from the
 probes. This file has the numbers and the plan; that one has the enumeration, so no surface ever has
 to be audited twice. Regenerate it whenever the numbers move.
 
@@ -42,7 +42,7 @@ error and hides a real gap if the reason ever stops being true.
 | Global HTML attributes | 88% | 22/25 | — | 88% |
 | **CSS properties** | 84% | 286/342 | 52 | **99%** |
 | DOM `HTMLElement` | 74% | 17/23 | — | 74% |
-| **style writes that reach the scene** | **23%** | **11/47** | — | **23%** |
+| **style writes that reach the scene** | **28%** | **13/47** | — | **28%** |
 
 Movement on 2026-09-22, and most of it was the instrument rather than the renderer:
 
@@ -56,9 +56,10 @@ Movement on 2026-09-22, and most of it was the instrument rather than the render
 | Timers | 27% | 91% |
 | JS syntax | 80% | 87% |
 | JS standard library | 68% | 95% |
+| style writes that reach the scene | 23% (11/47) | 28% (13/47) |
 
 **[GAPS-CSS-REMAINING.md](GAPS-CSS-REMAINING.md)** names the four CSS properties and eight values
-left, each with its reason. **[GAPS-RUNTIME-STYLE.md](GAPS-RUNTIME-STYLE.md)** is the 23% row: what a
+left, each with its reason. **[GAPS-RUNTIME-STYLE.md](GAPS-RUNTIME-STYLE.md)** is the 28% row: what a
 script can change on a compiled page, why the border is in the scene under a name nothing can reach,
 and the order the rest is worth doing in.
 
@@ -102,9 +103,9 @@ does not do, so a correct refusal is never counted as a hole again.
 ### One caveat on the timer number
 
 The timer probe exercises the prelude alone, and the loop that actually *drives* timers lives in a
-C# string (`CompiledPage.Runtime`). So 27% understates it — `setTimeout`/`setInterval`/`rAF` do run
-on a compiled page. The probe should compile a real page instead; until it does, treat that row as
-unmeasured rather than as 27%.
+C# string (`CompiledPage.Runtime`). So the row understates it — `setTimeout`/`setInterval`/`rAF` do
+run on a compiled page. The probe should compile a real page instead; until it does, treat 91% as a
+floor rather than a measurement.
 
 ---
 
@@ -122,74 +123,69 @@ seconds. **B has not moved at all today.** See the end of this file.
 
 Each item ends with the probe number, not a description.
 
-### 1. Events — 23%, and the lowest-hanging of the lot
+### 1. Events — 91%
 
-Seventeen of twenty-two members exist and answer nothing. What a page needs:
+Two of twenty-two members answer nothing, and they are the same gap twice: `event.key` and
+`event.code`, so a compiled page cannot read the keyboard. The event object, the mouse coordinates,
+`addEventListener` with its options, bubbling and `removeEventListener` all pass now. A key would
+have to come from the input patch, through the surface, into the chunk, exactly as the coordinates
+do — so this is not only a prelude job. Next door, `document.addEventListener` answers `0`: a
+listener on the document itself is registered nowhere.
 
-- the event object: `type target currentTarget preventDefault stopPropagation
-  stopImmediatePropagation defaultPrevented bubbles`
-- mouse: `clientX clientY offsetX offsetY button`
-- keyboard: `key code altKey ctrlKey shiftKey metaKey`
-- `addEventListener` with the capture/once/passive options object
-- real bubbling to a parent, and `removeEventListener`
-- which event **types** reach a page at all: `mousedown/up/move/enter/leave`, `click`, `input`,
-  `change`, `keydown/up`, `focus/blur`, `wheel`, `pointer*`
+### 2. Style properties that reach the scene — 28%
 
-The coordinates have to come from the input patch, through the surface, into the chunk — so this is
-not only a prelude job.
+Thirty-four of forty-seven style properties a script writes do not change the drawing. This is the
+`style.x = y` path specifically, which is how a script animates anything, and it is now the lowest
+row on the board by a wide margin.
 
-### 2. Style properties that reach the scene — 23%
+### 3. CSS properties — 84%, plus 52 named as not gaps
 
-Thirty-six of forty-seven style properties a script writes do not change the drawing. This is the
-`style.x = y` path specifically, which is how a script animates anything.
-
-### 3. CSS properties — 57%
-
-147 missing, and **most are "accepted, draws the same"**. The big families: the `animation-*`
-longhands, `background-*` longhands (`size`, `position`, `repeat`, `origin`, `attachment`), the
-per-side `border-*-color` longhands, `aspect-ratio`, `appearance`, `backdrop-filter`, the `break-*`
-and table properties, and the logical properties (`inline-start` and friends).
+Four left, and two of them are one item: `container-type` and `container-name` exist only to feed
+`@container`, which is itself the one at-rule missing and currently throws the container's name away
+and measures the design width instead (BUGS.md #83). The other two are `animation-composition` and
+`object-position`. See [GAPS-CSS-REMAINING.md](GAPS-CSS-REMAINING.md).
 
 Anything that genuinely cannot be drawn must **warn**, not be silently accepted.
 
-### 4. `HTMLElement` — 30%
+### 4. `HTMLElement` — 74%
 
-Twelve of the sixteen gaps are deliberate: a compiled page has no layout to measure, so
-`getBoundingClientRect`, `offsetWidth`, `scrollTop` and the rest honestly answer zero and are marked
-`[by design]`. That decision should be **revisited** — the compiler knows every box at compile time
-and could bake them in, which would make the whole family real rather than honest-but-useless.
+Five of the six gaps are deliberate: a compiled page has no layout to measure, so
+`getComputedStyle`, `scrollTop`, `scrollHeight` and the rest honestly answer `undefined` and are
+marked `[by design]`. That decision should be **revisited** — the compiler knows every box at
+compile time and could bake them in, which would make the whole family real rather than
+honest-but-useless.
 
-Four are simply absent: `focus`, `blur`, `click`, `scrollIntoView`.
+One is simply absent: `scrollIntoView`. `focus`, `blur` and `click` now exist.
 
-### 5. JS standard library — 68%
+### 5. JS standard library — 95%
 
-The gaps, by object: `Date` (12 of 15 missing — the calendar accessors), `Promise` (all 9),
-`RegExp` (`exec`, `test`), `Object` (`create`, `defineProperty`, `getPrototypeOf`, `seal`,
-`hasOwnProperty`, `is`), `Math` (the hyperbolics), `String` (`match`, `matchAll`, `normalize`,
-`fromCharCode`), `Array` (`copyWithin`, `reduceRight`, and the ES2023 `toSorted` family).
+One object left: `Promise`, all nine members. It deserves a decision rather than an implementation —
+a console page has no I/O to await.
 
-`Promise` deserves a decision rather than an implementation: a console page has no I/O to await.
+Read the number with the probe's own caveat: the manifest is keyed by method name alone, so a name
+two objects share counts as covered when either is (BUGS.md #3).
 
-### 6. CSS selectors, at-rules, values — 73 / 71 / 79%
+### 6. CSS selectors, at-rules, values — 92 / 91 / 92%
 
-The tail after this morning's escape-handling work. Worth doing, lower priority than the above.
+Selectors have **nothing** missing — the seven below 100% are all named refusals. At-rules have
+`@container` alone. Values have eight, listed in GAPS.md, of which `s / ms` is a bad probe row
+rather than a gap.
 
-### 7. JS syntax — 80%
+### 7. JS syntax — 87%
 
-What is left splits cleanly:
-
-- **out of scope for a console page**: `Promise`, `async`/`await`, generators, modules, `BigInt`,
-  `Symbol`, dynamic import. These should refuse clearly, which they do.
-- **genuinely missing**: labelled break, private class fields, static blocks, tagged templates, and
-  **real regular expressions** — the last being the largest single item, since only literal-character
-  patterns work today.
+All nine remaining constructs are the same family, and it is the out-of-scope one: `Promise`,
+`async`/`await`, generators, modules (`import`/`export`/dynamic import), `BigInt`, `Symbol` and
+top-level await. Each refuses with a line naming itself, which is the acceptable failure. Regular
+expression literals, previously the largest single item here, now translate.
 
 ### 8. `innerHTML` as structure — analysed, not wired
 
 `Markup.cs` reduces a page's markup to fixed structure plus holes, and all three Atmo pages now
-reduce (AtmoDark: 328 holes, 44 choices, 23,916 characters of fixed structure). Nothing yet turns
-those holes into slots. Still to build: parse and lay out the skeleton, map each sentinel to a slot,
-emit a scene per reachable choice, emit the Lua that writes them, and bind the registered handlers.
+reduce (AtmoDark: 328 holes, 44 choices, 23,916 characters of fixed structure). The sentinel→slot
+step now exists — `MarkupSlots.Resolve` lays out a skeleton, emits it, and reads back which slot
+each sentinel landed on — and it carries **BUGS.md #90**, which destroys the live page while doing
+it. The rest of the list is unchanged: emit a scene per reachable choice, emit the Lua that writes
+them, and bind the registered handlers.
 
 ### 9. Canvas 2D
 
@@ -230,4 +226,4 @@ their code in `<script type="text/x-dc">`, a type no browser executes either.
 
 By surface, scored by the three probes, reported at surface boundaries with numbers. No page is
 patched to make it pass; if a page fails, the feature gets built. Bugs found on the way go to
-[BUGS.md](BUGS.md) — 27 fixed, 10 open at the time of writing.
+[BUGS.md](BUGS.md) — 84 fixed, 20 open at the time of writing.

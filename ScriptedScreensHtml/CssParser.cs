@@ -252,7 +252,7 @@ internal sealed class CssRule
 
 /// <summary>
 /// CSS subset parser: rules with selector lists and declaration blocks, comments,
-/// inline style strings. @-rules are skipped whole. ponytail: no nesting, no !important.
+/// inline style strings. Nested rules, !important and the at-rules below are all handled.
 /// </summary>
 internal static class CssParser
 {
@@ -347,8 +347,8 @@ internal static class CssParser
                 else if (header.StartsWith("layer", StringComparison.OrdinalIgnoreCase) || header.StartsWith("container", StringComparison.OrdinalIgnoreCase) || header.StartsWith("scope", StringComparison.OrdinalIgnoreCase))
                 {
                     // @layer: its rules in source order (layer precedence is source order here);
-                    // @container: decided against the design size like @media (ponytail: a real
-                    // container query needs the container's laid-out size and a re-cascade);
+                    // @container: name and condition are kept on every selector inside the block and
+                    // answered per element by ContainerHolds against its nearest query container;
                     // @scope (root): the block becomes a nested rule under the root selector.
                     var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
                     var take = true;

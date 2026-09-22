@@ -170,6 +170,31 @@ internal static class VectorEmitter
     [ThreadStatic] private static Ctx? _ctx;
 
     /// <summary>
+    /// Runs <paramref name="work"/> with a private emit context, so an emit made inside it cannot
+    /// overwrite the buffer a caller on this thread is still holding.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Emit"/> returns <c>ctx.Out</c> - the thread context's OWN object, the same one every
+    /// call - and its <c>Chars</c> is a buffer the emitter keeps, by design (a 10 KB scene was 20 KB
+    /// of garbage a frame as a string). So a second Emit on the same thread silently rewrites what
+    /// the first one returned. HtmlSurface.Translate emits the page, splits it, then runs the
+    /// compile probes, which emit skeletons full of sentinels through this same context; anything
+    /// that read <c>r.Output</c> afterwards - FinishJob's send on the capture path - got the last
+    /// skeleton. Measured in game: <c>capture emit 1: 23 sentinel(s) in 4159 chars</c> on a page
+    /// whose real scene is 11 KB. The live path never showed it only because the worker never
+    /// probes.
+    ///
+    /// Costs one context per call, once per compile attempt - not per frame.
+    /// </remarks>
+    internal static T Isolated<T>(Func<T> work)
+    {
+        var shared = _ctx;
+        _ctx = null;
+        try { return work(); }
+        finally { _ctx = shared; }
+    }
+
+    /// <summary>
     /// Emit everything from scratch, ignoring what elements kept from last frame. The verify mode
     /// emits a frame both ways and compares: if they differ, the cache is reusing text whose inputs
     /// it cannot see, and a console would be showing something stale.
@@ -490,7 +515,13 @@ internal static class VectorEmitter
         // is a different scene, not a different number. Emitted whenever it can still change.
         if (rs.opacity < 0.999f || (tw != null && tw.From.Opacity < 0.999f) || CanFade(ctx, ve))
         {
-            ctx.Body.Append(indent).Append("G o=").Append(tw != null ? tw.Lerp(tw.From.Opacity, rs.opacity) : F(rs.opacity)).Append(" {\n");
+            // Named like the transform group when a script drives this element: `opacity` and
+            // `visibility` bind to <id>_o, and until this line that slot did not exist - the compiler
+            // reported the write as mapped and the console never changed. Two nodes then share an
+            // id (this G and the transform G), as the R and T of a box already do.
+            ctx.Body.Append(indent).Append("G o=").Append(tw != null ? tw.Lerp(tw.From.Opacity, rs.opacity) : F(rs.opacity));
+            if (Driven(ctx, ve)) ctx.Body.Append(" id=").Append(ve.name);
+            ctx.Body.Append(" {\n");
             groups++;
         }
         if (ctx.Built.TimeAnimations.TryGetValue(ve, out var ta) && TimeTimeline(ctx, ve, ta.spec, ta.start, x, y, w, h) is { } timeG)

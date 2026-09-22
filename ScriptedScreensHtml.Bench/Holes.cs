@@ -73,7 +73,14 @@ internal static class Holes
 
             any = true;
             var shapes = markup.Shapes();
+            static int Count(VisualElement v) { var n = 1; for (var i = 0; i < v.childCount; i++) n += Count(v[i]); return n; }
+            var beforeTree = Count(built.Root);
+            var beforeEl = built.ById.TryGetValue(id, out var probed) && probed != null ? probed.childCount : -1;
             var landed = MarkupSlots.ResolveAll(id, markup, built, panel, size);
+            var afterEl = built.ById.TryGetValue(id, out var probed2) && probed2 != null ? probed2.childCount : -1;
+            Console.WriteLine($"    tree: {beforeTree} -> {Count(built.Root)} elements; "
+                              + $"\"{id}\" children {beforeEl} -> {afterEl}; "
+                              + $"same element: {ReferenceEquals(probed, probed2)}");
             if (landed.Count == 0) { Console.WriteLine($"  {id}: no shape could be put into the page"); continue; }
 
             var holes = markup.Holes.Count;
@@ -139,15 +146,68 @@ internal static class Holes
         // The end-to-end question, which nothing short of this answers: does the page COMPILE now?
         // Resolving holes is only worth anything if the compiler then accepts the page.
         var slots = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+        var sceneText = string.Empty;
         OffThread.Active = true;
         try
         {
             var output = VectorEmitter.Emit(built, built.Root, size.x, size.y);
+            sceneText = new string(output.Chars, 0, output.Length);
             SceneSlots.Split(output.Chars, output.Length, slots);
         }
         finally { OffThread.Active = false; }
 
+        // Did probing leave the page as it found it? Resolving a hole means putting a SKELETON full
+        // of sentinels into the live page, laying it out and emitting it. If that is not undone, the
+        // console draws `987653` and `#0F0085` where its readings belong - which is exactly what
+        // AtmoDark, AtmoLight and AtmoApple all did on 2026-09-22, silently, on pages that do not
+        // even compile. So the scene emitted AFTER all the probing is the thing to check.
+        var leaked = 0;
+        foreach (var pair in slots)
+        {
+            var isLeak = (pair.Value.IsNumber && Markup.HoleOf(pair.Value.Number) >= 0)
+                         || (pair.Value.Text is { Length: > 0 } t && Markup.ColourHoleOf(t) >= 0);
+            if (!isLeak) continue;
+            if (leaked < 12)
+                Console.WriteLine($"    leak: {pair.Key} = "
+                                  + (pair.Value.IsNumber ? pair.Value.Number.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                                                         : pair.Value.Text));
+            leaked++;
+        }
+        if (leaked > 0)
+        {
+            File.WriteAllText("holes-scene.txt", sceneText);
+            Console.WriteLine("    (scene written to holes-scene.txt)");
+        }
+        Console.WriteLine();
+        Console.WriteLine(leaked == 0
+            ? "  restored: the page emits no sentinels after probing"
+            : $"  RESTORED: NO - {leaked} sentinel(s) survive in the emitted scene, so a console would draw them");
+
         var compiled = PageCompiler.Compile(built, panel, size, slots);
+
+        // The game emits AFTER Compile, not after ResolveAll - and Compile does more than resolve
+        // holes (it enumerates states by applying classes to the live page, among other things).
+        // The check above never covered that. This one does: emit again exactly as a surface would,
+        // with the incremental capture a surface uses, and look.
+        var after = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+        panel.Layout(size.x, size.y);
+        if (OffThread.Boxes is { } inc) OffThread.Capture(built.Root, built, inc, new List<VisualElement>());
+        OffThread.Active = true;
+        try
+        {
+            var o2 = VectorEmitter.Emit(built, built.Root, size.x, size.y);
+            SceneSlots.Split(o2.Chars, o2.Length, after);
+            File.WriteAllText("holes-scene-after-compile.txt", new string(o2.Chars, 0, o2.Length));
+        }
+        finally { OffThread.Active = false; }
+        var leakedAfter = 0;
+        foreach (var pair in after)
+            if ((pair.Value.IsNumber && Markup.HoleOf(pair.Value.Number) >= 0)
+                || (pair.Value.Text is { Length: > 0 } t2 && Markup.ColourHoleOf(t2) >= 0)) leakedAfter++;
+        Console.WriteLine(leakedAfter == 0
+            ? "  after Compile: still no sentinels"
+            : $"  AFTER COMPILE: {leakedAfter} sentinel(s) - the leak is in a Compile step later than ResolveAll");
+
         Console.WriteLine();
         Console.WriteLine($"  compiles: {(compiled.Ok ? "YES" : "no")}"
                           + $"  ({compiled.Bindings.Count} binding(s), {compiled.Problems.Count} problem(s), "

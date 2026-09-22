@@ -97,7 +97,9 @@ internal static class MarkupSlots
             var wasActive = OffThread.Active;
             OffThread.Active = true;
             VectorEmitter.Output output;
-            try { output = VectorEmitter.Emit(built, built.Root, size.x, size.y); }
+            // Isolated: this emit must not overwrite the buffer the surface's own emit returned and
+            // is about to send. See VectorEmitter.Isolated for the measurement.
+            try { output = VectorEmitter.Isolated(() => VectorEmitter.Emit(built, built.Root, size.x, size.y)); }
             finally { OffThread.Active = wasActive; }
             var table = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
             SceneSlots.Split(output.Chars, output.Length, table);
@@ -124,10 +126,12 @@ internal static class MarkupSlots
         finally
         {
             // Put back, always. A compile that throws half way must not leave the console drawing
-            // six-digit numbers where its readings should be.
-            Replace(element, node, original, built);
+            // six-digit numbers where its readings should be. Rebuilt rather than morphed: see the
+            // `inPlace` note on Replace - the fast path restores structure and not values.
+            Replace(element, node, original, built, inPlace: false);
             HtmlRenderer.Nameable(element, built, id);
             panel.Layout(size.x, size.y);
+
         }
     }
 
@@ -144,26 +148,110 @@ internal static class MarkupSlots
                                                         Panel panel, Vector2 size, int rows = 1)
     {
         var all = new Dictionary<int, Landing>();
-        // Each shape twice: a number serves a length and a label, a colour serves the positions a
-        // number is not valid in. Neither flavour alone reaches half the holes on a real page.
-        foreach (var shape in markup.Shapes())
-        foreach (var colours in new[] { false, true })
+
+        // The page as it was BEFORE any probing, kept here rather than only per pass.
+        //
+        // This is the difference between a bug that heals and one that compounds. Each Resolve below
+        // saves its own "original" and puts it back, but it saves it from the LIVE tree - so if one
+        // pass fails to restore, the next pass saves the SKELETON as its original and faithfully
+        // restores that. Ten passes run here (five shapes, two sentinel flavours), so one slip
+        // poisons every pass after it and the page keeps the skeleton for good.
+        //
+        // Seen in game on 2026-09-22: AtmoDark, AtmoLight and AtmoApple all drew `#0F0085` and
+        // `987653` where their readings belong, with their chrome gone, and NOTHING in the log said
+        // so. Worse, the pages that show it do not even compile - so a compile ATTEMPT that was
+        // going to be abandoned anyway is what destroyed the page it failed to compile.
+        if (!built.ById.TryGetValue(id, out var element) || element == null) return all;
+        if (!built.NodeOf.TryGetValue(element, out var node)) return all;
+        var pristine = HtmlRenderer.ToHtml(node, outer: false, keepIds: true);
+
+        try
         {
-            var landed = Resolve(id, markup, built, panel, size, shape, rows, colours);
-            if (landed == null) continue;
-            // First shape to land a hole wins. A hole reached by two shapes is the same hole in the
-            // same place; taking the later one would only churn.
-            foreach (var pair in landed) if (!all.ContainsKey(pair.Key)) all[pair.Key] = pair.Value;
+            // Each shape twice: a number serves a length and a label, a colour serves the positions a
+            // number is not valid in. Neither flavour alone reaches half the holes on a real page.
+            foreach (var shape in markup.Shapes())
+            foreach (var colours in new[] { false, true })
+            {
+                var landed = Resolve(id, markup, built, panel, size, shape, rows, colours);
+                if (landed == null) continue;
+                // First shape to land a hole wins. A hole reached by two shapes is the same hole in the
+                // same place; taking the later one would only churn.
+                foreach (var pair in landed) if (!all.ContainsKey(pair.Key)) all[pair.Key] = pair.Value;
+            }
+            return all;
         }
-        return all;
+        finally
+        {
+            Restore(id, element, node, pristine, built, panel, size);
+            Forget(built, panel, size);
+        }
+    }
+
+    /// <summary>
+    /// Clears the box snapshot and measures the restored page fresh.
+    /// </summary>
+    /// <remarks>
+    /// One of TWO things probing leaves behind, and the one that only showed offline. The other -
+    /// the probe's emit overwriting the shared output buffer a caller was still holding - is what
+    /// the game actually drew, and is closed by running the probe's emit inside
+    /// <see cref="VectorEmitter.Isolated"/>. This one is measured, not derived: the bench emitted
+    /// 17-22 sentinels after probing until this clear-and-remeasure, and reverting it brings them
+    /// back. Capture prunes entries it did not see, so "the cache only grows" is not the reason;
+    /// why the incremental walk kept the skeleton's values for elements it did see is not pinned.
+    /// Kept because it is cheap - one re-measure per compile attempt, once per page - and proven.
+    /// </remarks>
+    private static void Forget(HtmlRenderer.Result built, Panel panel, Vector2 size)
+    {
+        if (OffThread.Boxes is not { } boxes) return;
+        boxes.Clear();
+        panel.Layout(size.x, size.y);
+        OffThread.Capture(built.Root, built, boxes, new List<VisualElement>());
+    }
+
+    /// <summary>
+    /// Puts the page back exactly as it was, and says so out loud when it cannot.
+    /// </summary>
+    /// <remarks>
+    /// The check is the point. Probing mutates the live page, so "it was restored" is a claim the
+    /// code has to verify rather than assume - and the failure it guards against is invisible: a
+    /// console quietly drawing sentinels where its numbers should be, with no warning anywhere.
+    /// </remarks>
+    private static void Restore(string id, VisualElement element, HtmlNode node, string pristine,
+                                HtmlRenderer.Result built, Panel panel, Vector2 size)
+    {
+        var now = HtmlRenderer.ToHtml(node, outer: false, keepIds: true);
+        if (Environment.GetEnvironmentVariable("PROBE_RESTORE") != null)
+            Console.Error.WriteLine($"[restore] {id}: same={string.Equals(now, pristine, StringComparison.Ordinal)} "
+                                    + $"now={now.Length} pristine={pristine.Length} "
+                                    + $"nowHasSentinel={now.Contains("#0F0", StringComparison.Ordinal) || now.Contains("98765", StringComparison.Ordinal)}");
+        if (string.Equals(now, pristine, StringComparison.Ordinal))
+            return;
+
+        Replace(element, node, pristine, built, inPlace: false);
+        HtmlRenderer.Nameable(element, built, id);
+        panel.Layout(size.x, size.y);
+
+        if (!string.Equals(HtmlRenderer.ToHtml(node, outer: false, keepIds: true), pristine, StringComparison.Ordinal))
+            ScriptedScreensHtmlPlugin.Log?.LogWarning(
+                $"html: \"{id}\" could not be put back after probing it for slots, so the page may be "
+                + "drawing placeholder values. This is a compiler bug, not a fault in the page.");
     }
 
     /// <summary>
     /// Swaps an element's contents, in place when the shape allows and by rebuilding when it does not.
     /// </summary>
-    private static bool Replace(VisualElement element, HtmlNode node, string html, HtmlRenderer.Result built)
+    /// <param name="inPlace">
+    /// Whether the fast path may be used. False when PUTTING THE PAGE BACK, and that is not a
+    /// preference: <c>Morph</c> reports success having updated the structure while leaving a label's
+    /// text and a shape's resolved colour as the skeleton left them. The static text of a restored
+    /// page came back and every scripted value stayed a sentinel - `#0F0000` where the heading
+    /// belongs - which is how three consoles ended up drawing placeholders on 2026-09-22. Rebuilding
+    /// is slower and this runs once per probe, not per frame.
+    /// </param>
+    private static bool Replace(VisualElement element, HtmlNode node, string html, HtmlRenderer.Result built,
+                                bool inPlace = true)
     {
-        if (HtmlRenderer.Morph(element, node, html, built, null)) return true;
+        if (inPlace && HtmlRenderer.Morph(element, node, html, built, null)) return true;
         try
         {
             // A different shape - a choice taking its other side - so the subtree is rebuilt. The

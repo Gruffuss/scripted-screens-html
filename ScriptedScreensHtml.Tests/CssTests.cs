@@ -646,10 +646,14 @@ internal static class CssTests
             string Colour(string id) => built.ById.TryGetValue(id, out var ve) && built.CssOf(ve).TryGetValue("color", out var c) ? c.Trim().ToLowerInvariant() : "(none)";
             var panel = new Panel(built.Root);
             panel.Layout(900f, 900f);
-            // The build's cascade ran before any layout, so both took the plain rule. That is the
-            // whole reason the re-cascade below is not optional.
-            check(Colour("a") == "#ff0000" && Colour("b") == "#ff0000",
-                $"before layout no container has a size, so no query matches ({Colour("a")}, {Colour("b")})");
+            // The build's cascade ran before any layout, so both took the plain rule then. The first
+            // layout gives the containers their size, and the GeometryChangedEvent hook re-cascades
+            // under each one by itself - so this is already the right answer with no manual
+            // re-cascade. (This check used to expect #ff0000 for both and called the manual
+            // re-cascade below "not optional": that described the hook not existing. The checks
+            // after it now prove the manual path is idempotent rather than necessary.)
+            check(Colour("a") == "#ff0000" && Colour("b") == "#00ff00",
+                $"the first layout re-cascades under each container on its own: narrow {Colour("a")} (no match), wide {Colour("b")} (match)");
 
             foreach (var id in new[] { "narrow", "wide" })
                 if (built.ById.TryGetValue(id, out var card)) built.Reclass(card, "card");

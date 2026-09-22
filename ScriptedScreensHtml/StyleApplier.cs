@@ -332,7 +332,10 @@ internal static class StyleApplier
                 // ponytail: `hidden` hides the whole element, where CSS keeps its own background and
                 // border and hides only its contents. Closer than painting it in full, which is what
                 // warning and doing nothing amounted to.
-                if (v == "hidden") s.visibility = Visibility.Hidden;
+                // Fully qualified, as the `visibility` case above is: a bare `Visibility` binds to a
+                // different type in scope here, and the mod build is the only thing that says so -
+                // the headless test project compiles this file and accepts it.
+                if (v == "hidden") s.visibility = UnityEngine.UIElements.Visibility.Hidden;
                 break;
             case "background":
             case "background-color":

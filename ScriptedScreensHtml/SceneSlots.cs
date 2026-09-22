@@ -29,6 +29,14 @@ namespace ScriptedScreensHtml;
 /// </remarks>
 internal static class SceneSlots
 {
+    /// <summary>
+    /// What the SECOND line carrying an id is named after: <c>e__2_f</c>. A box and its label share
+    /// the element's id, and the second used to fall back to a positional name nothing could
+    /// address - so `color` on anything with a background had no slot. <see cref="DomSlots"/>
+    /// composes the same suffix from the other side.
+    /// </summary>
+    internal const string SecondSuffix = "__2";
+
     /// <summary>One slot's value: a number, or a string (text, or a colour the vector mod parses).</summary>
     internal readonly struct Value : IEquatable<Value>
     {
@@ -58,8 +66,10 @@ internal static class SceneSlots
         public string Id = string.Empty;
         /// <summary>Preferred: the author's id, or the positional name when there is no usable id.</summary>
         public string Name = string.Empty;
-        /// <summary>The positional name, used when another line claimed Name first.</summary>
+        /// <summary>The positional name, used when Name and Second are both claimed.</summary>
         public string Fallback = string.Empty;
+        /// <summary>The id-derived name for a second line carrying this id (<c>e__2_f</c>); null when there is no usable id.</summary>
+        public string? Second;
         /// <summary>Which of the two the last split actually used: Parts are built from it.</summary>
         public string? Chosen;
         public List<string>? Parts;
@@ -224,6 +234,10 @@ internal static class SceneSlots
         if (id.Length == 0 || id.Length > 48) return null;
         if (id.Length >= 2 && id[0] == '_' && id[1] == '_') return null;
         if ((id[0] == 'L' || id[0] == 'M') && id.Length > 1 && id[1] >= '0' && id[1] <= '9') return null;
+        // `e__2` is what a second line carrying `e` is named, so an author's id of that shape would
+        // claim the label's slots. `e__b` (the border companion) stays usable: no digit follows.
+        for (var at = id.IndexOf("__", StringComparison.Ordinal); at >= 0; at = id.IndexOf("__", at + 1, StringComparison.Ordinal))
+            if (at + 2 < id.Length && id[at + 2] >= '0' && id[at + 2] <= '9') return null;
         // ASCII only, so the name is an identifier the vector mod's expression parser accepts:
         // anything else (a dash, a space, an accent) becomes an underscore.
         var sb = new StringBuilder(id.Length + 1);
@@ -271,17 +285,23 @@ internal static class SceneSlots
             // wrote in the markup: <span id="temp"> is $temp, and its box is $temp_x, $temp_w and so
             // on. A line with no id keeps the positional name, which nothing outside can address.
             var friendly = Friendly(token.Id);
+            var isText = string.Equals(token.Key, "text", StringComparison.Ordinal);
             token.Name = friendly == null ? token.Fallback
-                : string.Equals(token.Key, "text", StringComparison.Ordinal) ? friendly
+                : isText ? friendly
                 : friendly + "_" + Safe(token.Key);
+            token.Second = friendly == null ? null
+                : isText ? friendly + SecondSuffix
+                : friendly + SecondSuffix + "_" + Safe(token.Key);
             token.Parts?.Clear();
             token.Chosen = null;
         }
-        // Two lines carrying the same id would name the same slot twice and one value would be lost,
-        // so the second one back to its positional name. First come wins, and emission order is the
-        // document's, so the same line wins every time.
+        // Two lines carrying the same id would name the same slot twice and one value would be lost.
+        // First come wins, and emission order is the document's, so the same line wins every time;
+        // the second takes `<id>__2_<key>` - a box's label, whose colour a script can then reach -
+        // and only a third falls back to the positional name.
         var name = token.Name;
-        if (!ReferenceEquals(name, token.Fallback) && values.ContainsKey(name)) name = token.Fallback;
+        if (!ReferenceEquals(name, token.Fallback) && values.ContainsKey(name))
+            name = token.Second != null && !values.ContainsKey(token.Second) ? token.Second : token.Fallback;
         if (!ReferenceEquals(name, token.Chosen)) { token.Chosen = name; token.Parts?.Clear(); }
 
         if (bodyEnd > bodyStart && scene[bodyStart] == '=')
@@ -319,11 +339,19 @@ internal static class SceneSlots
             // never inserts its bare name - only `X_t_0` and `X_t_1` through Part() - so the check
             // above cannot see the clash. Two lines carrying one id and both writing a pair would
             // otherwise SHARE those slots silently, and the last value written would win.
-            if (!ReferenceEquals(name, token.Fallback) && values.ContainsKey(name + "_0"))
+            // Part() rather than `name + "_0"`, which built a fresh string on every split for every
+            // named pair - a per-frame allocation in a file whose contract is none once warm.
+            if (!ReferenceEquals(name, token.Fallback) && values.ContainsKey(Part(token, 0, name)))
             {
-                name = token.Fallback;
+                name = token.Second ?? token.Fallback;
                 token.Chosen = name;
                 token.Parts?.Clear();
+                if (!ReferenceEquals(name, token.Fallback) && values.ContainsKey(Part(token, 0, name)))
+                {
+                    name = token.Fallback;
+                    token.Chosen = name;
+                    token.Parts?.Clear();
+                }
             }
 
             // a group's translate, scale and anchor: an element moved by a script changes values, not the structure
