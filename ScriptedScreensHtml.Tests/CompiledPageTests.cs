@@ -33,6 +33,44 @@ internal static class CompiledPageTests
     private static double? Base(string slot)
         => _scene.TryGetValue(slot, out var v) && v.IsNumber ? v.Number : (double?)null;
 
+    /// <summary>
+    /// A border's colour and width reach the border's own shape, not the element's.
+    /// </summary>
+    /// <remarks>
+    /// The border is a second shape beside the element's box, and it used to carry no id at all -
+    /// so its `s` and `sw` sat in the scene under a positional name that moves whenever the scene
+    /// does, and `el.style.borderColor` was refused on a renderer that emits exactly the slot for
+    /// it. An alarm state turning a panel's outline red is the commonest runtime style write a
+    /// console page makes.
+    ///
+    /// The second half matters as much: the companion must NOT be the element's own name. `s` there
+    /// is already the transform scale, so `border-color` would have collided with it silently.
+    /// </remarks>
+    private static void BorderSlots(Action<bool, string> check)
+    {
+        var box = new DomSlots.Box(outOfFlow: true, parentX: 0, parentY: 0, hasBackground: true);
+        var withBorder = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "p", "p_x", "p_y", "p_w", "p_h", "p_f", "p_s_0", "p_s_1",
+            "p__b_s", "p__b_sw", "p__b_x", "p__b_y", "p__b_w", "p__b_h",
+        };
+        var colour = DomSlots.Map("p", "style.borderColor", box, withBorder);
+        check(colour.Mapped && colour.Slots.Length == 1 && colour.Slots[0] == "p__b_s",
+              "slots: border-color lands on the border's own shape, not the element's"
+              + (colour.Mapped ? " (" + string.Join(",", colour.Slots) + ")" : " - " + colour.Problem));
+
+        var width = DomSlots.Map("p", "style.borderWidth", box, withBorder);
+        check(width.Mapped && width.Slots.Length == 1 && width.Slots[0] == "p__b_sw",
+              "slots: border-width lands on the border's own shape"
+              + (width.Mapped ? string.Empty : " - " + width.Problem));
+
+        // An element with no border, or one of the several-sided kinds, has no single stroke to
+        // write to. Refusing says so; mapping it anyway would write into a slot nothing reads.
+        var bare = new HashSet<string>(StringComparer.Ordinal) { "p", "p_x", "p_y", "p_w", "p_h", "p_f" };
+        var none = DomSlots.Map("p", "style.borderColor", box, bare);
+        check(!none.Mapped, "slots: border-color on a borderless element is refused, not mapped to nothing");
+    }
+
     internal static void Run(Action<bool, string> check)
     {
         var root = Root();
@@ -68,6 +106,8 @@ internal static class CompiledPageTests
         check(compiled.Unmapped.Count == 0, compiled.Unmapped.Count == 0
             ? "compiled: every runtime write binds to a slot"
             : $"compiled: {compiled.Unmapped.Count} unmapped - {string.Join("; ", compiled.Unmapped.Take(3))}");
+
+        BorderSlots(check);
 
         Dictionary<string, LuaValue> sent;
         LuaValue snap;

@@ -115,6 +115,7 @@ internal static class DomSlots
         // guard below refuses when this element does not emit one - `s` and `sw` only exist on a box
         // that actually draws a stroke, so a page setting a border colour on something that has no
         // border is told rather than writing into nothing.
+        // These two live on the border's own shape, not the element's - see Companion below.
         ["border-color"] = "s",
         ["borderColor"] = "s",
         ["border-width"] = "sw",
@@ -128,6 +129,12 @@ internal static class DomSlots
         ["opacity"] = "fo",
     };
 
+
+    /// <summary>Properties carried by the border's own shape rather than the element's.</summary>
+    private static readonly HashSet<string> Companion = new(StringComparer.Ordinal)
+    {
+        "border-color", "border-width",
+    };
 
     /// <summary>Properties carried by the element's wrapping group rather than its own node.</summary>
     private static readonly Dictionary<string, string[]> GroupKeys = new(StringComparer.Ordinal)
@@ -203,6 +210,20 @@ internal static class DomSlots
 
         if (!StyleKeys.TryGetValue(css, out var key))
             return Result.No($"`{css}` has no equivalent in the scene");
+
+        // A border is a second shape beside the element's box, so its colour and width are on a
+        // companion named after the element. It cannot be the element's own name: `s` there is
+        // already the transform scale, and the two shapes would collide on x, y, w and h.
+        if (Companion.Contains(css))
+        {
+            var border = id + VectorEmitter.BorderIdSuffix + "_" + key;
+            return available.Contains(border)
+                ? Result.Ok(border)
+                // Either this element draws no border at all, or it draws one of the several-sided
+                // kinds - a different colour per side, inset/outset, double - where one write has
+                // no single stroke to land on. Both are honest refusals rather than silent misses.
+                : Result.No($"\"{id}\" draws no single-stroke border, so `{css}` has no slot");
+        }
 
         // The condition that makes the rest sound. In normal flow this element's size and position
         // decide where its siblings go, and only the layout engine knows that.

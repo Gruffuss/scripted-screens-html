@@ -702,7 +702,7 @@ internal static class VectorEmitter
             }
             else if (cornerPath != null && tw == null && bw > 0.01f && sameWidth && sameColour && bstyle == "solid")
             {
-                ctx.Body.Append(indent).Append(CornerPath(css, rs, x + bw * 0.5f, y + bw * 0.5f, w - bw, h - bw)).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(bw).Append('\n');
+                ctx.Body.Append(indent).Append(CornerPath(css, rs, x + bw * 0.5f, y + bw * 0.5f, w - bw, h - bw)).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(bw).AppendBorderId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (mixed && rounded && RoundedSides(styles, rs, out var ringWidth, out var ringColours))
@@ -755,7 +755,7 @@ internal static class VectorEmitter
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x + half).Append(" y=").AppendNum(y + half)
                     .Append(" w=").AppendVal(tw != null ? tw.Lerp(tw.From.Rect.width - bw, w - bw) : null, w - bw)
                     .Append(" h=").AppendVal(tw != null ? tw.Lerp(tw.From.Rect.height - bw, h - bw) : null, h - bw)
-                    .AppendRadius(rs, w, h, -half).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(bw).Append(Dash(css, bw)).Append('\n');
+                    .AppendRadius(rs, w, h, -half).Append(" f=none s=").AppendHex(rs.borderTopColor).Append(" sw=").AppendNum(bw).Append(Dash(css, bw)).AppendBorderId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
             else if (bw > 0.01f || rs.borderRightWidth > 0.01f || rs.borderBottomWidth > 0.01f || rs.borderLeftWidth > 0.01f)
@@ -4751,6 +4751,29 @@ internal static class VectorEmitter
         sb.Append(" id=").Append(ve.name);
         return button ? sb.Append(" click=1") : sb;
     }
+
+    /// <summary>
+    /// Names the border shape after its element, so a script can write its colour and width.
+    /// </summary>
+    /// <remarks>
+    /// A border is a SECOND shape beside the element's own, and it carried no id - so its `s` and
+    /// `sw` were in the scene under a positional name that moves whenever the scene does, and
+    /// `el.style.borderColor` was refused on a renderer that emits exactly the slot it needs. That
+    /// is the commonest runtime style write a status panel makes.
+    ///
+    /// It cannot share the element's own id: `s` there is already the transform SCALE (`s_0`/`s_1`),
+    /// and two shapes claiming one name would make `x`, `y`, `w` and `h` ambiguous between the box
+    /// and its border. Hence a companion, which DomSlots knows by the same suffix.
+    ///
+    /// Only for an element a script drives. An identified node makes the renderer keep its whole
+    /// prop array, so every page should not pay for this.
+    /// </remarks>
+    internal const string BorderIdSuffix = "__b";
+
+    private static StringBuilder AppendBorderId(this StringBuilder sb, Ctx ctx, VisualElement ve)
+        => Keeps(ctx, ve) && ve.name is { Length: > 0 } name && !name.StartsWith("__", StringComparison.Ordinal)
+            ? sb.Append(" id=").Append(name).Append(BorderIdSuffix)
+            : sb;
 
     private static bool IsButton(Ctx ctx, VisualElement ve)
     {
