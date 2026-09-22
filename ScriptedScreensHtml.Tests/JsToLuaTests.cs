@@ -103,7 +103,6 @@ internal static class JsToLuaTests
     {
         ("async/await", "async function f() { await 1; }"),
         ("a generator", "function* g() { yield 1; }"),
-        ("a real regular expression", "var s = 'a1'.replace(/[0-9]+/g, '');"),
         ("an undeclared name", "missingThing.doSomething();"),
     };
 

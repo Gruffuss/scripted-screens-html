@@ -23,11 +23,15 @@ internal static class CssTests
             Media(check);
             Supports(check);
             ColumnCombinator(check);
+            StatePseudos(check);
+            PseudoElements(check);
+            ImpliedEndTags(check);
         }
         finally
         {
             CssParser.ViewportWidth = w;
             CssParser.ViewportHeight = h;
+            CssParser.ForgetReported();
         }
     }
 
@@ -98,6 +102,25 @@ internal static class CssTests
         check(N("(200px < width < 600px)") == 1 && N("(200px < width < 300px)") == 0, "range syntax: both bounds");
         check(N("(width = 400px)") == 1, "range syntax: equality");
         check(N("(min-width: 20em)") == 1 && N("(min-width: 30em)") == 0, "em in a media query is the initial font size (20em = 320px)");
+        // every length a query may legally be written in; without these the operand was NaN and
+        // the block vanished with nothing said, which reads exactly like a rule that does nothing
+        check(N("(min-width: 300pt)") == 1 && N("(min-width: 301pt)") == 0, "pt in a media query (400px = 300pt)");
+        check(N("(min-width: 25pc)") == 1 && N("(min-width: 26pc)") == 0, "pc");
+        check(N("(min-width: 4.16in)") == 1 && N("(min-width: 4.2in)") == 0, "in");
+        check(N("(min-width: 10.5cm)") == 1 && N("(min-width: 10.6cm)") == 0, "cm");
+        check(N("(min-width: 105mm)") == 1 && N("(min-width: 106mm)") == 0, "mm");
+        check(N("(min-width: 423Q)") == 1 && N("(min-width: 424Q)") == 0, "Q");
+        check(N("(min-width: 100vw)") == 1 && N("(min-width: 101vw)") == 0, "vw");
+        check(N("(min-height: 100vh)") == 1 && N("(min-height: 101vh)") == 0, "vh");
+        check(N("(min-width: 100vmin)") == 1 && N("(min-width: 100vmax)") == 1, "vmin and vmax are not read as `in` and `max`");
+        check(N("(width >= 300pt)") == 1 && N("(width >= 301pt)") == 0, "the range syntax reads the same units");
+
+        CssParser.ForgetReported();
+        warn.Clear();
+        check(N("(min-width: 40 kilometres)") == 0, "a quantity the parser cannot read still skips the block");
+        check(warn.Count == 1 && warn[0].Contains("kilometres", StringComparison.Ordinal) && warn[0].Contains("width", StringComparison.Ordinal),
+            $"and now says so, quoting what it could not read (got {warn.Count}: {string.Join("; ", warn)})");
+        check(N("(min-width: 40 kilometres)") == 0 && warn.Count == 1, "once per page, not once per rule");
         check(N("(min-aspect-ratio: 1/2)") == 1 && N("(min-aspect-ratio: 2/1)") == 0, "aspect-ratio is still a ratio");
         check(N("screen and (min-width: 10px)") == 1 && N("not print") == 1 && N("print, screen") == 1, "types, not and commas still work");
 
@@ -142,5 +165,136 @@ internal static class CssTests
             "and says so, instead of inventing a tag selector named ||");
         var td = Doc("<table><tr><td>c</td></tr></table>").Children[0].Children[0];
         check(!Hits("|| td", td), "nothing matches through a combinator that was refused");
+    }
+
+    // ---- state pseudo-classes ------------------------------------------------------------
+
+    /// <summary>
+    /// Every pseudo-class here answered "no" to the coverage probe, which reads as missing. Each
+    /// one is really a correct NO for the probe's own fixture - an undisturbed page has no pointer
+    /// on it, a &lt;dialog open&gt; is not modal, an out-of-range number is not :valid - so the
+    /// only way to tell "implemented and correctly silent" from "dead" is to supply the state and
+    /// watch it match. Without that these are indistinguishable from BUGS.md's recurring shape:
+    /// wired up, compiles, does nothing.
+    /// </summary>
+    private static void StatePseudos(Action<bool, string> check)
+    {
+        HtmlNode One(string html) => Doc("<div>" + html + "</div>").Children[0];
+
+        check(Hits("#a:hover", One("<span id=a data-hover></span>")) && !Hits("#a:hover", One("<span id=a></span>")),
+            ":hover matches the node the pointer is over, and only that one");
+        check(Hits("#a:active", One("<span id=a data-active></span>")) && !Hits("#a:active", One("<span id=a></span>")),
+            ":active matches the node being pressed");
+        check(Hits("#a:focus", One("<input id=a data-focus>")) && Hits("#a:focus-visible", One("<input id=a data-focus>"))
+              && !Hits("#a:focus", One("<input id=a>")),
+            ":focus and :focus-visible match the focused field");
+        var form = Doc("<form id=f><input id=a data-focus></form>");
+        check(Hits("#f:focus-within", form) && !Hits("#f:focus-within", Doc("<form id=f><input id=a></form>")),
+            ":focus-within looks down the subtree, not only at itself");
+
+        check(Hits("#a:valid", One("<input id=a required value=v>")) && !Hits("#a:valid", One("<input id=a required>")),
+            ":valid is the other half of :invalid, not a synonym for it");
+        check(!Hits("#a:valid", One("<input id=a type=number min=1 max=5 value=9>")),
+            "and an out-of-range number is not valid - which is why the probe's own fixture answers no");
+
+        check(Hits("#a:indeterminate", One("<progress id=a></progress>")) && !Hits("#a:indeterminate", One("<progress id=a value=1></progress>")),
+            ":indeterminate matches a progress bar with no value");
+        check(Hits("#a:modal", One("<dialog id=a open data-modal>d</dialog>")) && !Hits("#a:modal", One("<dialog id=a open>d</dialog>")),
+            ":modal needs showModal(), not the open attribute - a plain <dialog open> is not modal in a browser either");
+        check(Hits("#a:popover-open", One("<div id=a popover data-popover-open></div>")) && !Hits("#a:popover-open", One("<div id=a popover></div>")),
+            ":popover-open needs the popover to have been shown");
+
+        // :target has no URL fragment to name it and :visited no history to have been in; both are
+        // permanent noes. What matters is that they stay SELECTORS, so a rule-mate is not lost.
+        var warn = new List<string>();
+        var rules = CssParser.ParseStylesheet("#a:target, #a:visited, .keep { color: red }", warn.Add);
+        check(rules.Count == 1 && rules[0].Selectors.Count == 3,
+            ":target and :visited parse and never match, rather than taking their rule-mates with them");
+        check(!Hits("#a:target", One("<span id=a></span>")) && !Hits("#a:visited", One("<a id=a href=x></a>")),
+            "and neither of them matches anything");
+    }
+
+    // ---- pseudo-elements -----------------------------------------------------------------
+
+    /// <summary>
+    /// A pseudo-element is only real if something GENERATES its node. Seven names do -
+    /// ::before/::after and ::first-letter in the cascade, ::marker, ::placeholder,
+    /// ::details-content, ::backdrop under a modal, and the three scrollbar parts, which
+    /// VectorEmitter reads. ::first-line does not and now says so.
+    /// </summary>
+    private static void PseudoElements(Action<bool, string> check)
+    {
+        CssParser.ForgetReported();
+        HtmlNode Generated(string host, string which)
+        {
+            var n = new HtmlNode { Tag = "span", Parent = Doc("<div>" + host + "</div>").Children[0] };
+            n.Attributes["data-pseudo"] = which;
+            return n;
+        }
+
+        check(Hits("dialog::backdrop", Generated("<dialog open data-modal></dialog>", "backdrop")),
+            "::backdrop matches the box a modal dialog dims the page with");
+        check(Hits("div::-webkit-scrollbar-thumb", Generated("<div></div>", "-webkit-scrollbar-thumb"))
+              && Hits("div::-webkit-scrollbar-track", Generated("<div></div>", "-webkit-scrollbar-track")),
+            "the scrollbar thumb and track are pseudo-elements the emitter draws");
+        check(Hits("details::details-content", Generated("<details open></details>", "details-content")),
+            "::details-content matches the generated body of an open <details>");
+        check(!Hits("div::-webkit-scrollbar-thumb", Generated("<div></div>", "backdrop")),
+            "and a generated node only answers to its own pseudo-element");
+
+        // ::first-line is refused by name. It used to parse, set PseudoElement, and then match
+        // nothing at all - the silent variant of the same outcome, which an author cannot act on.
+        var warn = new List<string>();
+        var rules = CssParser.ParseStylesheet("p::first-line, .keep { color: red } p::first-line { color: blue }", warn.Add);
+        check(rules.Count == 2 && rules[0].Selectors.Count == 2,
+            "::first-line keeps its rule and its rule-mates instead of dropping them");
+        check(warn.Count == 1 && warn[0].Contains("first-line", StringComparison.Ordinal) && warn[0].Contains("after layout", StringComparison.Ordinal),
+            $"and warns once, naming itself and why (got {warn.Count}: {string.Join("; ", warn)})");
+        check(!Hits("p::first-line", Generated("<p>t</p>", "first-line")) && CssParser.ParseSelector("p::first-line", null)!.Chain[0].PseudoElement == null,
+            "::first-line matches nothing and is no longer recorded as a pseudo-element");
+
+        // ParseSelector(x, null) - @supports selector(), querySelector - must not consume the
+        // one report the page's own parse owes. Same family as the process-global sets in #10/#37.
+        CssParser.ForgetReported();
+        CssParser.ParseSelector("p::first-line", null);
+        warn.Clear();
+        CssParser.ParseStylesheet("p::first-line { color: red }", warn.Add);
+        check(warn.Count == 1, $"a silent parse of the same pseudo does not eat the page's warning (got {warn.Count})");
+        CssParser.ForgetReported();
+    }
+
+    // ---- HTML's optional end tags --------------------------------------------------------
+
+    /// <summary>
+    /// The tokenizer's half of the same contract, checked here because this is the front end's
+    /// Unity-free test file. `&lt;li&gt;a&lt;li&gt;b` is two items in every browser; it used to be
+    /// a nest here, which draws - wrongly, and quietly, which is the expensive kind.
+    /// </summary>
+    private static void ImpliedEndTags(Action<bool, string> check)
+    {
+        HtmlNode Body(string html) => Doc("<body>" + html + "</body>");
+        int Kids(HtmlNode n) { var k = 0; foreach (var c in n.Children) if (!c.IsText) k++; return k; }
+
+        var ul = Body("<ul><li>a<li>b<li>c</ul>").Children[0];
+        check(Kids(ul) == 3 && Kids(ul.Children[0]) == 0, "<li> closes an open <li> instead of nesting inside it");
+
+        var withList = Body("<ul><li>a<ul><li>x</li></ul></li><li>b</ul>").Children[0];
+        check(Kids(withList) == 2 && Kids(withList.Children[0]) == 1, "and a genuinely nested list is still nested");
+
+        var body = Body("<p>one<p>two<table><tr><td>c</table>");
+        check(Kids(body) == 3 && body.Children[2].Tag == "table",
+            "a block start tag closes an open <p>, so the table is a sibling and not inside the paragraph");
+        check(Body("<p>one<span>two</span>").Children[0].Tag == "p" && Kids(Body("<p>one<span>two</span>")) == 1,
+            "and phrasing content still belongs to the paragraph");
+
+        var table = Body("<table><tr><td>a<td>b<tr><td>c</table>").Children[0];
+        check(Kids(table) == 2 && Kids(table.Children[0]) == 2 && Kids(table.Children[1]) == 1,
+            "<td> closes a cell and <tr> closes a cell AND its row");
+
+        var select = Body("<select><option>x<option>y</select>").Children[0];
+        check(Kids(select) == 2, "<option> closes an open <option>");
+
+        var dl = Body("<dl><dt>k<dd>v<dt>k2<dd>v2</dl>").Children[0];
+        check(Kids(dl) == 4, "<dt> and <dd> close each other");
     }
 }

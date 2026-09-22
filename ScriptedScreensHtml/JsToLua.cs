@@ -58,8 +58,6 @@ internal sealed class JsToLua
         "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
     };
 
-    /// <summary>Regular-expression syntax. A pattern containing any of these is reported, not guessed at.</summary>
-    private static readonly char[] RegexMeta = { '\\', '^', '$', '.', '|', '?', '*', '+', '(', ')', '[', ']', '{', '}' };
 
     /// <summary>What the runtime prelude defines, so a reference to one is not reported as unknown.</summary>
     private static readonly HashSet<string> Provided = new(StringComparer.Ordinal)
@@ -82,7 +80,7 @@ internal sealed class JsToLua
         // The tables the compiler emits for the chunk to read: the element tree, the boxes, the
         // modifier state. A page declaring one of these would shadow it and the failure would look
         // like the DOM simply not working.
-        "PARENT", "BOXES", "TAG", "CLASS", "NODES", "MODS",
+        "PARENT", "BOXES", "TAG", "CLASS", "NODES", "MODS", "EPOCH",
     };
 
     /// <summary>
@@ -133,6 +131,15 @@ internal sealed class JsToLua
         "setPrototypeOf", "is", "seal", "isSafeInteger", "parseInt", "sinh", "cosh", "tanh",
         "asinh", "acosh", "atanh", "expm1", "log1p", "imul", "fromCharCode", "fromCodePoint",
         "test", "exec",
+        // The regex engine and the library tail it unblocked
+        "match", "matchAll", "normalize", "raw",
+        "copyWithin", "reduceRight", "toReversed", "toSorted", "toSpliced", "with",
+        "fround",
+        // Date's calendar accessors, which answer against EPOCH and throw by name until it is set
+        "getDate", "getDay", "getFullYear", "getHours", "getMilliseconds", "getMinutes",
+        "getMonth", "getSeconds", "getTimezoneOffset", "toISOString",
+        "toLocaleDateString", "toLocaleTimeString",
+        "createTextNode", "createDocumentFragment", "insertAdjacentText",
     };
 
     /// <summary>Property names the page itself defines, so its own methods are not reported as unknown.</summary>
@@ -1544,14 +1551,14 @@ internal sealed class JsToLua
                 return Fail(e, "++ or -- used as a value");
 
             case RegExpLiteral re:
-                // Only a pattern that is plain characters, which the prelude treats as a literal
-                // match. A real regular expression is reported rather than approximated: a Lua
-                // pattern is not a regex, and quietly matching something else is the worst outcome
-                // available. Every one on these pages is a single character being escaped for HTML.
-                return re.Raw.IndexOfAny(RegexMeta) >= 0
-                    ? Fail(e, "the regular expression " + re.Raw)
-                    : "js_regex(" + Quote(re.Raw.Substring(1, re.Raw.LastIndexOf('/') - 1))
-                      + ", " + Quote(re.Raw.Substring(re.Raw.LastIndexOf('/') + 1)) + ")";
+                // The prelude has a real engine now, so the pattern goes through as raw text with
+                // its backslashes intact. It used to refuse anything containing regex syntax,
+                // because a Lua pattern is not a regex and quietly matching something else is the
+                // worst outcome available - that reasoning was right, and the answer was to build
+                // the engine rather than to keep refusing. What it cannot do (lookbehind, \p{},
+                // an enormous quantifier) it refuses at construction, naming the pattern.
+                return "js_regex(" + Quote(re.Raw.Substring(1, re.Raw.LastIndexOf('/') - 1))
+                       + ", " + Quote(re.Raw.Substring(re.Raw.LastIndexOf('/') + 1)) + ")";
 
             case TemplateLiteral tpl:
                 return Template(tpl);

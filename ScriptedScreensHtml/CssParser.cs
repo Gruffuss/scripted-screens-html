@@ -729,7 +729,7 @@ internal static class CssParser
             var other = i < at ? operands[i] : operands[i + 1];
             var op = i < at ? Flip(ops[i]) : ops[i];
             var want = Operand(name, other);
-            if (float.IsNaN(want)) return false;
+            if (float.IsNaN(want)) return BadOperand(name, other, warn);
             var eps = name.EndsWith("aspect-ratio", StringComparison.Ordinal) ? 0.01f : 0.5f;
             var pass = op switch
             {
@@ -761,7 +761,7 @@ internal static class CssParser
         {
             if (value == null) return mine != 0f;
             var want = Operand(name, value);
-            if (float.IsNaN(want)) return false;
+            if (float.IsNaN(want)) return BadOperand(name, value, warn);
             var eps = name.EndsWith("aspect-ratio", StringComparison.Ordinal) ? 0.01f : 0.5f;
             return cmp > 0 ? mine >= want - eps : cmp < 0 ? mine <= want + eps : Math.Abs(mine - want) < eps;
         }
@@ -818,6 +818,18 @@ internal static class CssParser
             warn?.Invoke($"css: @media ({feature}) is not something a console can answer, so that block is skipped");
     }
 
+    /// <summary>
+    /// A feature this console can answer, written against a quantity it cannot read. The block
+    /// vanishes either way; saying so is the difference between an author fixing the unit and an
+    /// author wondering why a rule that looks right does nothing.
+    /// </summary>
+    private static bool BadOperand(string feature, string text, Action<string>? warn)
+    {
+        if (ReportedMedia.Add(feature + ":" + text))
+            warn?.Invoke($"css: @media ({feature}) was given \"{text.Trim()}\", which is not a length this parser reads, so that block is skipped");
+        return false;
+    }
+
     /// <summary>A written value in the feature's own unit: a ratio, dppx, or px.</summary>
     private static float Operand(string name, string text)
     {
@@ -838,8 +850,30 @@ internal static class CssParser
         // a media query's em is the initial font size, never the element's: there is no element yet
         if (v.EndsWith("rem", StringComparison.OrdinalIgnoreCase)) return Px(v.Substring(0, v.Length - 3)) * 16f;
         if (v.EndsWith("em", StringComparison.OrdinalIgnoreCase)) return Px(v.Substring(0, v.Length - 2)) * 16f;
+        // The rest of the lengths a query may legally be written in. Fixed ratios, and the
+        // viewport ones the query is asking about anyway; none of them needs an element or a
+        // font, which is why they belong here and not in the cascade's own unit table. Without
+        // them the operand was NaN and the whole block vanished with nothing said.
+        foreach (var (suffix, scale) in MediaUnits)
+            if (v.Length > suffix.Length && v.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                return Px(v.Substring(0, v.Length - suffix.Length)) * scale();
         return Px(v);
     }
+
+    /// <summary>Longest suffix first, so `vmin` is not read as `n` and `pc` not as `c`.</summary>
+    private static readonly (string Suffix, Func<float> Scale)[] MediaUnits =
+    {
+        ("vmin", () => Math.Min(ViewportWidth, ViewportHeight) / 100f),
+        ("vmax", () => Math.Max(ViewportWidth, ViewportHeight) / 100f),
+        ("vw", () => ViewportWidth / 100f),
+        ("vh", () => ViewportHeight / 100f),
+        ("mm", () => 96f / 25.4f),
+        ("cm", () => 96f / 2.54f),
+        ("in", () => 96f),
+        ("pt", () => 96f / 72f),
+        ("pc", () => 16f),
+        ("q", () => 96f / 101.6f),
+    };
 
     /// <summary>A px length or plain number as a float, NaN otherwise. Unity-free on purpose: this file is tested headless.</summary>
     private static float Px(string value)
@@ -1266,16 +1300,18 @@ internal static class CssParser
             if (element || name == "before" || name == "after")
             {
                 // ::before / ::after (and the legacy one-colon spelling), ::marker (the list
-                // marker span), ::placeholder (the field's placeholder, colour only); other
-                // pseudo-elements skip the rule.
+                // marker span), ::placeholder (the field's placeholder, colour only).
                 if (name is "-webkit-input-placeholder" or "-moz-placeholder" or "-ms-input-placeholder") name = "placeholder";
-                // Nothing generates a node for ::first-line, ::backdrop or a scrollbar part, so
-                // a rule naming one is parsed and never applies. Left that way deliberately:
-                // ::backdrop needs a modal, which :modal already never matches, and the webkit
-                // scrollbar parts do nothing in a non-webkit browser either. ::first-line is
-                // the one real gap of the three - see the report, not a warning, because these
-                // selectors still match if a generator is ever added for them.
-                if (name is not ("before" or "after" or "marker" or "placeholder" or "first-letter" or "first-line" or "backdrop" or "details-content" or "-webkit-scrollbar" or "-webkit-scrollbar-thumb" or "-webkit-scrollbar-track"))
+                // Every name kept here has something that generates its node: ::before/::after and
+                // ::first-letter in HtmlRenderer.AddGenerated, ::marker with the list marker span,
+                // ::placeholder on a field, ::details-content under an open <details>, ::backdrop
+                // under a modal dialog or open popover, and the three scrollbar parts under a
+                // scrolling box (VectorEmitter reads all three). ::first-line is NOT in the list:
+                // where the first line ends is only known after layout, and the text would have to
+                // be split before layout runs, so it goes to NeverMatches and warns. A rule that
+                // parses and then never matches is worse than one that is refused - an author can
+                // act on a warning and cannot act on a paragraph that simply is not styled.
+                if (name is not ("before" or "after" or "marker" or "placeholder" or "first-letter" or "backdrop" or "details-content" or "-webkit-scrollbar" or "-webkit-scrollbar-thumb" or "-webkit-scrollbar-track"))
                 {
                     if (!NeverMatches(name, warn)) return false;
                     compound.Pseudos.Add(_ => false);
@@ -1483,22 +1519,28 @@ internal static class CssParser
     private static readonly HashSet<string> ReportedPseudos = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// A pseudo that names something this page has none of: a text selection, a shadow tree, or
-    /// a browser's own widget internals. Keeping the rule and matching nothing is what a browser
-    /// without that vendor's parts does, and it beats dropping the rule - dropping it loses the
-    /// other selectors in the same list. Reported once so the gap is on the record either way.
+    /// A pseudo that names something this page has none of: a text selection, a shadow tree, a
+    /// browser's own widget internals, or a line box that does not exist until layout has run.
+    /// Keeping the rule and matching nothing is what a browser without that vendor's parts does,
+    /// and it beats dropping the rule - dropping it loses the other selectors in the same list.
+    /// Reported once so the gap is on the record either way.
     /// </summary>
     private static bool NeverMatches(string name, Action<string>? warn)
     {
         var part = name is "scroll-marker" or "scroll-marker-group" or "scroll-button" or "column";
-        if (!part && !name.StartsWith("-", StringComparison.Ordinal)
+        var line = name == "first-line";
+        if (!part && !line && !name.StartsWith("-", StringComparison.Ordinal)
             && name is not ("selection" or "host" or "host-context" or "slotted" or "part" or "cue" or "cue-region"
                 or "file-selector-button" or "spelling-error" or "grammar-error" or "highlight" or "target-text"
                 or "view-transition" or "view-transition-group" or "view-transition-image-pair"
                 or "view-transition-old" or "view-transition-new" or "picker" or "picker-icon" or "checkmark"))
             return false;
-        if (ReportedPseudos.Add(name))
-            warn?.Invoke(part
+        // warn != null first: ParseSelector(x, null) - @supports selector(), querySelector - would
+        // otherwise mark the name reported and eat the warning the page's own parse owes it.
+        if (warn != null && ReportedPseudos.Add(name))
+            warn.Invoke(line
+                ? $"css: \"{name}\" matches nothing here: where a line breaks is only known after layout, and the text would have to be split before it runs"
+                : part
                 ? $"css: \"{name}\" matches nothing here: the page has no such box to paint"
                 : $"css: \"{name}\" matches nothing here: no text selection, shadow tree or browser widget internals");
         return true;

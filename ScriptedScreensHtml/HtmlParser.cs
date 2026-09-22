@@ -70,6 +70,40 @@ internal static class HtmlParser
     };
 
     /// <summary>
+    /// The start tags that end an open &lt;p&gt;, straight from HTML's own list of when a p's end
+    /// tag may be omitted. Phrasing content is deliberately absent: `&lt;p&gt;a&lt;span&gt;` really
+    /// does keep the span inside the paragraph, so adding tags here would break as much as it fixes.
+    /// </summary>
+    private static readonly HashSet<string> ClosesParagraph = new(StringComparer.Ordinal)
+    {
+        "address", "article", "aside", "blockquote", "details", "div", "dl", "fieldset", "figcaption",
+        "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr",
+        "main", "menu", "nav", "ol", "p", "pre", "search", "section", "table", "ul",
+    };
+
+    /// <summary>
+    /// Whether opening <paramref name="opening"/> implicitly closes the currently open
+    /// <paramref name="open"/> element. The caller pops while this holds, so one start tag can
+    /// close a cell and its row at once.
+    /// ponytail: the open element is tested directly, so `&lt;p&gt;&lt;span&gt;&lt;p&gt;` keeps the
+    /// second paragraph nested - a browser walks past the inline box and this does not. Widen it
+    /// only if a real page needs it; stopping early never nests worse than the old behaviour did.
+    /// </summary>
+    private static bool ImpliedEnd(string open, string? opening) => opening != null && open switch
+    {
+        "li" => opening == "li",
+        "dt" or "dd" => opening is "dt" or "dd",
+        "p" => ClosesParagraph.Contains(opening),
+        "option" => opening is "option" or "optgroup",
+        "optgroup" => opening == "optgroup",
+        "td" or "th" => opening is "td" or "th" or "tr" or "thead" or "tbody" or "tfoot" or "caption" or "colgroup",
+        "tr" => opening is "tr" or "thead" or "tbody" or "tfoot" or "caption" or "colgroup",
+        "thead" or "tbody" or "tfoot" => opening is "thead" or "tbody" or "tfoot",
+        "rt" or "rp" => opening is "rt" or "rp",
+        _ => false,
+    };
+
+    /// <summary>
     /// The same strings come out of a parse over and over: every tag name, every class, and the
     /// text of every element a page redraws without changing. This is a fixed-size cache keyed by
     /// the characters themselves - a hit costs a hash and a compare, a miss costs the string it
@@ -292,6 +326,14 @@ internal static class HtmlParser
                 }
                 node.Attributes[attrName] = DecodeEntities(value);
             }
+
+            // HTML's optional end tags. A browser closes these for you, so `<li>a<li>b` is two
+            // items and `<tr><td>a<td>b` is two cells. Without this the second one became a CHILD
+            // of the first, and a `<table>` written after an unclosed `<p>` was laid out inside
+            // that paragraph - the page still drew, which is what made it expensive to notice.
+            while (current != root && current.Tag != null && ImpliedEnd(current.Tag, node.Tag))
+                current = current.Parent!;
+            node.Parent = current;
 
             current.Children.Add(node);
 

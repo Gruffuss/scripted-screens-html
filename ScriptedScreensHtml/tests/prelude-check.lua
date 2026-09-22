@@ -28,9 +28,21 @@ eq(js_m('hello', 'search', 'llo'), 2, 'search')
 
 -- numbers
 eq(js_m(1.5, 'toPrecision', 4), '1.500', 'toPrecision pads')
-eq(js_m(123.456, 'toPrecision', 2), '1.2e+02', 'toPrecision exponential')
+-- JavaScript writes the fewest exponent digits it can, where C writes at least two and the
+-- interpreter the game embeds writes three AND a capital E. This row used to expect C's "1.2e+02",
+-- which is not what a browser prints and not what the game printed either.
+eq(js_m(123.456, 'toPrecision', 2), '1.2e+2', 'toPrecision exponential')
 eq(js_m(0.000123, 'toPrecision', 2), '0.00012', 'toPrecision small')
 eq(js_m(12345, 'toExponential', 2), '1.23e+4', 'toExponential')
+-- toExponential with no argument: `%e` without a precision is ignored outright by the game's Lua,
+-- so this used to answer "12345" in game and "1.2345e+4" here.
+eq(js_m(12345, 'toExponential'), '1.2345e+4', 'toExponential with no precision')
+eq(js_m(0.00012, 'toExponential'), '1.2e-4', 'toExponential negative exponent')
+eq(js_m(1, 'toExponential'), '1e+0', 'toExponential of one')
+-- and the same exponent shape wherever a number is turned into text
+eq(js_str(1e21), '1e+21', 'a number past the positional range prints as JavaScript writes it')
+eq(js_str(1e-7), '1e-7', 'and so does a small one')
+eq(js_str(1.5e300), '1.5e+300', 'a three-digit exponent is not padded further')
 
 -- arrays
 local a = js_array({[0]=1,[1]=2,[2]=3}, 3)
@@ -78,6 +90,12 @@ eq(Object.hasOwn(o, 'z'), false, 'Object.hasOwn no')
 
 -- Math / Number
 eq(Math.log2(8), 3.0, 'log2')
+-- Exact at an exact power. The game's Lua answers 2.9999999999999996 for log10(1000), which makes
+-- the digit-counting idiom `floor(log10(n)) + 1` one too few for every power of ten.
+eq(Math.log10(1000), 3.0, 'log10 is exact at a power of ten')
+eq(Math.log10(1e6), 6.0, 'and at a larger one')
+eq(Math.log2(1024), 10.0, 'log2 is exact at a power of two')
+eq(math.abs(Math.log10(5) - 0.6989700043360189) < 1e-15, true, 'and is unchanged elsewhere')
 eq(Math.log10(1000), 3.0, 'log10')
 eq(math.floor(Math.cbrt(27) + 0.5), 3, 'cbrt')
 eq(Math.cbrt(-8) < 0, true, 'cbrt negative')
@@ -351,16 +369,259 @@ eq(js_m({ z = 1 }, 'hasOwnProperty', 'q'), false, 'hasOwnProperty no')
 eq(String.fromCharCode(65, 66), 'AB', 'fromCharCode')
 eq(String.fromCodePoint(960), string.char(207, 128), 'fromCodePoint encodes UTF-8')
 
--- RegExp: only a literal pattern ever reaches the prelude, so both answers are exact
-local re = js_regex('lo', '')
-eq(re.test('hello'), true, 'regex test hit')
-eq(re.test('heck'), false, 'regex test miss')
-eq(re.exec('hello').index, 3, 'regex exec index')
-eq(re.exec('hello')[0], 'lo', 'regex exec match')
-eq(js_regex('LO', 'i').test('hello'), true, 'regex ignoreCase')
-local g = js_regex('a', 'g')
-eq(g.exec('aba').index, 0, 'global exec first')
-eq(g.exec('aba').index, 2, 'global exec advances')
-eq(g.exec('aba'), nil, 'global exec ends')
+-- ---- regular expressions -----------------------------------------------------------------------
+--
+-- Table driven, because a regex engine is a hundred small behaviours and a handful of hand-written
+-- asserts checks the ones that were already working. Every expectation below was produced by
+-- running the same pattern, flags and subject through V8 and copying its answer: 164 cases were
+-- compared that way and the only difference left is the byte-versus-code-point one noted at the
+-- foot of this block.
+local B = '\\'
+local function rx(p, f) return js_regex(p, f) end
+
+-- pattern, flags, subject, whole match (nil = no match), first group
+local matching = {
+  { 'abc', '', 'xxabcyy', 'abc' },
+  { '[0-9]+', '', 'a123b', '123' },
+  { '[^0-9]+', '', '123abc456', 'abc' },
+  { B .. 'd+', '', 'ab 42', '42' },
+  { B .. 'D+', '', '12ab', 'ab' },
+  { B .. 'w+', '', '  foo_1 ', 'foo_1' },
+  { B .. 'W+', '', 'ab!! cd', '!! ' },
+  { B .. 's+', '', 'a  \tb', '  \t' },
+  { B .. 'S+', '', '  ab  ', 'ab' },
+  { 'a.c', '', 'a-c', 'a-c' },
+  { 'a.c', '', 'a\nc', nil },
+  { 'a.c', 's', 'a\nc', 'a\nc' },
+  { '^abc', '', 'xabc', nil },
+  { 'abc$', '', 'xabc', 'abc' },
+  { '^b', 'm', 'a\nb', 'b' },
+  { 'a$', 'm', 'a\nb', 'a' },
+  { '^.*$', 'm', 'aa\nbb', 'aa' },
+  { B .. 'bfoo' .. B .. 'b', '', 'a foo b', 'foo' },
+  { B .. 'bfoo' .. B .. 'b', '', 'afoob', nil },
+  { B .. 'Bfoo', '', 'afoo', 'foo' },
+  { 'a*', '', 'aaab', 'aaa' },
+  { 'a+', '', 'b', nil },
+  { 'ab?c', '', 'ac', 'ac' },
+  { 'a{3}', '', 'aaaa', 'aaa' },
+  { 'a{2,}', '', 'aaaa', 'aaaa' },
+  { 'a{2,3}', '', 'aaaa', 'aaa' },
+  { 'a+?', '', 'aaa', 'a' },
+  { 'a{2,3}?', '', 'aaaa', 'aa' },
+  { '<.+>', '', '<a><b>', '<a><b>' },
+  { '<.+?>', '', '<a><b>', '<a>' },
+  { 'cat|dog', '', 'I have a dog', 'dog' },
+  { '(ab)+', '', 'ababab', 'ababab', 'ab' },
+  { '(?:ab)+', '', 'ababab', 'ababab' },
+  { '(a|b)c', '', 'bc', 'bc', 'b' },
+  { '(a)?b', '', 'b', 'b', group = false },
+  { '(' .. B .. 'w)' .. B .. '1', '', 'abbc', 'bb', 'b' },
+  { '(' .. B .. 'w+)' .. B .. 's+' .. B .. '1', '', 'hey hey there', 'hey hey', 'hey' },
+  { 'ABC', 'i', 'xxabcyy', 'abc' },
+  { '[a-z]+', 'i', 'XYZ', 'XYZ' },
+  { '[^a-z]+', 'i', 'abcQ!', '!' },
+  { '(A)' .. B .. '1', 'i', 'aA', 'aA', 'a' },
+  { 'a(?=b)', '', 'ab', 'a' },
+  { 'a(?=b)', '', 'ac', nil },
+  { 'a(?!b)', '', 'ac', 'a' },
+  { 'a(?!b)', '', 'ab', nil },
+  { 'q(?!u)', '', 'quit qatar', 'q' },
+  -- the empty iteration of an unbounded repeat is DISCARDED, captures and all, which is why
+  -- group 1 here is undefined and why `(|a)*` gets past the empty branch to match "aa"
+  { '(a*)*', '', 'b', '', group = false },
+  { '(a*)+', '', 'aab', 'aa', 'aa' },
+  { '(|a)*', '', 'aa', 'aa', 'a' },
+  -- and a repetition starts each round with its own groups unset
+  { '(?:(a)|(b))+', '', 'ab', 'ab', group = false },
+  { 'colou?r', '', 'color', 'color' },
+  { '[' .. B .. 'd.]+', '', 'v1.25x', '1.25' },
+  { B .. '$' .. B .. 'd+', '', 'cost $42', '$42' },
+  { '[-+]?' .. B .. 'd+', '', 'x-12', '-12' },
+  { '(?<year>' .. B .. 'd{4})', '', 'in 2026', '2026', '2026' },
+  { '(foo|bar)baz', '', 'xbarbaz', 'barbaz', 'bar' },
+  { 'x[^]y', '', 'xQy', 'xQy' },
+  { B .. 'u0041', '', 'ZAZ', 'A' },
+  { B .. 'x41', '', 'ZAZ', 'A' },
+  { '[A-Fa-f0-9]{6}', '', '#1a2B3c!', '1a2B3c' },
+  { '[' .. B .. ']]', '', 'a]b', ']' },
+  { '[]]', '', 'a]b', nil },                 -- an empty class, then a literal ] - never matches
+  { '[a-c-e]', '', 'd-e', '-' },
+  { '(a|ab)(c|bcd)(d*)', '', 'abcd', 'abcd', 'a' },
+  { '^(?:(' .. B .. 'd+)|(' .. B .. 'w+))$', '', 'abc', 'abc', group = false },
+  { '(.)(?=' .. B .. '1)', '', 'aab', 'a', 'a' },
+  { '[' .. B .. 'b]', '', 'a\bb', '\b' },    -- a backspace inside a class, not a boundary
+}
+for _, c in ipairs(matching) do
+  local m = js_m(rx(c[1], c[2]), 'exec', c[3])
+  local label = 'regex /' .. c[1] .. '/' .. c[2] .. ' on ' .. string.format('%q', c[3])
+  eq(m and m[0] or nil, c[4], label)
+  -- `group = false` is how a row says the group did NOT participate. A trailing nil in the row
+  -- would not be there to test: the table would simply be one shorter and the check would be
+  -- skipped in silence, which is the failure this file exists to catch.
+  local wantGroup = c.group
+  if wantGroup == nil then wantGroup = c[5] end
+  if wantGroup ~= nil then
+    eq(m and m[1] or nil, wantGroup ~= false and wantGroup or nil, label .. ' group 1')
+  end
+end
+
+eq(js_m(rx('l+', ''), 'test', 'hello'), true, 'regex test hit')
+eq(js_m(rx('z', ''), 'test', 'hello'), false, 'regex test miss')
+eq(js_m(rx('lo', ''), 'exec', 'hello').index, 3, 'regex exec index')
+eq(js_m(rx('(x)(y)?', ''), 'exec', 'zx').length, 3, 'a match array is one longer than the groups')
+
+-- lastIndex, which is the whole difference a `g` makes to exec
+local g = rx('a', 'g')
+eq(js_m(g, 'exec', 'aba').index, 0, 'global exec first')
+eq(js_m(g, 'exec', 'aba').index, 2, 'global exec advances')
+eq(js_m(g, 'exec', 'aba'), nil, 'global exec ends')
+eq(g.lastIndex, 0, 'lastIndex resets when the scan runs out')
+eq(js_m(rx('b', 'y'), 'test', 'ab'), false, 'a sticky pattern only matches at lastIndex')
+
+-- replace, in all four of its shapes
+eq(js_m('a1b22c', 'replace', rx('[' .. B .. 'd]+', 'g'), '#'), 'a#b#c', 'replace global')
+eq(js_m('a1b22c', 'replace', rx('[' .. B .. 'd]+', ''), '#'), 'a#b22c', 'replace first only')
+eq(js_m('John Smith', 'replace', rx('(' .. B .. 'w+) (' .. B .. 'w+)', ''), '$2 $1'), 'Smith John', 'replace $1 $2')
+eq(js_m('abc', 'replace', rx('b', ''), '[$&]'), 'a[b]c', 'replace $&')
+eq(js_m('abc', 'replace', rx('b', ''), '$$'), 'a$c', 'replace $$')
+eq(js_m('abc', 'replace', rx('b', ''), "$`|$'"), 'aa|cc', 'replace $` and $twice')
+eq(js_m('a-b', 'replace', rx('-', ''), function(_, off) return '<' .. off .. '>' end), 'a<1>b', 'a replacer gets the offset')
+eq(js_m('a1b2', 'replace', rx('(' .. B .. 'd)', 'g'), function(_, p1) return '[' .. p1 .. ']' end),
+   'a[1]b[2]', 'a replacer gets the groups')
+eq(js_m('in 2026', 'replace', rx('(?<y>' .. B .. 'd{4})', ''), 'year $<y>'), 'in year 2026', 'replace $<name>')
+eq(js_m('a-b-c', 'replaceAll', '-', '+'), 'a+b+c', 'replaceAll with a plain needle takes every one')
+eq(js_m('a-b-c', 'replace', '-', '+'), 'a+b-c', 'replace with a plain needle takes the first')
+eq(js_m('abc', 'replaceAll', '', '-'), '-a-b-c-', 'replaceAll with an empty needle')
+-- the thousands separator: zero-width, a lookahead, a nested quantifier and a negative lookahead
+eq(js_m('1234567', 'replace', rx(B .. 'B(?=(' .. B .. 'd{3})+(?!' .. B .. 'd))', 'g'), ','),
+   '1,234,567', 'the thousands-separator idiom')
+
+-- match, matchAll, search, split
+local all = js_m('a1b22c', 'match', rx(B .. 'd+', 'g'))
+eq(all.length, 2, 'match global count')
+eq(all[1], '22', 'match global second')
+eq(js_m('abc', 'match', rx('z', 'g')), nil, 'match global miss is null, not an empty array')
+local one = js_m('a12b', 'match', rx('(' .. B .. 'd)(' .. B .. 'd)', ''))
+eq(one[2], '2', 'match without g gives the groups')
+eq(one.index, 1, 'match without g gives the index')
+local each = js_m('a1b2', 'matchAll', rx('(' .. B .. 'd)', 'g'))
+eq(each.length, 2, 'matchAll count')
+eq(each[1][1], '2', 'matchAll keeps each match its groups')
+eq(js_m('hello', 'search', rx('l+', '')), 2, 'search')
+eq(js_m('a.c', 'search', '.'), 0, 'search takes a STRING as a pattern, not as a literal')
+eq(js_m('abc', 'search', rx('z', '')), -1, 'search miss')
+eq(js_m(js_m('a1b22c', 'split', rx(B .. 'd+', '')), 'join', '|'), 'a|b|c', 'split by a regex')
+eq(js_m(js_m('a1b', 'split', rx('(' .. B .. 'd)', '')), 'join', '|'), 'a|1|b', 'split keeps the captures')
+eq(js_m('abc', 'split', rx('(?:)', '')).length, 3, 'split by an empty match')
+eq(js_m(js_m('ab cd', 'split', rx(B .. 'b', '')), 'join', '|'), 'ab| |cd', 'a separator at the end is not one')
+eq(js_m('a,b,c', 'split', ',', 2).length, 2, 'split honours its limit')
+
+-- a pattern that cannot be answered is an error, never a wrong answer
+eq(pcall(js_regex, '(a', ''), false, 'an unbalanced ( is refused')
+eq(pcall(js_regex, 'a', 'q'), false, 'an unknown flag is refused')
+eq(pcall(js_regex, '(?<=a)b', ''), false, 'lookbehind is refused')
+eq(pcall(js_regex, 'a{1,5000}', ''), false, 'an enormous quantifier is refused')
+eq(pcall(js_regex, '[z-a]', ''), false, 'a backwards range is refused')
+-- and a pattern that backtracks catastrophically gives up loudly rather than freezing the game
+eq(pcall(function() return js_m(js_regex('(a*)*b', ''), 'test', string.rep('a', 24) .. 'c') end),
+   false, 'catastrophic backtracking gives up')
+
+-- BYTES, not code points: for the ASCII a console page carries this is exactly a browser's answer,
+-- and beyond it a multi-byte character counts as its own bytes. Pinned so the boundary is a
+-- recorded decision rather than a surprise.
+eq(js_m(rx(B .. 'u00e9', ''), 'exec', 'caf\195\169!')[0], '\195\169', 'a non-ASCII literal matches its own bytes')
+eq(js_m(rx(B .. 'u00e9', ''), 'exec', 'caf\195\169!').index, 3, 'and its index is a byte index')
+
+-- ---- the standard library tail --------------------------------------------------------------
+local nums = js_array({ [0] = 3, [1] = 1, [2] = 2 }, 3)
+eq(arr(js_m(nums, 'toSorted')), '1,2,3', 'toSorted')
+eq(arr(nums), '3,1,2', 'toSorted leaves the original alone')
+eq(arr(js_m(nums, 'toReversed')), '2,1,3', 'toReversed')
+eq(arr(js_m(nums, 'with', 1, 9)), '3,9,2', 'with')
+eq(arr(nums), '3,1,2', 'with leaves the original alone')
+eq(arr(js_m(nums, 'toSpliced', 1, 1, 'x')), '3,x,2', 'toSpliced')
+eq(pcall(js_m, nums, 'with', 5, 0), false, 'with refuses an index outside the array')
+eq(js_m(js_array({ [0] = 'a', [1] = 'b', [2] = 'c' }, 3), 'reduceRight', function(acc, v) return acc .. v end),
+   'cba', 'reduceRight')
+eq(arr(js_m(js_array({ [0] = 1, [1] = 2, [2] = 3, [3] = 4, [4] = 5 }, 5), 'copyWithin', 0, 3)),
+   '4,5,3,4,5', 'copyWithin')
+eq(arr(js_m(js_array({ [0] = 1, [1] = 2, [2] = 3, [3] = 4, [4] = 5 }, 5), 'copyWithin', 1, 0, 3)),
+   '1,1,2,3,5', 'copyWithin overlapping forwards')
+-- a hole joins as nothing, not as the word "undefined"
+eq(js_m(js_array({ [0] = 1, [2] = 3 }, 3), 'join', '-'), '1--3', 'join renders a hole as empty')
+
+eq(Math.fround(16777217), 16777216, 'fround drops what a float32 cannot hold')
+eq(Math.fround(0.5), 0.5, 'fround keeps a value a float32 holds exactly')
+eq(Math.fround(Math.fround(1.1)), Math.fround(1.1), 'fround is idempotent')
+eq(Math.fround(1.1) ~= 1.1, true, 'fround actually rounds')
+eq(math.abs(Math.fround(1.1) - 1.1) < 1e-7, true, 'and rounds to something very close')
+eq(Math.fround(1e39), math.huge, 'past the largest float32 is Infinity')
+eq(Math.fround(1e-46), 0, 'below the smallest subnormal is zero')
+eq(Math.fround(-0.0), -0.0, 'fround keeps a zero')
+-- Ties at the exponents where this Lua's log(v, 2) is off by one, checked against V8's answers.
+-- They do NOT cover the correction in fround: where the log is wrong the value is exactly
+-- representable, so removing the correction leaves every answer here unchanged. It is there for
+-- the interpreter the game embeds, whose log is a different one.
+eq(Math.fround(2 ^ -29 * (1 + 2 ^ -24)), 2 ^ -29, 'fround rounds at an exponent the log gets wrong')
+eq(Math.fround(2 ^ -29 * (1 + 3 * 2 ^ -24)), 2 ^ -29 * (1 + 2 ^ -22), 'and rounds the tie to even')
+eq(Math.fround(2 ^ -62 * (1 + 2 ^ -24)), 2 ^ -62, 'at another of the exponents it gets wrong')
+
+eq(String.raw({ [0] = 'a', [1] = 'b', length = 2 }, 7), 'a7b', 'String.raw joins the pieces')
+eq(js_m('plain', 'normalize'), 'plain', 'normalize leaves ASCII alone')
+eq(pcall(js_m, 'caf\195\169', 'normalize'), false, 'and says so rather than guessing at anything else')
+
+-- ---- Date -------------------------------------------------------------------------------------
+-- Every calendar answer below was taken from V8's own UTC accessors for the same instant.
+eq(js_m(js_date(1234), 'getTime'), 1234, 'getTime needs no world clock')
+eq(pcall(js_m, js_date(0), 'getFullYear'), false, 'a calendar accessor refuses without EPOCH')
+EPOCH = 0
+local when = js_date('2026-09-22T14:30:05.250Z')
+eq(js_m(when, 'getFullYear'), 2026, 'getFullYear')
+eq(js_m(when, 'getMonth'), 8, 'getMonth is 0-based')
+eq(js_m(when, 'getDate'), 22, 'getDate')
+eq(js_m(when, 'getDay'), 2, 'getDay')
+eq(js_m(when, 'getHours'), 14, 'getHours')
+eq(js_m(when, 'getMinutes'), 30, 'getMinutes')
+eq(js_m(when, 'getSeconds'), 5, 'getSeconds')
+eq(js_str(js_m(when, 'getMilliseconds')), '250', 'getMilliseconds')
+eq(js_m(when, 'getTimezoneOffset'), 0, 'everything here is UTC')
+eq(js_m(when, 'toISOString'), '2026-09-22T14:30:05.250Z', 'toISOString')
+eq(js_m(when, 'toLocaleDateString'), '2026-09-22', 'a fixed date format, not a per-player one')
+eq(js_m(js_date('1969-07-20T20:17:00.000Z'), 'getFullYear'), 1969, 'before the epoch')
+eq(js_m(js_date('2000-02-29T00:00:00.000Z'), 'getDate'), 29, 'a leap day')
+eq(js_m(js_date(2026, 0, 32), 'toISOString'), '2026-02-01T00:00:00.000Z', 'the component form rolls over')
+eq(js_m(js_date(2026, 13, 1), 'getFullYear'), 2027, 'and carries a month into the year')
+eq(js_m(js_date('not a date'), 'toISOString'), 'Invalid Date', 'an unparseable string is an Invalid Date')
+EPOCH = nil
+
+-- ---- text nodes, fragments and the tree they make ---------------------------------------------
+local list = document.getElementById('a-list')
+local row = document.createElement('li')
+local text = document.createTextNode('hello')
+js_m(row, 'appendChild', text)
+js_m(list, 'appendChild', row)
+eq(text.nodeType, 3, 'a text node is nodeType 3')
+eq(text.nodeValue, 'hello', 'and carries its text')
+eq(text.nodeName, '#text', 'and is named #text')
+eq(text.tagName, nil, 'and has no tag name')
+eq(row.childNodes.length, 1, 'childNodes counts a text node')
+eq(row.children.length, 0, 'children does not')
+eq(row.firstElementChild, nil, 'nor does firstElementChild')
+js_m(row, 'insertAdjacentText', 'beforeend', 'more')
+eq(row.lastChild.nodeValue, 'more', 'insertAdjacentText appends one')
+
+local frag = document.createDocumentFragment()
+local em, strong = document.createElement('em'), document.createElement('strong')
+js_m(frag, 'appendChild', em)
+js_m(frag, 'appendChild', strong)
+eq(frag.childNodes.length, 2, 'a fragment holds its children')
+eq(frag.nodeType, 11, 'and is nodeType 11')
+js_m(list, 'appendChild', frag)
+eq(frag.childNodes.length, 0, 'appending a fragment empties it')
+eq(list.children.length, 3, 'and leaves its children behind, in order')
+eq(list.children[1].tagName, 'EM', 'first of them')
+eq(list.children[2].tagName, 'STRONG', 'then the next')
+eq(row.nextElementSibling.tagName, 'EM', 'nextElementSibling skips text nodes')
 
 if fails == 0 then print('all prelude checks pass') else print(fails .. ' FAILED') os.exit(1) end
