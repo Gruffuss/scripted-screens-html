@@ -27,6 +27,10 @@ internal sealed class CompiledRun
     // Enough to tell "it never runs" from "it runs and writes nothing" from "it writes and nothing
     // shows". Three different bugs that look identical on a frozen console.
     private int _ran, _blocked, _sent, _empty;
+    // Split, because "the compiled page costs 6 ms a frame" is a number with three possible owners
+    // and guessing which has a bad record on this project. Run is the chip's Lua; drain is reading
+    // PAYLOAD back; send is handing the values to the vector mod.
+    private long _tRun, _tDrain, _tSend;
     private float _nextReport;
 
     /// <summary>After this many failed frames in a row the page is handed back to the interpreter.</summary>
@@ -38,13 +42,19 @@ internal sealed class CompiledRun
         _nextReport = Time.time + 2f;
         ScriptedScreensHtmlPlugin.Log?.LogInfo(
             $"compiled \"{_page}\": {_ran} frame(s) ran, {_blocked} blocked, {_sent} value(s) sent, " +
-            $"{_empty} frame(s) wrote nothing, {_events} event(s) delivered");
+            $"{_empty} frame(s) wrote nothing, {_events} event(s) delivered" +
+            (_ran > 0
+                ? $"; per frame: lua {Ms(_tRun) / _ran:0.000} ms + drain {Ms(_tDrain) / _ran:0.000} + send {Ms(_tSend) / _ran:0.000}"
+                : string.Empty));
         _ran = _blocked = _sent = _empty = _events = 0;
+        _tRun = _tDrain = _tSend = 0;
     }
 
     private readonly object _env;
     private readonly object? _event;
     private int _events;
+    /// <summary>Reused across frames: a fresh map per frame is the largest allocation left on this path.</summary>
+    private readonly System.Collections.Generic.Dictionary<string, object> _values = new(StringComparer.Ordinal);
 
     private CompiledRun(object state, object env, object frame, string page)
     {
@@ -69,7 +79,7 @@ internal sealed class CompiledRun
         any |= ChipHost.RunEvent(_state, _event, id, "click", x, y);
         if (!any) return false;
         _events++;
-        var values = ChipHost.Drain(_env);
+        var values = ChipHost.Drain(_env, _values);
         if (values != null) { _sent += values.Count; send(values); }
         return true;
     }
@@ -80,10 +90,12 @@ internal sealed class CompiledRun
     {
         if (_event == null || !ChipHost.RunEvent(_state, _event, id, kind, x, y)) return false;
         _events++;
-        var values = ChipHost.Drain(_env);
+        var values = ChipHost.Drain(_env, _values);
         if (values != null) { _sent += values.Count; send(values); }
         return true;
     }
+
+    private static double Ms(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
     /// <summary>The chip's Lua state, so the caller can notice when it is replaced.</summary>
     internal object State => _state;
@@ -179,12 +191,17 @@ internal sealed class CompiledRun
         var dt = _last > 0f ? Time.time - _last : 0f;
         _last = Time.time;
 
-        if (ChipHost.RunFrame(_state, _frame, dt))
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var ok = ChipHost.RunFrame(_state, _frame, dt);
+        var t1 = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (ok)
         {
             _failures = 0;
             _ran++;
-            var values = ChipHost.Drain(_env);
+            var values = ChipHost.Drain(_env, _values);
+            var t2 = System.Diagnostics.Stopwatch.GetTimestamp();
             if (values != null) { _sent += values.Count; send(values); } else _empty++;
+            _tRun += t1 - t0; _tDrain += t2 - t1; _tSend += System.Diagnostics.Stopwatch.GetTimestamp() - t2;
             Report();
             return true;
         }

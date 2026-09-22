@@ -138,6 +138,31 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             // One Update after compiling, so the structure the chip writes into has gone out.
             if (_releasePending) { _releasePending = false; ReleaseWorkingSet(); }
+
+            // At the rate the renderer will actually draw, not at display rate. The compiled tick
+            // had no limit at all, so it ran the page's Lua ~78 times a second per console while the
+            // vector mod rebuilds at 30 - every second frame thrown away, on the GAME thread, times
+            // fourteen consoles. The interpreted path has always used this same gate; the compiled
+            // one simply never picked it up.
+            var clock = Time.time;
+            var lodNow = VectorBridge.Lod(clock);
+            var seen = IsOnScreen(out var widthNow);
+            var wantHidden = !seen && HtmlConfig.CullOffScreen switch
+            {
+                CullChoice.Always => true,
+                CullChoice.Never => false,
+                _ => lodNow.cull,
+            };
+            // No half-frame tolerance here, and that is the difference that matters. The
+            // interpreted path grants it so a 60 Hz cap on a 73 fps display is not halved to 36 -
+            // and it can afford to, because its work is on a worker. This work is on the GAME
+            // thread (the chip's VM is the game's, and is shared with the author's program, so it
+            // cannot move), and measured at 0.69 ms per console per frame for the runner. Letting
+            // every display frame through produced values the renderer never drew, at 14 consoles.
+            var interval = wantHidden ? HiddenInterval : FrameInterval(widthNow, lodNow);
+            if (clock - _lastCompiledTick < interval) return;
+            _lastCompiledTick = clock;
+
             if (_compiled.Tick(Cartridge ?? Board, SendCompiled)) return;
             // It gave up - the chip recompiled under it, or its frames kept failing. Back to the
             // interpreter, which is always able to run the page, so the page has to exist again.
@@ -629,6 +654,8 @@ internal sealed class HtmlSurface : MonoBehaviour
     private bool _released;
     /// <summary>Set when a page compiles; acted on next Update, once its structure has gone out.</summary>
     private bool _releasePending;
+    /// <summary>When the compiled chunk last ran a frame, so it runs at the rate the renderer draws.</summary>
+    private float _lastCompiledTick;
 
     /// <summary>
     /// Puts the page back when something needs it: a capture, a rebuild, or the compiled run giving up.

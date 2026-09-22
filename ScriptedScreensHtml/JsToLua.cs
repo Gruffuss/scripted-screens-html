@@ -229,6 +229,107 @@ internal sealed class JsToLua
         }
     }
 
+    /// <summary>
+    /// <c>el.style.transform = 'translate(' + x + 'px,' + y + 'px)'</c>, emitted as the two numbers.
+    /// </summary>
+    /// <remarks>
+    /// This is the whole remaining per-frame allocation of a compiled page, and it is one the
+    /// compiler creates itself. The page writes CSS, so the translated Lua built the string - a
+    /// <c>toFixed</c>, then three or four <c>js_add</c>s - and the binding runtime then pattern
+    /// matched the numbers back out of it, allocating the captures. Twenty-six times a frame, per
+    /// console, to move numbers the compiler had in its hands the whole time.
+    ///
+    /// So the literal pieces are recognised at compile time and dropped. Nothing is built and
+    /// nothing is parsed: the value goes to its slot as a number.
+    ///
+    /// Only the exact shapes below, and only when every hole is an expression rather than a literal
+    /// piece. Anything else falls through to the string path, which still works - this is an
+    /// optimisation with a correctness floor, not a new way of writing CSS.
+    /// </remarks>
+    private bool NumericStyle(AssignmentExpression a)
+    {
+        if (a.Left is not MemberExpression { Computed: false, Property: Identifier prop } m) return false;
+        if (m.Object is not MemberExpression { Computed: false, Property: Identifier { Name: "style" } } styleOf) return false;
+
+        var parts = new List<object>();
+        if (!Flatten(a.Right, parts)) return false;
+
+        // literal pieces in order, expressions in order
+        var literals = new List<string>();
+        var holes = new List<Expression>();
+        foreach (var part in parts)
+        {
+            if (part is string lit) literals.Add(lit);
+            else holes.Add((Expression)part);
+        }
+
+        var element = Expr(styleOf.Object);
+        var key = Quote(prop.Name);
+
+        // A hole that is `x.toFixed(n)` is a number a page formatted for CSS. On a numeric slot the
+        // string it returns is built only to be parsed back, so the value is taken without it.
+        string Hole(Expression e) =>
+            e is CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "toFixed" } } fixedOn } call
+                ? "js_fixnum(" + Expr(fixedOn.Object) + ", " + (call.Arguments.Count > 0 ? Expr(call.Arguments[0]) : "0") + ")"
+                : Expr(e);
+
+        // How many decimals the page asked toFixed for, so the uncompiled runtime can format the
+        // value back into exactly the string the original wrote. The compiled one ignores it.
+        string Digits(Expression e) =>
+            e is CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "toFixed" } } } c2
+                ? (c2.Arguments.Count > 0 ? Expr(c2.Arguments[0]) : "0")
+                : "nil";
+
+        // `x + 'px'` - one number and a unit
+        if (holes.Count == 1 && literals.Count == 1 && Unit(literals[0]))
+        {
+            Line("DOM.num(" + element + ", " + key + ", " + Hole(holes[0]) + ", " + Quote(literals[0]) + ", " + Digits(holes[0]) + ")");
+            return true;
+        }
+
+        // `'translate(' + x + 'px,' + y + 'px)'`
+        if (holes.Count == 2 && literals.Count == 3
+            && Head(literals[0], "translate(") && Mid(literals[1]) && Tail(literals[2]))
+        {
+            Line("DOM.xy(" + element + ", " + key + ", " + Hole(holes[0]) + ", " + Hole(holes[1]) + ", "
+                 + Quote(literals[0]) + ", " + Quote(literals[1]) + ", " + Quote(literals[2])
+                 + ", " + Digits(holes[0]) + ", " + Digits(holes[1]) + ")");
+            return true;
+        }
+
+        // `'translateX(' + x + 'px)'` / `'translateY(' + y + 'px)'`
+        if (holes.Count == 1 && literals.Count == 2 && Tail(literals[1]))
+        {
+            if (Head(literals[0], "translatex(")) { Line("DOM.xy(" + element + ", " + key + ", " + Hole(holes[0]) + ", nil, " + Quote(literals[0]) + ", \"\", " + Quote(literals[1]) + ", " + Digits(holes[0]) + ", nil)"); return true; }
+            if (Head(literals[0], "translatey(")) { Line("DOM.xy(" + element + ", " + key + ", nil, " + Hole(holes[0]) + ", " + Quote(literals[0]) + ", \"\", " + Quote(literals[1]) + ", nil, " + Digits(holes[0]) + ")"); return true; }
+        }
+        return false;
+
+        static bool Unit(string t) { t = t.Trim(); return Is(t, "px") || Is(t, "%") || t.Length == 0; }
+        static bool Head(string t, string want) => Is(t.Trim(), want);
+        static bool Mid(string t) { t = t.Trim(); return Is(t, "px,") || Is(t, "px ,"); }
+        static bool Tail(string t) => Is(t.Trim(), "px)");
+        static bool Is(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>A `+` chain as its pieces, in order. False when any piece is not a literal or a value.</summary>
+    private static bool Flatten(Expression e, List<object> into)
+    {
+        switch (e)
+        {
+            case NonLogicalBinaryExpression { Operator: Operator.Addition } add:
+                return Flatten(add.Left, into) && Flatten(add.Right, into);
+            case StringLiteral s:
+                into.Add(s.Value);
+                return true;
+            case NumericLiteral:
+                return false;            // a literal number in the chain is not a hole to bind
+            default:
+                into.Add(e);
+                return true;
+        }
+    }
+
     private void Unsupported(Node n, string what) =>
         _problems.Add("line " + n.Location.Start.Line.ToString(CultureInfo.InvariantCulture) + ": " + what + " is not translatable");
 
@@ -363,6 +464,9 @@ internal sealed class JsToLua
             Unsupported(a, "assigning to .length");
             return;
         }
+        // A CSS write the page builds as a string, emitted as the numbers it is made of.
+        if (a.Operator == Operator.Assignment && NumericStyle(a)) return;
+
         var target = Expr(a.Left);
         var value = Expr(a.Right);
         switch (a.Operator)

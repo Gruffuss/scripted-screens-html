@@ -470,6 +470,31 @@ function DOM.bind(id, key, value)
   for i = 1, #b.to do put(b.to[i][1], n + b.to[i][2]) end
 end
 
+-- The two the compiler emits instead of a CSS string. A page writes `x + 'px'` and
+-- `'translate(' + x + 'px,' + y + 'px)'`; the compiler recognises those shapes and calls these with
+-- the numbers, so nothing is built and nothing is parsed. That round trip - build a string, then
+-- pattern match the numbers back out of it - was the whole of a compiled page's per-frame garbage,
+-- and the compiler was creating both halves of it.
+function DOM.num(el, key, n)
+  -- tonumber, because a page almost always writes `x.toFixed(1) + 'px'` and toFixed returns a
+  -- STRING. Rejecting non-numbers here silently wrote nothing at all, which is how the runner's
+  -- player stopped moving the first time this was tried.
+  n = tonumber(n)
+  if n == nil or n ~= n then return end
+  local b = BOUND[rawget(el, '__id') .. '.style.' .. key]
+  if b == nil or b.read ~= 'length' then return end
+  for i = 1, #b.to do PAYLOAD[b.to[i][1]] = n + b.to[i][2] end
+  DIRTY = true
+end
+
+function DOM.xy(el, key, x, y)
+  local b = BOUND[rawget(el, '__id') .. '.style.' .. key]
+  if b == nil or b.read ~= 'translate' then return end
+  x, y = tonumber(x), tonumber(y)
+  if x ~= nil and x == x and b.to[1] then PAYLOAD[b.to[1][1]] = x + b.to[1][2] DIRTY = true end
+  if y ~= nil and y == y and b.to[2] then PAYLOAD[b.to[2][1]] = y + b.to[2][2] DIRTY = true end
+end
+
 -- Everything one frame wrote, in one payload: the renderer merges a payload and rebuilds once, so
 -- splitting these would show the console a half-applied frame.
 --

@@ -239,7 +239,7 @@ internal static class ChipHost
     /// What the last frame wrote, or null when it wrote nothing. Clears the flag, so a frame that
     /// changes nothing costs one boolean read and sends nothing.
     /// </summary>
-    internal static Dictionary<string, object>? Drain(object? environment)
+    internal static Dictionary<string, object>? Drain(object? environment, Dictionary<string, object>? into = null)
     {
         if (environment is not Lua.LuaTable env) return null;
         if (!env["DIRTY"].TryRead<bool>(out var dirty) || !dirty) return null;
@@ -247,7 +247,11 @@ internal static class ChipHost
 
         if (!env["PAYLOAD"].TryRead<Lua.LuaTable>(out var payload) || payload == null) return null;
 
-        var values = new Dictionary<string, object>(StringComparer.Ordinal);
+        // The caller's buffer, reused. A fresh dictionary per frame - with every double boxed into it
+        // - is allocation in the one path this whole exercise exists to keep empty, and at fourteen
+        // consoles times the draw rate it is the largest thing left.
+        var values = into ?? new Dictionary<string, object>(StringComparer.Ordinal);
+        values.Clear();
         var key = Lua.LuaValue.Nil;
         while (payload.TryGetNext(key, out var pair))
         {

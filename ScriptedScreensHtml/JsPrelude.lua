@@ -717,6 +717,37 @@ function DOM.fire(id, kind, x, y)
   return ev
 end
 
+-- The two shapes the compiler emits in place of a CSS string, with the literal pieces carried
+-- along. HERE they rebuild exactly the string the page wrote, so a page run against this prelude
+-- behaves identically to the original; a COMPILED page replaces both with versions that write the
+-- numbers straight to their slots and build nothing. Same call, two runtimes.
+-- toFixed's value WITHOUT its string. A page writes `x.toFixed(1) + 'px'` to format a number for
+-- CSS, and when that lands on a numeric slot the string is built only to be parsed straight back.
+-- Rounds away from zero on a half, as toFixed does - `math.floor(v * 10 + 0.5)` would round -0.05
+-- the other way, which is a wrong pixel rather than a wrong string.
+function js_fixnum(v, d)
+  v = tonumber(v)
+  if v == nil or v ~= v then return v end
+  local m = 10 ^ (tonumber(d) or 0)
+  if v < 0 then return -math.floor(-v * m + 0.5) / m end
+  return math.floor(v * m + 0.5) / m
+end
+
+local function shown(v, d)
+  if v == nil then return "" end
+  if d == nil then return js_str(v) end
+  return string.format("%." .. tostring(math.floor(d)) .. "f", tonumber(v) or 0)
+end
+
+function DOM.num(el, key, n, unit, d)
+  record(rawget(el, "__id"), "style." .. key, shown(n, d) .. (unit or ""))
+end
+
+function DOM.xy(el, key, x, y, l1, l2, l3, dx, dy)
+  record(rawget(el, "__id"), "style." .. key,
+         (l1 or "") .. shown(x, dx) .. (l2 or "") .. shown(y, dy) .. (l3 or ""))
+end
+
 -- setAttribute is a write like any other, recorded against the element it names.
 function DOM.attribute(el, name, value) record(rawget(el, "__id"), "@" .. name, value) end
 
