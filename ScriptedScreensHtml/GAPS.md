@@ -248,11 +248,10 @@ NOT drawn:
 
 ```
 
-1. Node and Element: 46 of 53 (87%)
-  answers nothing (4):
+1. Node and Element: 47 of 53 (89%)
+  answers nothing (3):
     innerHTML (read)                  undefined   [by design]
     outerHTML                         undefined
-    tagName (own markup)              undefined
     textContent (read)                undefined   [by design]
   refused by the compiler (2):
     insertAdjacentHTML                line 2: `.insertAdjacentHTML()`, which the prelude does not provide is no~
@@ -260,16 +259,9 @@ NOT drawn:
   WRONG ANSWER (1):
     attributes                        2
 
-2. HTMLElement: 10 of 23 (43%)
-  answers nothing (12):
-    clientHeight                      0   [by design]
-    clientWidth                       0   [by design]
-    getBoundingClientRect             0   [by design]
+2. HTMLElement: 17 of 23 (74%)
+  answers nothing (5):
     getComputedStyle (cascade)        undefined   [by design]
-    offsetHeight                      0   [by design]
-    offsetLeft                        undefined   [by design]
-    offsetTop                         undefined   [by design]
-    offsetWidth                       0   [by design]
     scrollHeight                      undefined   [by design]
     scrollLeft                        undefined   [by design]
     scrollTop                         undefined   [by design]
@@ -277,12 +269,9 @@ NOT drawn:
   refused by the compiler (1):
     scrollIntoView                    line 2: `.scrollIntoView()`, which the prelude does not provide is not tr~
 
-3. Document: 10 of 16 (63%)
-  answers nothing (4):
+3. Document: 13 of 16 (81%)
+  answers nothing (1):
     document.addEventListener         0
-    document.getElementsByTagName     0   [by design]
-    document.querySelector (.class)   false
-    document.querySelectorAll         0   [by design]
   refused by the compiler (2):
     createDocumentFragment            line 1: `.createDocumentFragment()`, which the prelude does not provide i~
     createTextNode                    line 1: `.createTextNode()`, which the prelude does not provide is not tr~

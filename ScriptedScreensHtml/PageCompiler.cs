@@ -46,6 +46,7 @@ internal static class PageCompiler
             // The console's own design size, so the page sizes itself for THIS screen.
             (size.x, size.y),
             Parents(built),
+            Structure(built, absolute),
             // The scene's own resting value for a slot, so a state can carry what it does NOT move
             // and therefore be leavable. Numbers only: a state that changes text or colour restores
             // through its own entry, and inventing a base for those would guess.
@@ -80,6 +81,45 @@ internal static class PageCompiler
                 mine = name;
             }
             for (var i = 0; i < ve.childCount; i++) Walk(ve[i], mine);
+        }
+    }
+
+    /// <summary>
+    /// The page's tags, classes and boxes, measured once so the chunk can answer questions about
+    /// itself.
+    /// </summary>
+    /// <remarks>
+    /// In document order, because that is the order every document-wide query has to return and it
+    /// cannot be recovered from a dictionary afterwards.
+    /// </remarks>
+    private static CompiledPage.Tree Structure(HtmlRenderer.Result built,
+                                               Dictionary<VisualElement, Vector2> absolute)
+    {
+        var tree = new CompiledPage.Tree();
+        Walk(built.Root);
+        return tree;
+
+        void Walk(VisualElement ve)
+        {
+            if (ve.name is { Length: > 0 } name && built.NodeOf.TryGetValue(ve, out var node))
+            {
+                tree.Order.Add(name);
+                if (node.Tag is { Length: > 0 } tag) tree.Tag[name] = tag.ToLowerInvariant();
+                if (node.Attr("class") is { Length: > 0 } classes) tree.Class[name] = classes;
+
+                var at = absolute.TryGetValue(ve, out var pos) ? pos : Vector2.zero;
+                var layout = ve.layout;
+                var style = ve.resolvedStyle;
+                // The content box is the border box less its own padding and border, which is what
+                // clientWidth reports - not the child content's extent.
+                var padX = style.paddingLeft + style.paddingRight + style.borderLeftWidth + style.borderRightWidth;
+                var padY = style.paddingTop + style.paddingBottom + style.borderTopWidth + style.borderBottomWidth;
+                tree.Boxes[name] = new CompiledPage.Tree.Box(
+                    at.x, at.y, layout.width, layout.height,
+                    Math.Max(0, layout.width - padX), Math.Max(0, layout.height - padY),
+                    layout.x, layout.y);
+            }
+            for (var i = 0; i < ve.childCount; i++) Walk(ve[i]);
         }
     }
 

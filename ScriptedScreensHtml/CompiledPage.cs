@@ -109,6 +109,36 @@ internal static class CompiledPage
         }
     }
 
+    /// <summary>
+    /// The page's laid-out structure, as the chunk needs to see it.
+    /// </summary>
+    /// <remarks>
+    /// A compiled page has no DOM and no layout engine, so everything a script asks ABOUT the page -
+    /// its tags, its classes, where its boxes are - has to have been measured at compile time or be
+    /// answered wrongly. Answered wrongly is the failure this project keeps recording, and
+    /// `classList.contains` returning false for a class written in the markup is exactly it.
+    /// </remarks>
+    internal sealed class Tree
+    {
+        /// <summary>Every named element, in document order, for the document-wide queries.</summary>
+        public readonly List<string> Order = new();
+        public readonly Dictionary<string, string> Tag = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, string> Class = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, Box> Boxes = new(StringComparer.Ordinal);
+
+        /// <summary>One element's geometry: border box, content size, and offset from its parent.</summary>
+        internal readonly struct Box
+        {
+            public readonly double X, Y, W, H, ContentW, ContentH, OffsetX, OffsetY;
+            public Box(double x, double y, double w, double h,
+                       double contentW, double contentH, double offsetX, double offsetY)
+            {
+                X = x; Y = y; W = w; H = h;
+                ContentW = contentW; ContentH = contentH; OffsetX = offsetX; OffsetY = offsetY;
+            }
+        }
+    }
+
     /// <summary>What compiling produced, or why it could not.</summary>
     internal sealed class Result
     {
@@ -156,6 +186,7 @@ internal static class CompiledPage
                                    string? prelude = null,
                                    (double Width, double Height)? viewport = null,
                                    IReadOnlyDictionary<string, string>? parents = null,
+                                   Tree? tree = null,
                                    Func<string, double?>? baseOf = null,
                                    (string Surface, string Element, string Scene)? target = null,
                                    string element = "VDATA")
@@ -262,7 +293,7 @@ internal static class CompiledPage
             }
         }
 
-        result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), prelude, viewport, parents, target, element);
+        result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), prelude, viewport, parents, tree, target, element);
         return result;
     }
 
@@ -357,6 +388,7 @@ internal static class CompiledPage
     private static string Assemble(string page, List<Binding> bindings, Func<string, bool> tabular,
                                    string? prelude, (double Width, double Height)? viewport,
                                    IReadOnlyDictionary<string, string>? parents,
+                                   Tree? tree,
                                    (string Surface, string Element, string Scene)? target, string element)
     {
         var sb = new StringBuilder(page.Length + (prelude?.Length ?? 0) + bindings.Count * 64 + 2048);
@@ -466,6 +498,49 @@ internal static class CompiledPage
             foreach (var kv in parents)
                 sb.Append("  [").Append(Quote(kv.Key)).Append("] = ").Append(Quote(kv.Value)).Append(",\n");
         sb.Append("}\n\n");
+
+        // The page's own markup, which the chunk otherwise cannot see at ALL. Without these, a
+        // script asking `classList.contains('wide')` about an element written in the HTML gets
+        // FALSE for a class that is plainly there - a wrong answer rather than a missing feature -
+        // and `closest`, `matches`, `tagName` and every document-wide query are dead.
+        //
+        // Emitted as data because it is all a compile-time fact: the structure a compiled page draws
+        // does not change, which is the premise of compiling it.
+        if (tree is { } t)
+        {
+            sb.Append("NODES = {");
+            for (var i = 0; i < t.Order.Count; i++)
+            {
+                if (i > 0) sb.Append(", ");
+                sb.Append(Quote(t.Order[i]));
+            }
+            sb.Append("}\n\n");
+
+            sb.Append("TAG = {\n");
+            foreach (var kv in t.Tag)
+                sb.Append("  [").Append(Quote(kv.Key)).Append("] = ").Append(Quote(kv.Value)).Append(",\n");
+            sb.Append("}\n\n");
+
+            sb.Append("CLASS = {\n");
+            foreach (var kv in t.Class)
+                sb.Append("  [").Append(Quote(kv.Key)).Append("] = ").Append(Quote(kv.Value)).Append(",\n");
+            sb.Append("}\n\n");
+
+            // Every laid-out box, so getBoundingClientRect and the offset family answer where the
+            // element IS rather than an honest zero. A compiled page has no layout engine, but the
+            // compiler had one - these are what it measured.
+            sb.Append("BOXES = {\n");
+            foreach (var kv in t.Boxes)
+            {
+                var b = kv.Value;
+                sb.Append("  [").Append(Quote(kv.Key)).Append("] = {")
+                  .Append(Num(b.X)).Append(", ").Append(Num(b.Y)).Append(", ")
+                  .Append(Num(b.W)).Append(", ").Append(Num(b.H)).Append(", ")
+                  .Append(Num(b.ContentW)).Append(", ").Append(Num(b.ContentH)).Append(", ")
+                  .Append(Num(b.OffsetX)).Append(", ").Append(Num(b.OffsetY)).Append("},\n");
+            }
+            sb.Append("}\n\n");
+        }
 
         // Where the page's own values go. Emitted as constants so the chunk reaches its element
         // itself, through ScriptedScreens' API, exactly as a hand-written console does - which is

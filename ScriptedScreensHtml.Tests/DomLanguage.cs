@@ -111,6 +111,7 @@ internal static class DomLanguage
             var state = LuaState.Create();
             state.OpenStandardLibraries();
             Chunk(state, prelude, "prelude");
+            Chunk(state, Markup, "markup");
             Chunk(state, lua, "page");
             Chunk(state, c.Tail, "tail");
             Chunk(state, "OUT = js_str(OUT)", "read");
@@ -123,6 +124,35 @@ internal static class DomLanguage
         if (got == c.Want) return (How.Works, got);
         return (Empty(got) ? How.Hollow : How.Wrong, got);
     }
+
+    /// <summary>
+    /// The page's own markup, as the compiler emits it.
+    /// </summary>
+    /// <remarks>
+    /// A compiled page has no DOM: what a script can learn ABOUT the document comes from tables
+    /// CompiledPage emits after laying the page out. The probe does not go through that path - it
+    /// compiles one snippet and runs it - so without a fixture here every markup question answers
+    /// as if the page were empty, and the probe measures its own harness rather than the runtime.
+    ///
+    /// This is the shape CompiledPage.Assemble writes, for the small document the cases assume:
+    /// an #app containing a #box and a #label.
+    /// </remarks>
+    private const string Markup = @"
+NODES = {'app', 'box', 'label'}
+TAG = { ['app'] = 'div', ['box'] = 'div', ['label'] = 'span' }
+-- #box carries no class: the classList cases build one up from nothing and would be
+-- measuring the fixture rather than the runtime if it started with two.
+CLASS = { ['app'] = 'root', ['label'] = 'text wide' }
+PARENT = { ['box'] = 'app', ['label'] = 'box', ['app'] = 'document' }
+-- x, y, w, h, contentW, contentH, offsetX, offsetY
+-- #box is the element every geometry case reads, so its numbers are the ones those cases expect:
+-- a 100x20 box at (8,8) inside #app, with no padding so the content box matches.
+BOXES = {
+  ['app']   = {0, 0, 800, 600, 800, 600, 0, 0},
+  ['box']   = {8, 8, 100, 20, 100, 20, 8, 8},
+  ['label'] = {20, 30, 60, 18, 60, 18, 12, 10},
+}
+";
 
     private static void Chunk(LuaState state, string text, string name) =>
         state.RunAsync(state.Load(text.AsSpan(), name, state.Environment)).AsTask().GetAwaiter().GetResult();
@@ -300,9 +330,11 @@ internal static class DomLanguage
         C("documentElement",    "var RESULT = document.documentElement !== null;", "true"),
         C("head",               "var RESULT = document.head !== null;", "true"),
         C("document.querySelector (#id)", "var RESULT = document.querySelector('#box') !== null;", "true"),
-        C("document.querySelector (.class)", "var RESULT = document.querySelector('.row') !== null;", "true"),
-        C("document.querySelectorAll", "var RESULT = document.querySelectorAll('div').length;", "1"),
-        C("document.getElementsByTagName", "var RESULT = document.getElementsByTagName('div').length;", "1"),
+        C("document.querySelector (.class)", "var RESULT = document.querySelector('.wide') !== null;", "true"),
+        // Two divs in the fixture markup, which is what a browser would report. The old
+        // expectation of 1 was written when the chunk could only see nodes the script built.
+        C("document.querySelectorAll", "var RESULT = document.querySelectorAll('div').length;", "2"),
+        C("document.getElementsByTagName", "var RESULT = document.getElementsByTagName('div').length;", "2"),
         C("document.addEventListener", "var n = 0; document.addEventListener('x', function () { n = 1; });",
           "DOM.fire('document', 'x', 0, 0) OUT = PAGE.n", "1"),
         C("document.removeEventListener", "var n = 0; var f = function () { n = 1; }; document.addEventListener('x', f); document.removeEventListener('x', f);",
