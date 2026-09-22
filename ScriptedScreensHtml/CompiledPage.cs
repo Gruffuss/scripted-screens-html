@@ -150,6 +150,7 @@ internal static class CompiledPage
                                    (double Width, double Height)? viewport = null,
                                    IReadOnlyDictionary<string, string>? parents = null,
                                    Func<string, double?>? baseOf = null,
+                                   (string Surface, string Element, string Scene)? target = null,
                                    string element = "VDATA")
     {
         var result = new Result();
@@ -241,7 +242,7 @@ internal static class CompiledPage
             }
         }
 
-        result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), prelude, viewport, parents, element);
+        result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), prelude, viewport, parents, target, element);
         return result;
     }
 
@@ -287,7 +288,8 @@ internal static class CompiledPage
 
     private static string Assemble(string page, List<Binding> bindings, Func<string, bool> tabular,
                                    string? prelude, (double Width, double Height)? viewport,
-                                   IReadOnlyDictionary<string, string>? parents, string element)
+                                   IReadOnlyDictionary<string, string>? parents,
+                                   (string Surface, string Element, string Scene)? target, string element)
     {
         var sb = new StringBuilder(page.Length + (prelude?.Length ?? 0) + bindings.Count * 64 + 2048);
 
@@ -396,6 +398,14 @@ internal static class CompiledPage
             foreach (var kv in parents)
                 sb.Append("  [").Append(Quote(kv.Key)).Append("] = ").Append(Quote(kv.Value)).Append(",\n");
         sb.Append("}\n\n");
+
+        // Where the page's own values go. Emitted as constants so the chunk reaches its element
+        // itself, through ScriptedScreens' API, exactly as a hand-written console does - which is
+        // what keeps this mod out of the per-frame path of a page it has already translated.
+        if (target is { } to)
+            sb.Append("SURFACE, ELEMENT, SCENE = ")
+              .Append(Quote(to.Surface)).Append(", ").Append(Quote(to.Element)).Append(", ").Append(Quote(to.Scene))
+              .Append("\n\n");
 
         sb.Append(Runtime(element)).Append('\n');
         sb.Append(page);
@@ -531,11 +541,50 @@ end
 -- screen toward the new value over the gap between payloads. A browser does not, so a page would
 -- gain a glide it never had - on every value at once, which reads as the motion having been
 -- mistranslated rather than as a setting.
+-- The page's values, sent the way a hand-written console sends them: from the chip, straight to
+-- the vector element, through ScriptedScreens' own API.
+--
+-- This used to leave PAYLOAD for the host to collect, and the host then built a dictionary, boxed
+-- every number into it, built a UiProp[] and called into the vector mod. All of that ran on the
+-- game thread, once per console per frame, for ever - so the mod was still in the per-frame path
+-- of a page it had already finished translating. Translated once and then costs nothing is not
+-- true while that is happening, whatever the per-frame numbers say.
+--
+-- The handle is taken once and kept. `keep = 1` means take the data and leave the scene alone,
+-- which is what makes this an update rather than a re-upload of the structure.
+local SURF, VEC
 function DOM.flush()
-  -- Nothing to do: the host takes PAYLOAD when DIRTY says there is something in it, and empties
-  -- BOTH it and the flag. Emptying matters - while it only cleared the flag, every frame re-sent
-  -- every slot the page had ever written, so a frame that moved one number sent all of them.
-  -- Kept as a function so the page's frame reads the same whether or not a host is listening.
+  if not DIRTY then return end
+  DIRTY = false
+  if VEC == nil then
+    -- Every one of these used to be a silent return, which is how a console froze while the log
+    -- said 82 frames ran and wrote values. SENDNOTE is read once by the host and logged.
+    if SURFACE == nil then SENDNOTE = 'no target was compiled in' return end
+    local oks, surf = pcall(function() return ss.ui.surface(SURFACE) end)
+    if not oks then SENDNOTE = 'ss.ui.surface threw: ' .. tostring(surf) return end
+    SURF = surf
+    if SURF == nil then SENDNOTE = 'ss.ui.surface(' .. tostring(SURFACE) .. ') is nil' return end
+    -- Its OWN element, not the one carrying the structure. `surface:element` REPLACES an element's
+    -- props rather than merging them, so asking for a handle to the structure element dropped its
+    -- `src` and the console went blank. A hand-written console has always had two - one for the
+    -- scene and one for the data - and this is the same split, arrived at the same way.
+    local oke, el = pcall(function()
+      return SURF:element({ id = ELEMENT .. '_cd', type = 'vector',
+                            props = { scene = SCENE, keep = 1 } })
+    end)
+    if not oke then SENDNOTE = 'surface:element threw: ' .. tostring(el) return end
+    VEC = el
+    if VEC == nil then SURF = nil SENDNOTE = 'surface:element returned nil for ' .. tostring(ELEMENT) return end
+    SENDNOTE = 'sending to ' .. tostring(ELEMENT) .. ' on ' .. tostring(SURFACE)
+  end
+  local okw, err = pcall(function()
+    VEC:set_props({ data = PAYLOAD, snap = 1 })
+    SURF:commit()
+  end)
+  if not okw then SENDNOTE = 'set_props/commit threw: ' .. tostring(err) return end
+  -- Emptied after the commit, not before: what was sent has gone by then, and a frame that moves
+  -- one number should send one number rather than every slot the page has ever written.
+  for k in pairs(PAYLOAD) do PAYLOAD[k] = nil end
 end
 
 -- The entry point the host calls once a frame. It is a GLOBAL of this chunk's own environment,

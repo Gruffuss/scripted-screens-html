@@ -26,11 +26,12 @@ internal sealed class CompiledRun
     private int _failures;
     // Enough to tell "it never runs" from "it runs and writes nothing" from "it writes and nothing
     // shows". Three different bugs that look identical on a frozen console.
-    private int _ran, _blocked, _sent, _empty;
+    private int _ran, _blocked, _empty;
     // Split, because "the compiled page costs 6 ms a frame" is a number with three possible owners
     // and guessing which has a bad record on this project. Run is the chip's Lua; drain is reading
     // PAYLOAD back; send is handing the values to the vector mod.
-    private long _tRun, _tDrain, _tSend;
+    private long _tRun;
+    private bool _noted;
     private float _nextReport;
 
     /// <summary>After this many failed frames in a row the page is handed back to the interpreter.</summary>
@@ -41,20 +42,18 @@ internal sealed class CompiledRun
         if (!HtmlConfig.Diagnostics || Time.time < _nextReport) return;
         _nextReport = Time.time + 2f;
         ScriptedScreensHtmlPlugin.Log?.LogInfo(
-            $"compiled \"{_page}\": {_ran} frame(s) ran, {_blocked} blocked, {_sent} value(s) sent, " +
+            $"compiled \"{_page}\": {_ran} frame(s) ran, {_blocked} blocked, " +
             $"{_empty} frame(s) wrote nothing, {_events} event(s) delivered" +
             (_ran > 0
-                ? $"; per frame: lua {Ms(_tRun) / _ran:0.000} ms + drain {Ms(_tDrain) / _ran:0.000} + send {Ms(_tSend) / _ran:0.000}"
+                ? $"; {Ms(_tRun) / _ran:0.000} ms of lua per frame, nothing sent from here"
                 : string.Empty));
-        _ran = _blocked = _sent = _empty = _events = 0;
-        _tRun = _tDrain = _tSend = 0;
+        _ran = _blocked = _empty = _events = 0;
+        _tRun = 0;
     }
 
     private readonly object _env;
     private readonly object? _event;
     private int _events;
-    /// <summary>Reused across frames: a fresh map per frame is the largest allocation left on this path.</summary>
-    private readonly System.Collections.Generic.Dictionary<string, object> _values = new(StringComparer.Ordinal);
 
     private CompiledRun(object state, object env, object frame, string page)
     {
@@ -71,7 +70,7 @@ internal sealed class CompiledRun
     /// not on the release a click waits for" - so delivering only <c>click</c> would leave it
     /// looking as dead as delivering nothing.
     /// </remarks>
-    internal bool Click(string id, float x, float y, Action<System.Collections.Generic.Dictionary<string, object>> send)
+    internal bool Click(string id, float x, float y)
     {
         if (_event == null) return false;
         var any = ChipHost.RunEvent(_state, _event, id, "mousedown", x, y);
@@ -79,19 +78,14 @@ internal sealed class CompiledRun
         any |= ChipHost.RunEvent(_state, _event, id, "click", x, y);
         if (!any) return false;
         _events++;
-        var values = ChipHost.Drain(_env, _values);
-        if (values != null) { _sent += values.Count; send(values); }
-        return true;
+        return true;   // the chunk's own flush sends whatever the handler changed
     }
 
     /// <summary>One pointer event, for the types a page uses to track a held button.</summary>
-    internal bool Pointer(string id, string kind, float x, float y,
-                          Action<System.Collections.Generic.Dictionary<string, object>> send)
+    internal bool Pointer(string id, string kind, float x, float y)
     {
         if (_event == null || !ChipHost.RunEvent(_state, _event, id, kind, x, y)) return false;
         _events++;
-        var values = ChipHost.Drain(_env, _values);
-        if (values != null) { _sent += values.Count; send(values); }
         return true;
     }
 
@@ -127,7 +121,8 @@ internal sealed class CompiledRun
     /// </remarks>
     internal static CompiledRun? Start(string page, object? cartridge, HtmlRenderer.Result built,
                                        Panel panel, Vector2 size,
-                                       System.Collections.Generic.IReadOnlyDictionary<string, SceneSlots.Value> slots)
+                                       System.Collections.Generic.IReadOnlyDictionary<string, SceneSlots.Value> slots,
+                                       (string Surface, string Element, string Scene) target)
     {
         if (!ChipHost.Available) return null;           // reported once at startup
         if (string.IsNullOrWhiteSpace(built.Script)) return null;
@@ -147,7 +142,7 @@ internal sealed class CompiledRun
             return null;
         }
 
-        var compiled = PageCompiler.Compile(built, panel, size, slots);
+        var compiled = PageCompiler.Compile(built, panel, size, slots, target);
         if (!compiled.Ok)
         {
             // Both lists, not whichever one a `Lua == null` test guesses at. A page that translated
@@ -177,7 +172,7 @@ internal sealed class CompiledRun
     /// recompiled under it, or its frames keep failing.
     /// </summary>
     /// <param name="send">Given whatever the frame wrote, when it wrote anything.</param>
-    internal bool Tick(object? cartridge, Action<System.Collections.Generic.Dictionary<string, object>> send)
+    internal bool Tick(object? cartridge)
     {
         // A chip that recompiles gets a brand new LuaState, and the chunk went with the old one.
         // Silently doing nothing would leave a console frozen with no clue why.
@@ -201,10 +196,15 @@ internal sealed class CompiledRun
         {
             _failures = 0;
             _ran++;
-            var values = ChipHost.Drain(_env, _values);
-            var t2 = System.Diagnostics.Stopwatch.GetTimestamp();
-            if (values != null) { _sent += values.Count; if (!HtmlConfig.AblateSend) send(values); } else _empty++;
-            _tRun += t1 - t0; _tDrain += t2 - t1; _tSend += System.Diagnostics.Stopwatch.GetTimestamp() - t2;
+            // Nothing is drained and nothing is sent. The chunk writes its own values straight to
+            // the vector element through ScriptedScreens' API, exactly as a hand-written console
+            // does, so the payload never crosses back into C# and this mod is not in the path.
+            _tRun += t1 - t0;
+            if (!_noted && ChipHost.NoteIn(_env) is { } note)
+            {
+                _noted = true;
+                ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: \"{_page}\" send path - {note}");
+            }
             Report();
             return true;
         }

@@ -39,6 +39,24 @@ internal sealed class DataSlots
 
     private readonly Dictionary<string, List<Target>> _byKey = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Per text slot, the em width its digit runs are monospaced at, or absent for plain text.
+    /// </summary>
+    /// <remarks>
+    /// `font-variant-numeric: tabular-nums` makes the emitter wrap every digit run in
+    /// `&lt;mspace=Xem&gt;`, and X comes from the element's measured font - which is exactly the
+    /// layout this class exists not to do. So it is LEARNED from the value the emitter produced,
+    /// during the same comparison that proves the mapping. That is sound because the em is a
+    /// property of the element's font size: it cannot change without a relayout, and a relayout
+    /// rebuilds all of this anyway.
+    ///
+    /// Found by the check rather than by reading the emitter: the first run refused with
+    /// `the emitter drew "&lt;mspace=0.57em&gt;58&lt;/mspace&gt;.&lt;mspace=0.57em&gt;9&lt;/mspace&gt;",
+    /// this would write "58.9"`, which named the problem and its size in one line.
+    /// </remarks>
+    private readonly Dictionary<string, string> _mspace = new(StringComparer.Ordinal);
+    private readonly System.Text.StringBuilder _shaped = new(64);
+
     /// <summary>Why the fast path is off, or null while it is on.</summary>
     internal string? Problem { get; private set; }
 
@@ -140,13 +158,13 @@ internal sealed class DataSlots
             switch (entry.Value.Type)
             {
                 case SS.UiValueType.String:
-                    foreach (var t in targets) (values ??= New())[t.Slot] = entry.Value.String ?? string.Empty;
+                    foreach (var t in targets) (values ??= New())[t.Slot] = Shape(t.Slot, entry.Value.String ?? string.Empty);
                     break;
 
                 case SS.UiValueType.Number:
                     foreach (var t in targets)
                         (values ??= New())[t.Slot] = t.IsText
-                            ? entry.Value.Number.ToString("G", CultureInfo.InvariantCulture)
+                            ? Shape(t.Slot, entry.Value.Number.ToString("G", CultureInfo.InvariantCulture))
                             : entry.Value.Number + t.Bias;
                     break;
 
@@ -202,6 +220,9 @@ internal sealed class DataSlots
             }
             if (pair.Value is string s)
             {
+                // A text slot the emitter monospaces differs only by the wrapping, and the wrapping
+                // is learnable from this very comparison.
+                if (!was.IsNumber && was.Text != null && LearnMspace(pair.Key, s, was.Text)) continue;
                 if (was.IsNumber || !string.Equals(was.Text, s, StringComparison.Ordinal))
                 {
                     Problem = $"slot \"{pair.Key}\": the emitter drew \"{(was.IsNumber ? was.Number.ToString(CultureInfo.InvariantCulture) : was.Text)}\", this would write \"{s}\"";
@@ -224,6 +245,35 @@ internal sealed class DataSlots
             return;
         }
         Proven = true;
+    }
+
+    /// <summary>The text as the emitter would have drawn it: digit runs monospaced, when this slot is.</summary>
+    private string Shape(string slot, string text)
+    {
+        if (!_mspace.TryGetValue(slot, out var open) || text.Length == 0) return text;
+        _shaped.Clear();
+        var i = 0;
+        while (i < text.Length)
+        {
+            if (!char.IsDigit(text[i])) { _shaped.Append(text[i++]); continue; }
+            var start = i;
+            while (i < text.Length && char.IsDigit(text[i])) i++;
+            _shaped.Append(open).Append(text, start, i - start).Append("</mspace>");
+        }
+        return _shaped.ToString();
+    }
+
+    /// <summary>Learns a slot's monospacing from what the emitter drew, when that is the only difference.</summary>
+    private bool LearnMspace(string slot, string mine, string emitted)
+    {
+        const string tag = "<mspace=";
+        var at = emitted.IndexOf(tag, StringComparison.Ordinal);
+        if (at < 0) return false;
+        var close = emitted.IndexOf('>', at);
+        if (close < 0) return false;
+        var open = emitted.Substring(at, close - at + 1);
+        _mspace[slot] = open;
+        return string.Equals(Shape(slot, mine), emitted, StringComparison.Ordinal);
     }
 
     private static Dictionary<string, object> New() => new(StringComparer.Ordinal);

@@ -25,7 +25,8 @@ internal static class PageCompiler
 {
     /// <summary>Compiles the page, using the layout it currently has.</summary>
     internal static CompiledPage.Result Compile(HtmlRenderer.Result built, Panel panel, Vector2 size,
-                                                IReadOnlyDictionary<string, SceneSlots.Value> slots)
+                                                IReadOnlyDictionary<string, SceneSlots.Value> slots,
+                                                (string Surface, string Element, string Scene)? target = null)
     {
         var available = new HashSet<string>(StringComparer.Ordinal);
         foreach (var name in slots.Keys) available.Add(name);
@@ -48,7 +49,9 @@ internal static class PageCompiler
             // The scene's own resting value for a slot, so a state can carry what it does NOT move
             // and therefore be leavable. Numbers only: a state that changes text or colour restores
             // through its own entry, and inventing a base for those would guess.
-            slot => slots.TryGetValue(slot, out var v) && v.IsNumber ? v.Number : (double?)null);
+            slot => slots.TryGetValue(slot, out var v) && v.IsNumber ? v.Number : (double?)null,
+            // Where the chunk sends its own values, so this mod is not in that path at all.
+            target);
     }
 
     /// <summary>

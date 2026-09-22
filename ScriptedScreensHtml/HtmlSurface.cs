@@ -44,6 +44,8 @@ internal sealed class HtmlSurface : MonoBehaviour
     private List<KeyValuePair<string, SS.UiValue>>? _dataToProve;
     /// <summary>Data ticks that skipped layout, translate and emit entirely (diagnostics).</summary>
     private int _dataFastTicks;
+    /// <summary>Whether the elements this page's data drives have been named for the emitter.</summary>
+    private bool _dataNamed;
     internal object? Visor;
     internal string ElementId = string.Empty;
     /// <summary>The data element's id: the vector mod needs a host of its own for a data payload.</summary>
@@ -163,7 +165,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             if (clock - _lastCompiledTick < interval) return;
             _lastCompiledTick = clock;
 
-            if (_compiled.Tick(Cartridge ?? Board, SendCompiled)) return;
+            if (_compiled.Tick(Cartridge ?? Board)) return;
             // It gave up - the chip recompiled under it, or its frames kept failing. Back to the
             // interpreter, which is always able to run the page, so the page has to exist again.
             _compiled = null;
@@ -642,6 +644,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         _boxScratch.Clear();
         _dataSlots = null;
         _dataToProve = null;
+        _dataNamed = false;
         _released = true;
 
         if (HtmlConfig.Diagnostics)
@@ -1271,7 +1274,10 @@ internal sealed class HtmlSurface : MonoBehaviour
                 && holder != null && _compileTried != _built)
             {
                 _compileTried = _built;
-                _compiled = CompiledRun.Start(PageKey, holder, _built!, _panel!, layout, _slotScratch);
+                // The element the chunk will write to itself, named the same way this mod names it,
+                // so the chunk's set_props lands on the surface this page already draws.
+                _compiled = CompiledRun.Start(PageKey, holder, _built!, _panel!, layout, _slotScratch,
+                                              (Surface, ElementId, "html:" + ElementId));
                 // Everything above needed the page; from here nothing does. Released after the
                 // structure has been emitted, never before - the scene is what the chip writes into.
                 if (_compiled != null) _releasePending = true;
@@ -1882,7 +1888,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         // to go somewhere that is still alive.
         if (_compiled != null)
         {
-            if (!_compiled.Click(key, _pointerPage.x, _pointerPage.y, SendCompiled))
+            if (!_compiled.Click(key, _pointerPage.x, _pointerPage.y))
                 ScriptedScreensHtmlPlugin.Log?.LogWarning(
                     $"html: \"{PageKey}\" is compiled but could not take a click on \"{key}\"; the page is not interactive");
             return;
@@ -2500,7 +2506,26 @@ internal sealed class HtmlSurface : MonoBehaviour
             _dataFastTicks++;
             return;
         }
-        if (_script == null && _dataSlots == null && entries.Count > 0 && _built != null)
+        // The emitter names what a SCRIPT drives, and a page with no script told it nothing - so the
+        // scene carried no slot for any of these keys and the fast path could never engage. Naming
+        // them costs one extra emit, once, and the map is built on the tick after that, when the
+        // slots it is going to bind to actually exist.
+        if (_script == null && !_dataNamed && entries.Count > 0 && _built != null)
+        {
+            _dataNamed = true;
+            var named = 0;
+            foreach (var entry in entries)
+                if (!string.IsNullOrEmpty(entry.Key) && _byId.ContainsKey(entry.Key) && _built.Driven.Add(entry.Key))
+                    named++;
+            if (named > 0)
+            {
+                _dirty = true; _dOther++;
+                if (HtmlConfig.Diagnostics)
+                    ScriptedScreensHtmlPlugin.Log?.LogInfo(
+                        $"html \"{ElementId}\": named {named} element(s) the data drives; re-emitting so the scene carries their slots");
+            }
+        }
+        else if (_script == null && _dataSlots == null && entries.Count > 0 && _built != null)
         {
             _dataSlots = DataSlots.Build(
                 entries,

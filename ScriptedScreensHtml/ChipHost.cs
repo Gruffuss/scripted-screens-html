@@ -191,6 +191,10 @@ internal static class ChipHost
         }
     }
 
+    /// <summary>What the chunk's own send path had to say, once, or null while it has said nothing.</summary>
+    internal static string? NoteIn(object? environment)
+        => environment is Lua.LuaTable env && env["SENDNOTE"].TryRead<string>(out var note) ? note : null;
+
     /// <summary>A named function in a loaded chunk's environment, or null when it declared none.</summary>
     internal static object? FunctionIn(object? environment, string name)
         => environment is Lua.LuaTable env && env[name].TryRead<Lua.LuaFunction>(out var fn) ? fn : null;
