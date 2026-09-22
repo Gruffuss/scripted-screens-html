@@ -429,6 +429,7 @@ ScriptedScreensHtml.Tests.JsToLuaTests.Run(Check);
 ScriptedScreensHtml.Tests.MotionTests.Run(Check);
 ScriptedScreensHtml.Tests.ClassTests.Run(Check);
 ScriptedScreensHtml.Tests.SyntaxTests.Run(Check);
+ScriptedScreensHtml.Tests.PreludeRuntime.Run(Check);
 ScriptedScreensHtml.Tests.CompiledPageTests.Run(Check);
 
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");

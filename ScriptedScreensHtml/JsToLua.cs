@@ -64,7 +64,8 @@ internal sealed class JsToLua
         "localStorage", "performance", "Date", "isNaN", "parseFloat", "parseInt", "Infinity", "NaN",
         "undefined", "requestAnimationFrame", "setTimeout", "setInterval", "clearInterval", "Object",
         "location", "Map", "Set", "WeakMap", "WeakSet", "Error", "TypeError", "RangeError", "Array",
-        "RegExp",
+        "RegExp", "clearTimeout", "cancelAnimationFrame", "addEventListener", "removeEventListener",
+        "getComputedStyle",
     };
 
     /// <summary>
@@ -101,6 +102,19 @@ internal sealed class JsToLua
         "flatMap", "lastIndexOf", "localeCompare", "reverse", "search", "shift", "splice", "substr",
         "toExponential", "toLocaleLowerCase", "toLocaleUpperCase", "toPrecision", "trimEnd",
         "trimStart", "unshift",
+        // The DOM: tree mutation, queries, attributes and events
+        "appendChild", "insertBefore", "removeChild", "replaceChild", "append", "prepend", "after",
+        "before", "replaceWith", "cloneNode", "getElementsByClassName", "getElementsByTagName",
+        "closest", "matches", "hasAttribute", "removeAttribute", "toggleAttribute", "setProperty",
+        "getPropertyValue", "removeProperty", "preventDefault", "stopPropagation",
+        "stopImmediatePropagation", "removeEventListener", "dispatchEvent", "getBoundingClientRect",
+        "createElementNS",
+        // Object, Array and Math statics
+        "fromEntries", "freeze", "hasOwn", "isArray", "of", "from", "isInteger", "cbrt", "log10",
+        "clz32",
+        // `repeat` is a Lua keyword, so the prelude spells it StringMethods["repeat"] and the
+        // manifest check cannot see it. It goes in by hand or a page calling it is refused.
+        "repeat",
     };
 
     /// <summary>Property names the page itself defines, so its own methods are not reported as unknown.</summary>

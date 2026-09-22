@@ -33,6 +33,8 @@ internal sealed class CompiledRun
     // PAYLOAD back; send is handing the values to the vector mod.
     private long _tRun;
     private bool _noted;
+    /// <summary>Elements already named as undrawable, so each is said once rather than every frame.</summary>
+    private readonly HashSet<string> _reported = new(StringComparer.Ordinal);
     private float _nextReport;
 
     /// <summary>After this many failed frames in a row the page is handed back to the interpreter.</summary>
@@ -218,6 +220,15 @@ internal sealed class CompiledRun
                 _noted = true;
                 ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: \"{_page}\" send path - {note}");
             }
+            // An element the page writes to that the scene has no shape for. Named once each: a page
+            // that creates nodes writes to every one of them on every frame, and the point is to say
+            // WHICH element is not being drawn, not to say it again forty times a second.
+            if (ChipHost.MissingIn(_env) is { } missing)
+                foreach (var id in missing)
+                    if (_reported.Add(id))
+                        ScriptedScreensHtmlPlugin.Log?.LogWarning(
+                            $"html: \"{_page}\" writes to \"{id}\", which the compiled scene does not draw - " +
+                            "an element the script created after the page was laid out has no shape to write into");
             Report();
             return true;
         }

@@ -229,7 +229,9 @@ internal static class JsToLuaTests
     /// </summary>
     private static readonly (string Path, string[] Reasons)[] CannotCompile =
     {
-        (@"examples\05-script.lua", new[] { "appendChild", "getContext", "clearRect" }),
+        // `appendChild` used to be here. The prelude provides it now, so what is left is the canvas
+        // 2D context - a missing feature rather than a page doing something odd.
+        (@"examples\05-script.lua", new[] { "getContext", "clearRect" }),
     };
 
     /// <summary>

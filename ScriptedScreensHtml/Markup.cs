@@ -286,7 +286,6 @@ internal sealed class Markup
     /// </remarks>
     private static Expression? Returned(BlockStatement block, Dictionary<string, Expression> into)
     {
-        Expression? result = null;
         foreach (var s in block.Body)
         {
             switch (s)
@@ -295,9 +294,10 @@ internal sealed class Markup
                     foreach (var one in d.Declarations)
                         if (one.Id is Identifier id && one.Init != null) into[id.Name] = one.Init;
                     break;
-                case ReturnStatement { Argument: { } r } when result == null:
-                    result = r;
-                    break;
+                case ReturnStatement { Argument: { } r }:
+                    // The first return wins and there cannot be a second: any statement that is not
+                    // a declaration or a return ends the reduction above, so nothing follows it.
+                    return r;
                 case EmptyStatement:
                     break;
                 default:
@@ -306,7 +306,7 @@ internal sealed class Markup
                     return null;
             }
         }
-        return result;
+        return null;                                   // fell off the end without returning markup
     }
 
     /// <summary>What a name stands for, through the helper frames currently open.</summary>

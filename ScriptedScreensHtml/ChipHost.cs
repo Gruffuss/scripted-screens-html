@@ -195,6 +195,37 @@ internal static class ChipHost
     internal static string? NoteIn(object? environment)
         => environment is Lua.LuaTable env && env["SENDNOTE"].TryRead<string>(out var note) ? note : null;
 
+    /// <summary>
+    /// Elements the page wrote to that the scene does not carry, cleared as they are read.
+    /// </summary>
+    /// <remarks>
+    /// The prelude has always recorded these and nothing has ever read them, so a write to an
+    /// element the scene has no shape for went nowhere and said nothing. That matters more now that
+    /// the prelude provides <c>appendChild</c> and its family: a node the script CREATES cannot have
+    /// been laid out, so every write to it lands here. Before, such a page refused outright and the
+    /// author knew; without this it would compile, run, and quietly draw nothing where the new rows
+    /// were meant to be - which is the failure this compiler exists to avoid.
+    /// </remarks>
+    internal static List<string>? MissingIn(object? environment)
+    {
+        if (environment is not Lua.LuaTable env
+            || !env["DOM"].TryRead<Lua.LuaTable>(out var dom)
+            || !dom["missing"].TryRead<Lua.LuaTable>(out var missing)) return null;
+
+        List<string>? names = null;
+        var key = Lua.LuaValue.Nil;
+        while (missing.TryGetNext(key, out var pair))
+        {
+            key = pair.Key;
+            if (key.Type != Lua.LuaValueType.String) continue;
+            (names ??= new List<string>()).Add(key.Read<string>());
+        }
+        // Cleared in place, and only after the walk: nilling a key mid-iteration is what `next` is
+        // explicitly not allowed to survive.
+        if (names != null) foreach (var id in names) missing[id] = Lua.LuaValue.Nil;
+        return names;
+    }
+
     /// <summary>A named function in a loaded chunk's environment, or null when it declared none.</summary>
     internal static object? FunctionIn(object? environment, string name)
         => environment is Lua.LuaTable env && env[name].TryRead<Lua.LuaFunction>(out var fn) ? fn : null;
