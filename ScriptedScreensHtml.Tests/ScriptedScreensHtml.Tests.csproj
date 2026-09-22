@@ -30,6 +30,8 @@
         <Compile Include="MotionProbe.cs" />
         <Compile Include="MotionTests.cs" />
         <Compile Include="Corpus.cs" />
+        <Compile Include="ClassTests.cs" />
+        <Compile Include="SyntaxTests.cs" />
         <Compile Include="JsToLuaTests.cs" />
         <Compile Include="CompiledPageTests.cs" />
     </ItemGroup>

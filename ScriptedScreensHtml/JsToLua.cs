@@ -63,7 +63,8 @@ internal sealed class JsToLua
         "Math", "Number", "String", "Boolean", "JSON", "console", "document", "window",
         "localStorage", "performance", "Date", "isNaN", "parseFloat", "parseInt", "Infinity", "NaN",
         "undefined", "requestAnimationFrame", "setTimeout", "setInterval", "clearInterval", "Object",
-        "location",
+        "location", "Map", "Set", "WeakMap", "WeakSet", "Error", "TypeError", "RangeError", "Array",
+        "RegExp",
     };
 
     /// <summary>
@@ -93,6 +94,8 @@ internal sealed class JsToLua
         "floor", "ceil", "abs", "sqrt", "sin", "cos", "tan", "atan", "asin", "acos", "exp", "log",
         "pow", "min", "max", "random", "assign", "stringify", "parse", "getItem", "setItem", "now",
         "log2", "getAttribute", "setAttribute", "warn", "error",
+        // Map, Set and the other built-in constructors
+        "get", "set", "has", "delete", "clear", "values", "getTime", "valueOf",
     };
 
     /// <summary>Property names the page itself defines, so its own methods are not reported as unknown.</summary>
@@ -177,6 +180,7 @@ internal sealed class JsToLua
         foreach (var s in body)
         {
             if (s is FunctionDeclaration { Id: { } id }) Add(id.Name);
+            else if (s is ClassDeclaration { Id: { } cid }) Add(cid.Name);
             else if (s is VariableDeclaration vd)
                 foreach (var d in vd.Declarations)
                     if (d.Id is Identifier vid) Add(vid.Name);
@@ -214,6 +218,12 @@ internal sealed class JsToLua
             if (fd.Id != null) _known.Add(fd.Id.Name);
             Parameters(fd.Params);
         }
+        // A class binds its name, and its members are names the page may call on an instance - the
+        // same reason an object literal's keys are collected below. Without this every `obj.tick()`
+        // on a page's own class was reported as a method the prelude does not provide.
+        if (n is ClassDeclaration { Id: { } cid }) _known.Add(cid.Name);
+        if (n is MethodDefinition { Computed: false, Key: Identifier mk }) _pageProperties.Add(mk.Name);
+        if (n is PropertyDefinition { Computed: false, Key: Identifier fk }) _pageProperties.Add(fk.Name);
         if (n is FunctionExpression fe) Parameters(fe.Params);
         if (n is ArrowFunctionExpression ae) Parameters(ae.Params);
         if (n is CatchClause { Param: Identifier c }) _known.Add(c.Name);
@@ -348,7 +358,8 @@ internal sealed class JsToLua
             case VariableDeclaration v:
                 foreach (var d in v.Declarations)
                 {
-                    if (d.Id is not Identifier id) { Unsupported(d, "a destructuring declaration"); continue; }
+                    if (d.Id is ObjectPattern or ArrayPattern) { Destructure(d.Id, d.Init, declare: true); continue; }
+                    if (d.Id is not Identifier id) { Unsupported(d, "a binding that is not a plain name"); continue; }
                     var init = d.Init == null ? "nil" : Expr(d.Init);
                     _known.Add(id.Name);
                     var name = Safe(id.Name);
@@ -366,8 +377,8 @@ internal sealed class JsToLua
                 // same name for the rest of the page.
                 // always an assignment: every scope declares its own function names up front, so a
                 // nested one shadows rather than overwriting an outer function of the same name
-                Line(Safe(f.Id.Name) + " = function(" + Params(f.Params) + ")");
-                Body(f.Body);
+                Line(Safe(f.Id.Name) + " = function(" + Params(f.Params, out var fnBind) + ")");
+                Body(f.Body, fnBind);
                 Line("end");
                 break;
 
@@ -400,6 +411,55 @@ internal sealed class JsToLua
                 ForOf(fof);
                 break;
 
+            case ForInStatement fin:
+                ForIn(fin);
+                break;
+
+            case WhileStatement w:
+                {
+                    var mine = ++_loop;
+                    Line("while " + Truthy(w.Test) + " do");
+                    _depth++;
+                    var outer = _enclosing; _enclosing = mine;
+                    var wasTop = _top; _top = false;
+                    Statement(w.Body);
+                    Line("::continue" + mine.ToString(CultureInfo.InvariantCulture) + "::");
+                    _enclosing = outer;
+                    _top = wasTop;
+                    _depth--;
+                    Line("end");
+                    break;
+                }
+
+            case DoWhileStatement dw:
+                {
+                    // Lua's `repeat ... until c` is `do ... while (!c)`, and its body shares a scope
+                    // with the condition - which is what makes `repeat local x = f() until x` legal.
+                    var mine = ++_loop;
+                    Line("repeat");
+                    _depth++;
+                    var outer = _enclosing; _enclosing = mine;
+                    var wasTop = _top; _top = false;
+                    Statement(dw.Body);
+                    Line("::continue" + mine.ToString(CultureInfo.InvariantCulture) + "::");
+                    _enclosing = outer;
+                    _top = wasTop;
+                    _depth--;
+                    Line("until not (" + Truthy(dw.Test) + ")");
+                    break;
+                }
+
+            case SwitchStatement sw:
+                Switch(sw);
+                break;
+
+            case ThrowStatement th:
+                // Lua's error() carries any value, so a thrown object arrives at the catch intact.
+                // Level 0 keeps the page's own message from being prefixed with a chunk position
+                // that means nothing to whoever wrote the page.
+                Line("error(" + Expr(th.Argument) + ", 0)");
+                break;
+
             case ContinueStatement when _enclosing == 0:
                 Unsupported(s, "`continue` outside a loop");
                 break;
@@ -421,10 +481,142 @@ internal sealed class JsToLua
             case EmptyStatement:
                 break;
 
+            case ClassDeclaration cd when cd.Id != null:
+                _known.Add(cd.Id.Name);
+                var declared = Safe(cd.Id.Name);
+                Line((_hoisted.Contains(declared) ? "" : "local ") + declared + " = " + Class(cd, cd.Id.Name));
+                break;
+
             default:
                 Unsupported(s, s.Type.ToString());
                 break;
         }
+    }
+
+    // ---- classes -----------------------------------------------------------------------------
+
+    /// <summary>How deeply classes are nested, so each one's base has a name of its own.</summary>
+    private int _classes;
+
+    /// <summary>The Lua name holding the current class's base, or null outside a class body.</summary>
+    private string? _superBase;
+
+    /// <summary>
+    /// A class, as one expression.
+    /// </summary>
+    /// <remarks>
+    /// This is the largest single gap the corpus had: <c>class</c> blocks eighteen pages, more than
+    /// twice anything else, and it is ordinary JavaScript rather than a corner of the language.
+    ///
+    /// The shape is a closure that names the base and returns a built class, so a declaration and an
+    /// expression are the same code and <c>super</c> has something to refer to. Methods, accessors
+    /// and statics go to <see cref="Prelude"/>'s <c>js_class</c> as separate tables because they are
+    /// separate namespaces in JavaScript: a static <c>make</c> and an instance <c>make</c> are two
+    /// different functions, and flattening them into one table would silently make them one.
+    ///
+    /// <b>Field initialisers run before the constructor body, not interleaved with it.</b> JavaScript
+    /// runs a derived class's fields after <c>super()</c> returns and before the rest of its
+    /// constructor; here every class's fields run first, base to derived. The two differ only if a
+    /// base constructor calls a method the derived class overrides AND that method reads a derived
+    /// field - which is a pattern worth not writing anyway. Said here rather than left to be found.
+    /// </remarks>
+    private string Class(IClass node, string name)
+    {
+        var baseName = "__base" + (++_classes).ToString(CultureInfo.InvariantCulture);
+        var hadSuper = _superBase;
+        _superBase = node.SuperClass != null ? baseName : null;
+
+        var methods = new List<string>();
+        var getters = new List<string>();
+        var setters = new List<string>();
+        var statics = new List<string>();
+        var fields = new List<string>();
+
+        foreach (var element in node.Body.Body)
+        {
+            switch (element)
+            {
+                case MethodDefinition m:
+                    {
+                        var key = KeyOf(m.Key, m.Computed, m);
+                        if (key == null) continue;
+                        if (m.Value is not FunctionExpression fn) { Unsupported(m, "a class member that is not a function"); continue; }
+                        // A static method has no instance, so it takes no receiver - and `this`
+                        // inside one refers to the class, which is reported rather than guessed.
+                        var lambda = Lambda(fn.Params, fn.Body, m.Static ? null : Self);
+                        var entry = "[" + Quote(m.Kind == PropertyKind.Constructor ? "__ctor" : key) + "] = " + lambda;
+                        (m.Kind switch
+                        {
+                            PropertyKind.Get => getters,
+                            PropertyKind.Set => setters,
+                            _ => m.Static ? statics : methods,
+                        }).Add(entry);
+                        break;
+                    }
+
+                case PropertyDefinition p:
+                    {
+                        var key = KeyOf(p.Key, p.Computed, p);
+                        if (key == null) continue;
+                        var value = p.Value == null ? "nil" : Expr(p.Value);
+                        if (p.Static) statics.Add("[" + Quote(key) + "] = " + value);
+                        else fields.Add(Self + "[" + Quote(key) + "] = " + value);
+                        break;
+                    }
+
+                case StaticBlock:
+                    Unsupported(element, "a static initialisation block");
+                    break;
+
+                default:
+                    Unsupported(element, element.Type.ToString());
+                    break;
+            }
+        }
+
+        // Fields are a function on the prototype rather than lines inside the constructor, because a
+        // class with no constructor of its own still has to initialise them.
+        if (fields.Count > 0)
+        {
+            var pad = new string(' ', (_depth + 2) * 2);
+            methods.Add("[\"__fields\"] = function(" + Self + ")\n" + pad
+                        + string.Join("\n" + pad, fields) + "\n" + new string(' ', (_depth + 1) * 2) + "end");
+        }
+
+        _superBase = hadSuper;
+        _classes--;
+
+        var indent = new string(' ', (_depth + 1) * 2);
+        var sb = new StringBuilder("(function()\n");
+        sb.Append(indent).Append("local ").Append(baseName).Append(" = ")
+          .Append(node.SuperClass == null ? "nil" : Expr(node.SuperClass)).Append('\n');
+        sb.Append(indent).Append("return js_class(").Append(Quote(name)).Append(", ").Append(baseName)
+          .Append(", ").Append(Table(methods))
+          .Append(", ").Append(Table(getters))
+          .Append(", ").Append(Table(setters))
+          .Append(", ").Append(Table(statics)).Append(")\n");
+        return sb.Append(new string(' ', _depth * 2)).Append("end)()").ToString();
+
+        static string Table(List<string> entries) => entries.Count == 0 ? "nil" : "{ " + string.Join(", ", entries) + " }";
+    }
+
+    /// <summary>The receiver name inside a method. Not `self`, which a page may well declare.</summary>
+    private const string Self = "__self";
+
+    /// <summary>A member's name, or null when it is computed - which cannot be resolved here.</summary>
+    private string? KeyOf(Node key, bool computed, Node at)
+    {
+        if (computed) { Unsupported(at, "a computed member name"); return null; }
+        var name = key switch
+        {
+            Identifier i => i.Name,
+            StringLiteral s => s.Value,
+            NumericLiteral n => Number(n.Value),
+            PrivateIdentifier p => "#" + p.Name,
+            _ => null,
+        };
+        if (name == null) Unsupported(at, "a member name that is not a plain name");
+        return name;
     }
 
     /// <summary>An expression used for its effect. Lua allows only a call as a statement, so everything else is shaped into one.</summary>
@@ -588,7 +780,195 @@ internal sealed class JsToLua
         Line("end");
     }
 
-    private void Body(Node body)
+    // ---- destructuring -------------------------------------------------------------------------
+
+    /// <summary>
+    /// A destructuring pattern, as the reads it stands for.
+    /// </summary>
+    /// <remarks>
+    /// <c>const { a, b: c = 2 } = o</c> is three ordinary statements once the source is in a
+    /// temporary, and so is <c>const [x, ...rest] = xs</c>. The temporary is what makes it correct
+    /// rather than convenient: the right-hand side may be a call, and reading it once per bound name
+    /// would run that call once per name. A page destructuring the result of a function with a side
+    /// effect - which is every `const { a, b } = next()` - would then do it twice.
+    ///
+    /// Nesting works because each element recurses with its own temporary, so
+    /// <c>const { a: { b } } = o</c> binds <c>b</c> and nothing else, exactly as it reads.
+    /// </remarks>
+    private void Destructure(Node pattern, Expression? from, bool declare)
+    {
+        var temp = "__d" + (++_loop).ToString(CultureInfo.InvariantCulture);
+        Line("local " + temp + " = " + (from == null ? "nil" : Expr(from)));
+        Unpack(pattern, temp, declare);
+    }
+
+    private void Unpack(Node pattern, string source, bool declare)
+    {
+        switch (pattern)
+        {
+            case Identifier id:
+                _known.Add(id.Name);
+                var name = Safe(id.Name);
+                Line((declare && !_hoisted.Contains(name) ? "local " : "") + name + " = " + source);
+                return;
+
+            case AssignmentPattern def:
+                // `{ a = 1 }`: the default applies when the value is missing, which in JavaScript
+                // means undefined specifically - and nil is this runtime's undefined.
+                var held = "__v" + (++_loop).ToString(CultureInfo.InvariantCulture);
+                Line("local " + held + " = " + source);
+                Line("if " + held + " == nil then " + held + " = " + Expr(def.Right) + " end");
+                Unpack(def.Left, held, declare);
+                return;
+
+            case ObjectPattern obj:
+                {
+                    var taken = new List<string>();
+                    foreach (var property in obj.Properties)
+                    {
+                        if (property is RestElement rest)
+                        {
+                            // `{ a, ...others }`: everything the pattern did not name. The names it
+                            // did are known here, which is the only reason this can be built.
+                            var into = "__r" + (++_loop).ToString(CultureInfo.InvariantCulture);
+                            Line("local " + into + " = {}");
+                            Line("for __k, __v in pairs(" + source + ") do");
+                            _depth++;
+                            Line("if " + (taken.Count == 0 ? "true" : string.Join(" and ", taken.ConvertAll(t => "__k ~= " + t)))
+                                 + " then " + into + "[__k] = __v end");
+                            _depth--;
+                            Line("end");
+                            Unpack(rest.Argument, into, declare);
+                            continue;
+                        }
+                        // `Property`, not `ObjectProperty`: a pattern's entries are AssignmentProperty,
+                        // which shares the base but not the type an object LITERAL's entries have.
+                        if (property is not Property p) { Unsupported(property, property.Type.ToString()); continue; }
+                        var key = KeyOf(p.Key, p.Computed, p);
+                        if (key == null) continue;
+                        taken.Add(Quote(key));
+                        Unpack(p.Value, source + "[" + Quote(key) + "]", declare);
+                    }
+                    return;
+                }
+
+            case ArrayPattern arr:
+                for (var i = 0; i < arr.Elements.Count; i++)
+                {
+                    var element = arr.Elements[i];
+                    if (element == null) continue;            // a hole: `[, b] = xs`
+                    if (element is RestElement rest)
+                    {
+                        var into = "__r" + (++_loop).ToString(CultureInfo.InvariantCulture);
+                        Line("local " + into + " = js_m(" + source + ", \"slice\", " + i.ToString(CultureInfo.InvariantCulture) + ")");
+                        Unpack(rest.Argument, into, declare);
+                        break;                                 // a rest element is always the last
+                    }
+                    Unpack(element, source + "[" + i.ToString(CultureInfo.InvariantCulture) + "]", declare);
+                }
+                return;
+
+            default:
+                Unsupported(pattern, "the binding " + pattern.Type);
+                return;
+        }
+    }
+
+    /// <summary>
+    /// <c>for (const k in obj)</c> — the keys of an object, which is a different walk from for-of.
+    /// </summary>
+    /// <remarks>
+    /// Over an array this yields the INDICES, as a string in a browser and as a number here. Pages
+    /// that write it over an array mean the indices either way; pages that write it over an object
+    /// mean its keys, and both work. The order is Lua's <c>pairs</c> order, which is unspecified -
+    /// as it is in JavaScript for non-integer keys.
+    /// </remarks>
+    private void ForIn(ForInStatement f)
+    {
+        if (f.Left is not VariableDeclaration { Declarations.Count: 1 } d || d.Declarations[0].Id is not Identifier id)
+        {
+            Unsupported(f, "a for-in over something other than a simple binding");
+            return;
+        }
+        _known.Add(id.Name);
+        var mine = ++_loop;
+        var key = Safe(id.Name);
+        Line("for " + key + " in pairs(" + Expr(f.Right) + ") do");
+        _depth++;
+        var outer = _enclosing; _enclosing = mine;
+        var wasTop = _top; _top = false;
+        // `length` is this prelude's bookkeeping on an array, not a key the page put there, so a
+        // for-in over an array would otherwise hand the page a key no browser ever would.
+        Line("if " + key + " ~= \"length\" then");
+        _depth++;
+        Statement(f.Body);
+        _depth--;
+        Line("end");
+        Line("::continue" + mine.ToString(CultureInfo.InvariantCulture) + "::");
+        _enclosing = outer;
+        _top = wasTop;
+        _depth--;
+        Line("end");
+    }
+
+    /// <summary>
+    /// A <c>switch</c>, as an if-chain inside a breakable block.
+    /// </summary>
+    /// <remarks>
+    /// Fall-through is the whole difficulty. JavaScript runs from the matching case to the next
+    /// <c>break</c>, not to the next <c>case</c>, so a chain of <c>elseif</c> would quietly change
+    /// what a page does. Instead a variable records whether any case has matched yet, and every case
+    /// body runs while it is set - which reproduces fall-through exactly, including the deliberate
+    /// empty-case idiom (<c>case 1: case 2: doBoth()</c>).
+    ///
+    /// <c>break</c> inside the switch leaves it, and that is Lua's own <c>break</c> out of the
+    /// wrapping loop; a <c>continue</c> inside belongs to the enclosing loop, so that is left alone.
+    /// </remarks>
+    private void Switch(SwitchStatement s)
+    {
+        var mine = ++_loop;
+        var subject = "__sw" + mine.ToString(CultureInfo.InvariantCulture);
+        var hit = "__hit" + mine.ToString(CultureInfo.InvariantCulture);
+        Line("local " + subject + " = " + Expr(s.Discriminant));
+        Line("local " + hit + " = false");
+        // `repeat ... until true` is Lua's block you can break out of, which is what a switch is.
+        Line("repeat");
+        _depth++;
+
+        var wasTop = _top; _top = false;
+        // The default runs only when nothing else matched, wherever it is written - so its test is
+        // built from every other case rather than from its position.
+        foreach (var c in s.Cases)
+        {
+            if (c.Test != null)
+            {
+                Line("if not " + hit + " and " + subject + " == " + Expr(c.Test) + " then " + hit + " = true end");
+                Line("if " + hit + " then");
+            }
+            else
+            {
+                var others = new StringBuilder();
+                foreach (var other in s.Cases)
+                {
+                    if (other.Test == null) continue;
+                    if (others.Length > 0) others.Append(" and ");
+                    others.Append(subject).Append(" ~= ").Append(Expr(other.Test));
+                }
+                Line("if not " + hit + " and (" + (others.Length > 0 ? others.ToString() : "true") + ") then " + hit + " = true end");
+                Line("if " + hit + " then");
+            }
+            _depth++;
+            foreach (var st in c.Consequent) Statement(st);
+            _depth--;
+            Line("end");
+        }
+
+        _top = wasTop;
+        _depth--;
+        Line("until true");
+    }
+
+    private void Body(Node body, List<(string Name, Node Pattern, Expression? Default, bool Variadic)>? bind = null)
     {
         var wasTop = _top; _top = false;
         var outer = _enclosing; _enclosing = 0;   // `continue` cannot cross a function boundary
@@ -596,25 +976,94 @@ internal sealed class JsToLua
         if (body is BlockStatement b)
         {
             var previous = OpenScope(Hoistable(b.Body));
+            // Defaults and patterns bind AFTER the scope is opened and before anything else runs, so
+            // a hoisted name the page also destructures into is already declared and assigns here.
+            if (bind != null) BindParams(bind);
             foreach (var s in b.Body) if (s is Statement st) Statement(st);
             _hoisted = previous;
         }
-        else if (body is Expression e) Line("do return " + Expr(e) + " end");
+        else if (body is Expression e)
+        {
+            // A concise arrow body is one expression, so anything a parameter needs has to be said
+            // before it - which means the body stops being a single `return`.
+            if (bind is { Count: > 0 }) BindParams(bind);
+            Line("do return " + Expr(e) + " end");
+        }
         _depth--;
         _enclosing = outer;
         _top = wasTop;
     }
 
-    private string Params(in NodeList<Node> ps)
+    /// <summary>
+    /// A parameter list, and whatever has to happen at the top of the body to bind it.
+    /// </summary>
+    /// <remarks>
+    /// Lua has plain positional parameters and nothing else, so a default, a pattern and a rest
+    /// parameter all become a generated name plus statements inside the body. The caller emits those
+    /// statements first, which is exactly where JavaScript evaluates them - a default may call a
+    /// function, and it must do so on entry rather than at the use site.
+    /// </remarks>
+    private string Params(in NodeList<Node> ps, out List<(string Name, Node Pattern, Expression? Default, bool Variadic)> bind)
     {
+        bind = new List<(string, Node, Expression?, bool)>();
         var sb = new StringBuilder();
         for (var i = 0; i < ps.Count; i++)
         {
             if (i > 0) sb.Append(", ");
-            if (ps[i] is Identifier id) { _known.Add(id.Name); sb.Append(Safe(id.Name)); }
-            else { Unsupported(ps[i], "a parameter that is not a plain name"); sb.Append("__p").Append(i.ToString(CultureInfo.InvariantCulture)); }
+            var slot = "__p" + i.ToString(CultureInfo.InvariantCulture);
+            switch (ps[i])
+            {
+                case Identifier id:
+                    _known.Add(id.Name);
+                    sb.Append(Safe(id.Name));
+                    break;
+
+                case AssignmentPattern { Left: Identifier named } def:
+                    // A defaulted plain name keeps its own name: only the fill-in moves to the body.
+                    _known.Add(named.Name);
+                    sb.Append(Safe(named.Name));
+                    bind.Add((Safe(named.Name), named, def.Right, false));
+                    break;
+
+                case AssignmentPattern def:
+                    sb.Append(slot);
+                    bind.Add((slot, def.Left, def.Right, false));
+                    break;
+
+                case RestElement rest:
+                    // `...args` is Lua's own vararg, collected into the array shape the prelude uses.
+                    sb.Append("...");
+                    bind.Add((slot, rest.Argument, null, true));
+                    break;
+
+                case ObjectPattern or ArrayPattern:
+                    sb.Append(slot);
+                    bind.Add((slot, ps[i], null, false));
+                    break;
+
+                default:
+                    Unsupported(ps[i], "a parameter that is not a plain name");
+                    sb.Append(slot);
+                    break;
+            }
         }
         return sb.ToString();
+    }
+
+    /// <summary>Emits the statements a parameter list needs at the top of its body.</summary>
+    private void BindParams(List<(string Name, Node Pattern, Expression? Default, bool Variadic)> bind)
+    {
+        foreach (var (name, pattern, fallback, variadic) in bind)
+        {
+            if (variadic)
+            {
+                Line("local " + name + " = js_array_of({ ... })");
+                Unpack(pattern, name, declare: true);
+                continue;
+            }
+            if (fallback != null) Line("if " + name + " == nil then " + name + " = " + Expr(fallback) + " end");
+            if (pattern is not Identifier) Unpack(pattern, name, declare: true);
+        }
     }
 
     // ---- expressions -------------------------------------------------------------------------
@@ -797,6 +1246,21 @@ internal sealed class JsToLua
                 // "TaggedTemplateExpression is not translatable".
                 return Fail(e, "a tagged template");
 
+            case ClassExpression ce:
+                return Class(ce, ce.Id?.Name ?? "(anonymous)");
+
+            case NewExpression ne:
+                return New(ne);
+
+            case Super when _superBase != null:
+                // Bare `super` only ever appears as the head of a call or a member access, and both
+                // are handled where they are built. Reaching here means something else was done
+                // with it, and the base class itself is the honest translation.
+                return _superBase;
+
+            case Super:
+                return Fail(e, "`super` outside a class that extends something");
+
             default:
                 return Fail(e, e.Type.ToString());
         }
@@ -887,13 +1351,13 @@ internal sealed class JsToLua
 
     private string Lambda(in NodeList<Node> ps, Node body, string? receiver = null)
     {
-        var declared = Params(ps);
+        var declared = Params(ps, out var bind);
         var header = "function(" + (receiver == null ? declared : declared.Length == 0 ? receiver : receiver + ", " + declared) + ")";
         var hadReceiver = _receiver;
         if (receiver != null) _receiver = receiver;
         // the body writes lines into the shared buffer, so it is taken back out and inlined here
         var saved = _sb.Length;
-        Body(body);
+        Body(body, bind);
         var inner = _sb.ToString(saved, _sb.Length - saved);
         _sb.Length = saved;
         _receiver = hadReceiver;
@@ -980,6 +1444,21 @@ internal sealed class JsToLua
             first = false;
             args.Append(Expr(a));
         }
+        // `super(...)` and `super.method(...)`: both are a call on the BASE's prototype with this
+        // instance as the receiver, which is what makes an inherited constructor or an overridden
+        // method reachable. Neither goes through the method dispatcher - the name is known here, and
+        // dispatching would find the derived override and recurse for ever.
+        if (c.Callee is Super)
+        {
+            if (_superBase == null) return Fail(c, "`super()` outside a class that extends something");
+            return _superBase + ".__proto.__ctor(" + Self + (args.Length > 0 ? ", " + args : "") + ")";
+        }
+        if (c.Callee is MemberExpression { Computed: false, Object: Super, Property: Identifier sp })
+        {
+            if (_superBase == null) return Fail(c, "`super." + sp.Name + "()` outside a class that extends something");
+            return _superBase + ".__proto[" + Quote(sp.Name) + "](" + Self + (args.Length > 0 ? ", " + args : "") + ")";
+        }
+
         // A method call goes through the prelude's dispatcher rather than Lua's `obj:name()`.
         // `"x".slice(1)` would otherwise need JavaScript's string methods on Lua's string metatable,
         // which is global: the generated chunk runs in its own _ENV precisely so it cannot reach
@@ -998,6 +1477,41 @@ internal sealed class JsToLua
         var callee = Expr(c.Callee);
         if (c.Callee is not (Identifier or MemberExpression or CallExpression)) callee = "(" + callee + ")";
         return callee + "(" + args + ")";
+    }
+
+    /// <summary>
+    /// Built-in constructors, as the prelude's own makers. A page writes <c>new Map()</c> far more
+    /// often than it writes a class, and these are the ones the corpus actually constructs.
+    /// </summary>
+    private static readonly Dictionary<string, string> Constructors = new(StringComparer.Ordinal)
+    {
+        ["Map"] = "js_map", ["Set"] = "js_set", ["WeakMap"] = "js_map", ["WeakSet"] = "js_set",
+        ["Array"] = "js_new_array", ["Error"] = "js_error", ["TypeError"] = "js_error",
+        ["RangeError"] = "js_error", ["Date"] = "js_date", ["Object"] = "js_new_object",
+    };
+
+    private string New(NewExpression n)
+    {
+        var args = new StringBuilder();
+        foreach (var a in n.Arguments)
+        {
+            if (a is SpreadElement) { Unsupported(a, "a spread argument"); continue; }
+            if (args.Length > 0) args.Append(", ");
+            args.Append(Expr(a));
+        }
+
+        // A built-in has its own maker; anything else is a class, and js_new is what knows how to
+        // instantiate one. A name that is neither is reported rather than handed to js_new, which
+        // would fail at run time with no line from the page.
+        if (n.Callee is Identifier id)
+        {
+            if (Constructors.TryGetValue(id.Name, out var maker)) return maker + "(" + args + ")";
+            if (id.Name == "RegExp")
+                return args.Length > 0 ? "js_regex(" + args + ")" : Fail(n, "`new RegExp()` with no pattern");
+            if (!_known.Contains(id.Name))
+                return Fail(n, "`new " + id.Name + "`, which neither the page nor the prelude defines");
+        }
+        return "js_new(" + Expr(n.Callee) + (args.Length > 0 ? ", " + args : "") + ")";
     }
 
     // ---- names, numbers and strings ------------------------------------------------------------
