@@ -191,6 +191,50 @@ internal static class ChipHost
         }
     }
 
+    /// <summary>A named function in a loaded chunk's environment, or null when it declared none.</summary>
+    internal static object? FunctionIn(object? environment, string name)
+        => environment is Lua.LuaTable env && env[name].TryRead<Lua.LuaFunction>(out var fn) ? fn : null;
+
+    /// <summary>
+    /// Delivers one event - a click, a press - to a compiled page's own handlers.
+    /// </summary>
+    /// <remarks>
+    /// The same guards as a frame, for the same reasons, plus one that is specific to this: an event
+    /// arrives from the input patch, NOT from Update, so it can land while the chip is mid-call.
+    /// Pushing onto a running state corrupts it, so a click that arrives at a bad moment is dropped
+    /// rather than forced - a browser drops one too when the tab is busy, and the alternative here
+    /// is a chip the player has to re-flash.
+    /// </remarks>
+    internal static bool RunEvent(object? state, object? handler, string id, string kind, float x, float y)
+    {
+        if (state is not Lua.LuaState chip || handler is not Lua.LuaFunction fn) return false;
+        if (chip.IsRunning) return false;
+
+        try
+        {
+            var stack = chip.Stack;
+            var baseline = stack.Count;
+            stack.Push(id);
+            stack.Push(kind);
+            stack.Push(x);
+            stack.Push(y);
+            var running = chip.RunAsync(fn, 4, default);
+            if (!running.IsCompleted)
+            {
+                if (stack.Count > baseline) stack.PopUntil(baseline);
+                return false;
+            }
+            running.GetAwaiter().GetResult();
+            if (stack.Count > baseline) stack.PopUntil(baseline);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: a compiled page's \"{kind}\" handler failed - {ex.Message}");
+            return false;
+        }
+    }
+
     /// <summary>
     /// What the last frame wrote, or null when it wrote nothing. Clears the flag, so a frame that
     /// changes nothing costs one boolean read and sends nothing.

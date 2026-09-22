@@ -1736,7 +1736,16 @@ internal sealed class HtmlSurface : MonoBehaviour
     private void OnPageClickLocked(string key)
     {
         Hold();
-        SetFocus(key);
+        // A compiled page's handlers live in its chip, with the state the console is drawing. The
+        // click arrives here exactly as before - the vector region names the element - it just has
+        // to go somewhere that is still alive.
+        if (_compiled != null)
+        {
+            if (!_compiled.Click(key, _pointerPage.x, _pointerPage.y, SendCompiled))
+                ScriptedScreensHtmlPlugin.Log?.LogWarning(
+                    $"html: \"{PageKey}\" is compiled but could not take a click on \"{key}\"; the page is not interactive");
+            return;
+        }
         _script?.EmitClick(key, _pointerPage.x, _pointerPage.y);
         if (_built != null && _byId.TryGetValue(key, out var ve) && _built.NodeOf.TryGetValue(ve, out var node)
             && node.Tag == "button" && string.Equals(node.Attr("type") ?? "submit", "submit", StringComparison.OrdinalIgnoreCase))
@@ -1780,6 +1789,10 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal void PointerMove(Vector2 fraction)
     {
         SavePointer(true, _pressed, fraction);
+        // A compiled page has no boxes to hit-test and no interpreter to tell: its handlers are in
+        // the chip and the click reaches them through the scene's own region, which names the
+        // element outright. Running this would only feed the copy nobody is drawing.
+        if (_compiled != null) return;
         Post(() => PointerMoveOnPage(fraction));
     }
 
@@ -1808,6 +1821,10 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         _pressed = false;
         SavePointer(false, false, _lastFraction);
+        // A compiled page has no boxes to hit-test and no interpreter to tell: its handlers are in
+        // the chip and the click reaches them through the scene's own region, which names the
+        // element outright. Running this would only feed the copy nobody is drawing.
+        if (_compiled != null) return;
         Post(PointerLeaveOnPage);
     }
 
@@ -1823,6 +1840,10 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         _pressed = true;
         SavePointer(true, true, fraction);
+        // A compiled page has no boxes to hit-test and no interpreter to tell: its handlers are in
+        // the chip and the click reaches them through the scene's own region, which names the
+        // element outright. Running this would only feed the copy nobody is drawing.
+        if (_compiled != null) return;
         Post(() => PointerDownOnPage(fraction));
     }
 
@@ -1841,6 +1862,10 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         _pressed = false;
         SavePointer(true, false, _lastFraction);
+        // A compiled page has no boxes to hit-test and no interpreter to tell: its handlers are in
+        // the chip and the click reaches them through the scene's own region, which names the
+        // element outright. Running this would only feed the copy nobody is drawing.
+        if (_compiled != null) return;
         Post(PointerUpOnPage);
     }
 

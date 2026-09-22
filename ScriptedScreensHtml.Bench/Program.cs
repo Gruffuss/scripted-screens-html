@@ -22,12 +22,21 @@ internal static class Program
 {
     private static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--retained")
+        {
+            var rp = args.Length > 1 ? args[1] : "../ScriptedScreensHtml/examples/07-game.lua";
+            var rhtml = PageOf(File.ReadAllText(rp));
+            if (rhtml == null) { Console.Error.WriteLine("no page in that file"); return 1; }
+            Console.WriteLine($"{Path.GetFileName(rp)}: {rhtml.Length} chars of html");
+            Retained.Run(rhtml, args.Length > 2 ? int.Parse(args[2]) : 8);
+            return 0;
+        }
+
         var path = args.Length > 0 ? args[0] : "../ScriptedScreensHtml/examples/07-game.lua";
         var iterations = args.Length > 1 ? int.Parse(args[1]) : 300;
         if (!File.Exists(path)) { Console.Error.WriteLine($"no such file: {path}"); return 1; }
 
         if (Check.Run() > 0) return 1;
-
         var text = File.ReadAllText(path);
         var html = path.EndsWith(".lua", StringComparison.OrdinalIgnoreCase) ? PageOf(text) : text;
         if (html == null) { Console.Error.WriteLine("no [[ <html... ]] page in that file"); return 1; }

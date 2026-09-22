@@ -11,6 +11,7 @@ void Check(bool ok, string what)
 }
 
 if (args.Length > 0 && args[0] == "--probe") { Probe.Run(); return 0; }
+if (args.Length > 1 && args[0] == "--why") { ScriptedScreensHtml.Tests.Probe4.Run(args[1]); return 0; }
 if (args.Length > 0 && args[0] == "--jsbench") { JsBench.Run(); return 0; }
 if (args.Length > 0 && args[0] == "--domwrites") { ScriptedScreensHtml.Tests.JsToLuaTests.Report(); return 0; }
 Console.WriteLine("HtmlParser");

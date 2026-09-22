@@ -114,6 +114,7 @@ internal static class CompiledPage
                                    Func<string, string, StateValues?>? stateOf = null,
                                    string? prelude = null,
                                    (double Width, double Height)? viewport = null,
+                                   IReadOnlyDictionary<string, string>? parents = null,
                                    string element = "VDATA")
     {
         var result = new Result();
@@ -199,7 +200,7 @@ internal static class CompiledPage
             }
         }
 
-        result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), prelude, viewport, element);
+        result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), prelude, viewport, parents, element);
         return result;
     }
 
@@ -244,7 +245,8 @@ internal static class CompiledPage
     // ---- the chunk --------------------------------------------------------------------------------
 
     private static string Assemble(string page, List<Binding> bindings, Func<string, bool> tabular,
-                                   string? prelude, (double Width, double Height)? viewport, string element)
+                                   string? prelude, (double Width, double Height)? viewport,
+                                   IReadOnlyDictionary<string, string>? parents, string element)
     {
         var sb = new StringBuilder(page.Length + (prelude?.Length ?? 0) + bindings.Count * 64 + 2048);
 
@@ -317,6 +319,16 @@ internal static class CompiledPage
             sb.Append("  [").Append(Quote(id)).Append("] = ")
               .Append(tabular(id) ? "js_tabular" : "js_plain").Append(",\n");
         }
+        sb.Append("}\n\n");
+
+        // Who contains whom, so an event can bubble. A page listens on a container and the click
+        // lands on whichever child is under the cursor, so without this the common case - the
+        // runner's `field.addEventListener('mousedown', jump)` - never fires at all. Static, because
+        // the structure a compiled page draws does not change; that is the whole premise.
+        sb.Append("PARENT = {\n");
+        if (parents != null)
+            foreach (var kv in parents)
+                sb.Append("  [").Append(Quote(kv.Key)).Append("] = ").Append(Quote(kv.Value)).Append(",\n");
         sb.Append("}\n\n");
 
         sb.Append(Runtime(element)).Append('\n');
@@ -445,6 +457,16 @@ frame = function(dt)
     end
   end
 
+  DOM.flush()
+end
+
+-- The other entry point: something the player did. The host calls this with the id of the scene
+-- region that was hit, and the page's own handlers run here, in the chunk, against the state that
+-- is on screen. Before this existed the click went to the INTERPRETER's copy of the page - which a
+-- compiled console has stopped drawing - so every button was dead while the scene still carried its
+-- click region and the log said nothing was wrong.
+event = function(id, kind, x, y)
+  DOM.fire(id, kind, x, y)
   DOM.flush()
 end
 ";

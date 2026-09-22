@@ -38,6 +38,7 @@
     <Compile Include="Check.cs" />
     <Compile Include="Js.cs" />
     <Compile Include="Stubs.cs" />
+    <Compile Include="Retained.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
   <ItemGroup>

@@ -43,7 +43,37 @@ internal static class PageCompiler
             // on its first line and defines nothing, which reads as "the page defined no frame".
             CompileProbe.Prelude(out _),
             // The console's own design size, so the page sizes itself for THIS screen.
-            (size.x, size.y));
+            (size.x, size.y),
+            Parents(built));
+    }
+
+    /// <summary>
+    /// Each named element's nearest named ancestor, so an event can bubble inside the chunk.
+    /// </summary>
+    /// <remarks>
+    /// NEAREST NAMED, not the direct parent: the tree has plenty of elements the scene never names,
+    /// and a chain that stops at the first of those would strand every click below it. Walking past
+    /// them keeps the chain whole and costs nothing, since the map is built once.
+    ///
+    /// The outermost element is pointed at <c>document</c> so a page that listens there - a keyboard
+    /// handler, a click-anywhere-to-dismiss - is reached too.
+    /// </remarks>
+    private static Dictionary<string, string> Parents(HtmlRenderer.Result built)
+    {
+        var parents = new Dictionary<string, string>(StringComparer.Ordinal);
+        Walk(built.Root, "document");
+        return parents;
+
+        void Walk(VisualElement ve, string above)
+        {
+            var mine = above;
+            if (ve.name is { Length: > 0 } name)
+            {
+                parents[name] = above;
+                mine = name;
+            }
+            for (var i = 0; i < ve.childCount; i++) Walk(ve[i], mine);
+        }
     }
 
     // ---- where things are -----------------------------------------------------------------------

@@ -113,7 +113,81 @@ internal static class CompiledPageTests
         check(leaked.Count == 0, leaked.Count == 0
             ? "compiled: setup-only writes send nothing at run time"
             : $"compiled: setup-only write(s) being sent every frame - {string.Join(", ", leaked)}");
+
+        Clicks(root, available, boxes, script, check);
     }
+
+    // ---- the player can still press the buttons -------------------------------------------------
+
+    /// <summary>
+    /// A click on a compiled page reaches the page's own handlers.
+    /// </summary>
+    /// <remarks>
+    /// This is here because the prelude's <c>addEventListener</c> was a no-op, so a compiled page
+    /// threw every handler away and every button on it was dead - while the scene still carried its
+    /// click region, the log said nothing, and the runner's autopilot made the console look alive.
+    /// Nothing in the suite would have caught it: every other check drives frames, and a frame is
+    /// exactly the path that still worked.
+    ///
+    /// Two cases, because they fail separately. A listener on the element that was hit needs only
+    /// the registry; a listener on a CONTAINER needs the parent map as well, and that is the case
+    /// the runner actually uses - <c>field.addEventListener('mousedown', jump)</c>, with the click
+    /// landing on whatever child is under the cursor.
+    /// </remarks>
+    private static void Clicks(string root, HashSet<string> available,
+                               Dictionary<string, (double X, double Y, double W, double H)> boxes,
+                               string script, Action<bool, string> check)
+    {
+        // `player` is inside `field`, which is what makes the second case a bubbling test.
+        var parents = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["player"] = "field", ["field"] = "app", ["app"] = "body", ["body"] = "document",
+            ["jumpBtn"] = "pads", ["duckBtn"] = "pads", ["pads"] = "app",
+        };
+        var compiled = CompiledPage.Compile(script, available, id => Box(id, boxes, available),
+                                            tabular: id => id is "score" or "hi",
+                                            stateOf: (id, cls) => State(id, cls, boxes, available),
+                                            prelude: File.ReadAllText(Path.Combine(root, "JsPrelude.lua")),
+                                            parents: parents);
+        if (compiled.Lua == null) { check(false, "compiled: the click build does not compile"); return; }
+
+        foreach (var (target, what) in new[] { ("jumpBtn", "on the button itself"), ("player", "bubbling up to the container") })
+        {
+            var sent = Click(compiled.Lua, target);
+            // Pressing JUMP in the attract mode starts a real game: `reset(false)` hides the overlay,
+            // so the big message is cleared. That is a slot write, which is the only evidence
+            // available out here - and it is evidence the click ran the page's own code.
+            var cleared = sent.TryGetValue("msgBig", out var msg)
+                          && msg.Type == LuaValueType.String && msg.Read<string>().Length == 0;
+            check(cleared, cleared
+                ? $"compiled: a click reaches the page's handlers, {what}"
+                : $"compiled: a click on \"{target}\" changed nothing - the page is not interactive ({what})");
+        }
+    }
+
+    /// <summary>Setup, a few frames, then one press - and what that press alone wrote.</summary>
+    private static Dictionary<string, LuaValue> Click(string lua, string target)
+    {
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        Chunk(state, lua, "page");
+        Chunk(state, Driver(3), "frames");
+        // Emptied first, so what comes back is what the CLICK wrote and not what the frames did.
+        Chunk(state, "PAYLOAD, DIRTY = {}, false\nevent(" + Quote(target) + ", \"mousedown\", 0, 0)", "click");
+
+        var sent = new Dictionary<string, LuaValue>(StringComparer.Ordinal);
+        if (state.Environment["PAYLOAD"].Type != LuaValueType.Table) return sent;
+        var table = state.Environment["PAYLOAD"].Read<LuaTable>();
+        var key = LuaValue.Nil;
+        while (table.TryGetNext(key, out var pair))
+        {
+            key = pair.Key;
+            if (key.Type == LuaValueType.String) sent[key.Read<string>()] = pair.Value;
+        }
+        return sent;
+    }
+
+    private static string Quote(string s) => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
 
     /// <summary>
     /// What one class state draws.

@@ -84,6 +84,7 @@ internal static class JsToLuaTests
         }
 
         Writes(check);
+        Scoping(check);
         Mapping(check);
         PairCollision(check);
         Manifest(check);
@@ -247,6 +248,47 @@ internal static class JsToLuaTests
     /// be refused. Every `innerHTML` on this page is setup, which is why it is the page to make work
     /// first - the Atmo pages rebuild themselves at run time and need state enumeration instead.
     /// </summary>
+    /// <summary>
+    /// An element bound INSIDE the function that writes it still resolves to its literal id, and a
+    /// name two functions bind differently resolves to nothing rather than to the wrong element.
+    /// </summary>
+    /// <remarks>
+    /// Both halves of one change, and they pull against each other. Descending into function bodies
+    /// is what makes `function render() { const frame = $('frame'); frame.innerHTML = ... }` -
+    /// every Atmo page - resolvable at all; before it, those writes were reported as being on "an
+    /// element chosen at run time" with the literal id three lines above. But the alias table has no
+    /// scoping, so descending also lets two functions collide on a name, and the old single-slot
+    /// table would have let the last one seen silently rename the other's writes. That failure draws
+    /// the wrong element with no warning, which is worse than not compiling.
+    /// </remarks>
+    private static void Scoping(Action<bool, string> check)
+    {
+        const string inner = @"
+            function render() {
+              const frame = document.getElementById('frame');
+              frame.textContent = 'hello';
+            }
+            setInterval(render, 100);";
+        var (w1, n1) = DomWrites.Of(inner);
+        var found = w1.FirstOrDefault(w => w.Property == "textContent");
+        check(found?.Id == "frame" && n1.Count == 0,
+            found?.Id == "frame" && n1.Count == 0
+                ? "domwrites: an element bound inside the function that writes it resolves to its id"
+                : $"domwrites: a function-local binding did not resolve - id {found?.Id ?? "(none)"}, {n1.Count} note(s)");
+
+        const string clash = @"
+            function a() { const el = document.getElementById('one'); el.textContent = 'x'; }
+            function b() { const el = document.getElementById('two'); el.textContent = 'y'; }
+            function step() { a(); b(); }
+            setInterval(step, 100);";
+        var (w2, n2) = DomWrites.Of(clash);
+        var named = w2.Where(w => w.Property == "textContent" && w.Id != null).ToList();
+        check(named.Count == 0 && n2.Count > 0,
+            named.Count == 0 && n2.Count > 0
+                ? "domwrites: a name two functions bind differently is reported, not guessed at"
+                : $"domwrites: an ambiguous alias resolved anyway to {string.Join(", ", named.Select(x => x.Id))} - a page would draw into the wrong element");
+    }
+
     private static void Writes(Action<bool, string> check)
     {
         var root = Root();

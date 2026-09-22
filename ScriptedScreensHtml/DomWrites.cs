@@ -80,8 +80,18 @@ internal sealed class DomWrites
     private readonly Dictionary<string, FunctionInfo> _functions = new(StringComparer.Ordinal);
     private readonly List<Write> _writes = new();
     private readonly List<string> _notes = new();
-    /// <summary>Names bound to `document.getElementById(...)`, so `const p = $('player')` resolves.</summary>
-    private readonly Dictionary<string, string> _aliases = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Names bound to `document.getElementById(...)`, so `const p = $('player')` resolves.
+    /// </summary>
+    /// <remarks>
+    /// A SET of ids per name, not one. This walk descends into function bodies (it has to: a page
+    /// that binds its element inside <c>render()</c> is the common case, not the exception), and two
+    /// functions may each bind their own <c>const el = $(...)</c> under the same name. With one slot
+    /// the last one seen would silently rename the other's writes - the analysis would be confidently
+    /// wrong about which element a page draws into, which is the worst failure this file can have.
+    /// With a set, an ambiguous name resolves to nothing and is reported instead.
+    /// </remarks>
+    private readonly Dictionary<string, HashSet<string>> _aliases = new(StringComparer.Ordinal);
     /// <summary>Names bound to a one-argument getElementById wrapper, i.e. the page's own `$`.</summary>
     private readonly HashSet<string> _lookups = new(StringComparer.Ordinal);
     /// <summary>
@@ -131,7 +141,12 @@ internal sealed class DomWrites
     /// </summary>
     private void Aliases(Node root)
     {
-        foreach (var n in All(root))
+        // Everything, not All: All stops at a function boundary, and the page that made this matter
+        // binds its element inside the function that writes it -
+        // `function render() { const frame = document.getElementById('frame'); frame.innerHTML = ... }`.
+        // With All that declarator is never visited, so the write was reported as being on "an element
+        // chosen at run time" when the id is a literal three lines above it.
+        foreach (var n in Everything(root))
         {
             if (n is not VariableDeclarator { Id: Identifier name, Init: { } init }) continue;
 
@@ -144,7 +159,7 @@ internal sealed class DomWrites
                 continue;
             }
             // const player = $('player')  /  document.getElementById('player')
-            if (init is CallExpression direct && Target(direct) is { } id) _aliases[name.Name] = id;
+            if (init is CallExpression direct && Target(direct) is { } id) Alias(name.Name, id);
         }
         Handles(root);
 
@@ -174,6 +189,15 @@ internal sealed class DomWrites
                     break;
             }
         }
+    }
+
+    /// <summary>Records that a name can stand for this element id. Several ids per name is allowed
+    /// and means the name is ambiguous, which <see cref="Make"/> then refuses rather than guesses at.</summary>
+    private void Alias(string name, string id)
+    {
+        if (!_aliases.TryGetValue(name, out var ids))
+            _aliases[name] = ids = new HashSet<string>(StringComparer.Ordinal);
+        ids.Add(id);
     }
 
     private void Holds(string name, Expression value)
@@ -360,8 +384,11 @@ internal sealed class DomWrites
                 write.Computed = call2.Arguments.Count > 0 ? Source(call2.Arguments[0]) : "?";
                 write.Prefix = call2.Arguments.Count > 0 ? Head(call2.Arguments[0]) : null;
                 return write;
-            case Identifier name when _aliases.TryGetValue(name.Name, out var aliased):
-                write.Id = aliased;
+            // Exactly one id, or none. A name two functions bind to different elements falls through
+            // to the Computed case below and is reported, because naming the wrong element silently
+            // is far worse than saying this one could not be resolved.
+            case Identifier name when _aliases.TryGetValue(name.Name, out var aliased) && aliased.Count == 1:
+                foreach (var only in aliased) write.Id = only;
                 return write;
             case Identifier name2:
                 write.Computed = name2.Name;

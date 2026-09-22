@@ -64,7 +64,7 @@ internal static class Js
         RunWith(host, built, panel, size, frames);
     }
 
-    private static ScriptHost Make(HtmlRenderer.Result built, Vector2 size)
+    internal static ScriptHost Make(HtmlRenderer.Result built, Vector2 size)
     {
         ScriptedScreensHtmlPlugin.Log ??= new BenchLogger();
         var host = new ScriptHost(

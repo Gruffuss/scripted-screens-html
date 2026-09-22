@@ -511,10 +511,11 @@ function js_tabular(s)
   return (s:gsub('%d+', function(run) return '<mspace=0.6em>' .. run .. '</mspace>' end))
 end
 
-DOM = { writes = {}, order = {}, missing = {} }
+DOM = { writes = {}, order = {}, missing = {}, listeners = {} }
 
 function DOM.reset()
   DOM.writes, DOM.order, DOM.missing = {}, {}, {}
+  DOM.listeners = {}
 end
 
 -- A page assigning `undefined` has still written: `log.scrollTop = log.scrollHeight` does exactly
@@ -585,7 +586,9 @@ ElementMeta.__index = function(el, key)
   if key == "style" then return rawget(el, "__style") end
   if key == "classList" then return rawget(el, "__classList") end
   if key == "setAttribute" then return function(name, value) DOM.attribute(el, name, value) end end
-  if key == "addEventListener" then return function() end end
+  if key == "addEventListener" then return function(kind, fn) DOM.on(rawget(el, "__id"), kind, fn) end end
+  if key == "removeEventListener" then return function(kind, fn) DOM.off(rawget(el, "__id"), kind, fn) end end
+  if key == "dispatchEvent" then return function(ev) DOM.fire(rawget(el, "__id"), ev and ev.type, 0, 0) return true end end
   if key == "getAttribute" then return function() return nil end end
   return rawget(el, "__props")[key]
 end
@@ -621,11 +624,99 @@ document = {
   end,
   querySelector = function() return nil end,
   querySelectorAll = function() return js_array({}, 0) end,
-  addEventListener = function() end,
+  addEventListener = function(kind, fn) DOM.on("document", kind, fn) end,
+  removeEventListener = function(kind, fn) DOM.off("document", kind, fn) end,
   body = element("body"),
   documentElement = element("html"),
   createElement = function(tag) return element("__new_" .. tag) end,
 }
+-- ---- events ---------------------------------------------------------------------------------
+-- A compiled page is still interactive. `addEventListener` used to be a no-op here, so every
+-- handler a page registered was thrown away and every button on a compiled console was dead while
+-- looking perfectly alive - the click arrived, the scene had its region, and nothing happened.
+--
+-- Handlers live in this chunk beside the state they close over, and the host calls `event` below
+-- when the player clicks. Bubbling walks PARENT, which the compiler emits from the laid-out tree:
+-- a page listens on a container (`field.addEventListener('mousedown', jump)`) and the click lands
+-- on whichever child is under the cursor, so without the walk the common case never fires.
+PARENT = PARENT or {}
+
+local function listeners(id, kind, make)
+  local byKind = DOM.listeners[id]
+  if byKind == nil then
+    if not make then return nil end
+    byKind = {}
+    DOM.listeners[id] = byKind
+  end
+  local list = byKind[kind]
+  if list == nil then
+    if not make then return nil end
+    list = {}
+    byKind[kind] = list
+  end
+  return list
+end
+
+function DOM.on(id, kind, fn)
+  if fn == nil or id == nil then return end
+  local list = listeners(id, js_str(kind), true)
+  list[#list + 1] = fn
+end
+
+function DOM.off(id, kind, fn)
+  local list = listeners(id, js_str(kind), false)
+  if list == nil then return end
+  for i = #list, 1, -1 do if list[i] == fn then table.remove(list, i) end end
+end
+
+-- Only what a handler actually reads. A page that wants more gets `nil` rather than a wrong number,
+-- which is the honest answer for a page with no layout: a compiled scene has no boxes to measure.
+local function make_event(id, kind, x, y)
+  local ev
+  ev = {
+    type = kind,
+    target = document.getElementById(id),
+    currentTarget = document.getElementById(id),
+    bubbles = true, cancelable = true, defaultPrevented = false,
+    button = 0, buttons = (kind == "mousedown") and 1 or 0,
+    clientX = x or 0, clientY = y or 0,
+    pageX = x or 0, pageY = y or 0,
+    offsetX = x or 0, offsetY = y or 0,
+    x = x or 0, y = y or 0,
+    preventDefault = function() ev.defaultPrevented = true end,
+    stopPropagation = function() ev.__stop = true end,
+    stopImmediatePropagation = function() ev.__stop = true ev.__now = true end,
+  }
+  return ev
+end
+
+--- Fires one event at `id` and up its ancestors, as a browser does.
+function DOM.fire(id, kind, x, y)
+  if id == nil or kind == nil then return nil end
+  kind = js_str(kind)
+  local ev = make_event(id, kind, x, y)
+  local at, guard = id, 0
+  while at ~= nil and guard < 64 do
+    guard = guard + 1
+    local list = listeners(at, kind, false)
+    if list ~= nil then
+      ev.currentTarget = document.getElementById(at)
+      -- Over a snapshot: a handler may add or remove listeners while this runs, and the runner page
+      -- does exactly that (a jump re-registers). Mutating the list under the loop skips handlers.
+      local snapshot, n = {}, #list
+      for i = 1, n do snapshot[i] = list[i] end
+      for i = 1, n do
+        local fn = snapshot[i]
+        if fn ~= nil then fn(ev) end
+        if ev.__now then return ev end
+      end
+    end
+    if ev.__stop then return ev end
+    at = PARENT[at]
+  end
+  return ev
+end
+
 -- setAttribute is a write like any other, recorded against the element it names.
 function DOM.attribute(el, name, value) record(rawget(el, "__id"), "@" .. name, value) end
 

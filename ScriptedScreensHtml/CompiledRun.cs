@@ -37,19 +37,72 @@ internal sealed class CompiledRun
         if (!HtmlConfig.Diagnostics || Time.time < _nextReport) return;
         _nextReport = Time.time + 2f;
         ScriptedScreensHtmlPlugin.Log?.LogInfo(
-            $"compiled \"{_page}\": {_ran} frame(s) ran, {_blocked} blocked, {_sent} value(s) sent, {_empty} frame(s) wrote nothing");
-        _ran = _blocked = _sent = _empty = 0;
+            $"compiled \"{_page}\": {_ran} frame(s) ran, {_blocked} blocked, {_sent} value(s) sent, " +
+            $"{_empty} frame(s) wrote nothing, {_events} event(s) delivered");
+        _ran = _blocked = _sent = _empty = _events = 0;
     }
 
     private readonly object _env;
+    private readonly object? _event;
+    private int _events;
 
     private CompiledRun(object state, object env, object frame, string page)
     {
         _state = state; _env = env; _frame = frame; _page = page;
+        _event = ChipHost.FunctionIn(env, "event");
+    }
+
+    /// <summary>
+    /// Hands the player's click to the page, and sends whatever it changed.
+    /// </summary>
+    /// <remarks>
+    /// A browser turns one press into mousedown, mouseup and click, and pages rely on which one
+    /// they get: the runner jumps on <c>mousedown</c> specifically, "a jump starts on the press,
+    /// not on the release a click waits for" - so delivering only <c>click</c> would leave it
+    /// looking as dead as delivering nothing.
+    /// </remarks>
+    internal bool Click(string id, float x, float y, Action<System.Collections.Generic.Dictionary<string, object>> send)
+    {
+        if (_event == null) return false;
+        var any = ChipHost.RunEvent(_state, _event, id, "mousedown", x, y);
+        any |= ChipHost.RunEvent(_state, _event, id, "mouseup", x, y);
+        any |= ChipHost.RunEvent(_state, _event, id, "click", x, y);
+        if (!any) return false;
+        _events++;
+        var values = ChipHost.Drain(_env);
+        if (values != null) { _sent += values.Count; send(values); }
+        return true;
+    }
+
+    /// <summary>One pointer event, for the types a page uses to track a held button.</summary>
+    internal bool Pointer(string id, string kind, float x, float y,
+                          Action<System.Collections.Generic.Dictionary<string, object>> send)
+    {
+        if (_event == null || !ChipHost.RunEvent(_state, _event, id, kind, x, y)) return false;
+        _events++;
+        var values = ChipHost.Drain(_env);
+        if (values != null) { _sent += values.Count; send(values); }
+        return true;
     }
 
     /// <summary>The chip's Lua state, so the caller can notice when it is replaced.</summary>
     internal object State => _state;
+
+    /// <summary>Why a page did not compile: every list that has something in it, capped and counted.</summary>
+    private static string Reasons(CompiledPage.Result r)
+    {
+        var parts = new System.Collections.Generic.List<string>(2);
+        Add("cannot translate", r.Problems);
+        Add("no slot for", r.Unmapped);
+        return parts.Count > 0 ? string.Join("; ", parts) : "no reason recorded, which is itself a bug";
+
+        void Add(string what, System.Collections.Generic.List<string> list)
+        {
+            if (list.Count == 0) return;
+            var head = string.Join("; ", list.GetRange(0, Math.Min(3, list.Count)));
+            parts.Add(list.Count > 3 ? $"{what}: {head} (+{list.Count - 3} more)" : $"{what}: {head}");
+        }
+    }
 
     /// <summary>
     /// Compiles a page and puts it in its chip, or returns null with the reason logged.
@@ -85,11 +138,12 @@ internal sealed class CompiledRun
         var compiled = PageCompiler.Compile(built, panel, size, slots);
         if (!compiled.Ok)
         {
+            // Both lists, not whichever one a `Lua == null` test guesses at. A page that translated
+            // but has a Problem printed the EMPTY unmapped list, so the log read
+            // "stays on the interpreter - " with nothing after it - the one thing a reason line
+            // must never do.
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
-                $"html: \"{page}\" stays on the interpreter - " +
-                (compiled.Lua == null
-                    ? string.Join("; ", compiled.Problems.GetRange(0, Math.Min(3, compiled.Problems.Count)))
-                    : string.Join("; ", compiled.Unmapped.GetRange(0, Math.Min(3, compiled.Unmapped.Count)))));
+                $"html: \"{page}\" stays on the interpreter - {Reasons(compiled)}");
             return null;
         }
 
