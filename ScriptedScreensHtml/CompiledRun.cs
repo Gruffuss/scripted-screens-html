@@ -192,7 +192,10 @@ internal sealed class CompiledRun
         _last = Time.time;
 
         var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        var ok = ChipHost.RunFrame(_state, _frame, dt);
+        // Ablation, measurement only: subtraction is the one honest instrument left, because Mono
+        // reports 0 for the per-thread allocation counter and a stopwatch answers a different
+        // question than "what allocates".
+        var ok = HtmlConfig.AblateLua || ChipHost.RunFrame(_state, _frame, dt);
         var t1 = System.Diagnostics.Stopwatch.GetTimestamp();
         if (ok)
         {
@@ -200,7 +203,7 @@ internal sealed class CompiledRun
             _ran++;
             var values = ChipHost.Drain(_env, _values);
             var t2 = System.Diagnostics.Stopwatch.GetTimestamp();
-            if (values != null) { _sent += values.Count; send(values); } else _empty++;
+            if (values != null) { _sent += values.Count; if (!HtmlConfig.AblateSend) send(values); } else _empty++;
             _tRun += t1 - t0; _tDrain += t2 - t1; _tSend += System.Diagnostics.Stopwatch.GetTimestamp() - t2;
             Report();
             return true;

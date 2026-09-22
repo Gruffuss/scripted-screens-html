@@ -25,6 +25,8 @@ internal static class HtmlConfig
     private static ConfigFile? _file;
     private static ConfigEntry<bool>? _diagnostics;
     private static ConfigEntry<bool>? _dumpScenes;
+    private static ConfigEntry<bool>? _ablateLua;
+    private static ConfigEntry<bool>? _ablateSend;
     private static ConfigEntry<CullChoice>? _cullOffScreen;
     private static ConfigEntry<bool>? _verifyEmitCache;
     private static ConfigEntry<bool>? _probeV8;
@@ -63,6 +65,19 @@ internal static class HtmlConfig
     /// </summary>
     internal static bool DumpScenes => _dumpScenes?.Value ?? false;
 
+    /// <summary>
+    /// Ablation for a compiled page: skip the chip's Lua, or skip the send, and read the difference
+    /// in allocation off the frame line.
+    /// </summary>
+    /// <remarks>
+    /// Guessing which half of a per-frame cost is the expensive one has a poor record on this
+    /// project. A three-way stopwatch answered where the TIME goes; it says nothing about where the
+    /// ALLOCATION goes, and Mono reports 0 for the per-thread counter so nothing finer is available
+    /// in game. Subtraction is. Turn one off, read `alloc MB/s`, put it back.
+    /// </remarks>
+    internal static bool AblateLua => _ablateLua?.Value ?? false;
+    internal static bool AblateSend => _ablateSend?.Value ?? false;
+
     internal static void Load(ConfigFile file)
     {
         if (_file != null || file == null)
@@ -82,6 +97,18 @@ internal static class HtmlConfig
             "layout to scenes/<page>-layout.txt): on every new structure, and at most every two " +
             "seconds while only values change. Development tool for reading exactly what the " +
             "translation produced; each file is overwritten, not appended. Leave it off for normal play.");
+
+        _ablateLua = _file.Bind(
+            "Diagnostics", "AblateLua", false,
+            "Measurement only. Stop running a compiled page's Lua while still draining and sending " +
+            "whatever it last produced. The console freezes; the point is to read `alloc MB/s` off " +
+            "the frame line with that half removed and subtract. Leave it off.");
+
+        _ablateSend = _file.Bind(
+            "Diagnostics", "AblateSend", false,
+            "Measurement only. Run a compiled page's Lua and drain it, but do not hand the values " +
+            "to the renderer. The console freezes; the difference in `alloc MB/s` is what the send " +
+            "path costs. Leave it off.");
 
         _verifyEmitCache = _file.Bind(
             "Diagnostics", "VerifyEmitCache", false,

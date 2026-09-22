@@ -264,7 +264,7 @@ internal sealed class JsToLua
         }
 
         var element = Expr(styleOf.Object);
-        var key = Quote(prop.Name);
+        var key = Quote("style." + prop.Name);   // the whole key, so the runtime never builds one
 
         // A hole that is `x.toFixed(n)` is a number a page formatted for CSS. On a numeric slot the
         // string it returns is built only to be parsed back, so the value is taken without it.

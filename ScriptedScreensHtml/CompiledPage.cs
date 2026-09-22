@@ -304,10 +304,33 @@ internal static class CompiledPage
             sb.Append("window.innerWidth, window.innerHeight = ")
               .Append(Num(v.Width)).Append(", ").Append(Num(v.Height)).Append("\n\n");
 
-        sb.Append("BOUND = {\n");
+        // Nested by element, then by property - NOT keyed by "id.property". A flat table reads
+        // better and costs a string concatenation on every write, twenty-six a frame per console,
+        // to rebuild a key the compiler already had. Two table lookups allocate nothing, and
+        // "allocates nothing per frame" is the entire point of compiling.
+        // Grouped, not run-length encoded. An element's bindings are NOT consecutive in the list -
+        // `player.className` and `player.style.transform` are found at different points in the
+        // script - so opening a group per run emitted the same element twice, and a Lua table keeps
+        // only the last of two identical keys. Every binding in the first group vanished.
+        var byOwner = new Dictionary<string, List<Binding>>(StringComparer.Ordinal);
+        var ownerOrder = new List<string>();
         foreach (var b in bindings)
         {
-            sb.Append("  [").Append(Quote(b.Key)).Append("] = { read = ").Append(Quote(b.Read.ToString().ToLowerInvariant()));
+            var at = b.Key.IndexOf('.');
+            var who = at > 0 ? b.Key.Substring(0, at) : b.Key;
+            if (!byOwner.TryGetValue(who, out var forOwner)) { byOwner[who] = forOwner = new List<Binding>(); ownerOrder.Add(who); }
+            forOwner.Add(b);
+        }
+
+        sb.Append("BOUND = {\n");
+        foreach (var owner in ownerOrder)
+        {
+            sb.Append("  [").Append(Quote(owner)).Append("] = {\n");
+            foreach (var b in byOwner[owner])
+            {
+            var dot = b.Key.IndexOf('.');
+            var member = dot > 0 ? b.Key.Substring(dot + 1) : string.Empty;
+            sb.Append("    [").Append(Quote(member)).Append("] = { read = ").Append(Quote(b.Read.ToString().ToLowerInvariant()));
 
             // A state binding carries what each class DRAWS, laid out at compile time, rather than a
             // slot and a number. Picking one at run time is a table lookup and a copy.
@@ -343,6 +366,8 @@ internal static class CompiledPage
                 sb.Append("{ ").Append(Quote(b.Slots[i])).Append(", ").Append(Num(b.Bias[i])).Append(" }");
             }
             sb.Append(" } },\n");
+            }
+            sb.Append("  },\n");
         }
         sb.Append("}\n\n");
 
@@ -425,7 +450,9 @@ local function put(slot, n)
 end
 
 function DOM.bind(id, key, value)
-  local b = BOUND[id .. '.' .. key]
+  local e = BOUND[id]
+  if e == nil then return end
+  local b = e[key]
   if b == nil then return end                         -- a setup write, or one the compiler refused
 
   if b.read == 'text' then
@@ -481,14 +508,16 @@ function DOM.num(el, key, n)
   -- player stopped moving the first time this was tried.
   n = tonumber(n)
   if n == nil or n ~= n then return end
-  local b = BOUND[rawget(el, '__id') .. '.style.' .. key]
+  local e = BOUND[rawget(el, '__id')]
+  local b = e and e[key]
   if b == nil or b.read ~= 'length' then return end
   for i = 1, #b.to do PAYLOAD[b.to[i][1]] = n + b.to[i][2] end
   DIRTY = true
 end
 
 function DOM.xy(el, key, x, y)
-  local b = BOUND[rawget(el, '__id') .. '.style.' .. key]
+  local e = BOUND[rawget(el, '__id')]
+  local b = e and e[key]
   if b == nil or b.read ~= 'translate' then return end
   x, y = tonumber(x), tonumber(y)
   if x ~= nil and x == x and b.to[1] then PAYLOAD[b.to[1][1]] = x + b.to[1][2] DIRTY = true end

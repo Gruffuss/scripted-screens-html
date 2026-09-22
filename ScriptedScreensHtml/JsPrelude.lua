@@ -739,12 +739,14 @@ local function shown(v, d)
   return string.format("%." .. tostring(math.floor(d)) .. "f", tonumber(v) or 0)
 end
 
+-- `key` arrives complete ("style.height"): the compiler knows it and passing it whole is what
+-- keeps the runtime from building one per write.
 function DOM.num(el, key, n, unit, d)
-  record(rawget(el, "__id"), "style." .. key, shown(n, d) .. (unit or ""))
+  record(rawget(el, "__id"), key, shown(n, d) .. (unit or ""))
 end
 
 function DOM.xy(el, key, x, y, l1, l2, l3, dx, dy)
-  record(rawget(el, "__id"), "style." .. key,
+  record(rawget(el, "__id"), key,
          (l1 or "") .. shown(x, dx) .. (l2 or "") .. shown(y, dy) .. (l3 or ""))
 end
 
