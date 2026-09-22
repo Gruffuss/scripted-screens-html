@@ -75,6 +75,40 @@ internal static class CompiledPage
         public readonly List<(string Slot, string Value)> Text = new();
     }
 
+    /// <summary>
+    /// Fills every state out to the same set of slots, so leaving a state restores what it moved.
+    /// </summary>
+    /// <remarks>
+    /// A slot a state does not mention takes the value the scene was emitted with - the page's
+    /// resting geometry - which is exactly right: a state that does not move a box is a state in
+    /// which that box sits where the markup put it.
+    ///
+    /// A slot with no base value is dropped from EVERY state, not only from the ones that omit it.
+    /// Keeping it in some would make those states one-way - enterable and not leavable - which is
+    /// the bug this whole function exists to remove, reintroduced for a subset.
+    /// </remarks>
+    private static void Complete(List<StateValues> states, Func<string, double?>? baseOf)
+    {
+        var union = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var s in states)
+            foreach (var (slot, _) in s.Numbers) union.Add(slot);
+        if (union.Count == 0) return;
+
+        var unrestorable = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var slot in union)
+            if (baseOf?.Invoke(slot) == null) unrestorable.Add(slot);
+
+        foreach (var s in states)
+        {
+            var has = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var (slot, _) in s.Numbers) has.Add(slot);
+            s.Numbers.RemoveAll(n => unrestorable.Contains(n.Slot));
+            foreach (var slot in union)
+                if (!has.Contains(slot) && !unrestorable.Contains(slot) && baseOf!(slot) is { } at)
+                    s.Numbers.Add((slot, at));
+        }
+    }
+
     /// <summary>What compiling produced, or why it could not.</summary>
     internal sealed class Result
     {
@@ -115,6 +149,7 @@ internal static class CompiledPage
                                    string? prelude = null,
                                    (double Width, double Height)? viewport = null,
                                    IReadOnlyDictionary<string, string>? parents = null,
+                                   Func<string, double?>? baseOf = null,
                                    string element = "VDATA")
     {
         var result = new Result();
@@ -189,6 +224,12 @@ internal static class CompiledPage
                         result.Unmapped.Add($"line {w.Line}: {key} - cannot draw the state(s) {string.Join(", ", missing)}");
                         continue;
                     }
+                    // Every state carries a value for every slot ANY state moves, not just the ones
+                    // it moves itself. States used to be deltas, so the base state's entry came out
+                    // empty and going duck -> "" wrote nothing: the page kept the ducked geometry
+                    // for ever. A state is a description of what the page looks like, not of what
+                    // changed to get there, and only the first of those can be left.
+                    Complete(states, baseOf);
                     result.Bindings.Add(new Binding(key, Array.Empty<string>(), Array.Empty<double>(), Kind.State, states));
                     continue;
                 }
@@ -412,6 +453,18 @@ function DOM.bind(id, key, value)
     return
   end
 
+  -- A class name is not a value, it is a state: the compiler laid the page out in each one and
+  -- emitted what each DRAWS, so picking one is a lookup and a copy. Without this arm the write fell
+  -- through to length('duck'), which is nil, and every compiled page drew its base state for ever
+  -- while the states sat in the table unused.
+  if b.read == 'state' then
+    local st = b.states[js_str(value)]
+    if st == nil then return end                      -- a class the enumeration never saw
+    for i = 1, #st do PAYLOAD[st[i][1]] = st[i][2] end
+    if #st > 0 then DIRTY = true end
+    return
+  end
+
   local n = length(value)
   if n == nil then return end
   for i = 1, #b.to do put(b.to[i][1], n + b.to[i][2]) end
@@ -425,8 +478,10 @@ end
 -- gain a glide it never had - on every value at once, which reads as the motion having been
 -- mistranslated rather than as a setting.
 function DOM.flush()
-  -- Nothing to do: the host takes PAYLOAD when DIRTY says there is something in it, and clears the
-  -- flag. Kept as a function so the page's frame reads the same whether or not a host is listening.
+  -- Nothing to do: the host takes PAYLOAD when DIRTY says there is something in it, and empties
+  -- BOTH it and the flag. Emptying matters - while it only cleared the flag, every frame re-sent
+  -- every slot the page had ever written, so a frame that moved one number sent all of them.
+  -- Kept as a function so the page's frame reads the same whether or not a host is listening.
 end
 
 -- The entry point the host calls once a frame. It is a GLOBAL of this chunk's own environment,

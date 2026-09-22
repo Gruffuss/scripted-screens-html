@@ -44,7 +44,11 @@ internal static class PageCompiler
             CompileProbe.Prelude(out _),
             // The console's own design size, so the page sizes itself for THIS screen.
             (size.x, size.y),
-            Parents(built));
+            Parents(built),
+            // The scene's own resting value for a slot, so a state can carry what it does NOT move
+            // and therefore be leavable. Numbers only: a state that changes text or colour restores
+            // through its own entry, and inventing a base for those would guess.
+            slot => slots.TryGetValue(slot, out var v) && v.IsNumber ? v.Number : (double?)null);
     }
 
     /// <summary>

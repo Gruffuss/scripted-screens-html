@@ -28,6 +28,11 @@ internal static class CompiledPageTests
     /// <summary>The player's own absolute top in the captured scene; its children's tops are relative to it.</summary>
     private const double PlayerTop = 85;
 
+    /// <summary>The captured scene's resting value for a slot, so a state can carry what it does not move.</summary>
+    private static Dictionary<string, SceneSlots.Value> _scene = new(StringComparer.Ordinal);
+    private static double? Base(string slot)
+        => _scene.TryGetValue(slot, out var v) && v.IsNumber ? v.Number : (double?)null;
+
     internal static void Run(Action<bool, string> check)
     {
         var root = Root();
@@ -38,6 +43,7 @@ internal static class CompiledPageTests
 
         var values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
         SceneSlots.Split(File.ReadAllText(scenePath), values);
+        _scene = values;
         var available = values.Keys.ToHashSet(StringComparer.Ordinal);
         var boxes = Boxes(File.ReadAllText(scenePath));
 
@@ -50,7 +56,9 @@ internal static class CompiledPageTests
                                             // The same prelude production embeds. Leaving it out here
                                             // is what let the chunk ship without one: the test loaded
                                             // the prelude separately and never noticed.
-                                            prelude: File.ReadAllText(Path.Combine(root, "JsPrelude.lua")));
+                                            prelude: File.ReadAllText(Path.Combine(root, "JsPrelude.lua")),
+                                            // the scene's resting values, so a state can carry what it does not move
+                                            baseOf: Base);
 
         check(compiled.Lua != null, compiled.Lua != null
             ? $"compiled: 07-game compiles, {compiled.Bindings.Count} slot binding(s)"
@@ -114,7 +122,59 @@ internal static class CompiledPageTests
             ? "compiled: setup-only writes send nothing at run time"
             : $"compiled: setup-only write(s) being sent every frame - {string.Join(", ", leaked)}");
 
-        Clicks(root, available, boxes, script, check);
+        Clicks(root, available, boxes, script, Base, check);
+        States(compiled.Lua!, check);
+    }
+
+    // ---- a class name actually draws its state -------------------------------------------------
+
+    /// <summary>
+    /// A className write moves the slots its state names, and leaving that state puts them back.
+    /// </summary>
+    /// <remarks>
+    /// The compiler enumerates every class a page can assign, lays the page out in each and emits
+    /// what each draws. All of that worked and none of it was connected: the runtime dispatched on
+    /// 'text', 'colour' and 'translate' and then fell through to reading the value as a CSS length,
+    /// which for "duck" is nil - so every compiled page drew its base state for ever, in silence.
+    ///
+    /// The restore half is the subtler one. States were emitted as DELTAS, so the base state's entry
+    /// was empty; going duck -> "" wrote nothing and the ducked geometry stayed on screen. Each state
+    /// now carries a value for every slot ANY state touches, which is what makes leaving one work.
+    /// </remarks>
+    private static void States(string lua, Action<bool, string> check)
+    {
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        Chunk(state, lua, "page");
+        Chunk(state, Driver(3), "frames");
+
+        var ducked = Payload(state, "PAYLOAD, DIRTY = {}, false\nDOM.bind(\"player\", \"className\", \"duck\")");
+        check(ducked.Count > 0, ducked.Count > 0
+            ? $"compiled: a className write draws its state ({ducked.Count} slot(s) moved)"
+            : "compiled: a className write moved nothing - every compiled page draws its base state for ever");
+        if (ducked.Count == 0) return;
+
+        var back = Payload(state, "PAYLOAD, DIRTY = {}, false\nDOM.bind(\"player\", \"className\", \"\")");
+        var restored = ducked.Keys.All(back.ContainsKey);
+        check(restored, restored
+            ? "compiled: leaving a state puts every slot it moved back"
+            : $"compiled: leaving a state restored {back.Count} of {ducked.Count} slot(s) - the rest keep the old state's geometry");
+    }
+
+    /// <summary>Runs one snippet against a loaded chunk and returns what it put in PAYLOAD.</summary>
+    private static Dictionary<string, LuaValue> Payload(LuaState state, string snippet)
+    {
+        Chunk(state, snippet, "bind");
+        var sent = new Dictionary<string, LuaValue>(StringComparer.Ordinal);
+        if (state.Environment["PAYLOAD"].Type != LuaValueType.Table) return sent;
+        var table = state.Environment["PAYLOAD"].Read<LuaTable>();
+        var key = LuaValue.Nil;
+        while (table.TryGetNext(key, out var pair))
+        {
+            key = pair.Key;
+            if (key.Type == LuaValueType.String) sent[key.Read<string>()] = pair.Value;
+        }
+        return sent;
     }
 
     // ---- the player can still press the buttons -------------------------------------------------
@@ -136,7 +196,7 @@ internal static class CompiledPageTests
     /// </remarks>
     private static void Clicks(string root, HashSet<string> available,
                                Dictionary<string, (double X, double Y, double W, double H)> boxes,
-                               string script, Action<bool, string> check)
+                               string script, Func<string, double?> baseOf, Action<bool, string> check)
     {
         // `player` is inside `field`, which is what makes the second case a bubbling test.
         var parents = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -148,6 +208,8 @@ internal static class CompiledPageTests
                                             tabular: id => id is "score" or "hi",
                                             stateOf: (id, cls) => State(id, cls, boxes, available),
                                             prelude: File.ReadAllText(Path.Combine(root, "JsPrelude.lua")),
+                                            // the scene's resting values, so a state can carry what it does not move
+                                            baseOf: baseOf,
                                             parents: parents);
         if (compiled.Lua == null) { check(false, "compiled: the click build does not compile"); return; }
 
@@ -206,10 +268,15 @@ internal static class CompiledPageTests
         // #player.duck moves the descendants; #player.hurt recolours one; neither touches the player
         if (id == "player")
         {
-            var ducking = cls.Contains("duck", StringComparison.Ordinal);
-            foreach (var part in new[] { "legA", "legB", "bootA", "bootB" })
-                if (available.Contains(part + "_y") && boxes.TryGetValue(part, out var b))
-                    values.Numbers.Add((part + "_y", ducking ? b.Y + 6 : b.Y));
+            // Only what MOVED, which is what the real PageCompiler.StateOf returns - it diffs the
+            // laid-out positions and records the ones that changed. The stub used to return a value
+            // for every state including the base one, so it was already complete and the test could
+            // not see states being emitted as deltas. A stub that is kinder than production tests
+            // nothing.
+            if (cls.Contains("duck", StringComparison.Ordinal))
+                foreach (var part in new[] { "legA", "legB", "bootA", "bootB" })
+                    if (available.Contains(part + "_y") && boxes.TryGetValue(part, out var b))
+                        values.Numbers.Add((part + "_y", b.Y + 6));
             return values;
         }
         if (id == "score")

@@ -257,6 +257,14 @@ internal static class ChipHost
             if (pair.Value.TryRead<double>(out var number)) values[name] = number;
             else if (pair.Value.TryRead<string>(out var text)) values[name] = text;
         }
+
+        // Emptied, not just flagged. While only DIRTY was cleared the table kept every slot the page
+        // had ever written, so a frame that moved one number re-sent all of them - every frame, for
+        // ever. Clearing here rather than in Lua keeps the page's own code unaware of the host, and
+        // the keys are nilled in place rather than by handing over a fresh table, which would
+        // allocate once per frame in exactly the path this whole exercise exists to keep empty.
+        foreach (var name in values.Keys) payload[name] = Lua.LuaValue.Nil;
+
         return values.Count > 0 ? values : null;
     }
 
