@@ -168,10 +168,14 @@ internal sealed class HtmlSurface : MonoBehaviour
         // and writes the scene's slots directly, so all this update does is give that Lua a frame.
         if (_compiled != null)
         {
+            // One Update after compiling, so the structure the chip writes into has been sent.
+            if (_releasePending) { _releasePending = false; ReleaseWorkingSet(); }
             if (_compiled.Tick(Cartridge ?? Board, SendCompiled)) return;
             // It gave up - the chip recompiled under it, or its frames kept failing. Back to the
             // interpreter, which is always able to run the page.
             _compiled = null;
+            // It gave up, so the page has to exist again to draw anything at all.
+            if (_released && !Rehydrate()) return;
             _dirty = true; _dOther++;
             Wake();
         }
@@ -574,6 +578,68 @@ internal sealed class HtmlSurface : MonoBehaviour
         }
     }
 
+    // ---- a compiled page keeps nothing it no longer uses ------------------------------------------
+
+    /// <summary>
+    /// Lets go of a page's DOM, cascade, layout tree and script engine once its Lua is in the chip.
+    /// </summary>
+    /// <remarks>
+    /// Measured at <b>5.6 MB per page</b>, 87.7 MB across sixteen consoles, 94% of it the script
+    /// engine (<c>ScriptedScreensHtml.Bench --retained</c>). None of it is read again: <c>Update</c>
+    /// returns as soon as a compiled run exists, clicks go to the chip, and values come back as slot
+    /// writes. It still costs, though - the collector marks every live byte on every collection, and
+    /// the mark is what decides how LONG a pause is. Allocation rate only decides how often.
+    ///
+    /// Anything that does need the page again rebuilds it from <c>_source</c>, which is the same call
+    /// that made it in the first place. That is why this is safe to do at all: nothing here is the
+    /// only copy of anything.
+    /// </remarks>
+    private void ReleaseWorkingSet()
+    {
+        if (_built == null && _script == null) return;
+
+        var nodes = _built?.NodeOf.Count ?? 0;
+        _script?.Dispose();
+        _script = null;
+        _built = null;
+        _panel = null;
+        _content = null;
+        _byId = new Dictionary<string, VisualElement>(System.StringComparer.Ordinal);
+        _shapes = new Dictionary<string, SvgShape>(System.StringComparer.Ordinal);
+        _svgs.Clear();
+        _animations.Clear();
+        _boxes.Clear();
+        _boxScratch.Clear();
+        _dataSlots = null;
+        _dataToProve = null;
+        _released = true;
+
+        if (HtmlConfig.Diagnostics)
+            ScriptedScreensHtmlPlugin.Log?.LogInfo(
+                $"html \"{ElementId}\": released the page's working set ({nodes} node(s), dom + cascade + layout + engine); "
+                + "it rebuilds from source if anything needs it again");
+    }
+
+    /// <summary>True while this page's working set has been let go because it compiled.</summary>
+    private bool _released;
+    /// <summary>Set when a page compiles; acted on next Update, once its structure has gone out.</summary>
+    private bool _releasePending;
+
+    /// <summary>
+    /// Puts the page back when something needs it: a capture, a rebuild, or the compiled run giving up.
+    /// </summary>
+    /// <returns>False when there is no source to rebuild from, which should not happen.</returns>
+    private bool Rehydrate()
+    {
+        if (_built != null) return true;
+        if (string.IsNullOrEmpty(_source)) return false;
+        if (HtmlConfig.Diagnostics)
+            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{ElementId}\": rebuilding the page - something asked for it after it was released");
+        _released = false;
+        Build();
+        return _built != null;
+    }
+
     private void BuildInner()
     {
         {
@@ -723,6 +789,8 @@ internal sealed class HtmlSurface : MonoBehaviour
     internal void EmitNow()
     {
         Hold();
+        // A capture wants the page itself, so it comes back for this.
+        if (_released) Rehydrate();
         var s0 = _structureSends;
         var p0 = _patchSends;
         lock (CascadeGate)
@@ -983,8 +1051,18 @@ internal sealed class HtmlSurface : MonoBehaviour
         _allUpdateTicks = _allEmitTicks = 0;
         foreach (var page in Surfaces)
         {
-            if (page == null || page._built == null)
+            if (page == null) continue;
+            // A page that compiled has let its DOM go, and skipping it here would have made the most
+            // interesting page in the base the one that reports nothing - "no line" reading as
+            // "not loaded" rather than as "costing nothing", which is the wrong way round.
+            if (page._built == null)
+            {
+                if (page._released)
+                    ScriptedScreensHtmlPlugin.Log?.LogInfo(
+                        $"html \"{page.ElementId}\": compiled and released - no layout, script, translate or emit; "
+                        + $"sent {page._patchSends} patches ({page._patchSlots} values), heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}");
                 continue;
+            }
             var emits = page._emits - page._emitsAtReport;
             page._emitsAtReport = page._emits;
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
@@ -1160,6 +1238,9 @@ internal sealed class HtmlSurface : MonoBehaviour
             {
                 _compileTried = _built;
                 _compiled = CompiledRun.Start(PageKey, holder, _built!, _panel!, layout, _slotScratch);
+                // Everything above needed the page; from here nothing does. Released after the
+                // structure has been emitted, never before - the scene is what the chip writes into.
+                if (_compiled != null) _releasePending = true;
             }
             // The emitter has just said what every slot really is, which is the only honest check
             // available for the data fast path: what it WOULD have written, against what was drawn.
@@ -2290,6 +2371,10 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             // the vector scene's copy goes now (the vector mod is the game thread's); the page's on its thread
             ForwardData(entries);
+            // A compiled page's values come from its own Lua, and its DOM has been let go. Binding
+            // into a rebuilt copy would cost a rebuild per tick and draw nothing, since the copy is
+            // not what the console shows.
+            if (_compiled != null || _released) return;
             Post(() => BindData(entries));
         }
         finally { _allUpdateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - d0; }
