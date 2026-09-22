@@ -84,13 +84,19 @@ internal static class Holes
 
             // Where the ones that did not land actually sit in the markup: guessing at this is how
             // the last three "obvious" diagnoses in this project turned out wrong.
-            var skeleton = markup.Skeleton();
+            // Presence is checked against EVERY shape that was emitted, not against the default
+            // one. Checking the default alone reported 155 holes as "not in this shape" when they
+            // were in a shape that had been emitted and simply had not reached a slot - which is a
+            // completely different problem, and the one worth working on.
+            var skeletons = shapes.Select(sh => markup.Skeleton(sh)).ToArray();
             var whole = 0; var inStyle = 0; var inAttr = 0; var inText = 0; var absent = 0;
             for (var h = 0; h < holes; h++)
             {
                 if (landed.ContainsKey(h)) continue;
-                var at = skeleton.IndexOf(Markup.Sentinel(h), StringComparison.Ordinal);
-                if (at < 0) { absent++; continue; }
+                var sentinel = Markup.Sentinel(h);
+                var skeleton = skeletons.FirstOrDefault(k => k.Contains(sentinel, StringComparison.Ordinal));
+                if (skeleton == null) { absent++; continue; }
+                var at = skeleton.IndexOf(sentinel, StringComparison.Ordinal);
                 var before = skeleton.Substring(Math.Max(0, at - 40), Math.Min(40, at));
                 var quote = before.LastIndexOf('"');
                 if (quote < 0) { inText++; continue; }
@@ -102,6 +108,23 @@ internal static class Holes
             }
             Console.WriteLine($"    of those: {whole} are a WHOLE style attribute, {inStyle} inside one, "
                               + $"{inAttr} another attribute, {inText} text, {absent} not in this shape");
+
+            // The first few text misses in context. Which shape of markup they sit in is the whole
+            // question, and it is cheaper to look than to reason about it.
+            var shown = 0;
+            for (var h = 0; h < holes && shown < 4; h++)
+            {
+                if (landed.ContainsKey(h)) continue;
+                var sentinel = Markup.Sentinel(h);
+                var k = skeletons.FirstOrDefault(x => x.Contains(sentinel, StringComparison.Ordinal));
+                if (k == null) continue;
+                var at = k.IndexOf(sentinel, StringComparison.Ordinal);
+                var attr = k.LastIndexOf('"', at) > k.LastIndexOf('>', at) ? "attr" : "text";
+                var from = Math.Max(0, at - 55);
+                var context = k.Substring(from, Math.Min(110, k.Length - from)).Replace('\n', ' ');
+                Console.WriteLine($"    miss {h,3} [{attr}]: ...{context}...");
+                shown++;
+            }
 
             var missed = Enumerable.Range(0, holes).Where(h => !landed.ContainsKey(h)).ToArray();
             if (missed.Length > 0)

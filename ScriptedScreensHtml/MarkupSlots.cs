@@ -61,7 +61,8 @@ internal static class MarkupSlots
     /// <returns>Hole index to where it lands. A hole missing from the map did not reach the scene.</returns>
     internal static Dictionary<int, Landing>? Resolve(string id, Markup markup, HtmlRenderer.Result built,
                                                       Panel panel, Vector2 size,
-                                                      IReadOnlyList<bool>? taken = null, int rows = 1)
+                                                      IReadOnlyList<bool>? taken = null, int rows = 1,
+                                                      bool colours = false)
     {
         if (!built.ById.TryGetValue(id, out var element) || element == null) return null;
         if (!built.NodeOf.TryGetValue(element, out var node)) return null;
@@ -72,7 +73,7 @@ internal static class MarkupSlots
 
         try
         {
-            var skeleton = markup.Skeleton(taken, rows);
+            var skeleton = markup.Skeleton(taken, rows, colours);
             if (!Replace(element, node, skeleton, built))
             {
                 ScriptedScreensHtmlPlugin.Log?.LogInfo(
@@ -108,6 +109,10 @@ internal static class MarkupSlots
                     continue;
                 }
                 if (pair.Value.Text is not { Length: > 0 } text) continue;
+                // A colour arrives as its own slot value, whole - there is nothing around it to
+                // keep, and a colour is never half of a label.
+                var colour = Markup.ColourHoleOf(text);
+                if (colour >= 0) { found[colour] = new Landing(pair.Key, isNumber: false); continue; }
                 foreach (var (hole, before, after) in InText(text))
                     found[hole] = new Landing(pair.Key, isNumber: false, before, after);
             }
@@ -136,9 +141,12 @@ internal static class MarkupSlots
                                                         Panel panel, Vector2 size, int rows = 1)
     {
         var all = new Dictionary<int, Landing>();
+        // Each shape twice: a number serves a length and a label, a colour serves the positions a
+        // number is not valid in. Neither flavour alone reaches half the holes on a real page.
         foreach (var shape in markup.Shapes())
+        foreach (var colours in new[] { false, true })
         {
-            var landed = Resolve(id, markup, built, panel, size, shape, rows);
+            var landed = Resolve(id, markup, built, panel, size, shape, rows, colours);
             if (landed == null) continue;
             // First shape to land a hole wins. A hole reached by two shapes is the same hole in the
             // same place; taking the later one would only churn.

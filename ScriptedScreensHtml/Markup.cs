@@ -216,9 +216,10 @@ internal sealed class Markup
 
             case ConditionalExpression c:
                 {
+                    var mark = _holes.Count;
                     var then = new List<Part>(); Walk(c.Consequent, then); Merge(then);
                     var otherwise = new List<Part>(); Walk(c.Alternate, otherwise); Merge(otherwise);
-                    Branch(c, c.Test, then, otherwise, into);
+                    Branch(c, c.Test, then, otherwise, into, mark);
                     return;
                 }
 
@@ -228,17 +229,19 @@ internal sealed class Markup
 
             case LogicalExpression { Operator: Acornima.Operator.LogicalOr } fallback:
                 {
+                    var mark = _holes.Count;
                     var supplied = new List<Part>(); Walk(fallback.Left, supplied); Merge(supplied);
                     var otherwise2 = new List<Part>(); Walk(fallback.Right, otherwise2); Merge(otherwise2);
-                    Branch(fallback, fallback.Left, supplied, otherwise2, into);
+                    Branch(fallback, fallback.Left, supplied, otherwise2, into, mark);
                     return;
                 }
 
             case LogicalExpression { Operator: Acornima.Operator.LogicalAnd } and:
                 // `cond && markup` is `cond ? markup : ''` written shorter.
                 {
+                    var mark = _holes.Count;
                     var then = new List<Part>(); Walk(and.Right, then); Merge(then);
-                    Branch(and, and.Left, then, new List<Part>(), into);
+                    Branch(and, and.Left, then, new List<Part>(), into, mark);
                     return;
                 }
 
@@ -277,10 +280,17 @@ internal sealed class Markup
     /// Measured on one page: 119 choices, which is 2^119 shapes, against the 23 the page really has.
     /// A branch whose sides contain no markup is a value, and a value is one slot.
     /// </remarks>
-    private void Branch(Expression whole, Expression test, List<Part> then, List<Part> otherwise, List<Part> into)
+    private void Branch(Expression whole, Expression test, List<Part> then, List<Part> otherwise,
+                        List<Part> into, int mark)
     {
         if (!Structural(then) && !Structural(otherwise))
         {
+            // Both sides were walked to find out whether either was structural, and walking them
+            // registered a hole for every value inside. Folding to one hole discards those parts, so
+            // the holes they registered have to go with them - otherwise the list carries entries
+            // that appear nowhere in the tree, the count overstates the page, and every one of them
+            // reads afterwards as a hole no shape contains.
+            _holes.RemoveRange(mark, _holes.Count - mark);
             into.Add(new Hole(whole, _holes.Count));
             _holes.Add(whole);
             return;
@@ -518,6 +528,30 @@ internal sealed class Markup
     /// </remarks>
     internal const int SentinelBase = 987650;
 
+    /// <summary>
+    /// The colour-shaped flavour, for the positions a number is not valid in.
+    /// </summary>
+    /// <remarks>
+    /// Most holes are lengths or text and a number serves both. A colour is the exception and it is
+    /// not a small one: <c>color:987652</c>, <c>background:987653</c> and <c>border:2px solid
+    /// 987656</c> are all invalid, so the declaration is dropped, the sentinel never reaches the
+    /// scene, and the hole reads as unmappable. Measured on AtmoLight, that was most of what was
+    /// missing.
+    ///
+    /// So a hole is resolved twice, once in each flavour, and the answers are unioned. The index
+    /// rides in the low bytes of a colour that no page would pick.
+    /// </remarks>
+    internal static string ColourSentinel(int index) => "#0F" + index.ToString("X4", CultureInfo.InvariantCulture);
+
+    /// <summary>The hole a colour sentinel stands for, or -1 when it is not one.</summary>
+    internal static int ColourHoleOf(string? value)
+    {
+        if (value is not { Length: 7 } || value[0] != '#') return -1;
+        if (!value.StartsWith("#0F", StringComparison.OrdinalIgnoreCase)) return -1;
+        return int.TryParse(value.AsSpan(3), System.Globalization.NumberStyles.HexNumber,
+                            CultureInfo.InvariantCulture, out var n) && n < 10000 ? n : -1;
+    }
+
     internal static string Sentinel(int index)
         => (SentinelBase + index).ToString(CultureInfo.InvariantCulture);
 
@@ -536,7 +570,7 @@ internal sealed class Markup
     /// has eight shapes, and the caller lays out and emits the ones it decides are reachable.
     /// </param>
     /// <param name="rows">How many times to emit a repeated row.</param>
-    internal string Skeleton(IReadOnlyList<bool>? taken = null, int rows = 1)
+    internal string Skeleton(IReadOnlyList<bool>? taken = null, int rows = 1, bool colours = false)
     {
         var sb = new StringBuilder();
         // Counted here rather than during the analysis: a registration inside a repeat happens once
@@ -553,7 +587,7 @@ internal sealed class Markup
                 switch (part)
                 {
                     case Fixed f: sb.Append(f.Text); break;
-                    case Hole h: sb.Append(Sentinel(h.Index)); break;
+                    case Hole h: sb.Append(colours ? ColourSentinel(h.Index) : Sentinel(h.Index)); break;
                     case Push p:
                         counts.TryGetValue(p.List, out var had);
                         counts[p.List] = had + 1;
