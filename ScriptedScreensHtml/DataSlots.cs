@@ -34,7 +34,14 @@ internal sealed class DataSlots
         /// <summary>Text goes through as a string; everything else is a number the scene reads.</summary>
         public readonly bool IsText;
 
-        public Target(string slot, double bias, bool isText) { Slot = slot; Bias = bias; IsText = isText; }
+        /// <summary>
+        /// What the value is multiplied by before the bias is added: 1 for everything except a
+        /// far-edge position, where it is -1. Carried here because a mapping that produced it and a
+        /// consumer that dropped it would put `right` on the wrong side of its parent, silently.
+        /// </summary>
+        public readonly double Scale;
+        public Target(string slot, double bias, bool isText, double scale = 1)
+        { Slot = slot; Bias = bias; IsText = isText; Scale = scale; }
     }
 
     private readonly Dictionary<string, List<Target>> _byKey = new(StringComparer.Ordinal);
@@ -111,7 +118,7 @@ internal sealed class DataSlots
                     var mapped = DomSlots.Map(key, "textContent", box.Value, available);
                     if (!mapped.Mapped) { map.Problem = $"\"{key}\" - {mapped.Problem}"; return map; }
                     for (var i = 0; i < mapped.Slots.Length; i++)
-                        targets.Add(new Target(mapped.Slots[i], mapped.Bias[i], isText: true));
+                        targets.Add(new Target(mapped.Slots[i], mapped.Bias[i], isText: true, mapped.Scale[i]));
                     break;
                 }
 
@@ -122,7 +129,7 @@ internal sealed class DataSlots
                         var mapped = DomSlots.Map(key, "style." + decl.Key, box.Value, available);
                         if (!mapped.Mapped) { map.Problem = $"\"{key}\".{decl.Key} - {mapped.Problem}"; return map; }
                         for (var i = 0; i < mapped.Slots.Length; i++)
-                            targets.Add(new Target(mapped.Slots[i], mapped.Bias[i], isText: false));
+                            targets.Add(new Target(mapped.Slots[i], mapped.Bias[i], isText: false, mapped.Scale[i]));
                     }
                     break;
                 }
@@ -165,7 +172,7 @@ internal sealed class DataSlots
                     foreach (var t in targets)
                         (values ??= New())[t.Slot] = t.IsText
                             ? Shape(t.Slot, entry.Value.Number.ToString("G", CultureInfo.InvariantCulture))
-                            : entry.Value.Number + t.Bias;
+                            : entry.Value.Number * t.Scale + t.Bias;
                     break;
 
                 case SS.UiValueType.Map when entry.Value.Map != null:
@@ -178,9 +185,9 @@ internal sealed class DataSlots
                         var d = entry.Value.Map[i];
                         var t = targets[i];
                         if (d.Value.Type == SS.UiValueType.Number)
-                            (values ??= New())[t.Slot] = d.Value.Number + t.Bias;
+                            (values ??= New())[t.Slot] = d.Value.Number * t.Scale + t.Bias;
                         else if (Length(d.Value.String) is { } n)
-                            (values ??= New())[t.Slot] = n + t.Bias;
+                            (values ??= New())[t.Slot] = n * t.Scale + t.Bias;
                         else
                             (values ??= New())[t.Slot] = d.Value.String ?? string.Empty;
                     }
