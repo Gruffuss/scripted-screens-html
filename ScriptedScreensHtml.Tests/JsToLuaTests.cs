@@ -101,14 +101,10 @@ internal static class JsToLuaTests
     /// </summary>
     private static readonly (string Name, string Source)[] MustRefuse =
     {
-        // A TAGGED template is still refused: a tag is a function taking the pieces and the
-        // values separately, which is a different thing from a template and not translated.
-        ("a tagged template", "function tag(p, v){ return p[0]; } var s = tag`a${1}b`;"),
         ("async/await", "async function f() { await 1; }"),
         ("a generator", "function* g() { yield 1; }"),
         ("a real regular expression", "var s = 'a1'.replace(/[0-9]+/g, '');"),
         ("an undeclared name", "missingThing.doSomething();"),
-        ("a labelled break", "outer: for (var i = 0; i < 2; i++) { break outer; }"),
     };
 
     /// <summary>

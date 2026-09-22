@@ -42,6 +42,10 @@ internal sealed class JsToLua
     private int _loop;
     /// <summary>The label a `continue` here belongs to: the ENCLOSING loop, saved and restored.</summary>
     private int _enclosing;
+    /// <summary>A source label to the loop it names, for `break outer` and `continue outer`.</summary>
+    private readonly Dictionary<string, int> _labels = new(StringComparer.Ordinal);
+    /// <summary>Loops something jumped out of, so only those get a break label emitted after them.</summary>
+    private readonly HashSet<int> _broke = new();
     /// <summary>Whether emission is in the script's own top-level statement list.</summary>
     private bool _top = true;
     /// <summary>The name `this` refers to, set only inside a getter body.</summary>
@@ -486,6 +490,40 @@ internal sealed class JsToLua
                 Line("error(" + Expr(th.Argument) + ", 0)");
                 break;
 
+            case LabeledStatement labelled:
+                {
+                    // `outer: for (...) { ... break outer; }`. Lua has no labelled loop, but it has
+                    // goto - so the label becomes a target placed AFTER the loop, and a labelled
+                    // break jumps there. The loop this label names is the next one to be numbered,
+                    // which is why the name is recorded before the body is emitted.
+                    var named = _loop + 1;
+                    _labels[labelled.Label.Name] = named;
+                    Statement(labelled.Body);
+                    // Only emitted when something actually jumped here: Lua rejects a label that is
+                    // the last statement of a block, and an unused one is noise in the output.
+                    if (_broke.Remove(named))
+                        Line("::break" + named.ToString(CultureInfo.InvariantCulture) + "::");
+                    _labels.Remove(labelled.Label.Name);
+                    break;
+                }
+
+            case BreakStatement { Label: { } target } when _labels.TryGetValue(target.Name, out var toLoop):
+                _broke.Add(toLoop);
+                Line("goto break" + toLoop.ToString(CultureInfo.InvariantCulture));
+                break;
+
+            case ContinueStatement { Label: { } target } when _labels.TryGetValue(target.Name, out var toLoop):
+                Line("goto continue" + toLoop.ToString(CultureInfo.InvariantCulture));
+                break;
+
+            case BreakStatement { Label: { } unknown }:
+                Unsupported(s, "`break " + unknown.Name + "`, which names no enclosing loop");
+                break;
+
+            case ContinueStatement { Label: { } unknown }:
+                Unsupported(s, "`continue " + unknown.Name + "`, which names no enclosing loop");
+                break;
+
             case ContinueStatement when _enclosing == 0:
                 Unsupported(s, "`continue` outside a loop");
                 break;
@@ -557,6 +595,7 @@ internal sealed class JsToLua
         var setters = new List<string>();
         var statics = new List<string>();
         var fields = new List<string>();
+        var blocks = new List<string>();
 
         foreach (var element in node.Body.Body)
         {
@@ -590,8 +629,11 @@ internal sealed class JsToLua
                         break;
                     }
 
-                case StaticBlock:
-                    Unsupported(element, "a static initialisation block");
+                case StaticBlock block:
+                    // `static { ... }` runs once when the class is defined, with `this` bound to the
+                    // class itself - so it is emitted as a function handed the class after js_class
+                    // has built it, rather than as part of any instance.
+                    blocks.Add(Lambda(new NodeList<Node>(), block, Self));
                     break;
 
                 default:
@@ -616,11 +658,25 @@ internal sealed class JsToLua
         var sb = new StringBuilder("(function()\n");
         sb.Append(indent).Append("local ").Append(baseName).Append(" = ")
           .Append(node.SuperClass == null ? "nil" : Expr(node.SuperClass)).Append('\n');
-        sb.Append(indent).Append("return js_class(").Append(Quote(name)).Append(", ").Append(baseName)
-          .Append(", ").Append(Table(methods))
-          .Append(", ").Append(Table(getters))
-          .Append(", ").Append(Table(setters))
-          .Append(", ").Append(Table(statics)).Append(")\n");
+        var built = "js_class(" + Quote(name) + ", " + baseName
+                  + ", " + Table(methods)
+                  + ", " + Table(getters)
+                  + ", " + Table(setters)
+                  + ", " + Table(statics) + ")";
+        if (blocks.Count == 0)
+        {
+            sb.Append(indent).Append("return ").Append(built).Append('\n');
+        }
+        else
+        {
+            var cls = "__cls" + (_classes + 1).ToString(CultureInfo.InvariantCulture);
+            sb.Append(indent).Append("local ").Append(cls).Append(" = ").Append(built).Append('\n');
+            // Leading semicolon: Lua reads `local x = f()\n(g)(x)` as calling the result of f, so a
+            // statement starting with a parenthesis has to be separated explicitly.
+            foreach (var block in blocks)
+                sb.Append(indent).Append(";(").Append(block).Append(")(").Append(cls).Append(")\n");
+            sb.Append(indent).Append("return ").Append(cls).Append('\n');
+        }
         return sb.Append(new string(' ', _depth * 2)).Append("end)()").ToString();
 
         static string Table(List<string> entries) => entries.Count == 0 ? "nil" : "{ " + string.Join(", ", entries) + " }";
@@ -1377,11 +1433,30 @@ internal sealed class JsToLua
             case TemplateLiteral tpl:
                 return Template(tpl);
 
-            case TaggedTemplateExpression:
-                // A tag is a function taking the pieces and the values separately, which is a
-                // different thing from a template and worth naming rather than lumping in with
-                // "TaggedTemplateExpression is not translatable".
-                return Fail(e, "a tagged template");
+            case TaggedTemplateExpression tagged:
+                {
+                    // `tag`a${x}b`` calls tag with the literal pieces as an array and the values as
+                    // the remaining arguments. The array carries `raw` because that is what every
+                    // real tag function reads; cooked and raw differ only in escape processing,
+                    // which this parser has already done, so both hold the same strings.
+                    var quasi = tagged.Quasi;
+                    var pieces = new StringBuilder("js_array({");
+                    for (var i = 0; i < quasi.Quasis.Count; i++)
+                    {
+                        if (i > 0) pieces.Append(", ");
+                        pieces.Append('[').Append(i.ToString(CultureInfo.InvariantCulture)).Append("] = ")
+                              .Append(Quote(quasi.Quasis[i].Value.Cooked ?? quasi.Quasis[i].Value.Raw));
+                    }
+                    pieces.Append("}, ").Append(quasi.Quasis.Count.ToString(CultureInfo.InvariantCulture)).Append(')');
+
+                    // Built inline rather than through a prelude helper: `raw` has to be a property
+                    // OF the pieces array, which is one statement, and a helper for one statement is
+                    // a name to keep in step with the manifest for no gain.
+                    var call = new StringBuilder("(function() local __q = ").Append(pieces)
+                                   .Append(" __q.raw = __q return ").Append(Expr(tagged.Tag)).Append("(__q");
+                    foreach (var hole in quasi.Expressions) call.Append(", ").Append(Expr(hole));
+                    return call.Append(") end)()").ToString();
+                }
 
             case ChainExpression chain:
                 return Chain(chain);
@@ -1592,6 +1667,13 @@ internal sealed class JsToLua
 
     private string Member(MemberExpression m)
     {
+        // `this.#count`. A private name is not reachable from outside the class in JavaScript, and
+        // nothing here enforces that - but the NAME is distinct from any public one, so a class with
+        // both `#x` and `x` keeps them apart, which is the part that would corrupt data if it did
+        // not hold.
+        if (m is { Computed: false, Property: PrivateIdentifier priv })
+            return Expr(m.Object) + "[" + Quote("#" + priv.Name) + "]";
+
         var obj = Expr(m.Object);
         // Lua indexes a name, a call or a parenthesised expression - not a bare literal. `({a:7}).a`
         // would emit `{["a"] = 7}.a`, which does not parse.

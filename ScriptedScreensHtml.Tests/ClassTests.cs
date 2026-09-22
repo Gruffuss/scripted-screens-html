@@ -106,8 +106,14 @@ internal static class ClassTests
         Lua("class S { static go() { return this.x; } }", out var problems);
         check(problems.Count > 0, "class: `this` in a static method is reported, not guessed");
 
-        Lua("class S { static { this.x = 1; } }", out problems);
-        check(problems.Count > 0, "class: a static initialisation block is reported");
+        // A static block used to be reported. It runs once against the class itself, which is a
+        // thing this compiler can express, so it is translated now.
+        var blockLua = Lua("class S { static x = 0; static { this.x = 1; } }", out problems);
+        check(blockLua != null && problems.Count == 0,
+              "class: a static initialisation block translates"
+              + (problems.Count > 0 ? "\n    " + string.Join("\n    ", problems) : ""));
+        check(blockLua != null && blockLua.Contains("__cls", StringComparison.Ordinal),
+              "class: a static block runs against the class, not an instance");
 
         Lua("var k = 'go'; class S { [k]() { return 1; } }", out problems);
         check(problems.Count > 0, "class: a computed member name is reported");
