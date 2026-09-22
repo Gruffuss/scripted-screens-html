@@ -65,7 +65,7 @@ internal sealed class JsToLua
         "undefined", "requestAnimationFrame", "setTimeout", "setInterval", "clearInterval", "Object",
         "location", "Map", "Set", "WeakMap", "WeakSet", "Error", "TypeError", "RangeError", "Array",
         "RegExp", "clearTimeout", "cancelAnimationFrame", "addEventListener", "removeEventListener",
-        "getComputedStyle",
+        "getComputedStyle", "globalThis",
     };
 
     /// <summary>
@@ -416,6 +416,13 @@ internal sealed class JsToLua
                 foreach (var inner in b.Body) if (inner is Statement st) Statement(st);
                 break;
 
+            case ReturnStatement r when _tryReturn is { } carry:
+                // Inside a pcall closure: record the value and leave the closure. Try() does the
+                // real return afterwards, or the page's value would be swallowed by the pcall.
+                Line(carry.Flag + ", " + carry.Value + " = true, " + (r.Argument == null ? "nil" : Expr(r.Argument)));
+                Line("return");
+                break;
+
             case ReturnStatement r:
                 // `do ... end` because Lua allows `return` only as a block's last statement, and an
                 // early return in the middle of a JS function is ordinary.
@@ -688,6 +695,24 @@ internal sealed class JsToLua
             case Operator.MultiplicationAssignment: Line(target + " = " + target + " * (" + value + ")"); break;
             case Operator.DivisionAssignment: Line(target + " = " + target + " / (" + value + ")"); break;
             case Operator.RemainderAssignment: Line(target + " = math.fmod(" + target + ", " + value + ")"); break;
+            case Operator.BitwiseAndAssignment: Line(target + " = js_band(" + target + ", " + value + ")"); break;
+            case Operator.BitwiseOrAssignment: Line(target + " = js_bor(" + target + ", " + value + ")"); break;
+            case Operator.BitwiseXorAssignment: Line(target + " = js_bxor(" + target + ", " + value + ")"); break;
+            case Operator.LeftShiftAssignment: Line(target + " = js_shl(" + target + ", " + value + ")"); break;
+            case Operator.RightShiftAssignment: Line(target + " = js_shr(" + target + ", " + value + ")"); break;
+            case Operator.UnsignedRightShiftAssignment: Line(target + " = js_ushr(" + target + ", " + value + ")"); break;
+            case Operator.ExponentiationAssignment: Line(target + " = (" + target + ") ^ (" + value + ")"); break;
+
+            // `a ??= b` assigns only when a is null or undefined; `||=` and `&&=` test truthiness.
+            // All three are SHORT CIRCUITING - the right side must not be evaluated otherwise, which
+            // is the whole reason a page writes them.
+            case Operator.NullishCoalescingAssignment:
+                Line("if " + target + " == nil then " + target + " = " + value + " end"); break;
+            case Operator.LogicalOrAssignment:
+                Line("if not js_truthy(" + target + ") then " + target + " = " + value + " end"); break;
+            case Operator.LogicalAndAssignment:
+                Line("if js_truthy(" + target + ") then " + target + " = " + value + " end"); break;
+
             default: Unsupported(a, "the " + a.Operator + " operator"); break;
         }
     }
@@ -700,20 +725,96 @@ internal sealed class JsToLua
     /// Each of those is reported rather than emitted, because on these pages <c>try</c> only ever
     /// guards localStorage and JSON - a plain fallback, which this shape does serve correctly.
     /// </summary>
+    /// <summary>
+    /// <c>try</c>, which is Lua's <c>pcall</c> around a closure - and the closure is the whole
+    /// difficulty.
+    /// </summary>
+    /// <remarks>
+    /// Three things do not survive being wrapped in a function, and each was previously refused or,
+    /// worse, silently wrong:
+    ///
+    /// <b>Declarations.</b> A <c>var</c> inside the block became a local of the closure and vanished
+    /// at its end, so the whole of <c>try { var a = 1; } catch (e) {}</c> - the most ordinary shape
+    /// there is - was refused. The names are declared BEFORE the pcall and the statements inside
+    /// assign them, which is what JavaScript's own hoisting does anyway.
+    ///
+    /// <b>The error.</b> <c>pcall</c> returns success AND the error, and only success was being
+    /// read - so <c>catch (e)</c> left <c>e</c> as an unset global. It compiled, it ran, and the
+    /// handler saw nothing. Now the second return value is bound to the catch parameter.
+    ///
+    /// <b>Returning.</b> A <c>return</c> inside the closure returns from the CLOSURE, not from the
+    /// function the page wrote it in, so the value was swallowed. A flag and a value carry it out
+    /// and the real return happens after. Two locals rather than a table, because this is on the
+    /// per-frame path of any page that guards work with a try.
+    ///
+    /// <c>break</c> and <c>continue</c> still cannot cross the boundary - Lua's goto may not leave a
+    /// function - and are reported rather than quietly dropped.
+    /// </remarks>
     private void Try(TryStatement t)
     {
-        if (t.Finalizer != null) Unsupported(t, "a `finally` block");
-        foreach (var inner in Escapes(t.Block)) Unsupported(inner, "`" + inner.Type + "` inside a `try` block");
+        foreach (var inner in Escapes(t.Block))
+            Unsupported(inner, "`" + inner.Type + "` inside a `try` block, which cannot leave a pcall");
 
-        Line("local __ok = pcall(function()");
+        var mine = ++_loop;
+        var id = mine.ToString(CultureInfo.InvariantCulture);
+        var ok = "__ok" + id;
+        var err = "__err" + id;
+        var returned = "__ret" + id;
+        var value = "__val" + id;
+
+        // Declared out here so they outlive the closure, and marked hoisted so the statements inside
+        // assign rather than redeclare.
+        var names = Hoistable(t.Block.Body);
+        var wasHoisted = _hoisted;
+        if (names.Count > 0)
+        {
+            _hoisted = new HashSet<string>(wasHoisted, StringComparer.Ordinal);
+            foreach (var n in names) _hoisted.Add(n);
+            for (var i = 0; i < names.Count; i += 40)
+                Line("local " + string.Join(", ", names.GetRange(i, Math.Min(40, names.Count - i))));
+        }
+
+        var returns = Returns(t.Block);
+        if (returns) Line("local " + returned + ", " + value + " = false, nil");
+
+        var wasTry = _tryReturn;
+        _tryReturn = returns ? (returned, value) : null;
+        Line("local " + ok + ", " + err + " = pcall(function()");
         _depth++; Statement(t.Block); _depth--;
         Line("end)");
+        _tryReturn = wasTry;
+        _hoisted = wasHoisted;
+
         if (t.Handler != null)
         {
-            Line("if not __ok then");
-            _depth++; Statement(t.Handler.Body); _depth--;
+            Line("if not " + ok + " then");
+            _depth++;
+            if (t.Handler.Param is Identifier caught)
+            {
+                _known.Add(caught.Name);
+                Line("local " + Safe(caught.Name) + " = " + err);
+            }
+            Statement(t.Handler.Body);
+            _depth--;
             Line("end");
         }
+
+        // `finally` runs whether or not the block threw, and before the return leaves.
+        if (t.Finalizer != null) Statement(t.Finalizer);
+
+        // An uncaught error still has to propagate, or a page swallows every fault it did not
+        // handle and looks merely frozen.
+        if (t.Handler == null) Line("if not " + ok + " then error(" + err + ", 0) end");
+        if (returns) Line("if " + returned + " then return " + value + " end");
+    }
+
+    /// <summary>Where a `return` inside a pcall closure puts its value, or null outside one.</summary>
+    private (string Flag, string Value)? _tryReturn;
+
+    private static bool Returns(Node block)
+    {
+        foreach (var n in Walk(block)) if (n is ReturnStatement) return true;
+        return false;
     }
 
     /// <summary>Statements in a try block whose effect escapes it, which a pcall closure swallows.</summary>
@@ -721,7 +822,9 @@ internal sealed class JsToLua
     {
         foreach (var n in Walk(block))
         {
-            if (n is ReturnStatement or BreakStatement or ContinueStatement or VariableDeclaration) yield return n;
+            // `return` is carried out by Try(); a loop jump cannot be, because Lua's goto may not
+            // cross a function boundary and there is nowhere for it to land.
+            if (n is BreakStatement or ContinueStatement) yield return n;
             // a nested function's own return is its own business
             if (n is FunctionDeclaration or FunctionExpression or ArrowFunctionExpression) break;
         }
@@ -1211,6 +1314,21 @@ internal sealed class JsToLua
 
             case ArrayExpression arr:
                 {
+                    var spreads = false;
+                    foreach (var el in arr.Elements) if (el is SpreadElement) { spreads = true; break; }
+                    if (spreads)
+                    {
+                        // `[a, ...xs, b]` - the length is not known here, so the pieces are joined
+                        // at run time rather than indexed into a literal.
+                        var into = new StringBuilder("js_concat(");
+                        for (var i = 0; i < arr.Elements.Count; i++)
+                        {
+                            if (i > 0) into.Append(", ");
+                            into.Append(arr.Elements[i] is SpreadElement element
+                                ? "js_spread_of(" + Expr(element.Argument) + ")" : Expr(arr.Elements[i]));
+                        }
+                        return into.Append(')').ToString();
+                    }
                     var sb = new StringBuilder("js_array({");
                     for (var i = 0; i < arr.Elements.Count; i++)
                     {
@@ -1264,6 +1382,20 @@ internal sealed class JsToLua
                 // different thing from a template and worth naming rather than lumping in with
                 // "TaggedTemplateExpression is not translatable".
                 return Fail(e, "a tagged template");
+
+            case ChainExpression chain:
+                return Chain(chain);
+
+            case SequenceExpression seq:
+                {
+                    // `(a, b)` evaluates both and yields the last. The earlier ones are there for
+                    // their side effects, so they are evaluated rather than dropped.
+                    var sb = new StringBuilder("(function() ");
+                    for (var i = 0; i < seq.Expressions.Count - 1; i++)
+                        sb.Append("local _ = ").Append(Expr(seq.Expressions[i])).Append(' ');
+                    return sb.Append("return ").Append(Expr(seq.Expressions[seq.Expressions.Count - 1]))
+                             .Append(" end)()").ToString();
+                }
 
             case ClassExpression ce:
                 return Class(ce, ce.Id?.Name ?? "(anonymous)");
@@ -1321,6 +1453,7 @@ internal sealed class JsToLua
     {
         var fields = new StringBuilder("{");
         var getters = new StringBuilder();
+        var setters = new StringBuilder();
         var merge = new List<string>();
         var fieldCount = 0;
 
@@ -1354,7 +1487,14 @@ internal sealed class JsToLua
                 getters.Append('[').Append(Quote(key)).Append("] = ").Append(Lambda(g.Params, g.Body, "self"));
                 continue;
             }
-            if (prop.Kind != PropertyKind.Init) { Unsupported(p, "a setter"); continue; }
+            if (prop.Kind == PropertyKind.Set)
+            {
+                if (prop.Value is not FunctionExpression st) { Unsupported(p, "a setter that is not a function"); continue; }
+                if (setters.Length > 0) setters.Append(", ");
+                setters.Append('[').Append(Quote(key)).Append("] = ").Append(Lambda(st.Params, st.Body, "self"));
+                continue;
+            }
+            if (prop.Kind != PropertyKind.Init) { Unsupported(p, "a " + prop.Kind + " property"); continue; }
 
             if (fieldCount > 0) fields.Append(", ");
             fieldCount++;
@@ -1365,6 +1505,10 @@ internal sealed class JsToLua
         var body = merge.Count > 0
             ? "js_merge(" + string.Join(", ", merge) + (fieldCount > 0 ? ", " + fields : "") + ")"
             : fields.ToString();
+        // A setter needs __newindex, which costs a Lua call on EVERY write to the object, so an
+        // object with only getters keeps the cheaper form.
+        if (setters.Length > 0)
+            return "js_accessors(" + body + ", {" + getters + "}, {" + setters + "})";
         return getters.Length > 0 ? "js_getters(" + body + ", {" + getters + "})" : body;
     }
 
@@ -1382,6 +1526,69 @@ internal sealed class JsToLua
         _receiver = hadReceiver;
         return header + "\n" + inner + new string(' ', _depth * 2) + "end";
     }
+
+    /// <summary>
+    /// <c>a?.b.c</c> and <c>f?.()</c>: a chain that stops at the first link that is not there.
+    /// </summary>
+    /// <remarks>
+    /// The short circuit is the whole point and it covers the WHOLE chain, not one link: in
+    /// JavaScript <c>a?.b.c</c> yields undefined when <c>a</c> is nullish rather than faulting on
+    /// <c>.c</c>. So the steps are walked in order and the first nil ends it - which is also why
+    /// this cannot be a chain of Lua `and`s, since those would yield false rather than nil and would
+    /// stop on any falsy value rather than only on a missing one.
+    /// </remarks>
+    private string Chain(ChainExpression chain)
+    {
+        var steps = new List<Node>();
+        for (Node at = chain.Expression; ;)
+        {
+            steps.Add(at);
+            if (at is MemberExpression m) at = m.Object;
+            else if (at is CallExpression c) at = c.Callee;
+            else break;
+        }
+        steps.Reverse();
+
+        var held = "__c" + (++_loop).ToString(CultureInfo.InvariantCulture);
+        var sb = new StringBuilder("(function() local ").Append(held).Append(" = ").Append(Expr((Expression)steps[0]));
+
+        for (var i = 1; i < steps.Count; i++)
+        {
+            sb.Append(" if ").Append(held).Append(" == nil then return nil end ");
+            switch (steps[i])
+            {
+                case MemberExpression m:
+                    sb.Append(held).Append(" = ").Append(held)
+                      .Append(m.Computed ? "[" + Expr(m.Property) + "]" : "[" + Quote(NameOf(m.Property)) + "]");
+                    break;
+                case CallExpression call:
+                    {
+                        var args = new StringBuilder();
+                        foreach (var a in call.Arguments)
+                        {
+                            if (args.Length > 0) args.Append(", ");
+                            args.Append(Expr(a));
+                        }
+                        // The receiver for a method call through a chain is the object the previous
+                        // step came from, and it has already been consumed - so a chained method call
+                        // goes through the dispatcher on the value itself.
+                        sb.Append(held).Append(" = ").Append(held).Append('(').Append(args).Append(')');
+                        break;
+                    }
+                default:
+                    return Fail(chain, "an optional chain through " + steps[i].Type);
+            }
+        }
+        return sb.Append(" return ").Append(held).Append(" end)()").ToString();
+    }
+
+    private static string NameOf(Node property) => property switch
+    {
+        Identifier i => i.Name,
+        PrivateIdentifier p => "#" + p.Name,
+        StringLiteral s => s.Value,
+        _ => "?",
+    };
 
     private string Member(MemberExpression m)
     {
@@ -1429,6 +1636,22 @@ internal sealed class JsToLua
             Operator.LessThanOrEqual => "(" + l + " <= " + r + ")",
             Operator.GreaterThan => "(" + l + " > " + r + ")",
             Operator.GreaterThanOrEqual => "(" + l + " >= " + r + ")",
+
+            // Bitwise, through helpers rather than Lua's own operators. JavaScript defines these on
+            // 32-bit signed integers and Lua's are 64-bit, so `~a` and `a << 1` agree for small
+            // positive numbers and diverge everywhere else - silently, and only for the inputs a
+            // page hits in anger. The helpers truncate the way the language says.
+            Operator.BitwiseAnd => "js_band(" + l + ", " + r + ")",
+            Operator.BitwiseOr => "js_bor(" + l + ", " + r + ")",
+            Operator.BitwiseXor => "js_bxor(" + l + ", " + r + ")",
+            Operator.LeftShift => "js_shl(" + l + ", " + r + ")",
+            Operator.RightShift => "js_shr(" + l + ", " + r + ")",
+            Operator.UnsignedRightShift => "js_ushr(" + l + ", " + r + ")",
+
+            // `k in o` asks about a KEY, and on an array about an index rather than a value.
+            Operator.In => "js_in(" + l + ", " + r + ")",
+            Operator.InstanceOf => "js_instanceof(" + l + ", " + r + ")",
+
             _ => Fail(b, "the " + b.Operator + " operator"),
         };
     }
@@ -1440,6 +1663,7 @@ internal sealed class JsToLua
             Operator.UnaryNegation => "(-(" + Expr(u.Argument) + "))",
             Operator.UnaryPlus => "js_num(" + Expr(u.Argument) + ")",
             Operator.LogicalNot => "(not " + Truthy(u.Argument) + ")",
+            Operator.BitwiseNot => "js_bnot(" + Expr(u.Argument) + ")",
             // `typeof x` is legal on a name nothing declares - it is how a page asks whether a host
             // object exists at all - so this is the one place an unknown name is not a problem.
             Operator.TypeOf => "js_typeof(" + (u.Argument is Identifier n && !_known.Contains(n.Name) && !Provided.Contains(n.Name)
@@ -1456,12 +1680,30 @@ internal sealed class JsToLua
     {
         var args = new StringBuilder();
         var first = true;
-        foreach (var a in c.Arguments)
+        var spread = false;
+        foreach (var a in c.Arguments) if (a is SpreadElement) { spread = true; break; }
+        if (spread)
         {
-            if (a is SpreadElement) { Unsupported(a, "a spread argument"); continue; }
-            if (!first) args.Append(", ");
-            first = false;
-            args.Append(Expr(a));
+            // `f(a, ...xs, b)`. The pieces are gathered into one array and unpacked, which is
+            // correct wherever the spread sits - Lua only expands a call's LAST expression, so
+            // emitting table.unpack in place would silently drop everything after it.
+            args.Append("js_spread(js_concat(");
+            foreach (var a in c.Arguments)
+            {
+                if (!first) args.Append(", ");
+                first = false;
+                args.Append(a is SpreadElement spreadArg ? "js_spread_of(" + Expr(spreadArg.Argument) + ")" : Expr(a));
+            }
+            args.Append("))");
+        }
+        else
+        {
+            foreach (var a in c.Arguments)
+            {
+                if (!first) args.Append(", ");
+                first = false;
+                args.Append(Expr(a));
+            }
         }
         // `super(...)` and `super.method(...)`: both are a call on the BASE's prototype with this
         // instance as the receiver, which is what makes an inherited constructor or an overridden

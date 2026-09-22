@@ -8,6 +8,9 @@
         <RootNamespace>ScriptedScreensHtml.Tests</RootNamespace>
         <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
         <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <NoWarn>$(NoWarn);CS0618;CS8618;CS8625;CA1416</NoWarn>
+        <Managed>$(SteamLibraryDirectory)\Stationeers\rocketstation_Data\Managed</Managed>
     </PropertyGroup>
     <ItemGroup>
         <!-- The parsers are Unity-free on purpose so they compile here from source. -->
@@ -22,6 +25,24 @@
         <Compile Include="..\ScriptedScreensHtml\CompiledPage.cs" />
         <Compile Include="..\ScriptedScreensHtml\Motion.cs" />
         <Compile Include="..\ScriptedScreensHtml\Markup.cs" />
+        <!-- The CSS probe asks whether a property changes the DRAWING, which only the real cascade
+             and the real emitter can answer, so it needs the Unity-bound half of the pipeline too.
+             Stubs.cs is the bench's: the three mod singletons, standing in outside the game. -->
+        <Compile Include="..\ScriptedScreensHtml\Yoga\**\*.cs" />
+        <Compile Include="..\ScriptedScreensHtml\Dom.cs" />
+        <Compile Include="..\ScriptedScreensHtml\DomStyle.cs" />
+        <Compile Include="..\ScriptedScreensHtml\StyleApplier.cs" />
+        <Compile Include="..\ScriptedScreensHtml\HtmlRenderer.cs" />
+        <Compile Include="..\ScriptedScreensHtml\GridLayout.cs" />
+        <Compile Include="..\ScriptedScreensHtml\PostLayout.cs" />
+        <Compile Include="..\ScriptedScreensHtml\OffThread.cs" />
+        <Compile Include="..\ScriptedScreensHtml\SvgElement.cs" />
+        <Compile Include="..\ScriptedScreensHtml\CanvasElement.cs" />
+        <Compile Include="..\ScriptedScreensHtml\Animation.cs" />
+        <Compile Include="..\ScriptedScreensHtml\Tweens.cs" />
+        <Compile Include="..\ScriptedScreensHtml\VectorEmitter.cs" />
+        <Compile Include="..\ScriptedScreensHtml.Bench\Stubs.cs" />
+        <Compile Include="CssLanguage.cs" />
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />
         <Compile Include="Probe2.cs" />
@@ -31,6 +52,7 @@
         <Compile Include="MotionProbe.cs" />
         <Compile Include="MotionTests.cs" />
         <Compile Include="Corpus.cs" />
+        <Compile Include="Language.cs" />
         <Compile Include="ClassTests.cs" />
         <Compile Include="SyntaxTests.cs" />
         <Compile Include="MarkupProbe.cs" />
@@ -45,6 +67,12 @@
       <Reference Include="Lua">
         <HintPath>$(SteamLibraryDirectory)\..\workshop\content\544550\3659911735\Lua.dll</HintPath>
       </Reference>
+      <Reference Include="UnityEngine.CoreModule"><HintPath>$(Managed)\UnityEngine.CoreModule.dll</HintPath></Reference>
+      <Reference Include="UnityEngine.UIElementsModule"><HintPath>$(Managed)\UnityEngine.UIElementsModule.dll</HintPath></Reference>
+      <Reference Include="UnityEngine.TextRenderingModule"><HintPath>$(Managed)\UnityEngine.TextRenderingModule.dll</HintPath></Reference>
+      <Reference Include="Unity.TextMeshPro"><HintPath>$(Managed)\Unity.TextMeshPro.dll</HintPath></Reference>
+      <Reference Include="UnityEngine.TextCoreTextEngineModule"><HintPath>$(Managed)\UnityEngine.TextCoreTextEngineModule.dll</HintPath></Reference>
+      <Reference Include="UnityEngine.TextCoreFontEngineModule"><HintPath>$(Managed)\UnityEngine.TextCoreFontEngineModule.dll</HintPath></Reference>
     </ItemGroup>
   <ItemGroup>
     <!-- A scene captured from the running game, so the mapping is checked against what the emitter

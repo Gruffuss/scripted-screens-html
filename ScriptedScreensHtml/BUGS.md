@@ -43,6 +43,12 @@ It is why the project's rule is to fail toward a loud refusal rather than toward
 | 21 | **Every ternary was treated as a choice of shapes.** | `Markup.cs` | `(on ? 'var(--cb-live)' : 'transparent')` inside a style attribute picks a colour, not a shape — but counting it as structure gave AtmoDark 119 choices, which is 2^119 scenes to emit, against the 23 the page really has. A branch whose sides contain no markup is a value and gets one slot. 149 → 6 on AtmoApple. |
 | 22 | **A markup reduction that produced no structure said nothing.** | `Markup.cs` | A page whose document is built in a loop reduced to a single hole and no tags, and the caller got "1 hole, 4 characters" with no problem reported — indistinguishable from a page that genuinely has almost no markup. It now says the markup is computed rather than built from literals. |
 
+| 23 | **`try { var a = 1; } catch (e) {}` — the most ordinary shape there is — was refused outright.** | `JsToLua.cs` | `try` compiles to `pcall(function() ... end)`, so a declaration inside became a local of the closure and vanished. Names are now declared before the pcall. |
+| 24 | **`catch (e)` never bound `e`.** | `JsToLua.cs` | `pcall` returns success AND the error and only success was read, so the handler saw an unset global. It compiled, it ran, and every catch block was blind. Silent-failure family again. |
+| 25 | **A `return` inside a `try` was swallowed.** | `JsToLua.cs` | It returned from the pcall closure, not from the function the page wrote it in. A flag and a value carry it out now. |
+| 26 | **An uncaught error inside `try`/`finally` was discarded.** | `JsToLua.cs` | With no catch clause the pcall absorbed the fault and execution continued, so a page with a genuine error looked merely frozen. It re-raises. |
+| 27 | **I nearly shipped a prelude that would not parse.** | `JsPrelude.lua` | Bitwise was written with Lua 5.3's `&` `\|` `<<`, which the interpreter the game embeds does not have. A prelude that fails to parse takes down EVERY page, not just ones doing bitwise. Caught only by the test that runs each page under that same interpreter — the standalone `lua` on PATH accepted it happily. Rewritten as arithmetic and checked against JavaScript's own answers for `& \| ^ ~ << >> >>>`. |
+
 ---
 
 ## Not bugs, recorded so they are not re-investigated

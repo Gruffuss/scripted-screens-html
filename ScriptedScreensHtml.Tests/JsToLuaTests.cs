@@ -107,11 +107,8 @@ internal static class JsToLuaTests
         ("async/await", "async function f() { await 1; }"),
         ("a generator", "function* g() { yield 1; }"),
         ("a real regular expression", "var s = 'a1'.replace(/[0-9]+/g, '');"),
-        ("a spread argument", "function f() {} var xs = [1]; f(...xs);"),
         ("an undeclared name", "missingThing.doSomething();"),
         ("a labelled break", "outer: for (var i = 0; i < 2; i++) { break outer; }"),
-        ("optional chaining", "var o = {}; var v = o?.a?.b;"),
-        ("getters on a class", "var o = { set x(v) { this._x = v; } };"),
     };
 
     /// <summary>

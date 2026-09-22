@@ -123,6 +123,138 @@ function js_getters(fields, getters)
   end })
 end
 
+-- ---- bitwise ----------------------------------------------------------------------------------
+--
+-- JavaScript's bitwise operators are defined on 32-bit signed integers: both operands are truncated
+-- to int32, the operation is done there, and the result comes back as a signed 32-bit number. Lua's
+-- own operators are 64-bit, so `~a` and `a << 1` agree with JavaScript for small positive numbers
+-- and diverge everywhere else - silently, and only for the inputs a page hits in anger.
+--
+-- The one exception is `>>>`, which is the only operator that yields an UNSIGNED result, so it is
+-- the only one that does not come back through ToInt32.
+
+local function to_uint32(v)
+  v = js_num(v)
+  if v ~= v or v == math.huge or v == -math.huge then return 0 end
+  v = v < 0 and -floor(-v) or floor(v)
+  v = v % 4294967296
+  if v < 0 then v = v + 4294967296 end
+  return v
+end
+
+local function to_int32(v)
+  local n = to_uint32(v)
+  if n >= 2147483648 then n = n - 4294967296 end
+  return n
+end
+
+-- Written as arithmetic rather than with Lua's own `&` and `<<`, because the interpreter the game
+-- embeds does not have them: a prelude containing one fails to PARSE, which takes down every page
+-- rather than only the one doing bitwise. Caught by the test that runs each page under that same
+-- interpreter, which is the only thing standing between this and a mod that loads nothing.
+local function pairwise(a, b, op)
+  local x, y = to_uint32(a), to_uint32(b)
+  local result, bit = 0, 1
+  for _ = 1, 32 do
+    local xb, yb = x % 2, y % 2
+    if op(xb, yb) == 1 then result = result + bit end
+    x = (x - xb) / 2
+    y = (y - yb) / 2
+    bit = bit * 2
+    if x == 0 and y == 0 then break end
+  end
+  return result
+end
+
+local function op_and(x, y) if x == 1 and y == 1 then return 1 end return 0 end
+local function op_or(x, y) if x == 1 or y == 1 then return 1 end return 0 end
+local function op_xor(x, y) if x ~= y then return 1 end return 0 end
+
+function js_band(a, b) return to_int32(pairwise(a, b, op_and)) end
+function js_bor(a, b) return to_int32(pairwise(a, b, op_or)) end
+function js_bxor(a, b) return to_int32(pairwise(a, b, op_xor)) end
+function js_bnot(a) return to_int32(4294967295 - to_uint32(a)) end
+
+-- Only the low five bits of the shift count are used, as in JavaScript: `1 << 32` is 1, not 0.
+local function shift_by(b) return to_uint32(b) % 32 end
+
+function js_shl(a, b) return to_int32(to_uint32(a) * (2 ^ shift_by(b)) % 4294967296) end
+function js_shr(a, b)
+  -- Arithmetic shift: the sign is preserved, so -8 >> 1 is -4 rather than a huge positive.
+  local n, by = to_int32(a), shift_by(b)
+  local shifted = n / (2 ^ by)
+  return to_int32(shifted >= 0 and floor(shifted) or -ceil(-shifted) - (n % (2 ^ by) ~= 0 and 1 or 0))
+end
+function js_ushr(a, b) return floor(to_uint32(a) / (2 ^ shift_by(b))) end
+
+-- ---- membership and identity --------------------------------------------------------------------
+
+-- `k in o`. On an array this asks about an INDEX, not a value, which is the part people get wrong -
+-- and which is why `'length' in xs` is true while `1 in [9]` is false for a one-element array.
+function js_in(key, obj)
+  if type(obj) ~= "table" then return false end
+  if type(key) == "number" then
+    local n = obj.length
+    if n ~= nil then return key >= 0 and key < n end
+  end
+  return obj[key] ~= nil
+end
+
+-- `x instanceof C`, walking the chain js_class builds.
+function js_instanceof(value, class)
+  if type(value) ~= "table" or type(class) ~= "table" then return false end
+  local proto = class.__proto
+  if proto == nil then return false end
+  local mt = getmetatable(value)
+  while mt ~= nil do
+    if mt == proto then return true end
+    local base = mt.__baseproto
+    mt = base
+  end
+  return false
+end
+
+-- Spreading an array into an argument list. Bounds are explicit because these arrays are 0-based
+-- with their own length field, which table.unpack cannot infer.
+function js_spread(t)
+  if type(t) ~= "table" then return end
+  return table.unpack(t, 0, (t.length or 0) - 1)
+end
+
+-- `[a, ...xs, b]`: the pieces in order, each either a single value or an array to flatten.
+function js_concat(...)
+  local out, n = {}, 0
+  for i = 1, select("#", ...) do
+    local piece = select(i, ...)
+    if type(piece) == "table" and piece.__spread then
+      local items = piece[1]
+      for k = 0, (items.length or 0) - 1 do out[n] = items[k] n = n + 1 end
+    else
+      out[n] = piece n = n + 1
+    end
+  end
+  return js_array(out, n)
+end
+
+function js_spread_of(items) return { __spread = true, items } end
+
+-- An object literal with setters as well as getters. Separate from js_getters because a plain
+-- __index costs nothing and __newindex on every write does not.
+function js_accessors(fields, getters, setters)
+  return setmetatable(fields, {
+    __index = function(self, key)
+      local g = getters and getters[key]
+      if g then return g(self) end
+      return nil
+    end,
+    __newindex = function(self, key, value)
+      local s = setters and setters[key]
+      if s then s(self, value) return end
+      rawset(self, key, value)
+    end,
+  })
+end
+
 function js_delete(t, k)
   if type(t) == "table" then t[k] = nil end
   return true
@@ -173,6 +305,10 @@ function js_class(name, base, methods, getters, setters, statics)
   if setters ~= nil then for k, v in pairs(setters) do set[k] = v end end
 
   proto.__jsclass = true
+  -- The chain instanceof walks. Flattening the methods means the prototype does not reference its
+  -- base any more, so the relationship has to be recorded separately or `x instanceof Base` is false
+  -- for every subclass instance.
+  proto.__baseproto = base ~= nil and base.__proto or nil
   -- A plain table __index is a raw lookup the VM does itself; the function form costs a Lua call on
   -- every property read, so it is used only by a class that really declares an accessor.
   if next(get) == nil then
@@ -982,6 +1118,9 @@ console = { log = function() end, warn = function() end, error = function() end 
 localStorage = { getItem = function() return nil end, setItem = function() end }
 location = nil
 window = { innerWidth = 0, innerHeight = 0 }
+-- The chunk's own environment. A page uses it to test for a host object without throwing, which is
+-- exactly what it is for; it is NOT the author's globals, which this environment cannot reach.
+globalThis = window
 performance = { now = function() return 0 end }
 JSON = { stringify = js_str, parse = function() return nil end }
 
