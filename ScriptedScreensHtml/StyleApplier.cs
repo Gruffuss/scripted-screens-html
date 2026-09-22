@@ -470,7 +470,7 @@ internal static class StyleApplier
             // The LAYOUT takes it (the box is measured with the spacing) but the scene's label has
             // no word spacing, only cspace - so the box is wide and the text is not. Applied and
             // reported, because half of it does happen.
-            case "word-spacing": s.wordSpacing = Len(v); if (v != "normal" && Num(v) != 0f) Unknown(d, warn); break;
+            case "word-spacing": s.wordSpacing = Len(v); break;
             case "text-overflow": s.textOverflow = v == "ellipsis" ? TextOverflow.Ellipsis : TextOverflow.Clip; break;
             case "text-shadow":
             {
@@ -687,7 +687,6 @@ internal static class StyleApplier
     /// </remarks>
     private static readonly Dictionary<string, string> Dropped = new(StringComparer.Ordinal)
     {
-        ["all"] = "resets every property, which the cascade here cannot undo",
         ["appearance"] = "the controls are drawn, not native, so there is no native look to remove",
         ["accent-color"] = "the drawn controls carry their own colour",
         ["backdrop-filter"] = "nothing is composited behind a shape to filter",
@@ -698,21 +697,13 @@ internal static class StyleApplier
         ["perspective"] = "the scene is 2D",
         ["perspective-origin"] = "the scene is 2D",
         ["transform-style"] = "the scene is 2D",
-        ["border-collapse"] = "table borders are drawn per cell",
-        ["border-spacing"] = "table cells are laid out without separation",
         ["caption-side"] = "a caption stays where it is written",
         ["empty-cells"] = "an empty cell is drawn like any other",
         ["table-layout"] = "columns are always sized from their content",
-        ["columns"] = "the shorthand is not split; set column-count",
         ["column-span"] = "a column-spanning element is laid out in its column",
-        ["clear"] = "there is no float line to clear",
         ["direction"] = "the page is laid out left to right",
-        ["overflow-wrap"] = "a long word is not broken; word-break: break-all is",
-        ["word-wrap"] = "a long word is not broken; word-break: break-all is",
         ["tab-size"] = "a tab is drawn at the face's own width",
-        ["quotes"] = "content: open-quote is not understood, so a quote pair set here would change nothing",
         ["list-style-position"] = "a marker always sits outside the item",
-        ["text-orientation"] = "a vertical label is the whole line turned, so its glyphs turn with it and cannot be set upright one by one",
         ["text-emphasis-style"] = "there are no emphasis marks",
         ["text-emphasis-color"] = "there are no emphasis marks",
         ["text-emphasis-position"] = "there are no emphasis marks",
@@ -720,8 +711,6 @@ internal static class StyleApplier
         ["marker"] = "line markers are not drawn",
         ["zoom"] = "set the design size with <meta name=\"viewport\" content=\"width=N\">",
         // Each of these was parsed, put in the record, and read by nothing - the worst outcome.
-        ["font-variant"] = "small caps are not drawn; use text-transform: uppercase with a smaller size",
-        ["font-variant-caps"] = "small caps are not drawn; use text-transform: uppercase with a smaller size",
         ["column-fill"] = "columns are filled in order, never balanced",
         ["border-image-slice"] = "a border image is stretched over the border box; it is not sliced",
         ["border-image-repeat"] = "a border image is stretched over the border box; it is not tiled",
@@ -729,7 +718,6 @@ internal static class StyleApplier
         ["mask-position"] = "a mask is drawn over the whole box",
         ["mask-repeat"] = "a mask is drawn over the whole box, never tiled",
         ["content-visibility"] = "nothing here skips a subtree, so a hidden one is still drawn",
-        ["word-spacing"] = "the label has no word spacing, only letter-spacing; the box is measured with it and the text drawn without",
     };
 
     private static void Unknown(CssDeclaration d, Action<string>? warn)

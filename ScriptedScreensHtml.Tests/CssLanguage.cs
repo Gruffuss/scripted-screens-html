@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
@@ -100,8 +100,7 @@ internal static class CssLanguage
             // whatever they were set to.
             var runner = new KeyframeRunner(element, frames, spec, 0f, _ => { }, built.CssOf(element), built.Touch);
             runner.Update(0f);
-            runner.Update(0.15f);
-            runner.Update(0.15f);
+            runner.Update(0.3f);
         }
         panel.Layout(size.x, size.y);
 
@@ -520,7 +519,9 @@ internal static class CssLanguage
         P("inset-inline-start", "inset-inline-start:25px", Fix.Abs);
         P("inset-inline-end", "inset-inline-end:25px", Fix.Abs);
         P("float", "float:right");
-        P("clear", "clear:both", Fix.Box, "#q{float:left}");
+        // Fix.Box's container carries an inline `display:flex`, and a float only makes a WRAPPING
+        // row when the page has not said how the box lays out - so there was no line to clear.
+        P("clear", "clear:both", Fix.List, "#r{float:left}");
         P("z-index", "z-index:5");
         P("visibility", "visibility:hidden");
         P("opacity", "opacity:0.4");
@@ -656,7 +657,9 @@ internal static class CssLanguage
         P("border-start-end-radius", "border-start-end-radius:14px");
         P("border-end-start-radius", "border-end-start-radius:14px");
         P("border-end-end-radius", "border-end-end-radius:14px");
-        P("border-collapse", "border-collapse:collapse", Fix.Table);
+        // The cells have no border of their own in the fixture, so collapsing them had nothing to
+        // collapse - the row read as missing whatever the renderer did.
+        P("border-collapse", "border-collapse:collapse", Fix.Table, "#p td{border:2px solid #ff8800}");
         P("border-spacing", "border-spacing:9px", Fix.Table);
         P("border-image", "border-image:linear-gradient(#f00,#00f) 30");
         P("border-image-source", "border-image-source:linear-gradient(#f00,#00f)");
@@ -715,7 +718,7 @@ internal static class CssLanguage
         P("font-kerning", "font-kerning:none");
         P("font-feature-settings", "font-feature-settings:\"tnum\"");
         P("font-optical-sizing", "font-optical-sizing:none");
-        P("font-synthesis", "font-synthesis:none");
+        P("font-synthesis", "font-synthesis:none", Fix.Box, "#p{font-style:italic;font-weight:bold}"); // nothing to refuse to fake unless the fixture asks for a fake
         P("line-height", "line-height:2.4", Fix.Text);
         P("letter-spacing", "letter-spacing:3px");
         P("word-spacing", "word-spacing:6px");
@@ -729,7 +732,7 @@ internal static class CssLanguage
         P("text-decoration-style", "text-decoration-style:dashed", Fix.Box, "#p{text-decoration:underline;height:18px}");
         P("text-decoration-thickness", "text-decoration-thickness:4px", Fix.Box, "#p{text-decoration:underline;height:18px}");
         P("text-underline-offset", "text-underline-offset:4px", Fix.Box, "#p{text-decoration:underline;height:18px}");
-        P("text-underline-position", "text-underline-position:under", Fix.Box, "#p{text-decoration:underline}");
+        P("text-underline-position", "text-underline-position:under", Fix.Box, "#p{text-decoration:underline;height:18px}"); // the line is geometry only on a label that does not wrap, as its siblings above
         P("text-shadow", "text-shadow:2px 2px 3px #ff0000");
         P("text-overflow (longhand)", "text-overflow:clip", Fix.Box, "#p{width:40px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}");
         P("white-space", "white-space:nowrap", Fix.Text);
@@ -794,9 +797,9 @@ internal static class CssLanguage
         const string frames = "@keyframes probe{from{opacity:0.2;transform:translateX(0)}to{opacity:1;transform:translateX(40px)}}";
         P("animation", "animation:probe 2s linear infinite", Fix.Box, frames);
         P("animation-name", "animation-name:probe", Fix.Box, frames + "#p{animation-duration:2s}");
-        P("animation-duration", "animation-duration:2s", Fix.Box, frames + "#p{animation-name:probe}");
+        P("animation-duration", "animation-duration:0.05s", Fix.Box, frames + "#p{animation:probe 100s linear 1}");
         P("animation-delay", "animation-delay:-1s", Fix.Box, frames + "#p{animation:probe 2s linear infinite}");
-        P("animation-iteration-count", "animation-iteration-count:3", Fix.Box, frames + "#p{animation:probe 0.2s linear 1}");
+        P("animation-iteration-count", "animation-iteration-count:3", Fix.Box, frames + "#p{animation:probe 0.25s linear 1}");
         P("animation-direction", "animation-direction:reverse", Fix.Box, frames + "#p{animation:probe 2s linear infinite}");
         P("animation-fill-mode", "animation-fill-mode:backwards", Fix.Box, frames + "#p{animation:probe 2s linear 1 1s}");
         P("animation-play-state", "animation-play-state:paused", Fix.Box, frames + "#p{animation:probe 2s linear infinite}");
@@ -846,7 +849,9 @@ internal static class CssLanguage
         P("touch-action", "touch-action:none");
         P("scrollbar-width", "scrollbar-width:thin", Fix.Clip, "#p{overflow:scroll}");
         P("scrollbar-color", "scrollbar-color:#ff0000 #000000", Fix.Clip, "#p{overflow:scroll}");
-        P("scrollbar-gutter", "scrollbar-gutter:stable", Fix.Clip, "#p{overflow:scroll}");
+        // The gutter is padding, so it only shows on content sized BY the box. Fix.Clip's overflowing
+        // child carries an inline width, which no amount of reserved space moves.
+        P("scrollbar-gutter", "scrollbar-gutter:stable", Fix.Clip, "#p{overflow:scroll}#p>div{width:100% !important}");
         P("scroll-behavior", "scroll-behavior:smooth", Fix.Clip, "#p{overflow:scroll}");
         P("scroll-snap-type", "scroll-snap-type:x mandatory", Fix.Clip, "#p{overflow:scroll}");
         P("scroll-snap-align", "scroll-snap-align:center", Fix.Clip, "#p{overflow:scroll}");
@@ -1028,7 +1033,8 @@ internal static class CssLanguage
         ("@layer named", "@layer base{#p{background-color:#ff0000}}", "", Fix.Box),
         ("@layer anonymous", "@layer{#p{background-color:#ff0000}}", "", Fix.Box),
         ("@scope", "@scope(.w){#p{background-color:#ff0000}}", "", Fix.Box),
-        ("@container", "@container (min-width:10px){#p{background-color:#ff0000}}", "container-type:inline-size", Fix.Box),
+        // the container is an ANCESTOR (#w), never the element itself: on #p this row could not pass even once @container resolves
+        ("@container", "@container (min-width:10px){#p{background-color:#ff0000}}", "#w{container-type:inline-size}", Fix.Box),
         ("@property", "@property --probe{syntax:\"<color>\";inherits:false;initial-value:#ff0000}", "background-color:var(--probe)", Fix.Box),
         ("@starting-style", "@starting-style{#p{opacity:0.1}}", "opacity:1;transition:opacity 2s", Fix.Box),
         ("@counter-style", "@counter-style probe{system:cyclic;symbols:\"**\";suffix:\" \"}", "#p{list-style-type:probe}", Fix.List),

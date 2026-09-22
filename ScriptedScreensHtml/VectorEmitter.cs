@@ -830,6 +830,17 @@ internal static class VectorEmitter
                 break;
             case Label label when css.TryGetValue("writing-mode", out var wm) && wm.Trim().StartsWith("vertical", StringComparison.OrdinalIgnoreCase) || (css.TryGetValue("writing-mode", out wm) && wm.Trim().StartsWith("sideways", StringComparison.OrdinalIgnoreCase)):
             {
+                // text-orientation: upright keeps every glyph the right way up, so the line is not
+                // turned at all - the characters are stacked instead, one per line, in the box as it
+                // stands. `mixed` and `sideways` are the turned line, which is what is below.
+                if (css.TryGetValue("text-orientation", out var to) && to.Trim().Equals("upright", StringComparison.OrdinalIgnoreCase))
+                {
+                    var sb = new StringBuilder();
+                    foreach (var ch in label.text ?? string.Empty)
+                        if (!char.IsWhiteSpace(ch)) { if (sb.Length > 0) sb.Append('\n'); sb.Append(ch); }
+                    EmitText(ctx, label, css, x, y, w, h, indent, sb.ToString());
+                    break;
+                }
                 // vertical text: the label rotated about the box centre, its box swapped
                 var cx = x + w * 0.5f; var cy = y + h * 0.5f;
                 var angle = string.Equals(wm.Trim(), "sideways-lr", StringComparison.OrdinalIgnoreCase) ? -90f : 90f;
@@ -1960,7 +1971,7 @@ internal static class VectorEmitter
         return false;
     }
 
-    private static readonly string[] InheritedText = { "font-family", "font-weight", "font-style", "font-variant-numeric", "letter-spacing", "word-spacing", "line-height", "text-transform", "text-align", "text-align-last", "white-space", "text-shadow", "text-emphasis-style", "text-emphasis-color", "text-emphasis-position", "font-variant-caps", "text-indent" };
+    private static readonly string[] InheritedText = { "font-family", "font-weight", "font-style", "font-variant-numeric", "letter-spacing", "word-spacing", "line-height", "text-transform", "text-align", "text-align-last", "white-space", "text-shadow", "text-emphasis-style", "text-emphasis-color", "text-emphasis-position", "font-variant-caps", "text-indent", "font-synthesis", "font-variant", "overflow-wrap", "word-wrap", "text-underline-position" };
 
     /// <summary>The label's record with the inherited text properties filled in from its ancestors (a copy only when something is added).</summary>
     private static Dictionary<string, string> WithInherited(Ctx ctx, VisualElement ve, Dictionary<string, string> css)
@@ -1984,10 +1995,10 @@ internal static class VectorEmitter
         return merged ?? css;
     }
 
-    private static void EmitText(Ctx ctx, Label label, Dictionary<string, string> css, float x, float y, float w, float h, string indent)
+    private static void EmitText(Ctx ctx, Label label, Dictionary<string, string> css, float x, float y, float w, float h, string indent, string? textOverride = null)
     {
         var rs = OffThread.Of(label);
-        var text = label.text ?? string.Empty;
+        var text = textOverride ?? label.text ?? string.Empty;
         if (text.Length == 0)
             return;
         var ownCss = css;
@@ -2004,9 +2015,24 @@ internal static class VectorEmitter
         }
         if (css.TryGetValue("word-break", out var wb) && wb.Trim() == "break-all")
             text = BreakAll(text);
+        // overflow-wrap / word-wrap: break-word - break-all, but only inside a word that cannot fit
+        // its line on its own. The line's capacity is estimated from the face's mean advance (about
+        // half the em), which is all that is available here: the measure is the layout's, of the
+        // whole label, and says nothing about one word.
+        else if ((css.TryGetValue("overflow-wrap", out var ow2) || css.TryGetValue("word-wrap", out ow2)) && Lower(ow2) is "break-word" or "anywhere" && rs.fontSize > 0f)
+            text = BreakLong(text, Mathf.Max(4, Mathf.FloorToInt(w / (0.5f * rs.fontSize))));
+        // word-spacing: TextMeshPro has no word spacing of its own, and the layout box was already
+        // measured WITH it - a box wide enough for a gap the text did not have. <space> after each
+        // space is the gap.
+        if (css.TryGetValue("word-spacing", out var wsp) && rs.fontSize > 0f && Lower(wsp) != "normal")
+        {
+            var wspv = wsp.Trim();
+            var wpx = wspv.EndsWith("em", StringComparison.OrdinalIgnoreCase) && float.TryParse(wspv.Substring(0, wspv.Length - 2), NumberStyles.Float, CultureInfo.InvariantCulture, out var wemv) ? wemv * rs.fontSize : StyleApplier.Num(wspv);
+            if (wpx != 0f) text = WordSpace(text, wpx);
+        }
         var deco = Decoration(css);
         var ox = x; var ow = w;
-        var drawDeco = deco.line != 0 && !(rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && text.IndexOf(' ') >= 0) && (deco.colour != null || deco.style != "solid" || deco.thickness > 0f || !float.IsNaN(deco.offset) || (deco.line & 4) != 0);
+        var drawDeco = deco.line != 0 && !(rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && text.IndexOf(' ') >= 0) && (deco.colour != null || deco.style != "solid" || deco.thickness > 0f || !float.IsNaN(deco.offset) || deco.under || (deco.line & 4) != 0);
         if (!drawDeco)
         {
             // TextMeshPro draws the plain forms itself, wrapped lines included
@@ -2019,11 +2045,30 @@ internal static class VectorEmitter
             if (deco.line != 0 && (deco.colour != null || deco.style != "solid" || deco.thickness > 0f))
                 Warn(ctx, "html: text-decoration-color / -style / -thickness is not drawn on a label that wraps; the plain line is");
         }
+        // font-synthesis: which of the faked faces a browser is still allowed to fake. `none` refuses
+        // both, and the default (absent) allows both. A REAL weight face is not synthesis and is
+        // picked below whatever this says.
+        var synth = css.TryGetValue("font-synthesis", out var fsy) ? Lower(fsy) : "weight style";
+        var synthStyle = synth.Contains("style", StringComparison.Ordinal);
+        var synthWeight = synth.Contains("weight", StringComparison.Ordinal);
         // font-style: italic. The renderer folds a real weight face into style.face and leaves the
         // italic bit here precisely so it can still be drawn; nothing read it, so `font-style` was
         // accepted by the cascade and then never reached the glyphs. TextMeshPro shears them.
-        if (rs.unityFontStyleAndWeight is FontStyle.Italic or FontStyle.BoldAndItalic && text.Length > 0)
+        if (rs.unityFontStyleAndWeight is FontStyle.Italic or FontStyle.BoldAndItalic && synthStyle && text.Length > 0)
             text = "<i>" + text + "</i>";
+        // font-variant / font-variant-caps: small-caps. TextMeshPro has no OpenType feature table, so
+        // this is its own synthetic smallcaps span - which is what a browser does for a face with no
+        // real small-caps either. Other font-variant values (ligatures, numeric) are somebody else's.
+        if (((css.TryGetValue("font-variant-caps", out var fvc) && Lower(fvc) is "small-caps" or "all-small-caps")
+             || (css.TryGetValue("font-variant", out var fv) && Lower(fv).Contains("small-caps", StringComparison.Ordinal)))
+            && text.Length > 0)
+            text = "<smallcaps>" + text + "</smallcaps>";
+        // Counted BEFORE the escape below turns every newline into the two characters backslash-n.
+        // It used to be counted after, so the scan for '\n' found none and EVERY label reported one
+        // line - which quietly gave multi-line labels the single-line rescue and decided their
+        // valign by luck rather than by the test.
+        var lines = 1;
+        foreach (var ch in text) if (ch == '\n') lines++;
         // Scene text escapes (vector mod 0.10.1.0): backslash first, then the quote; a line
         // break in the text becomes the two characters backslash-n.
         text = text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n");
@@ -2065,7 +2110,6 @@ internal static class VectorEmitter
         // single line its metric height, centred on the CSS line box (the clip stays the CSS box).
         // Decided here rather than rewritten into the finished T line, which cost four formatted
         // numbers and four concatenations on every clipped single-line label.
-        var lines = 1; foreach (var ch in text) if (ch == '\n') lines++;
         var ty = y; var th = h;
         if (clipped && !wraps && lines == 1 && h < rs.fontSize * 1.4f)
         {
@@ -2138,7 +2182,7 @@ internal static class VectorEmitter
         }
         // A face that is already a named weight ("Barlow SemiBold") must not be bolded again:
         // TextMeshPro's synthetic bold widens every glyph on top of it.
-        if (wantBold && !NamedWeight(first))
+        if (wantBold && synthWeight && !NamedWeight(first))
             sb.Append(" weight=bold");
         if (css.TryGetValue("letter-spacing", out var ls) && rs.fontSize > 0f)
         {
@@ -2249,6 +2293,8 @@ internal static class VectorEmitter
         public float thickness;
         /// <summary>text-underline-offset in px, NaN for auto.</summary>
         public float offset;
+        /// <summary>text-underline-position: under - the line clears the descenders.</summary>
+        public bool under;
     }
 
     /// <summary>text-decoration and its longhands: the lines, style, colour, thickness and underline offset.</summary>
@@ -2283,6 +2329,10 @@ internal static class VectorEmitter
         if (css.TryGetValue("text-decoration-color", out var tc) && StyleApplier.TryColor(tc, out var col)) d.colour = col;
         if (css.TryGetValue("text-decoration-thickness", out var tt) && tt.Trim() is not ("auto" or "from-font")) d.thickness = StyleApplier.Num(tt);
         if (css.TryGetValue("text-underline-offset", out var to) && to.Trim() != "auto") d.offset = StyleApplier.Num(to);
+        // text-underline-position: `under` puts the line below the descenders rather than just under
+        // the baseline. `auto`/`from-font` are what is already drawn; `left`/`right` are vertical-text
+        // only and there is no per-glyph sidebearing here to put a line beside.
+        if (css.TryGetValue("text-underline-position", out var tup) && Lower(tup).Contains("under", StringComparison.Ordinal)) d.under = true;
         return d;
     }
 
@@ -2303,7 +2353,7 @@ internal static class VectorEmitter
         var t = d.thickness > 0f ? d.thickness : Mathf.Max(1f, fs / 14f);
         var mid = y + h * 0.5f;
         var baseline = mid + fs * 0.32f;
-        var offset = float.IsNaN(d.offset) ? fs * 0.1f : d.offset;
+        var offset = (float.IsNaN(d.offset) ? fs * 0.1f : d.offset) + (d.under ? fs * 0.22f : 0f); // `under` clears the descenders
         void Line(float ly)
         {
             if (d.style == "double")
@@ -2353,6 +2403,50 @@ internal static class VectorEmitter
             sb.Append(ch);
             if (inTag) { if (ch == '>') inTag = false; continue; }
             if (!char.IsWhiteSpace(ch)) sb.Append('\u200B');
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// overflow-wrap / word-wrap: break-word - zero-width spaces inside a word longer than
+    /// <paramref name="max"/> characters, and only there. break-all does this to every word; the
+    /// difference IS the property, so a short word must come through untouched.
+    /// </summary>
+    internal static string BreakLong(string text, int max)
+    {
+        var sb = new StringBuilder(text.Length + 16);
+        var word = new StringBuilder();
+        var inTag = false;
+        void Flush()
+        {
+            if (word.Length > max)
+                for (var i = 0; i < word.Length; i++) { sb.Append(word[i]); sb.Append('​'); }
+            else sb.Append(word);
+            word.Clear();
+        }
+        foreach (var ch in text)
+        {
+            if (ch == '<') { Flush(); inTag = true; }
+            if (inTag) { sb.Append(ch); if (ch == '>') inTag = false; continue; }
+            if (char.IsWhiteSpace(ch)) { Flush(); sb.Append(ch); continue; }
+            word.Append(ch);
+        }
+        Flush();
+        return sb.ToString();
+    }
+
+    /// <summary>word-spacing: TextMeshPro's &lt;space&gt; after every space outside rich-text tags.</summary>
+    internal static string WordSpace(string text, float px)
+    {
+        var tag = "<space=" + F(px) + "px>";
+        var sb = new StringBuilder(text.Length + 16);
+        var inTag = false;
+        foreach (var ch in text)
+        {
+            if (ch == '<') inTag = true;
+            sb.Append(ch);
+            if (inTag) { if (ch == '>') inTag = false; continue; }
+            if (ch == ' ') sb.Append(tag);
         }
         return sb.ToString();
     }

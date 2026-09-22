@@ -181,7 +181,9 @@ Console.WriteLine("Keyframes, child combinator, !important");
     Check(rules.Exists(r => r.Selectors[0].Matches(HtmlParser.Parse("<p></p>").Children[0])) && rules.Exists(r => r.Selectors[0].Matches(HtmlParser.Parse("<q></q>").Children[0])), "@layer blocks parsed, named and anonymous");
     var card = HtmlParser.Parse("<div class=card><img></div>").Children[0];
     Check(rules.Exists(r => r.Selectors[0].Matches(card.Children[0])) && rules.Exists(r => r.Selectors[0].Matches(card) && r.Declarations[0].Name == "padding"), "@scope prefixes its rules with the root; :scope is the root");
-    Check(rules.Exists(r => r.Declarations[0].Value.Trim() == "green" && r.Selectors[0].Matches(HtmlParser.Parse("<div class=in></div>").Children[0])) && !rules.Exists(r => r.Selectors[0].Matches(HtmlParser.Parse("<div class=out></div>").Children[0])), "@container decided like @media");
+    // Neither half matches: a query container is an ANCESTOR with container-type, and a bare div has none.
+    // This used to assert the opposite, because @container was answered against the design width. CssTests.Containers covers the resolved cases.
+    Check(!rules.Exists(r => r.Selectors[0].Matches(HtmlParser.Parse("<div class=in></div>").Children[0])) && !rules.Exists(r => r.Selectors[0].Matches(HtmlParser.Parse("<div class=out></div>").Children[0])), "@container matches nothing when the element has no container above it");
     Check(CssParser.PropertyInitials.TryGetValue("--gap", out var init) && init == "7px", "@property initial-value recorded");
     var form = HtmlParser.Parse("<input id=r required><input id=v type=number min=1 max=5 value=3><input id=o type=number min=1 max=5 value=9><a id=l href=x></a><p id=p lang=en-GB></p><div dir=rtl><div id=d></div></div>");
     HtmlNode ById(HtmlNode n, string id) { if (n.Attr("id") == id) return n; foreach (var c in n.Children) { var f = ById(c, id); if (f != null) return f; } return null!; }

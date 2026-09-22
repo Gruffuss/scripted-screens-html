@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UIElements;
 using ScriptedScreensHtml;
 
 namespace ScriptedScreensHtml.Tests;
@@ -26,6 +28,10 @@ internal static class CssTests
             StatePseudos(check);
             PseudoElements(check);
             ImpliedEndTags(check);
+            Containers(check);
+            ContainersLaidOut(check);
+            TextProperties(check);
+            LayoutProperties(check);
         }
         finally
         {
@@ -296,5 +302,365 @@ internal static class CssTests
 
         var dl = Body("<dl><dt>k<dd>v<dt>k2<dd>v2</dl>").Children[0];
         check(Kids(dl) == 4, "<dt> and <dd> close each other");
+    }
+
+    // ---- text properties that only exist in the emitted scene ----------------------------
+
+    /// <summary>
+    /// The seven below are drawn, not laid out, so the cascade cannot answer for them: a property
+    /// the record carries and the emitter ignores draws exactly what its absence draws. The scene
+    /// string is the only witness, so these compile the Unity half like CssLanguage does.
+    /// </summary>
+    private static string Scene(string body, string css)
+    {
+        ResolvedStyle.DefaultFace = FontLibrary.Default();
+        HtmlRenderer.SurfaceAspect = 1f;
+        OffThread.MainThreadId = Environment.CurrentManagedThreadId;
+        OffThread.Job = OffThread.Globals.Take();
+
+        var html = "<html><head><meta name=\"viewport\" content=\"width=400\"><style>"
+                   + "#p{color:#eeeeee;font-size:14px}" + css + "</style></head><body>" + body + "</body></html>";
+        var built = HtmlRenderer.Build(html, FontLibrary.Default());
+        HtmlRenderer.NameDrivenGroups(built);
+        var panel = new Panel(built.Root);
+        foreach (var grid in built.Grids)
+            if (built.LayoutAttached.Add(grid)) GridLayout.Attach(grid, built);
+        PostLayout.Attach(built);
+        var boxes = new Dictionary<VisualElement, OffThread.Box>();
+        OffThread.Boxes = boxes;
+        var size = new Vector2(built.ViewportWidth, built.ViewportWidth);
+        panel.Layout(size.x, size.y);
+        OffThread.Capture(built.Root, built, boxes, new List<VisualElement>());
+        OffThread.Active = true;
+        try
+        {
+            var tweens = new Tweens();
+            tweens.Diff(built.Root, built, 0f);
+            var output = VectorEmitter.Emit(built, built.Root, size.x, size.y, tweens, 0f, null);
+            return new string(output.Chars, 0, output.Length);
+        }
+        finally { OffThread.Active = false; }
+    }
+
+    /// <summary>The y of the first decoration stroke in the scene, or NaN when none was drawn.</summary>
+    private static float StrokeY(string scene)
+    {
+        var i = scene.IndexOf("L p=[", StringComparison.Ordinal);
+        if (i < 0) return float.NaN;
+        var parts = scene.Substring(i + 5, scene.IndexOf(']', i) - i - 5).Split(',');
+        return float.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static void TextProperties(Action<bool, string> check)
+    {
+        const string Box = "<div id=p style=\"width:200px;height:18px\">Agy one</div>";
+
+        // font-synthesis: none refuses both fakes; the default allows both
+        var synth = Scene(Box, "#p{font-style:italic;font-weight:bold;font-synthesis:none}");
+        var faked = Scene(Box, "#p{font-style:italic;font-weight:bold}");
+        check(faked.Contains("<i>", StringComparison.Ordinal) && faked.Contains("weight=bold", StringComparison.Ordinal)
+              && !synth.Contains("<i>", StringComparison.Ordinal) && !synth.Contains("weight=bold", StringComparison.Ordinal),
+            "font-synthesis: none draws neither the sheared italic nor the widened bold");
+        check(Scene(Box, "#p{font-style:italic;font-weight:bold;font-synthesis:style}") is var styleOnly
+              && styleOnly.Contains("<i>", StringComparison.Ordinal) && !styleOnly.Contains("weight=bold", StringComparison.Ordinal),
+            "font-synthesis: style keeps the italic and drops the bold");
+
+        // text-underline-position: under puts the line below the descenders. Measured against the
+        // same underline with the offset pinned, so only the property moves it.
+        var above = StrokeY(Scene(Box, "#p{text-decoration:underline;text-underline-offset:0}"));
+        var under = StrokeY(Scene(Box, "#p{text-decoration:underline;text-underline-offset:0;text-underline-position:under}"));
+        check(!float.IsNaN(above) && !float.IsNaN(under) && under > above + 2f,
+            $"text-underline-position: under drops the line clear of the descenders ({above} -> {under})");
+
+        // font-variant / font-variant-caps: small-caps
+        check(Scene(Box, "#p{font-variant:small-caps}").Contains("<smallcaps>", StringComparison.Ordinal),
+            "font-variant: small-caps reaches the glyphs");
+        check(Scene(Box, "#p{font-variant-caps:small-caps}").Contains("<smallcaps>", StringComparison.Ordinal),
+            "font-variant-caps: small-caps reaches the glyphs");
+
+        // text-orientation: upright stacks the characters instead of turning the line
+        var upright = Scene("<div id=p style=\"width:30px;height:120px\">Hi</div>", "#p{writing-mode:vertical-rl;text-orientation:upright}");
+        var turned = Scene("<div id=p style=\"width:30px;height:120px\">Hi</div>", "#p{writing-mode:vertical-rl}");
+        check(upright.Contains("text=\"H\\ni\"", StringComparison.Ordinal) && !upright.Contains("r=90", StringComparison.Ordinal)
+              && turned.Contains("r=90", StringComparison.Ordinal),
+            "text-orientation: upright stacks the glyphs and leaves the line unturned");
+
+        // word-spacing: the box was measured with the gap, so the text must carry it too
+        check(Scene(Box, "#p{word-spacing:6px}").Contains("<space=6px>", StringComparison.Ordinal),
+            "word-spacing widens the gaps in the drawn text, not only the box");
+
+        // overflow-wrap / word-wrap: break-word breaks the long word ONLY - break-all breaks them all
+        const string Long = "<div id=p style=\"width:150px;height:60px\">short supercalifragilisticexpialidocious</div>";
+        foreach (var name in new[] { "overflow-wrap", "word-wrap" })
+        {
+            var s = Scene(Long, "#p{" + name + ":break-word}");
+            check(s.Contains("short ", StringComparison.Ordinal) && s.Contains("s\u200Bu\u200Bp\u200Be\u200Br", StringComparison.Ordinal),
+                name + ": break-word breaks a word too long for the line and leaves a short one whole");
+        }
+    }
+
+    // ---- layout properties, also only visible in the scene -------------------------------
+
+    /// <summary>The x/y/w of every solid R rect painted in <paramref name="hex"/>, in scene order.</summary>
+    private static List<(float x, float y, float w)> Rects(string scene, string hex)
+    {
+        var list = new List<(float, float, float)>();
+        foreach (var raw in scene.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (!line.StartsWith("R ", StringComparison.Ordinal) || !line.Contains("f=" + hex, StringComparison.Ordinal)) continue;
+            list.Add((Num(line, " x="), Num(line, " y="), Num(line, " w=")));
+        }
+        return list;
+    }
+
+    private static float Num(string line, string key)
+    {
+        var i = line.IndexOf(key, StringComparison.Ordinal);
+        if (i < 0) return float.NaN;
+        i += key.Length;
+        var j = i;
+        while (j < line.Length && line[j] != ' ') j++;
+        return float.TryParse(line.Substring(i, j - i), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : float.NaN;
+    }
+
+    private static int CountOf(string s, string needle)
+    {
+        var n = 0;
+        for (var i = s.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = s.IndexOf(needle, i + needle.Length, StringComparison.Ordinal)) n++;
+        return n;
+    }
+
+    private static void LayoutProperties(Action<bool, string> check)
+    {
+        // border-collapse: an interior edge is drawn by one of the two cells that share it, not both.
+        // One side per cell, so the count of painted edges IS the count of drawn borders.
+        const string Table = "<table id=p><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>";
+        int Edges(string side, bool collapse) => Rects(Scene(Table, "td{border-" + side + ":2px solid #ff8800}"
+            + (collapse ? "#p{border-collapse:collapse}" : string.Empty)), "#FF8800").Count;
+        check(Edges("left", false) == 4 && Edges("left", true) == 2 && Edges("top", false) == 4 && Edges("top", true) == 2,
+            $"border-collapse: collapse draws each shared edge once ({Edges("left", false)}->{Edges("left", true)} vertical, {Edges("top", false)}->{Edges("top", true)} horizontal)");
+
+        // border-spacing: cells abut under `separate` unless it says otherwise
+        var tight = Rects(Scene(Table, "td{background:#884444}"), "#884444");
+        var spaced = Rects(Scene(Table, "td{background:#884444}#p{border-spacing:9px 7px}"), "#884444");
+        check(tight.Count == 4 && spaced.Count == 4 && spaced[1].x > tight[1].x + 3f && spaced[2].y > tight[2].y + 6f,
+            $"border-spacing separates the cells ({tight[1].x}->{spaced[1].x} across, {tight[2].y}->{spaced[2].y} down)");
+
+        // content: open-quote was falling through to the empty string
+        const string Quoted = "<p id=p>hi</p>";
+        var curly = Scene(Quoted, "#p::before{content:open-quote}#p::after{content:close-quote}");
+        var guillemets = Scene(Quoted, "#p::before{content:open-quote}#p::after{content:close-quote}#p{quotes:\"«\" \"»\"}");
+        check(curly.Contains("text=\"“\"", StringComparison.Ordinal) && curly.Contains("text=\"”\"", StringComparison.Ordinal)
+              && guillemets.Contains("text=\"«\"", StringComparison.Ordinal) && guillemets.Contains("text=\"»\"", StringComparison.Ordinal),
+            "content: open-quote/close-quote draw a quote pair, and `quotes` chooses which");
+
+        // all: unset undoes what the cascade set before it on this element
+        const string Painted = "<div id=p class=x>hi</div>";
+        check(Scene(Painted, ".x{background:#22aa44;width:120px;height:30px}").Contains("f=#22AA44", StringComparison.Ordinal)
+              && !Scene(Painted, ".x{background:#22aa44;width:120px;height:30px}#p{all:unset}").Contains("f=#22AA44", StringComparison.Ordinal),
+            "all: unset drops the declarations that came before it");
+
+        // columns: the shorthand has to be split before anything reads column-count
+        const string Prose = "<p id=p style=\"width:220px\">one two three four five six seven eight nine ten</p>";
+        check(CountOf(Scene(Prose, string.Empty), "T x=") == 1 && CountOf(Scene(Prose, "#p{columns:2 60px}"), "T x=") == 2,
+            "columns: 2 60px splits the text into two columns");
+
+        // clear: the floated row wraps, so a line break before the child is a real one
+        const string Floats = "<div id=p style=\"width:200px\">"
+            + "<div style=\"float:left;width:60px;height:20px;background:#884444\"></div>"
+            + "<div id=b style=\"width:60px;height:20px;background:#884444\"></div></div>";
+        var inline_ = Rects(Scene(Floats, string.Empty), "#884444");
+        var cleared = Rects(Scene(Floats, "#b{clear:both}"), "#884444");
+        check(inline_.Count == 2 && cleared.Count == 2 && inline_[1].y <= inline_[0].y + 0.5f && cleared[1].y > cleared[0].y + 10f,
+            $"clear: both puts the child on the next line ({inline_[1].y} -> {cleared[1].y})");
+
+        // scrollbar-gutter: stable insets the content so the box does not jump when it overflows
+        const string Scroller = "<div id=p style=\"width:100px;height:40px;overflow:auto\">"
+            + "<div style=\"height:200px;background:#884444\"></div></div>";
+        var loose = Rects(Scene(Scroller, string.Empty), "#884444");
+        var gutter = Rects(Scene(Scroller, "#p{scrollbar-gutter:stable}"), "#884444");
+        check(loose.Count == 1 && gutter.Count == 1 && gutter[0].w < loose[0].w - 7f,
+            $"scrollbar-gutter: stable reserves the bar's width ({loose[0].w} -> {gutter[0].w})");
+    }
+
+    // ---- @container ----------------------------------------------------------------------
+
+    /// <summary>
+    /// A container query is answered by the nearest ANCESTOR that establishes containment, by name
+    /// when the query gives one. It used to be answered by MediaMatches against the page's design
+    /// width with the name thrown away, so `@container sidebar` and `@container main` were the same
+    /// query and a 200px panel inside a 900px page took the 900px branch.
+    /// </summary>
+    private static void Containers(Action<bool, string> check)
+    {
+        var info = CssParser.ContainerInfo;
+        var sink = CssParser.ContainerWarn;
+        var warnings = new List<string>();
+        try
+        {
+            CssParser.ViewportWidth = 900f;     // the page: every query below would match if it answered from here
+            CssParser.ViewportHeight = 900f;
+            CssParser.ContainerWarn = warnings.Add;
+
+            // side is 200 wide and named "sidebar"; main is 900 wide and named "main"
+            var body = Doc("<body><div id=side><p id=a>x</p></div><div id=main><p id=b>x</p></div><p id=loose>x</p></body>");
+            HtmlNode Id(string id) { foreach (var c in body.Children) { if (c.Attr("id") == id) return c; foreach (var g in c.Children) if (g.Attr("id") == id) return g; } throw new InvalidOperationException(id); }
+
+            var boxes = new Dictionary<string, (Dictionary<string, string> css, float width, float height)>(StringComparer.Ordinal);
+            Dictionary<string, string> Css(params string[] kv)
+            {
+                var d = new Dictionary<string, string>(StringComparer.Ordinal);
+                for (var i = 0; i < kv.Length; i += 2) d[kv[i]] = kv[i + 1];
+                return d;
+            }
+            boxes["side"] = (Css("container-type", "inline-size", "container-name", "sidebar"), 200f, 500f);
+            boxes["main"] = (Css("container-type", "inline-size", "container-name", "main"), 900f, 500f);
+            CssParser.ContainerInfo = n => n.Attr("id") is { } nid && boxes.TryGetValue(nid, out var box)
+                ? box
+                : ((Dictionary<string, string> css, float width, float height)?)null;
+
+            bool Hit(string sheet, HtmlNode node)
+            {
+                foreach (var r in CssParser.ParseStylesheet(sheet, warnings.Add))
+                    foreach (var sel in r.Selectors)
+                        if (sel.Matches(node)) return true;
+                return false;
+            }
+
+            // the two the brief asks for
+            check(!Hit("@container sidebar (min-width: 400px) { p { color: red } }", Id("b")),
+                "a named query does not match a container with a different name");
+            check(Hit("@container main (min-width: 400px) { p { color: red } }", Id("b")),
+                "and does match the container it names");
+            check(!Hit("@container (min-width: 400px) { p { color: red } }", Id("a"))
+                && Hit("@container (min-width: 400px) { p { color: red } }", Id("b")),
+                "an unnamed query is answered by the nearest container, not by the 900px page");
+            check(!Hit("@container (max-width: 400px) { p { color: red } }", Id("b"))
+                && Hit("@container (max-width: 400px) { p { color: red } }", Id("a")),
+                "and the narrow container answers max-width where the page would not");
+
+            // the name is a list, and the `container` shorthand carries both halves
+            boxes["side"] = (Css("container-type", "inline-size", "container-name", "tools sidebar"), 200f, 500f);
+            check(Hit("@container sidebar (max-width: 400px) { p { color: red } }", Id("a")), "container-name is a list of names");
+            boxes["side"] = (Css("container", "sidebar / inline-size"), 200f, 500f);
+            check(Hit("@container sidebar (max-width: 400px) { p { color: red } }", Id("a")), "the `container` shorthand gives the name and the type");
+            boxes["side"] = (Css("container-type", "normal", "container-name", "sidebar"), 200f, 500f);
+            check(!Hit("@container sidebar (max-width: 400px) { p { color: red } }", Id("a")),
+                "container-type: normal establishes no containment, so the query passes it by");
+            boxes["side"] = (Css("container-type", "inline-size", "container-name", "sidebar"), 200f, 500f);
+
+            // nested containers: the inner one wins for an unnamed query, and a name reaches past it
+            check(Hit("@container (max-width: 400px) { p { color: red } }", Id("a")), "the nearest container is the inner one");
+
+            // an unresolvable query fails loudly rather than guessing
+            CssParser.ForgetReported();
+            warnings.Clear();
+            check(!Hit("@container (min-width: 10px) { p { color: red } }", Id("loose")),
+                "a query with no container above it matches nothing, as in a browser");
+            check(warnings.Count == 1 && warnings[0].Contains("no ancestor", StringComparison.Ordinal),
+                $"and says so rather than falling back to the page ({warnings.Count}: {string.Join(" | ", warnings)})");
+            CssParser.ForgetReported();
+            warnings.Clear();
+            check(!Hit("@container sidebar (min-width: 10px) { p { color: red } }", Id("b"))
+                && warnings.Count == 1 && warnings[0].Contains("sidebar", StringComparison.Ordinal),
+                $"a query naming a container that is not above the element names it ({string.Join(" | ", warnings)})");
+
+            // inline-size gives the inline axis alone; a block-axis question is refused, not answered from the page
+            CssParser.ForgetReported();
+            warnings.Clear();
+            check(!Hit("@container (min-height: 10px) { p { color: red } }", Id("b"))
+                && warnings.Count == 1 && warnings[0].Contains("block axis", StringComparison.Ordinal),
+                $"inline-size refuses a height query instead of answering it from the page ({string.Join(" | ", warnings)})");
+            boxes["main"] = (Css("container-type", "size", "container-name", "main"), 900f, 500f);
+            check(Hit("@container (min-height: 400px) { p { color: red } }", Id("b")), "container-type: size does answer the block axis");
+            check(Hit("@container (min-inline-size: 400px) { p { color: red } }", Id("b"))
+                && !Hit("@container (min-block-size: 900px) { p { color: red } }", Id("b")),
+                "the container syntax's own inline-size / block-size names");
+
+            // a style query is not answerable here; refused at parse time, with the block skipped
+            CssParser.ForgetReported();
+            warnings.Clear();
+            check(!Hit("@container style(--theme: dark) { p { color: red } }", Id("b"))
+                && warnings.Count == 1 && warnings[0].Contains("style", StringComparison.Ordinal),
+                $"a style() query is refused rather than mis-parsed as a container name ({string.Join(" | ", warnings)})");
+
+            // nothing installed at all: every query says so and matches nothing
+            CssParser.ForgetReported();
+            warnings.Clear();
+            CssParser.ContainerInfo = null;
+            check(!Hit("@container (min-width: 10px) { p { color: red } }", Id("b"))
+                && warnings.Count == 1 && warnings[0].Contains("laid-out size", StringComparison.Ordinal),
+                $"with no way to read a container's size, a query matches nothing and says why ({string.Join(" | ", warnings)})");
+        }
+        finally
+        {
+            CssParser.ContainerInfo = info;
+            CssParser.ContainerWarn = sink;
+            CssParser.ForgetReported();
+        }
+    }
+
+    /// <summary>
+    /// The same question through the real pipeline: a page built, laid out, and re-cascaded the way
+    /// the renderer must once a container's box is known. This is also the proof for the two hooks -
+    /// nothing in HtmlRenderer installs them yet, so the lambda below IS the patch that has to land
+    /// there, run here against the real cascade rather than a stub.
+    /// </summary>
+    private static void ContainersLaidOut(Action<bool, string> check)
+    {
+        var info = CssParser.ContainerInfo;
+        var sink = CssParser.ContainerWarn;
+        try
+        {
+            ResolvedStyle.DefaultFace = FontLibrary.Default();
+            HtmlRenderer.SurfaceAspect = 1f;
+            OffThread.MainThreadId = Environment.CurrentManagedThreadId;
+            OffThread.Boxes = new Dictionary<VisualElement, OffThread.Box>();
+            OffThread.Job = OffThread.Globals.Take();
+
+            // A 900px page holding a 200px panel and a 800px one. Both cards are containers; the
+            // plain rule comes first so the container rule wins by source order when it matches.
+            const string Html = "<html><head><meta name=\"viewport\" content=\"width=900\"><style>"
+                + ".card{container-type:inline-size}"
+                + "#narrow{width:200px}#wide{width:800px}"
+                + ".t{color:#ff0000}"
+                + "@container (min-width:400px){.t{color:#00ff00}}"
+                + "</style></head><body>"
+                + "<div id=narrow class=card><p id=a class=t>x</p></div>"
+                + "<div id=wide class=card><p id=b class=t>x</p></div>"
+                + "</body></html>";
+
+            var built = HtmlRenderer.Build(Html, FontLibrary.Default());
+            CssParser.ContainerWarn = built.Warnings.Add;
+            CssParser.ContainerInfo = n =>
+            {
+                if (n.Attr("id") is not { } nid || !built.ById.TryGetValue(nid, out var cve))
+                    return null;
+                var rs = cve.resolvedStyle;
+                return (built.CssOf(cve),
+                    cve.layout.width - rs.paddingLeft - rs.paddingRight - rs.borderLeftWidth - rs.borderRightWidth,
+                    cve.layout.height - rs.paddingTop - rs.paddingBottom - rs.borderTopWidth - rs.borderBottomWidth);
+            };
+
+            string Colour(string id) => built.ById.TryGetValue(id, out var ve) && built.CssOf(ve).TryGetValue("color", out var c) ? c.Trim().ToLowerInvariant() : "(none)";
+            var panel = new Panel(built.Root);
+            panel.Layout(900f, 900f);
+            // The build's cascade ran before any layout, so both took the plain rule. That is the
+            // whole reason the re-cascade below is not optional.
+            check(Colour("a") == "#ff0000" && Colour("b") == "#ff0000",
+                $"before layout no container has a size, so no query matches ({Colour("a")}, {Colour("b")})");
+
+            foreach (var id in new[] { "narrow", "wide" })
+                if (built.ById.TryGetValue(id, out var card)) built.Reclass(card, "card");
+            check(Colour("a") == "#ff0000", $"the 200px panel inside a 900px page takes the small branch (got {Colour("a")})");
+            check(Colour("b") == "#00ff00", $"and the 800px one beside it takes the large branch (got {Colour("b")})");
+        }
+        finally
+        {
+            CssParser.ContainerInfo = info;
+            CssParser.ContainerWarn = sink;
+            CssParser.ForgetReported();
+        }
     }
 }

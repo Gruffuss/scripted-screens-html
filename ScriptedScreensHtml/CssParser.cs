@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text;
 
@@ -70,6 +70,14 @@ internal sealed class CssSelector
     /// <summary>Left to right: ancestors first, subject last.</summary>
     public readonly List<CssCompound> Chain = new();
 
+    /// <summary>
+    /// The @container queries this selector sits inside, innermost last; all must hold. Carried
+    /// on the selector rather than on the rule because every part of the renderer asks the same
+    /// question through <see cref="Matches"/> - the cascade, the ::placeholder probe, the
+    /// ::first-letter probe - so one check here covers all of them.
+    /// </summary>
+    public List<CssContainerQuery>? Containers;
+
     /// <summary>CSS specificity packed as ids*10000 + classes*100 + tags.</summary>
     public int Specificity
     {
@@ -133,8 +141,35 @@ internal sealed class CssSelector
             }
             ancestor = ancestor.Parent;
         }
+        // Last, because it walks the ancestors again and reads their laid-out boxes: a selector
+        // that was never going to match should not pay for it.
+        if (Containers != null)
+            foreach (var q in Containers)
+                if (!q.Holds(node)) return false;
         return true;
     }
+}
+
+/// <summary>
+/// One `@container [name] &lt;condition&gt;`: which container it asks about, and what it asks.
+/// </summary>
+/// <remarks>
+/// The name used to be thrown away and the condition answered by <see cref="CssParser.MediaMatches"/>
+/// against the page's design width, so `@container sidebar (min-width: 40em)` and
+/// `@container main (min-width: 40em)` were the same query and a 200px panel inside a 900px page
+/// took the 900px branch. Both halves of that are fixed here: the name is kept and matched, and
+/// the condition is answered against the container's own laid-out content box.
+/// </remarks>
+internal sealed class CssContainerQuery
+{
+    /// <summary>The container-name asked for, null when the query names none (nearest container wins).</summary>
+    public string? Name;
+    /// <summary>The condition as written, `(min-width: 40em)`.</summary>
+    public string Condition = string.Empty;
+
+    public bool Holds(HtmlNode subject) => CssParser.ContainerHolds(this, subject);
+
+    public override string ToString() => "@container " + (Name == null ? string.Empty : Name + " ") + Condition;
 }
 
 /// <summary>An @counter-style: how a counter value becomes text.</summary>
@@ -317,10 +352,11 @@ internal static class CssParser
                     // @scope (root): the block becomes a nested rule under the root selector.
                     var inner = css.Substring(brace + 1, Math.Max(0, j - brace - 2));
                     var take = true;
+                    CssContainerQuery? query = null;
                     if (header.StartsWith("container", StringComparison.OrdinalIgnoreCase))
                     {
-                        var paren = header.IndexOf('(');
-                        take = paren >= 0 && MediaMatches(header.Substring(paren), warn);
+                        query = ContainerQuery(header.Substring(9), warn);
+                        take = query != null;
                     }
                     else if (header.StartsWith("scope", StringComparison.OrdinalIgnoreCase))
                     {
@@ -334,6 +370,8 @@ internal static class CssParser
                         foreach (var r in ParseStylesheet(inner, warn, keyframes))
                         {
                             r.Order = order++;
+                            if (query != null)
+                                foreach (var sel in r.Selectors) (sel.Containers ??= new List<CssContainerQuery>()).Add(query);
                             rules.Add(r);
                         }
                     }
@@ -517,15 +555,21 @@ internal static class CssParser
                 var kind = header.Split(' ', '(')[0].ToLowerInvariant();
                 if (kind == "media" && !MediaMatches(header.Substring(5), warn)) continue;
                 if (kind == "supports" && !SupportsMatches(header.Substring(8), warn)) continue;
+                CssContainerQuery? query = null;
                 if (kind == "container")
                 {
-                    var paren = header.IndexOf('(');
-                    if (paren < 0 || !MediaMatches(header.Substring(paren), warn)) continue;
+                    query = ContainerQuery(header.Substring(9), warn);
+                    if (query == null) continue;
                 }
                 if (kind == "starting-style")
                     ParseRule("&", nbody, selectors, StartingRules, ref order, warn, keyframes);
                 else if (kind is "media" or "supports" or "layer" or "container")
+                {
+                    var from = rules.Count;
                     ParseRule("&", nbody, selectors, rules, ref order, warn, keyframes);
+                    for (var r = from; query != null && r < rules.Count; r++)
+                        foreach (var inside in rules[r].Selectors) (inside.Containers ??= new List<CssContainerQuery>()).Add(query);
+                }
                 else
                     warn?.Invoke($"css: nested @{header.Split(' ')[0]} skipped");
                 continue;
@@ -696,6 +740,145 @@ internal static class CssParser
             if (ok != negate) return true;
         }
         return false;
+    }
+
+    // ---- @container ----------------------------------------------------------------------
+
+    /// <summary>
+    /// A node seen as a query container: the declarations that won its cascade, and its laid-out
+    /// content box. The renderer installs this for the page it is cascading, the way
+    /// <see cref="SupportsOracle"/> is installed - the parser stays Unity-free and knows nothing
+    /// about VisualElements or layout.
+    /// </summary>
+    /// <remarks>
+    /// Installing this is a promise to re-cascade a container's subtree when its box changes. A
+    /// page's first cascade runs BEFORE any layout, so every query answers false there and only
+    /// the re-cascade sees the real size. With nothing installed every container query says so
+    /// and matches nothing, which is a browser's answer for a query it cannot resolve.
+    /// </remarks>
+    internal static Func<HtmlNode, (Dictionary<string, string> css, float width, float height)?>? ContainerInfo;
+
+    /// <summary>Where a container query's complaints go: the page's warning list, installed with <see cref="ContainerInfo"/>.</summary>
+    internal static Action<string>? ContainerWarn;
+
+    /// <summary>Whether these cascaded declarations make the element a size query container.</summary>
+    internal static bool IsQueryContainer(Dictionary<string, string> css) => ContainerTypeOf(css) != null;
+
+    /// <summary>"inline-size", "size", or null when the element is no size container (the `container` shorthand included).</summary>
+    private static string? ContainerTypeOf(Dictionary<string, string> css)
+    {
+        var type = css.TryGetValue("container-type", out var t) ? t : null;
+        if (type == null && css.TryGetValue("container", out var shorthand))
+        {
+            var slash = shorthand.IndexOf('/');
+            type = slash >= 0 ? shorthand.Substring(slash + 1) : null;
+        }
+        type = type?.Trim().ToLowerInvariant();
+        return type is "inline-size" or "size" ? type : null;
+    }
+
+    /// <summary>Whether this element answers to that container-name (a name list, or the `container` shorthand's first half).</summary>
+    private static bool HasContainerName(Dictionary<string, string> css, string want)
+    {
+        var names = css.TryGetValue("container-name", out var n) ? n : null;
+        if (names == null && css.TryGetValue("container", out var shorthand))
+        {
+            var slash = shorthand.IndexOf('/');
+            names = slash >= 0 ? shorthand.Substring(0, slash) : shorthand;
+        }
+        if (names == null) return false;
+        foreach (var one in names.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            if (string.Equals(one.Trim(), want, StringComparison.Ordinal))   // a CSS ident is case-sensitive
+                return true;
+        return false;
+    }
+
+    /// <summary>
+    /// `@container [name] &lt;condition&gt;`: the optional name, then the condition. Null when the
+    /// header is one this renderer cannot answer, which skips the block as an unreadable @media does.
+    /// </summary>
+    private static CssContainerQuery? ContainerQuery(string header, Action<string>? warn)
+    {
+        var text = header.Trim();
+        string? name = null;
+        if (text.Length > 0 && text[0] != '(')
+        {
+            var space = text.IndexOf(' ');
+            var first = space < 0 ? text : text.Substring(0, space);
+            // `not (...)`, `style(...)` and `scroll-state(...)` start the condition; anything else is the name
+            if (first.IndexOf('(') < 0 && !string.Equals(first, "not", StringComparison.OrdinalIgnoreCase))
+            {
+                name = first;
+                text = space < 0 ? string.Empty : text.Substring(space + 1).Trim();
+            }
+        }
+        if (text.Length == 0)
+        {
+            ReportContainer($"css: @container {header.Trim()} has no condition, so that block is skipped", warn);
+            return null;
+        }
+        if (text.IndexOf("style(", StringComparison.OrdinalIgnoreCase) >= 0 || text.IndexOf("scroll-state(", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            ReportContainer($"css: @container {text} asks about a style or a scroll state, which this renderer cannot answer, so that block is skipped", warn);
+            return null;
+        }
+        return new CssContainerQuery { Name = name, Condition = text };
+    }
+
+    /// <summary>
+    /// The query answered against the nearest ancestor that establishes a containment context -
+    /// by name when the query gives one, as a browser does. Not the page's design width, which is
+    /// what this used to answer and what made every container query the same query.
+    /// </summary>
+    internal static bool ContainerHolds(CssContainerQuery query, HtmlNode subject)
+    {
+        if (ContainerInfo == null)
+        {
+            ReportContainer($"css: {query} cannot be answered - nothing here can read a container's laid-out size, so that block is skipped", ContainerWarn);
+            return false;
+        }
+        for (var a = subject.Parent; a != null; a = a.Parent)
+        {
+            if (ContainerInfo(a) is not { } info) continue;
+            var type = ContainerTypeOf(info.css);
+            if (type == null) continue;                                      // not a container at all
+            if (query.Name != null && !HasContainerName(info.css, query.Name)) continue;
+            return ContainerAnswers(query, type, info.width, info.height);
+        }
+        ReportContainer(query.Name == null
+            ? $"css: {query} has no ancestor with a container-type above it, so that block is skipped"
+            : $"css: {query} has no ancestor named \"{query.Name}\" with a container-type above it, so that block is skipped", ContainerWarn);
+        return false;
+    }
+
+    private static bool ContainerAnswers(CssContainerQuery query, string type, float width, float height)
+    {
+        // the container syntax's own feature names; everything else a size query may ask is @media's
+        var condition = query.Condition.Replace("inline-size", "width").Replace("block-size", "height");
+        if (type == "inline-size" && (condition.IndexOf("height", StringComparison.Ordinal) >= 0
+            || condition.IndexOf("orientation", StringComparison.Ordinal) >= 0
+            || condition.IndexOf("aspect-ratio", StringComparison.Ordinal) >= 0))
+        {
+            ReportContainer($"css: {query} asks about the block axis, which only `container-type: size` gives - `inline-size` answers the inline axis alone, so that block is skipped", ContainerWarn);
+            return false;
+        }
+        // ponytail: a container with no width yet - the cascade before the page's first layout -
+        // answers false, which is also what a genuinely zero-wide container gives a min-width query.
+        if (!(width > 0f)) return false;
+        var w = ViewportWidth;
+        var h = ViewportHeight;
+        ViewportWidth = width;
+        // inline-size contains the inline axis only, so the block axis is not answerable: NaN
+        // rather than the page's height, which would answer a height query from the wrong box.
+        ViewportHeight = type == "size" ? height : float.NaN;
+        try { return MediaMatches(condition, ContainerWarn); }
+        finally { ViewportWidth = w; ViewportHeight = h; }
+    }
+
+    /// <summary>Once per distinct message, cleared with the rest by <see cref="ForgetReported"/>.</summary>
+    private static void ReportContainer(string message, Action<string>? warn)
+    {
+        if (ReportedMedia.Add(message)) warn?.Invoke(message);
     }
 
     /// <summary>

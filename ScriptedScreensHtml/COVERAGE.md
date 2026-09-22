@@ -41,17 +41,40 @@ cd ScriptedScreensHtml.Tests && dotnet run -c Release -- --domlanguage   # DOM +
 
 ### How to read these
 
-Three outcomes, and they are not equally bad:
+Five outcomes, and they are not equally bad:
 
 1. **Refused** — the compiler says so, with a line. The page does not run, and the author knows why.
    This is the acceptable failure.
 2. **Missing** — not implemented and not claimed.
-3. **Accepted, draws the same** — parses without a warning and is then ignored. **The worst of the
-   three**, and most of the CSS gap. A page sets `background-size`, nothing complains, and the
-   console quietly looks wrong.
+3. **Accepted, draws the same** — parses without a warning and is then ignored. A page sets
+   `background-size`, nothing complains, and the console quietly looks wrong.
+4. **Present but answers nothing** — the member exists and returns `0` or `undefined`. A page
+   reading `event.clientX` gets `0`, not an error.
+5. **Refused although it works** — a warning naming a feature the renderer implements. Found eleven
+   times on 2026-09-22, all in `StyleApplier.Dropped`: `backface-visibility`, `appearance`,
+   `accent-color`, `offset-rotate`, `border-image-slice`, `mask-position`, `vertical-align`,
+   `text-align-last`, `caption-side`, `empty-cells`, `column-span`. **Arguably the worst of the
+   five**, because unlike silent acceptance it is read and acted on: it talks an author out of a
+   feature that would have worked.
 
-The DOM probe adds a fourth that matters here: **present but answers nothing**. 17 of the 22 event
-members exist and return `0` or `undefined`. A page reading `event.clientX` gets `0`, not an error.
+### And a sixth, which is about the probe rather than the mod
+
+**Correctly absent, counted as a hole.** A probe that compares emitted scenes cannot tell a feature
+nobody implemented from one that is implemented and correctly does nothing — both draw the baseline.
+This cost more than every real gap found on 2026-09-22 put together:
+
+| where | read as missing | actually missing |
+|---|---|---|
+| CSS selectors | 21 | 4 refusals + 0 gaps |
+| CSS properties | 115 | 23 |
+| HTML elements | 1 | 0 |
+
+The fixture had no hover state, no circle, no `<text>`, no caption, no empty cell, no digit, no
+image, no checkbox, nothing clickable, and a viewBox scale of exactly 1 — the one scale at which
+`non-scaling-stroke` cannot be distinguished from doing nothing. **The lesson is not "check the
+fixture".** It is that a probe which asserts its own premise will agree with itself, and the only
+cure is to emit the thing and read what came out. Every surface here now names what it deliberately
+does not do, so a correct refusal is never counted as a hole again.
 
 ### One caveat on the timer number
 

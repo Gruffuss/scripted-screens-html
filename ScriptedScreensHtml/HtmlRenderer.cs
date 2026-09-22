@@ -571,7 +571,7 @@ internal static class HtmlRenderer
             // an ::after is built last among its siblings: its counters and text are resolved now
             var owner = node.Parent ?? node;
             if (AfterDecls.TryGetValue(node, out var afterDecls)) ApplyCounters(node, owner, afterDecls);
-            var afterText = GeneratedText(afterContent, owner);
+            var afterText = GeneratedText(afterContent, owner, rules);
             node.Attributes.Remove("data-content");
             if (afterText == null) return;
             node.Children.Add(new HtmlNode { Text = afterText, Parent = node });
@@ -1462,7 +1462,9 @@ internal static class HtmlRenderer
         var list = new List<CssDeclaration>();
         foreach (var m in matched) list.AddRange(m.rule.Declarations);
         if (node.Attr("style") is { } inline) list.AddRange(CssParser.ParseDeclarations(inline));
-        return list;
+        // Expanded, as ApplyStyles does it: raw declarations left every reader of this blind to
+        // shorthands and logical properties, so `columns: 2 60px` reached a column count of none.
+        return StyleApplier.Expand(list);
     }
 
     private static string? CascadedValue(HtmlNode node, List<CssRule> rules, string name)
@@ -1533,7 +1535,7 @@ internal static class HtmlRenderer
                 continue;
             }
             ApplyCounters(probe, node, pseudoDecls);
-            var text = GeneratedText(content, node);
+            var text = GeneratedText(content, node, rules);
             if (text == null) continue;
             probe.Children.Add(new HtmlNode { Text = text, Parent = probe });
             node.Children.Insert(0, probe);
@@ -1576,8 +1578,20 @@ internal static class HtmlRenderer
         }
     }
 
+    /// <summary>The quote a `quotes` pair gives (inherited, level one only), else the usual curly mark.</summary>
+    private static string Quote(HtmlNode node, List<CssRule>? rules, bool open)
+    {
+        for (var n = node; rules != null && n != null; n = n.Parent)
+            if (CascadedValue(n, rules, "quotes") is { } q && q != "auto" && q != "none")
+            {
+                var parts = CssParser.SplitTopLevel(q, ' ');
+                if (parts.Count > (open ? 0 : 1)) return parts[open ? 0 : 1].Trim().Trim('"', '\'');
+            }
+        return open ? "“" : "”";
+    }
+
     /// <summary>The string a `content` value produces, or null for none/normal.</summary>
-    private static string? GeneratedText(string value, HtmlNode node)
+    private static string? GeneratedText(string value, HtmlNode node, List<CssRule>? rules = null)
     {
         var v = value.Trim();
         if (v == "none" || v == "normal") return null;
@@ -1633,6 +1647,14 @@ internal static class HtmlRenderer
                 sb.Append(node.Attr(v.Substring(i + 5, close - i - 5).Trim()) ?? string.Empty);
                 i = close + 1;
             }
+            // open-quote / close-quote: the fall-through below walked past them and produced an
+            // empty string. `no-` prefixed: the fall-through is right, they draw nothing.
+            else if ((i == 0 || v[i - 1] != '-') && (ch == 'o' || ch == 'c')
+                     && (string.CompareOrdinal(v, i, "open-quote", 0, 10) == 0 || string.CompareOrdinal(v, i, "close-quote", 0, 11) == 0))
+            {
+                sb.Append(Quote(node, rules, ch == 'o'));
+                i += ch == 'o' ? 10 : 11;
+            }
             else i++;
         }
         return sb.ToString();
@@ -1684,6 +1706,15 @@ internal static class HtmlRenderer
         if (colWidths.TrueForAll(w => w == null)) colWidths.Clear();
         var hideEmpty = CascadedValue(node, rules, "empty-cells") == "hide";
         if (hideEmpty) node.Attributes["data-empty-cells"] = "hide";
+        // border-collapse: collapse - every cell draws its own border, so an interior edge was
+        // drawn twice; the cell on the right/below it drops its edge and the pair becomes one line.
+        // border-spacing only means anything under `separate`, which is the CSS default.
+        var collapse = CascadedValue(node, rules, "border-collapse")?.Trim() == "collapse";
+        var gaps = !collapse && CascadedValue(node, rules, "border-spacing") is { } bsv
+            ? bsv.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries) : null;
+        var spaceX = gaps is { Length: > 0 } ? StyleApplier.Num(gaps[0]) : 0f;
+        var spaceY = gaps is { Length: > 1 } ? StyleApplier.Num(gaps[1]) : spaceX;
+        var rowIndex = 0;
         foreach (var child in node.Children)
         {
             if (child.IsText) continue;
@@ -1700,11 +1731,11 @@ internal static class HtmlRenderer
                     ApplyStyles(section, child, rules, result);
                     ve.Add(section);
                     foreach (var tr in child.Children)
-                        if (tr.Tag == "tr") AppendRow(section, tr, columns, rules, result, colWidths);
+                        if (tr.Tag == "tr") AppendRow(section, tr, columns, rules, result, colWidths, collapse, spaceX, spaceY, rowIndex++);
                     break;
                 }
                 case "tr":
-                    AppendRow(ve, child, columns, rules, result, colWidths);
+                    AppendRow(ve, child, columns, rules, result, colWidths, collapse, spaceX, spaceY, rowIndex++);
                     break;
             }
         }
@@ -1732,7 +1763,8 @@ internal static class HtmlRenderer
         return null;
     }
 
-    private static void AppendRow(VisualElement table, HtmlNode tr, int columns, List<CssRule> rules, Result result, List<string?>? colWidths = null)
+    private static void AppendRow(VisualElement table, HtmlNode tr, int columns, List<CssRule> rules, Result result, List<string?>? colWidths = null,
+                                  bool collapse = false, float spaceX = 0f, float spaceY = 0f, int rowIndex = 0)
     {
         var colIndex = 0;
         // A row narrower than the table cannot say so with flex-grow: shares of a row are
@@ -1749,6 +1781,7 @@ internal static class HtmlRenderer
         Register(row, tr, result);
         ApplyStyles(row, tr, rules, result);
         table.Add(row);
+        if (rowIndex > 0 && spaceY > 0f) row.style.marginTop = spaceY;
         foreach (var cell in tr.Children)
         {
             if (cell.Tag != "td" && cell.Tag != "th") continue;
@@ -1767,6 +1800,12 @@ internal static class HtmlRenderer
             Append(row, cell, rules, result);
             if (row.childCount <= before) continue;
             var cve = row[row.childCount - 1];
+            if (collapse)
+            {
+                if (row.childCount > 1) cve.style.borderLeftWidth = 0f;
+                if (rowIndex > 0) cve.style.borderTopWidth = 0f;
+            }
+            else if (spaceX > 0f && row.childCount > 1) cve.style.marginLeft = spaceX;
             if (!result.CssOf(cve).ContainsKey("width"))
             {
                 if (short_)
@@ -1830,6 +1869,16 @@ internal static class HtmlRenderer
             order.Sort((a, b) => Rank(result.CssOf(a)).CompareTo(Rank(result.CssOf(b))));
             foreach (var c in order) c.BringToFront();
             static int Rank(Dictionary<string, string> c) => c.TryGetValue("float", out var f) ? (f.Trim() == "left" ? 0 : 2) : 1;
+            // clear: the row wraps, so a real line break exists - a full-width zero-height spacer
+            // before the child pushes it onto the next line. ponytail: left/right/both alike
+            foreach (var c in new List<VisualElement>(ve.Children()))
+            {
+                if (!result.CssOf(c).TryGetValue("clear", out var cl) || cl.Trim() is "none" or "") continue;
+                var brk = new VisualElement { name = "__clear" };
+                brk.style.flexBasis = new Length(100, LengthUnit.Percent);
+                brk.style.height = 0;
+                ve.Insert(ve.IndexOf(c), brk);
+            }
         }
         var columns = 0;
         if (css.TryGetValue("column-count", out var cc) && int.TryParse(cc.Trim(), out var ccn)) columns = ccn;
@@ -2348,7 +2397,7 @@ internal static class HtmlRenderer
                 var owner = node.Parent ?? node;
                 if (AfterDecls.TryGetValue(node, out var afterDecls)) ApplyCounters(node, owner, afterDecls);
                 node.Attributes.Remove("data-content");
-                if (GeneratedText(afterContent, owner) is { } afterText) node.Children.Add(new HtmlNode { Text = afterText, Parent = node });
+                if (GeneratedText(afterContent, owner, rules) is { } afterText) node.Children.Add(new HtmlNode { Text = afterText, Parent = node });
             }
         }
 
@@ -2802,6 +2851,18 @@ internal static class HtmlRenderer
             var resolved = HasFn(raw.Value) ? TryResolveVars(raw.Value, node) : raw.Value;
             if (resolved == null) continue; // an undefined var() with no fallback: the declaration is dropped
             var d = HasFn(raw.Value) ? new CssDeclaration(raw.Name, resolved, raw.Important) : raw;
+            // `all`'s only legal values ARE the CSS-wide keywords, so the branch below dropped it
+            // and it never reached anything. It undoes what the cascade has set so far on this
+            // element; declarations after it still apply, as in a browser.
+            // ponytail: the tag's own defaults come back, so all three keywords behave as `revert`
+            // - `button { all: unset }` keeps the drawn button chrome. Reset the tag defaults too
+            // if a page needs the full `unset`.
+            if (d.Name == "all")
+            {
+                foreach (var gone in new List<string>(record.Keys)) { StyleApplier.Reset(ve, gone); record.Remove(gone); names.Remove(gone); }
+                if (node.Tag != null) TagDefaults(ve, node);
+                continue;
+            }
             // Keywords: inherit takes the parent's cascaded value (the layout inherits text
             // properties by itself, but not backgrounds or borders); initial/unset/revert
             // drop the declaration. currentColor is the element's own colour, else inherited.
@@ -2878,6 +2939,15 @@ internal static class HtmlRenderer
                 st.width = st.width.value.value + Px(st.paddingLeft) + Px(st.paddingRight) + st.borderLeftWidth.value + st.borderRightWidth.value;
             if (record.ContainsKey("height") && st.height.keyword == StyleKeyword.Undefined && st.height.value.unit == LengthUnit.Pixel)
                 st.height = st.height.value.value + Px(st.paddingTop) + Px(st.paddingBottom) + st.borderTopWidth.value + st.borderBottomWidth.value;
+        }
+        // scrollbar-gutter: stable - the bar is drawn as an overlay over the content, so a box's
+        // layout jumped the moment it overflowed. Reserving the bar's width as padding is what
+        // `stable` is for. ponytail: the 8/5 px here is EmitScrollbar's own default width.
+        if (record.TryGetValue("scrollbar-gutter", out var gutter) && gutter.Trim().StartsWith("stable", StringComparison.Ordinal)
+            && (record.TryGetValue("overflow", out var scrolls) || record.TryGetValue("overflow-y", out scrolls)) && scrolls.Trim() is "auto" or "scroll")
+        {
+            var barW = record.TryGetValue("scrollbar-width", out var sbw) ? sbw.Trim() switch { "none" => 0f, "thin" => 5f, _ => 8f } : 8f;
+            if (barW > 0f) ve.style.paddingRight = Px(ve.style.paddingRight) + barW;
         }
         if (record.TryGetValue("display", out var display) && display.Trim() == "grid" && !result.Grids.Contains(ve))
             result.Grids.Add(ve);

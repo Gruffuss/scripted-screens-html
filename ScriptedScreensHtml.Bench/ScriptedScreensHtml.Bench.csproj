@@ -45,6 +45,7 @@
     <Compile Include="..\ScriptedScreensHtml\Markup.cs" />
     <Compile Include="Check.cs" />
     <Compile Include="Holes.cs" />
+    <Compile Include="Slots.cs" />
     <Compile Include="CorpusCss.cs" />
     <Compile Include="Js.cs" />
     <Compile Include="Stubs.cs" />

@@ -24,6 +24,7 @@ internal static class Program
     {
         if (args.Length > 0 && args[0] == "--css") { ScriptedScreensHtml.Bench.CorpusCss.Run(args); return 0; }
         if (args.Length > 0 && args[0] == "--holes") return ScriptedScreensHtml.Bench.Holes.Run(args);
+        if (args.Length > 0 && args[0] == "--slots") return ScriptedScreensHtml.Bench.Slots.Run(args);
         if (args.Length > 0 && args[0] == "--retained")
         {
             var rp = args.Length > 1 ? args[1] : "../ScriptedScreensHtml/examples/07-game.lua";
