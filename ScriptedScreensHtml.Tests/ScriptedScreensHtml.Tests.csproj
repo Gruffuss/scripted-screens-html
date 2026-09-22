@@ -29,6 +29,7 @@
         <Compile Include="JsBench.cs" />
         <Compile Include="MotionProbe.cs" />
         <Compile Include="MotionTests.cs" />
+        <Compile Include="Corpus.cs" />
         <Compile Include="JsToLuaTests.cs" />
         <Compile Include="CompiledPageTests.cs" />
     </ItemGroup>

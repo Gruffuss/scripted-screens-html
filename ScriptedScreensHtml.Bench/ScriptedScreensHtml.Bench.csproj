@@ -37,6 +37,7 @@
     <Compile Include="..\ScriptedScreensHtml\JsEngine.cs" />
     <Compile Include="..\ScriptedScreensHtml\DomWrites.cs" />
     <Compile Include="Check.cs" />
+    <Compile Include="CorpusCss.cs" />
     <Compile Include="Js.cs" />
     <Compile Include="Stubs.cs" />
     <Compile Include="Retained.cs" />
