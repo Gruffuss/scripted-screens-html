@@ -53,7 +53,7 @@ internal static class DomLanguage
         Section("4. Events", Events(), prelude);
         Section("5. classList, style, dataset", Views(), prelude);
         Section("6. Timers and frames", Timers(), prelude);
-        StyleProperties();
+        StyleProperties(root);
         Elements(root);
         Attributes(root);
     }
@@ -479,13 +479,71 @@ OUT = PAGE.RESULT
         "backgroundImage", "borderTopLeftRadius", "maxWidth", "minHeight", "transition",
     };
 
-    private static void StyleProperties()
+    /// <summary>
+    /// The slot names a real emit of a fully-styled, script-driven element actually produces.
+    /// </summary>
+    /// <remarks>
+    /// This used to be a hand-written list of eleven names, and the probe then reported
+    /// <c>borderColor</c>, <c>borderWidth</c> and <c>visibility</c> as writes the compiler refuses -
+    /// on the strength of that list saying the element emits no stroke and no fill opacity. The
+    /// instrument was asserting its own answer, which is the sixth time that shape appeared in one
+    /// session. Emitting the thing and reading what came out corrects it in both directions: the
+    /// border IS there, as a second shape with a name of its own, and the opacity group carries a
+    /// synthetic name too - so those writes are refused for a real reason and a different one.
+    ///
+    /// The page's script writes every property under test, because the emitter only names a group
+    /// or keeps a zero-valued key for something a script drives; without the script the slots a
+    /// compiled page would have simply do not exist.
+    /// </remarks>
+    private static HashSet<string>? RealSlots(string root)
     {
-        var available = new HashSet<string>(StringComparer.Ordinal)
+        var bench = Bench(root);
+        if (bench == null) return null;
+
+        var writes = new StringBuilder();
+        foreach (var p in CommonStyleWrites)
+            writes.Append("  try{e.style.").Append(p).Append("='1px';}catch(x){}\n");
+        var page =
+            "<html><head><meta name=\"viewport\" content=\"width=400\"></head><body>"
+            + "<div id=e style=\"position:absolute;left:10px;top:12px;width:90px;height:40px;"
+            + "background:#22aa44;border:3px solid #ff8800;border-radius:6px;opacity:0.8;"
+            + "color:#eeeeee;font-size:14px;transform:translate(4px,5px) rotate(10deg)\">hello</div>"
+            + "<script>\nvar e = document.getElementById('e');\nfunction tick(){\n"
+            + writes + "}\nsetInterval(tick, 100);\n</script></body></html>";
+
+        var dir = Path.Combine(Path.GetTempPath(), "ss-domlanguage", "slots");
+        Directory.CreateDirectory(dir);
+        var file = Path.Combine(dir, "page.html");
+        File.WriteAllText(file, page);
+        try
         {
-            "e", "e_w", "e_h", "e_x", "e_y", "e_f", "e_rx", "e_size", "e_o", "e_t_0", "e_t_1",
-        };
-        var box = new DomSlots.Box(outOfFlow: true, parentX: 0, parentY: 0, hasBackground: false);
+            using var p = Process.Start(new ProcessStartInfo(bench, $"--slots \"{file}\"")
+            {
+                WorkingDirectory = dir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            });
+            if (p == null) return null;
+            var output = p.StandardOutput.ReadToEnd();
+            p.StandardError.ReadToEnd();
+            p.WaitForExit(120000);
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var line in output.Split('\n'))
+                if (line.Trim() is { Length: > 0 } s) set.Add(s);
+            return set.Count > 0 ? set : null;
+        }
+        catch (Exception) { return null; }
+    }
+
+    private static void StyleProperties(string root)
+    {
+        var available = RealSlots(root);
+        if (available == null) { Skip("5b. style properties that reach the scene"); return; }
+        // hasBackground: the probe element paints one, and that is the common case - a box a script
+        // moves is almost always a box you can see. It also makes the `color` refusal honest: the
+        // box and its label share an id, so the first `f` is the box's fill.
+        var box = new DomSlots.Box(outOfFlow: true, parentX: 0, parentY: 0, hasBackground: true);
         var reach = new List<string>();
         var refused = new List<string>();
         foreach (var property in CommonStyleWrites)

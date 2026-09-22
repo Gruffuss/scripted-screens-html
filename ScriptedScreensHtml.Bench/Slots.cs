@@ -23,8 +23,6 @@ namespace ScriptedScreensHtml.Bench;
 /// </remarks>
 internal static class Slots
 {
-    private static string Scene = string.Empty;
-
     internal static int Run(string[] args)
     {
         var path = args.Length > 1 ? args[1] : null;
@@ -59,17 +57,10 @@ internal static class Slots
         try
         {
             var output = VectorEmitter.Emit(built, built.Root, size.x, size.y);
-            Scene = new string(output.Chars, 0, output.Length);
             SceneSlots.Split(output.Chars, output.Length, slots);
         }
         finally { OffThread.Active = false; }
 
-        Console.WriteLine("# " + slots.Count + " slots, " + built.Warnings.Count + " warning(s), script "
-                          + (built.Script == null ? "null" : built.Script.Length.ToString()) + " chars, "
-                          + built.Driven.Count + " driven, " + built.NamedGroups.Count + " named groups");
-        Console.WriteLine("# --- scene ---");
-        Console.WriteLine(Scene);
-        foreach (var w in built.Warnings) Console.WriteLine("# warn: " + w);
         foreach (var name in slots.Keys.OrderBy(k => k, StringComparer.Ordinal)) Console.WriteLine(name);
         return 0;
     }

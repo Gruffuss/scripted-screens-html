@@ -128,20 +128,6 @@ internal static class DomSlots
         ["opacity"] = "fo",
     };
 
-    /// <summary>
-    /// Keys to try on the element's own node before falling back to its wrapping group.
-    /// </summary>
-    /// <remarks>
-    /// `fo` is only emitted on a shape that has a reason to carry one, so `visibility` and `opacity`
-    /// were refused on the ordinary case - a plain box, which is most of a page. The wrapping group's
-    /// `o` does the same job and IS emitted for anything a script drives, so the write lands there
-    /// instead of being turned away. Same fade either way; what differs is that the group also takes
-    /// the element's children with it, which is what `visibility: hidden` does in CSS anyway.
-    /// </remarks>
-    private static readonly HashSet<string> GroupFallback = new(StringComparer.Ordinal)
-    {
-        "visibility", "opacity",
-    };
 
     /// <summary>Properties carried by the element's wrapping group rather than its own node.</summary>
     private static readonly Dictionary<string, string[]> GroupKeys = new(StringComparer.Ordinal)

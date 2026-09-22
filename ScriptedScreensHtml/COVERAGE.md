@@ -21,23 +21,46 @@ cd ScriptedScreensHtml.Tests && dotnet run -c Release -- --domlanguage   # DOM +
 
 ## Where it stands, 2026-09-22
 
-| surface | | |
+"Not gaps" are named one by one with a reason, not waved at: a console has no printer, no browser to
+hint, no bidi pass, no inline flow, no blending and no third dimension. They are kept out of the
+score rather than counted as successes, because counting a correct refusal as a win is the opposite
+error and hides a real gap if the reason ever stops being true.
+
+| surface | | | not gaps | accounted for |
+|---|---|---|---|---|
+| **CSS selectors** | 92% | 81/88 | 7 | **100%** |
+| **CSS at-rules** | 91% | 31/34 | 2 | **97%** |
+| **HTML elements** | **100%** | 112/112 | — | **100%** |
+| `classList` / `style` / `dataset` | **100%** | 16/16 | — | 100% |
+| JS standard library | 95% | 165/174 | — | 95% |
+| DOM `Document` | 94% | 15/16 | — | 94% |
+| CSS values and functions | 92% | 98/106 | — | 92% |
+| DOM `Node` / `Element` | 91% | 48/53 | — | 91% |
+| Events | 91% | 20/22 | — | 91% |
+| Timers and frames | 91% | 10/11 | — | 91% |
+| JS syntax | 87% | 61/70 | — | 87% |
+| Global HTML attributes | 88% | 22/25 | — | 88% |
+| **CSS properties** | 84% | 286/342 | 52 | **99%** |
+| DOM `HTMLElement` | 74% | 17/23 | — | 74% |
+| **style writes that reach the scene** | **23%** | **11/47** | — | **23%** |
+
+Movement on 2026-09-22, and most of it was the instrument rather than the renderer:
+
+| surface | was | now |
 |---|---|---|
-| HTML elements | **99%** | 111/112 |
-| JS syntax | **80%** | 56/70 |
-| CSS values and functions | 79% | 84/106 |
-| CSS selectors | 73% | 64/88 |
-| CSS at-rules | 71% | 24/34 |
-| JS standard library | 68% | 119/174 |
-| DOM `Node` / `Element` | 66% | 35/53 |
-| Global HTML attributes | 64% | 16/25 |
-| CSS properties | **57%** | 195/342 |
-| DOM `Document` | 56% | 9/16 |
-| `classList` / `style` / `dataset` | 75% | 12/16 |
-| DOM `HTMLElement` | **30%** | 7/23 |
-| Timers and frames | **27%** | 3/11 |
-| **Events** | **23%** | 5/22 |
-| **style properties that reach the scene** | **23%** | 11/47 |
+| CSS properties | 57% (195/342) | 84% + 52 named |
+| CSS selectors | 73% (64/88) | 92% + 7 named, nothing missing |
+| CSS at-rules | 71% (24/34) | 91% + 2 named, nothing missing |
+| HTML elements | 99% | 100% |
+| Events | 23% | 91% |
+| Timers | 27% | 91% |
+| JS syntax | 80% | 87% |
+| JS standard library | 68% | 95% |
+
+**[GAPS-CSS-REMAINING.md](GAPS-CSS-REMAINING.md)** names the four CSS properties and eight values
+left, each with its reason. **[GAPS-RUNTIME-STYLE.md](GAPS-RUNTIME-STYLE.md)** is the 23% row: what a
+script can change on a compiled page, why the border is in the scene under a name nothing can reach,
+and the order the rest is worth doing in.
 
 ### How to read these
 
