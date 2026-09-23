@@ -73,7 +73,7 @@ internal static class HtmlDocsTool
 
         foreach (var (file, key, title, blurb, deep) in new[]
         {
-            ("README.md", "guide", "Guide", "the authoring guide: the html element, the data element, controls, CSS, fonts, SVG, JavaScript, diagnostics", false),
+            ("README.md", "guide", "Guide", "the authoring guide: the html element, showing real device data (reading devices in Lua, the data element), controls, CSS, fonts, SVG, JavaScript, diagnostics", false),
             ("SUPPORT.md", "support", "Support", "what works from HTML, CSS and JavaScript, what is accepted without effect, and what is still being finished", true),
         })
         {
@@ -122,7 +122,7 @@ internal static class HtmlDocsTool
         var list = index.ToString();
         var quickstart = System.IO.Path.Combine(folder, "QUICKSTART.md");
         resource.Invoke(null, new object[] { DocRoot + "index", "Html quick start and documentation index",
-            "Start here: what the ScriptedScreens html element is, a page and data element that run as written, the rules that fail silently, how to check a page, and every documentation URI.",
+            "Start here: what the ScriptedScreens html element is, a page and data element that run as written, showing real device data, the rules that fail silently, how to check a page, and every documentation URI.",
             "text/markdown", new Func<string>(() => Read(quickstart) + list) });
 
         registry.GetMethod("RegisterBundledExampleDocumentation", new[] { typeof(string), typeof(string), typeof(string) })

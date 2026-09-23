@@ -54,7 +54,7 @@ fit that rect.
 | Prop | Meaning |
 |---|---|
 | `src` | the page: a complete HTML document as a string (Lua's `[[ ... ]]` is convenient) |
-| `page` | optional; names the page a *data* element belongs to (see Data), default is the element id |
+| `page` | optional; names the page a *data* element belongs to (see Showing real device data), default is the element id |
 | `data` | on a second element: a table of values for the page |
 
 | Event | Meaning |
@@ -67,47 +67,66 @@ the page out for that width in px units, as you would for a phone, and it scales
 console size. Without the meta tag the design width is the element's width in canvas units
 (460 on every console).
 
-## Data: the page changes, Lua decides
+## Showing real device data
 
-Keep the page element static and send values through a second, tiny element that names the
-page. Its `data` table binds by element id:
+A page cannot read the game. The chip's Lua reads the devices and sends the values; the page
+decides how they look. That takes two elements: the page (`src`), and a second, tiny `html`
+element whose `page` names the first and whose `data` table carries the values.
 
 ```lua
 local data = ui:element({
     id = "screen_data", type = "html",
-    rect = { unit = "px", x = -4, y = -4, w = 1, h = 1 },
+    rect = { unit = "px", x = -4, y = -4, w = 1, h = 1 },   -- off screen; its rect does not matter
     props = { page = "screen", data = {} },
 })
 ui:commit()
 
-function tick(dt)
+local LT = ic.enums.LogicType
+function tick(dt)                                            -- runs about twice a second
+    local id = ic.find("Tank")                               -- the device's Labeller name
+    local kpa = id and ic.read_id(id, LT.Pressure)
+    local pct = math.floor(math.min(100, (kpa or 0) / 60000 * 100))
     data:set_props({ data = {
-        temp   = string.format("%.1f K", read_temperature()),   -- text of <span id="temp">
-        bar    = { width = pct .. "%" },                          -- CSS on <div id="bar">
-        alarm  = pressure > 500,                                  -- display of <div id="alarm">
-        hist   = history,                                         -- an SVG shape with id="hist"
+        pressure = kpa and string.format("%.0f kPa", kpa) or "--",   -- text of id="pressure"
+        bar = { width = string.format("%d%%", pct) },                -- CSS on id="bar"
+        alarm = (kpa or 0) > 55000,                                  -- shows or hides id="alarm"
     } })
     ui:commit()
 end
 ```
 
-| Value type | What it does to the element with that id |
+Each key of `data` is the `id` of an element in the page:
+
+| Value | What it does to that element |
 |---|---|
 | string or number | becomes its text |
-| table of `property = value` | sets those CSS declarations on it (`{ width = "60%", background = "#B5352C" }`) |
-| boolean | shows or hides it |
-| number array | on an SVG shape: y values spread across the viewBox width (a live graph); on a text element, joined |
-| string on an SVG shape | its `points` |
-| table on an SVG shape | its attributes |
+| table of CSS declarations | sets them: the `width` of a bar inside its track (`"62%"`), `background-color`, `color` |
+| `true` / `false` | shows / hides it |
 
-Because the elements persist, a CSS `transition` on the element animates the change: a bar
-with `transition: width 0.4s` glides to its new width, nothing in Lua runs per frame.
+A CSS `transition` on the element runs on every change: `transition: width 0.6s ease` on the
+bar slides it to each new value. Colours change at once. On a page with no `<script>` the CSS
+and layout are worked out once, from the first values; after that only the values move, so a
+readout costs nothing between ticks. A gauge needle turned by `transform` from data is coming;
+today a bar is a `width`.
 
-The whole `data` table also reaches the vector layer as `$name` values (`$temp`, `$tank_fill`
-for `tank = { fill = ... }`), which SVG expressions can use directly (see SVG).
+`examples/10-device-readout.lua` is one tank: pressure, temperature, a bar that changes colour,
+and an alarm. `examples/11-device-list.lua` lists every device whose name starts with a prefix,
+a row each, with the unused rows hidden.
 
-Page scripts see the same values as a `data` event on `window` (`window.ondata = function
-(d) { ... }`), if you would rather react in JavaScript.
+What not to do:
+
+- **Don't send every frame.** `tick(dt)` runs about twice a second, which is plenty: the
+  transition fills in the motion between ticks.
+- **Don't send raw numbers as text.** Format them in Lua, units and all:
+  `string.format("%.1f kPa", kpa)`. `%d` needs a whole number, so `math.floor` first, or the
+  chip stops with an error.
+- **Don't animate from Lua.** Stepping a width a little every tick fights the transition. Send
+  where the value should end up.
+- **Don't leave keys out, or send an empty string.** The page is prepared from the first values
+  it gets: send every key every time, and `"--"` for a reading you do not have. A `true`/`false`
+  first sent later cannot hide anything, and text first sent empty has nowhere to go.
+
+A key the page cannot use is named in the BepInEx log, once.
 
 ## Controls and clicks
 
@@ -157,8 +176,12 @@ own face.
 ## SVG
 
 Inline `<svg>` is resolved as a browser resolves it and written shape for shape: paths,
-gradients, `use`/`symbol`, `clipPath`, `text`, `image`, `transform`, CSS on shapes. Two
-extensions exist because the vector layer animates for free:
+gradients, `use`/`symbol`, `clipPath`, `text`, `image`, `transform`, CSS on shapes. A readout,
+a bar or an alarm needs none of it: boxes, text and the data table above do those.
+
+### If you already know SVG
+
+Two extensions exist because the vector layer animates for free:
 
 - Any attribute may be an expression: `cy="=60+8*sin(t*2)"`. `t` is seconds, `i` the
   instance index inside a repeat, `$name` a data value. Functions: `sin cos abs min max
@@ -172,8 +195,10 @@ extensions exist because the vector layer animates for free:
 </svg>
 ```
 
-That tank surface ripples on the client with nothing sent per frame; `$level` comes from
-the data table.
+That tank surface ripples on the client with nothing sent per frame. `$level` comes from the
+data table: every data value is also a `$name` for expressions (`$tank_fill` for
+`tank = { fill = ... }`). A number array sent to an SVG shape's id is its y values, spread
+evenly across the viewBox width: a live graph.
 
 ## JavaScript
 
@@ -187,7 +212,8 @@ writes. Sizes are the exception: `clientHeight`, `getBoundingClientRect` and the
 last drawn layout, so a script that changes something and wants the new size reads it on the next
 frame, where a browser would lay the page out on the spot. `window.innerWidth` and
 `window.innerHeight` are the page's own design size and are right from the first line.
-`console.log` goes to the BepInEx log.
+`console.log` goes to the BepInEx log. Data from Lua arrives as a `data` event on `window`
+(`window.ondata = function (d) { ... }`), if you would rather react in JavaScript.
 
 Use it for what a browser page would use it for: building the DOM from data, reacting to
 clicks, drawing on a canvas. Do not use it for animation loops that could be CSS or an SVG
@@ -196,10 +222,10 @@ not free), a CSS animation costs nothing.
 
 ## Performance, in one paragraph
 
-A page is translated to vector geometry when it changes, never per frame. Data ticks
-re-translate the page (a fraction of a millisecond for a typical page); transitions,
-keyframes, SVG expressions and scroll animations are evaluated by the vector mod on a worker
-thread. The costs to know about: a huge radial gradient or a blurred shadow is many
+A page is translated to vector geometry when it changes, never per frame. On a page with no
+script a data tick writes its values straight into the drawn scene, with no layout or
+translation; transitions, keyframes, SVG expressions and scroll animations are evaluated by
+the vector mod on a worker thread. The costs to know about: a huge radial gradient or a blurred shadow is many
 vertices; a canvas redrawn every frame is an emit every frame; a page script that touches
 hundreds of elements per tick is a lot of layout. The diagnostics line tells you which.
 
@@ -233,6 +259,9 @@ Script errors are logged with their message and stack. StationeersLua's MCP tool
 | `05-script.lua` | a page script building a table from a `data` event and reacting to clicks |
 | `06-console.lua` | a complete gas monitor: grid layout, live values, alarms, a history graph |
 | `07-game.lua` | Stationeer Run, an endless runner: a `requestAnimationFrame` loop, clicks, a demo that plays itself |
+| `10-device-readout.lua` | a real tank found by name: pressure, temperature, a bar that changes colour, an alarm |
+| `11-device-list.lua` | every device whose name starts with a prefix, one row each, unused rows hidden |
+
 `mockups/` beside them holds three complete consoles written as browser pages, each opening
 on the screen named by `TAB` at its top (`atmo`, `supply`, `filter`, `alarm`, `config`):
 

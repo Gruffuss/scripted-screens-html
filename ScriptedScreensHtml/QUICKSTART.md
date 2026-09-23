@@ -71,6 +71,7 @@ function tick(dt)
         press = string.format("%.1f kPa", press),
         alarm = press > 102.5,                       -- a boolean shows or hides
     } })
+    ui:commit()                                      -- set_props waits for the commit
 end
 ```
 
@@ -78,12 +79,44 @@ Values bind by element id. A number array binds to an SVG shape's points (a live
 Clicks: `<button id="purge">` or any element with `onclick` reports to `function on_click(id)`;
 inputs, selects, checkboxes and ranges report to `function on_change(v)` as `"name=value"`.
 
+## Showing real device data
+
+The values above are simulated. Real ones come from the chip's Lua, which finds a device by its
+Labeller name and reads it; the page never reads the game itself. Replace the tick with:
+
+```lua
+local LT = ic.enums.LogicType
+function tick(dt)                                    -- about twice a second
+    local id = ic.find("Hab Sensor")                 -- the Labeller name, exactly
+    local press = id and ic.read_id(id, LT.Pressure) -- kPa, or nil when there is no such device
+    local o2 = id and ic.read_id(id, LT.RatioOxygen) -- 0..1
+    data:set_props({ data = {
+        o2 = o2 and string.format("%.1f %%", o2 * 100) or "--",
+        o2bar = { width = string.format("%d%%", math.floor((o2 or 0) * 100)) },
+        press = press and string.format("%.1f kPa", press) or "--",
+        alarm = press ~= nil and press > 102.5,
+    } })
+    ui:commit()
+end
+```
+
+| Value in `data` | Does to the element with that id |
+|---|---|
+| string or number | its text |
+| table | CSS declarations: `width` of a bar inside its track, `background-color`, `color` |
+| `true` / `false` | shows / hides it |
+
+Send finished strings (units, rounding) about twice a second, never per frame; let a CSS
+`transition` move the bar between ticks rather than stepping it from Lua. A gauge needle turned
+by `transform` from data is coming. Whole chips: `examples/10-device-readout.lua` (one tank),
+`examples/11-device-list.lua` (every device whose name starts with a prefix).
+
 ## Which construct for which need
 
 | Need | Write |
 |---|---|
 | a value that changes | an element with an id; send a string through `data` |
-| a bar, gauge fill, progress | a box with `width`/`height` from `data` and a `transition` |
+| a bar, gauge fill, progress | a box inside a track, its `width` from `data`, with a `transition` |
 | show/hide on a condition | a boolean through `data` (`display`) |
 | a blinking lamp, a marching duct | `@keyframes` + `animation` on the element |
 | a live graph | inline `<svg>` with a `<polyline id="hist">` and a number array through `data` |
@@ -103,6 +136,9 @@ glyph a face lacks (subscript digits, the gear) comes from the game's own face a
 - [ ] The page's `id` is what the data element names in `page = "..."`; a mismatch binds nothing.
 - [ ] Every element that receives data has an `id`; an id that matches nothing warns once in the log.
 - [ ] `string.format("%d", x)` with a float is a Lua error on the chip; `math.floor` first.
+- [ ] Every data key goes in every payload from the first one on, with `"--"` rather than `""`
+      for a missing reading: a bool first sent later hides nothing, and text first sent empty
+      has nowhere to go (both named in the log).
 - [ ] One design width in the viewport meta; without it the page is laid out at the console's 460.
 - [ ] A page script has no `fetch`, no custom elements, no frameworks; the DOM subset is in the guide.
 - [ ] Only elements that are clickable report clicks: a `<button>`, an element with `onclick`, or one a script gave a `click` listener.
@@ -131,7 +167,7 @@ glyph a face lacks (subscript digits, the gear) comes from the game's own face a
 | Topic | URI |
 |---|---|
 | the html element, rect, design width | `stationeers://html/guide/the-html-element` |
-| the data element and binding by id | `stationeers://html/guide/data-the-page-changes-lua-decides` |
+| the data element, reading devices, binding by id | `stationeers://html/guide/showing-real-device-data` |
 | buttons, inputs, on_click, on_change | `stationeers://html/guide/controls-and-clicks` |
 | CSS that works, by area | `stationeers://html/support/css` and its subsections |
 | fonts | `stationeers://html/guide/fonts` |
