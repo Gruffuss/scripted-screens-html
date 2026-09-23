@@ -624,4 +624,146 @@ eq(list.children[1].tagName, 'EM', 'first of them')
 eq(list.children[2].tagName, 'STRONG', 'then the next')
 eq(row.nextElementSibling.tagName, 'EM', 'nextElementSibling skips text nodes')
 
+
+-- js_m: an array method only on an array. A canvas context has fill(), save() and translate() too,
+-- and reaching Array.fill with it died inside the method rather than naming the call.
+local okFill, errFill = pcall(js_m, {}, 'fill', 0)
+eq(okFill, false, 'fill on a plain object is refused')
+eq(tostring(errFill):find('the page calls .fill() on a object', 1, true) ~= nil, true, 'and the refusal names the call')
+local clsView = document.getElementById('cls')
+clsView.className = 'one two'
+local seenClasses = ''
+js_m(clsView.classList, 'forEach', function(c) seenClasses = seenClasses .. c end)
+eq(seenClasses, 'onetwo', 'but classList, whose length is derived, still takes an array method')
+
+-- Promise: reactions run on the microtask queue, drained after the script
+local order = {}
+local p1 = js_promise(function(res) res(1) end)
+js_m(js_m(p1, 'then', function(v) order[#order + 1] = 'then' .. v return v + 1 end), 'then',
+     function(v) order[#order + 1] = 'chain' .. v end)
+order[#order + 1] = 'sync'
+js_microtasks()
+eq(table.concat(order, ','), 'sync,then1,chain2', 'then runs after the script, in chain order')
+local caught
+js_m(js_m(js_m(Promise, 'reject', 'boom'), 'catch', function(e) caught = e return 'ok' end), 'then',
+     function(v) caught = caught .. '/' .. v end)
+js_microtasks()
+eq(caught, 'boom/ok', 'catch recovers and the chain continues')
+local fin = ''
+js_m(js_m(js_m(Promise, 'resolve', 5), 'finally', function() fin = fin .. 'f' end), 'then', function(v) fin = fin .. v end)
+js_microtasks()
+eq(fin, 'f5', 'finally runs and passes the value through')
+local thrown
+js_m(js_m(js_m(Promise, 'resolve', 1), 'then', function() error(js_error('x'), 0) end), 'catch', function(e) thrown = e.message end)
+js_microtasks()
+eq(thrown, 'x', 'a throw in then rejects the next promise')
+local adopted
+js_m(js_m(Promise, 'resolve', js_m(Promise, 'resolve', 7)), 'then', function(v) adopted = v end)
+js_microtasks()
+eq(adopted, 7, 'resolve adopts a promise')
+local waited
+js_m(js_m(js_m(Promise, 'resolve', 1), 'then', function(v) return js_promise(function(res) res(v + 10) end) end), 'then',
+     function(v) waited = v end)
+js_microtasks()
+eq(waited, 11, 'a promise returned from then is waited for')
+local thenable
+js_m(js_m(Promise, 'resolve', { ['then'] = function(res) res('foreign') end }), 'then', function(v) thenable = v end)
+js_microtasks()
+eq(thenable, 'foreign', 'a foreign thenable is adopted')
+local allv, allr, raced, settledv, anyv, anye
+js_m(js_m(Promise, 'all', js_array({ [0] = js_m(Promise, 'resolve', 1), [1] = 2 }, 2)), 'then', function(v) allv = arr(v) end)
+js_m(js_m(Promise, 'all', js_array({ [0] = js_m(Promise, 'reject', 'no'), [1] = 2 }, 2)), 'catch', function(e) allr = e end)
+js_m(js_m(Promise, 'race', js_array({ [0] = js_m(Promise, 'resolve', 'a'), [1] = js_m(Promise, 'resolve', 'b') }, 2)), 'then',
+     function(v) raced = v end)
+js_m(js_m(Promise, 'allSettled', js_array({ [0] = js_m(Promise, 'resolve', 1), [1] = js_m(Promise, 'reject', 'e') }, 2)), 'then',
+     function(v) settledv = v[0].status .. v[0].value .. v[1].status .. v[1].reason end)
+js_m(js_m(Promise, 'any', js_array({ [0] = js_m(Promise, 'reject', 'x'), [1] = js_m(Promise, 'resolve', 'y') }, 2)), 'then',
+     function(v) anyv = v end)
+js_m(js_m(Promise, 'any', js_array({ [0] = js_m(Promise, 'reject', 'x') }, 1)), 'catch', function(e) anye = e.name .. arr(e.errors) end)
+js_microtasks()
+eq(allv, '1,2', 'all collects in order')
+eq(allr, 'no', 'all rejects on the first rejection')
+eq(raced, 'a', 'race takes the first settled')
+eq(settledv, 'fulfilled1rejectede', 'allSettled reports both outcomes')
+eq(anyv, 'y', 'any takes the first fulfilled')
+eq(anye, 'AggregateErrorx', 'any rejects with every reason when none fulfils')
+local seq = ''
+js_promise(function(res) seq = seq .. 'e' res() end)
+queueMicrotask(function() seq = seq .. 'm' end)
+seq = seq .. 's'
+js_microtasks()
+eq(seq, 'esm', 'the executor is synchronous, a microtask waits for the script')
+local nested = ''
+queueMicrotask(function() nested = nested .. 'a' queueMicrotask(function() nested = nested .. 'b' end) end)
+js_microtasks()
+eq(nested, 'ab', 'a microtask queued during the drain runs in it')
+-- a click the page itself makes: the handler's reaction waits for the page's own line to finish
+local evp, viaClick = document.getElementById('evp'), ''
+js_m(evp, 'addEventListener', 'click',
+     function() js_m(js_m(Promise, 'resolve', 'M'), 'then', function(v) viaClick = viaClick .. v end) end)
+js_m(evp, 'click')
+viaClick = viaClick .. 'S'
+eq(viaClick, 'S', 'a promise settled in a click handler waits for the script that clicked')
+js_microtasks()
+eq(viaClick, 'SM', 'and runs when the host drains, after it: the order a browser gives')
+-- a job that throws leaves the ones behind it for the next drain
+local after = ''
+queueMicrotask(function() error('first', 0) end)
+queueMicrotask(function() after = after .. 'second' end)
+eq(pcall(js_microtasks), false, 'a throwing microtask reaches the host')
+js_microtasks()
+eq(after, 'second', 'and the rest of the queue survives it')
+-- a rejection nobody handles is noted; one caught later in the same script is not
+DOM.notes = {}
+js_m(Promise, 'reject', js_error('lost'))
+js_microtasks()
+eq(select(2, next(DOM.notes)), 'lost', 'an unhandled rejection is noted with its message')
+DOM.notes = {}
+local late = js_m(Promise, 'reject', 'x')
+js_m(late, 'catch', function() end)
+js_microtasks()
+eq(next(DOM.notes), nil, 'a rejection caught before the drain is not')
+
+-- the markup a script reads back: exact for what it wrote or built, noted for the page's own
+local made = document.createElement('div')
+made.id = 'x'
+made.className = 'k'
+js_m(made, 'setAttribute', 'data-n', '1')
+js_m(made, 'appendChild', document.createTextNode('a<b'))
+eq(made.outerHTML, '<div id="x" class="k" data-n="1">a&lt;b</div>', 'outerHTML of a built element')
+eq(made.innerHTML, 'a&lt;b', 'innerHTML of a built element')
+eq(made.textContent, 'a<b', 'textContent of a built element')
+made.innerHTML = '<b>y</b>'
+eq(made.innerHTML, '<b>y</b>', 'innerHTML reads back a write')
+eq(made.textContent, 'y', 'textContent reads a written innerHTML without its tags')
+made.innerText = 'z'
+eq(made.innerText, 'z', 'innerText reads back a write')
+eq(document.createElement('p').attributes.length, 0, 'a created element has no attributes until one is set')
+DOM.notes = {}
+eq(card.innerHTML, nil, 'the markup of a page element is not in the chunk')
+eq(next(DOM.notes) ~= nil, true, 'and reading it is noted')
+DOM.notes = {}
+eq(card.scrollTop, nil, 'scrollTop stays undefined')
+eq(next(DOM.notes) ~= nil, true, 'and reading it is noted')
+DOM.notes = {}
+card.scrollTop = 12
+eq(card.scrollTop, 12, 'a scroll offset the page wrote reads back')
+eq(next(DOM.notes), nil, 'and is not noted: the page asked for nothing the chunk lacks')
+card.scrollTop = card.scrollHeight
+eq(card.scrollTop, nil, 'one set from a scrollHeight the chunk has not is undefined again')
+BOXES['card'] = { 0, 0, 240, 32, 240, 32 }
+eq(getComputedStyle(card).width, '240px', 'getComputedStyle width from the laid-out box')
+card.style.width = '10px'
+eq(getComputedStyle(card).width, '10px', 'a script write wins over the box')
+eq(getComputedStyle(card) == getComputedStyle(card), true, 'the computed view is made once')
+DOM.notes = {}
+eq(getComputedStyle(card).color, nil, 'a cascaded colour is not in the chunk')
+eq(next(DOM.notes) ~= nil, true, 'and reading it is noted')
+DOM.notes = {}
+js_m(card, 'addEventListener', 'keydown', function() end)
+eq(next(DOM.notes) ~= nil, true, 'a key listener is noted: no keyboard event reaches a console')
+-- the page's own markup is enumerable from an element, not only from the document
+eq(js_m(document.getElementById('app'), 'getElementsByClassName', 'panel').length, 1, 'getElementsByClassName finds the markup below an element')
+eq(js_m(document.getElementById('app'), 'getElementsByTagName', 'p').length, 1, 'getElementsByTagName finds the markup below an element')
+
 if fails == 0 then print('all prelude checks pass') else print(fails .. ' FAILED') os.exit(1) end

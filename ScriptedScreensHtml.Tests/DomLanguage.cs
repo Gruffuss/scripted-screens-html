@@ -80,8 +80,12 @@ internal static class DomLanguage
         { Name = name; Js = js; Tail = tail; Want = want; }
     }
 
-    /// <summary>A case whose answer is the page's own <c>RESULT</c>.</summary>
-    private static Case C(string name, string js, string want) => new(name, js, "PAGE_SYNC() OUT = PAGE.RESULT", want);
+    /// <summary>
+    /// A case whose answer is the page's own <c>RESULT</c>. The microtask drain stands in for the
+    /// one the chunk's runtime tail runs right after the page's top-level code, which is when a
+    /// browser runs a promise reaction the script queued.
+    /// </summary>
+    private static Case C(string name, string js, string want) => new(name, js, "js_microtasks() PAGE_SYNC() OUT = PAGE.RESULT", want);
 
     /// <summary>A case that needs something to happen, or something only Lua can see, first.</summary>
     private static Case C(string name, string js, string tail, string want) => new(name, js, tail, want);
@@ -164,18 +168,29 @@ BOXES = {
     }
 
     /// <summary>
-    /// Members that answer nothing ON PURPOSE, each documented where it is defined. A compiled page
-    /// has no layout in it at all - the cascade and the boxes were resolved once, at compile time,
-    /// and what is left on the chip is a scene and some Lua - so every measurement is zero by
-    /// construction rather than by omission. Listed so the report says which hollow answers are a
+    /// Members that answer nothing ON PURPOSE, with the reason - the same one the prelude notes at
+    /// run time, so the log and this report say the same thing. A compiled page carries no layout,
+    /// no cascade and no markup text: they were resolved once, at compile time, and what is left on
+    /// the chip is a scene and some Lua. Listed so the report says which hollow answers are a
     /// decision and which are simply a gap.
     /// </summary>
-    private static readonly HashSet<string> Deliberate = new(StringComparer.Ordinal)
+    private static readonly Dictionary<string, string> Deliberate = new(StringComparer.Ordinal)
     {
-        "offsetWidth", "offsetHeight", "offsetLeft", "offsetTop", "clientWidth", "clientHeight",
-        "scrollTop", "scrollLeft", "scrollWidth", "scrollHeight", "getBoundingClientRect",
-        "document.querySelectorAll", "document.getElementsByTagName",
-        "getComputedStyle (cascade)", "textContent (read)", "innerHTML (read)",
+        ["scrollTop"] = "no scroll state in the chunk: the scene scrolls on the vector side and the offset never comes back to the chip",
+        ["scrollLeft"] = "no scroll state in the chunk",
+        ["scrollWidth"] = "no scroll state in the chunk",
+        ["scrollHeight"] = "no scroll state in the chunk",
+        ["getComputedStyle (cascade, colour)"] = "the cascade ran at compile time; only the script's own writes and the laid-out size are in the chunk",
+        ["textContent (read, own markup)"] = "the page's text was laid out at compile time and is not in the chunk; what the script wrote or built reads back exactly",
+        ["innerHTML (read, own markup)"] = "the page's markup is not in the chunk; what the script wrote or built reads back exactly",
+        ["outerHTML (own markup)"] = "the page's markup is not in the chunk; a built element serialises exactly",
+        ["event.key"] = "no keyboard event reaches a console page: the game keeps the keyboard, and a click carries no key",
+        ["event.code"] = "no keyboard event reaches a console page: the game keeps the keyboard, and a click carries no key",
+        // Two the compiler refuses by name rather than the prelude answering hollowly: each is
+        // something the chunk has no way to do, and a refusal at compile time is the loudest form
+        // there is - the page then runs interpreted, where both work.
+        ["insertAdjacentHTML"] = "the chunk has no HTML parser: markup becomes nodes once, at compile time, so a fragment at run time has nothing to become; refused by name and the page runs interpreted",
+        ["scrollIntoView"] = "no scroll state in the chunk: the scene's scroll box keeps its own offset and the chunk has no slot to move it; refused by name and the page runs interpreted",
     };
 
     private static void Section(string title, List<Case> cases, string prelude)
@@ -202,7 +217,7 @@ BOXES = {
         if (lines.Count == 0) return;
         Console.WriteLine($"{label} ({lines.Count}):");
         foreach (var l in lines.OrderBy(x => x, StringComparer.Ordinal))
-            Console.WriteLine("    " + l + (Deliberate.Contains(Head(l)) ? "   [by design]" : ""));
+            Console.WriteLine("    " + l + (Deliberate.TryGetValue(Head(l), out var why) ? "   [by design: " + why + "]" : ""));
     }
 
     private static string Head(string line)
@@ -250,12 +265,19 @@ BOXES = {
         C("className",             Box + "e.className = 'a b'; var RESULT = e.className;", "a b"),
         C("classList",             Box + "e.classList.add('a'); var RESULT = e.className;", "a"),
         C("textContent (write)",   Box + "e.textContent = 'hi';", Wrote("box.textContent"), "hi"),
-        C("textContent (read)",    Box + "var RESULT = e.textContent;", "hi"),
+        // A read right after a write sees the write; a read of the markup's own text cannot, since
+        // that text was laid out at compile time and is not in the chunk.
+        C("textContent (read)",    Box + "e.textContent = 'hi'; var RESULT = e.textContent;", "hi"),
+        C("textContent (read, own markup)", Box + "var RESULT = e.textContent;", "hello"),
         C("innerText (write)",     Box + "e.innerText = 'hi';", Wrote("box.innerText"), "hi"),
         C("innerHTML (write)",     Box + "e.innerHTML = '<b>x</b>';", Wrote("box.innerHTML"), "<b>x</b>"),
-        C("innerHTML (read)",      Box + "var RESULT = e.innerHTML;", "<b>x</b>"),
-        C("outerHTML",             Box + "var RESULT = e.outerHTML;", "<div id=\"box\"></div>"),
-        C("attributes",            Box + "e.setAttribute('k', 'v'); var RESULT = e.attributes.length;", "1"),
+        C("innerHTML (read)",      Box + "e.innerHTML = '<b>x</b>'; var RESULT = e.innerHTML;", "<b>x</b>"),
+        C("innerHTML (read, own markup)", Box + "var RESULT = e.innerHTML;", "<span id=\"label\" class=\"text wide\">hello</span>"),
+        C("outerHTML",             "var c = document.createElement('div'); c.id = 'x'; c.className = 'k'; var RESULT = c.outerHTML;", "<div id=\"x\" class=\"k\"></div>"),
+        C("outerHTML (own markup)", Box + "var RESULT = e.outerHTML;", "<div id=\"box\"><span id=\"label\" class=\"text wide\">hello</span></div>"),
+        // #box carries an id in the markup, so the browser counts two: the id and the one set.
+        C("attributes",            Box + "e.setAttribute('k', 'v'); var RESULT = e.attributes.length;", "2"),
+        C("attributes (created)",  "var c = document.createElement('div'); c.setAttribute('k', 'v'); var RESULT = c.attributes.length;", "1"),
 
         // ---- methods
         C("appendChild",           Tree + "var RESULT = p.children.length;", "2"),
@@ -309,12 +331,17 @@ BOXES = {
         C("clientWidth",        Box + "var RESULT = e.clientWidth;", "100"),
         C("clientHeight",       Box + "var RESULT = e.clientHeight;", "20"),
         C("scrollTop",          Box + "var RESULT = e.scrollTop;", "0"),
+        // An offset the page set reads back; one it never set is not in the chunk.
+        C("scrollTop (written)", Box + "e.scrollTop = 0; var RESULT = e.scrollTop === 0 ? 'zero' : 'other';", "zero"),
         C("scrollLeft",         Box + "var RESULT = e.scrollLeft;", "0"),
         C("scrollWidth",        Box + "var RESULT = e.scrollWidth;", "100"),
         C("scrollHeight",       Box + "var RESULT = e.scrollHeight;", "20"),
         C("getBoundingClientRect", Box + "var RESULT = e.getBoundingClientRect().width;", "100"),
         C("getComputedStyle",   Box + "e.style.width = '5px'; var RESULT = getComputedStyle(e).width;", "5px"),
+        // The laid-out size is in the chunk (BOXES), so a computed width is the real one; a colour
+        // the stylesheet gave the element is not.
         C("getComputedStyle (cascade)", Box + "var RESULT = getComputedStyle(e).width;", "100px"),
+        C("getComputedStyle (cascade, colour)", Box + "var RESULT = getComputedStyle(e).color;", "rgb(0, 0, 0)"),
     };
 
     // ---- 3. Document --------------------------------------------------------------------------
@@ -335,8 +362,10 @@ BOXES = {
         // expectation of 1 was written when the chunk could only see nodes the script built.
         C("document.querySelectorAll", "var RESULT = document.querySelectorAll('div').length;", "2"),
         C("document.getElementsByTagName", "var RESULT = document.getElementsByTagName('div').length;", "2"),
+        // PAGE_SYNC() after the fire, or the tail reads the page's `n` from before the handler ran
+        // - which is how this row reported the listener as hollow while it fired perfectly well.
         C("document.addEventListener", "var n = 0; document.addEventListener('x', function () { n = 1; });",
-          "DOM.fire('document', 'x', 0, 0) OUT = PAGE.n", "1"),
+          "DOM.fire('document', 'x', 0, 0) PAGE_SYNC() OUT = PAGE.n", "1"),
         C("document.removeEventListener", "var n = 0; var f = function () { n = 1; }; document.addEventListener('x', f); document.removeEventListener('x', f);",
           "DOM.fire('document', 'x', 0, 0) OUT = PAGE.n == 0 and 'gone' or 'still there'", "gone"),
         C("document.dispatchEvent", "var n = 0; document.addEventListener('x', function () { n = 1; }); document.dispatchEvent({ type: 'x' }); var RESULT = n;", "1"),
@@ -346,11 +375,12 @@ BOXES = {
     // ---- 4. Events ----------------------------------------------------------------------------
 
     /// <summary>
-    /// A click as the host delivers one: <c>DOM.fire</c> is what <c>event(id, kind, x, y)</c> calls,
-    /// so the registry, the bubbling walk and the event object are all on the path - which calling a
-    /// handler directly would skip.
+    /// A click as the host delivers one: <c>DOM.fire</c> then <c>js_microtasks()</c> is what
+    /// <c>event(id, kind, x, y)</c> does, so the registry, the bubbling walk, the event object and
+    /// the reactions the handlers queued are all on the path - which calling a handler directly
+    /// would skip.
     /// </summary>
-    private const string Click = "DOM.fire('box', 'click', 3, 4) PAGE_SYNC() OUT = PAGE.RESULT";
+    private const string Click = "DOM.fire('box', 'click', 3, 4) js_microtasks() PAGE_SYNC() OUT = PAGE.RESULT";
 
     /// <summary>`box` sits inside `app`, which is what makes a bubbling case a bubbling case.</summary>
     private const string Nested = "PARENT['box'] = 'app'\n" + Click;
@@ -417,6 +447,8 @@ BOXES = {
 -- two bugs in it were fixed and never copied back, so the probe kept measuring the old behaviour:
 -- timers as the `else` of the animation branch (a page that animates ran no timer at all) and a
 -- one-shot that never stopped. A probe that disagrees with production measures the probe.
+-- The js_microtasks() at the end of each frame is where the chunk's `frame` has to drain before
+-- DOM.flush(), so every promise reaction a frame's callbacks queued lands in that frame's payload.
 local function DRIVE(n, dt)
   for _ = 1, n do
     local pending = Pending.frame
@@ -437,8 +469,12 @@ local function DRIVE(n, dt)
         end
       end
     end
+    js_microtasks()
   end
 end
+-- The runtime tail drains once as the chunk finishes loading, before any frame: what the page's
+-- top-level code queued runs ahead of its first timer, as it does in a browser.
+js_microtasks()
 DRIVE(4, 100)
 PAGE_SYNC()
 OUT = PAGE.RESULT
@@ -457,6 +493,13 @@ OUT = PAGE.RESULT
         C("an interval beside a rAF loop", "var RESULT = 0; setInterval(function () { RESULT++; }, 100); function tick() { requestAnimationFrame(tick); } requestAnimationFrame(tick);", Drive, "4"),
         C("setTimeout with no delay", "var RESULT = 0; setTimeout(function () { RESULT++; });", Drive, "1"),
         C("queueMicrotask",     "var RESULT = 0; queueMicrotask(function () { RESULT = 1; });", "1"),
+        // A microtask runs before any timer, however short the timer's delay.
+        C("microtask before a timer", "var RESULT = ''; setTimeout(function () { RESULT += 'T'; }, 0); queueMicrotask(function () { RESULT += 'M'; });", Drive, "MT"),
+        C("Promise.then",       "var RESULT = 0; Promise.resolve(2).then(function (v) { RESULT = v; });", "2"),
+        C("new Promise",        "var RESULT = 0; new Promise(function (ok) { ok(3); }).then(function (v) { RESULT = v; });", "3"),
+        C("Promise.catch",      "var RESULT = ''; Promise.reject('no').catch(function (e) { RESULT = e; });", "no"),
+        C("Promise.all",        "var RESULT = 0; Promise.all([Promise.resolve(1), 2]).then(function (v) { RESULT = v.length; });", "2"),
+        C("a promise settled in a click handler", Box + "var RESULT = 0; e.addEventListener('click', function () { Promise.resolve(1).then(function (v) { RESULT = v; }); });", Click, "1"),
     };
 
     // ---- the style properties a write can actually reach ---------------------------------------

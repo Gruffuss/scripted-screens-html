@@ -226,6 +226,35 @@ internal static class ChipHost
         return names;
     }
 
+    /// <summary>
+    /// What the page asked for that a compiled page cannot give, keyed by the reason and cleared
+    /// as read: a scroll offset, the cascade behind getComputedStyle, its own markup's text, a
+    /// keyboard event, a promise rejection nothing caught. The prelude notes each once, by reason,
+    /// with the element or key it was asked about as the value; unread, the note was exactly as
+    /// silent as the nil it explained.
+    /// </summary>
+    internal static List<string>? NotesIn(object? environment)
+    {
+        if (environment is not Lua.LuaTable env
+            || !env["DOM"].TryRead<Lua.LuaTable>(out var dom)
+            || !dom["notes"].TryRead<Lua.LuaTable>(out var notes)) return null;
+
+        List<string>? lines = null;
+        List<string>? reasons = null;
+        var key = Lua.LuaValue.Nil;
+        while (notes.TryGetNext(key, out var pair))
+        {
+            key = pair.Key;
+            if (key.Type != Lua.LuaValueType.String) continue;
+            var why = key.Read<string>();
+            (reasons ??= new List<string>()).Add(why);
+            (lines ??= new List<string>()).Add(pair.Value.TryRead<string>(out var what) ? $"{why} - \"{what}\"" : why);
+        }
+        // Cleared after the walk, as MissingIn does: `next` does not survive a nil mid-iteration.
+        if (reasons != null) foreach (var why in reasons) notes[why] = Lua.LuaValue.Nil;
+        return lines;
+    }
+
     /// <summary>A named function in a loaded chunk's environment, or null when it declared none.</summary>
     internal static object? FunctionIn(object? environment, string name)
         => environment is Lua.LuaTable env && env[name].TryRead<Lua.LuaFunction>(out var fn) ? fn : null;

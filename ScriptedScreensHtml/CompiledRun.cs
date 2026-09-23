@@ -232,6 +232,12 @@ internal sealed class CompiledRun
                         ScriptedScreensHtmlPlugin.Log?.LogWarning(
                             $"html: \"{_page}\" writes to \"{id}\", which the compiled scene does not draw - " +
                             "an element the script created after the page was laid out has no shape to write into");
+            // What the page asked for that a compiled page cannot give. The prelude answers nil and
+            // notes why, once per reason; without this the note was as silent as the nil.
+            if (ChipHost.NotesIn(_env) is { } notes)
+                foreach (var asked in notes)
+                    if (_reported.Add("asked:" + asked))
+                        ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: \"{_page}\" - {asked}");
             Report();
             return true;
         }

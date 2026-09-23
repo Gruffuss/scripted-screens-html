@@ -575,6 +575,9 @@ internal static class CompiledPage
 
         sb.Append(Runtime(element)).Append('\n');
         sb.Append(page);
+        // What the page's top-level code queued - a Promise.then, a queueMicrotask - runs once,
+        // here, as a browser runs it when the script returns and before any timer.
+        sb.Append("\njs_microtasks()\n");
         return sb.ToString();
     }
 
@@ -818,6 +821,10 @@ frame = function(dt)
     end
   end
 
+  -- The reactions this frame's callbacks queued, before the payload goes: a browser runs them
+  -- when the callback returns, and a value a .then wrote has to land in THIS frame's payload,
+  -- not the next one's. An empty queue is one comparison.
+  js_microtasks()
   DOM.flush()
 end
 
@@ -828,6 +835,7 @@ end
 -- click region and the log said nothing was wrong.
 event = function(id, kind, x, y)
   DOM.fire(id, kind, x, y)
+  js_microtasks()
   DOM.flush()
 end
 ";

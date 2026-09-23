@@ -60,7 +60,20 @@ internal sealed class JintEngine : IJsEngine
     public string Name => "Jint";
     public void Bind(string name, Delegate fn) => _engine.SetValue(name, fn);
     public void Execute(string script) => _engine.Execute(script);
-    public object? Invoke(string name, params object?[] args) => _engine.Invoke(name, args);
+
+    /// <summary>
+    /// A call, then the promise reactions it queued. Jint drains its microtask queue at the end of
+    /// <c>Execute</c> and NOT at the end of <c>Invoke</c> - measured, not read - and the page script
+    /// is the only Execute this host ever makes. Every frame, click and data event is an Invoke, so
+    /// a <c>.then</c> reached from any of them was queued and never run: an interpreted page's
+    /// promises were dead after its first line, with nothing in the log.
+    /// </summary>
+    public object? Invoke(string name, params object?[] args)
+    {
+        var result = _engine.Invoke(name, args);
+        _engine.Advanced.ProcessTasks();
+        return result;
+    }
 
     public double AsNumber(object? value) => value is Jint.Native.JsValue v && v.IsNumber() ? v.AsNumber() : 0d;
     public bool AsBool(object? value) => value is Jint.Native.JsValue v && v.IsBoolean() && v.AsBoolean();

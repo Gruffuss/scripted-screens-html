@@ -22,6 +22,7 @@ internal static class PreludeRuntime
 {
     internal static void Run(Action<bool, string> check)
     {
+        OnJint(check);
         OnTheGamesLua(check);
         var script = Find("ScriptedScreensHtml/tests/prelude-check.lua");
         if (script == null)
@@ -54,6 +55,42 @@ internal static class PreludeRuntime
         catch (Exception ex)
         {
             check(false, "prelude: running the checks threw - " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The interpreted path's promises. Jint has Promise natively; the question was whether a
+    /// reaction runs without the host asking for it. Measured: <c>Execute</c> drains the microtask
+    /// queue and <c>Invoke</c> does not - and the page script is the only Execute ScriptHost makes,
+    /// every frame and event being an Invoke - so <c>JintEngine.Invoke</c> pumps the queue itself.
+    /// Two checks: the raw-Jint fact that makes the pump necessary, pinned on the engine version in
+    /// use, and the host's own wrapper doing it. The second reads its answer through a further
+    /// Invoke, whose own pump comes after the value has been read, so it cannot mask a missing one.
+    /// </summary>
+    private static void OnJint(Action<bool, string> check)
+    {
+        try
+        {
+            using var raw = new Jint.Engine();
+            raw.Execute("var r = 0; function f() { Promise.resolve().then(function () { r = 2; }); }");
+            raw.Invoke("f");
+            var afterInvoke = Jint.JsValueExtensions.AsNumber(raw.GetValue("r"));
+            raw.Advanced.ProcessTasks();
+            var afterPump = Jint.JsValueExtensions.AsNumber(raw.GetValue("r"));
+            check(afterInvoke == 0 && afterPump == 2,
+                  "interpreted: Jint runs no promise reaction after Invoke until ProcessTasks() is called"
+                  + $" (after Invoke {afterInvoke}, after the pump {afterPump})");
+
+            using var host = new JintEngine();
+            host.Execute("var r = 0; function f() { Promise.resolve().then(function () { r = 2; }); } function read() { return r; }");
+            host.Invoke("f");
+            var seen = host.AsNumber(host.Invoke("read"));
+            check(seen == 2, "interpreted: JintEngine.Invoke drains the reactions the call queued, so a .then reached from a frame or a click runs"
+                             + $" (read {seen})");
+        }
+        catch (Exception ex)
+        {
+            check(false, "interpreted: the Jint promise check threw - " + First(ex.Message));
         }
     }
 

@@ -212,9 +212,32 @@ internal static class Corpus
         Console.WriteLine($"{scripted.Count(p => p.Driver == "raf")} write every frame and need motion as expressions on top of compiling");
     }
 
+    /// <summary>
+    /// The 2D canvas context's methods, so a canvas page counts as ONE blocker whichever call the
+    /// transpiler named first. Counted by method name the histogram split one missing feature
+    /// across `getContext`, `fillRect`, `save`, `rotate` and `beginPath` rows - and lost `fill`
+    /// outright the day the array method of that name was implemented, which read as a canvas
+    /// page coming unblocked when nothing about it had changed. `fill` is kept in the set for the
+    /// day the manifest learns receivers; today `ctx.fill()` compiles and is refused by the prelude
+    /// at run time, by name, since the receiver has no `length`.
+    /// </summary>
+    private static readonly HashSet<string> CanvasMethods = new(StringComparer.Ordinal)
+    {
+        "getContext", "fillRect", "strokeRect", "clearRect", "fillText", "strokeText", "measureText",
+        "beginPath", "closePath", "moveTo", "lineTo", "arc", "arcTo", "ellipse", "rect", "roundRect",
+        "quadraticCurveTo", "bezierCurveTo", "fill", "stroke", "clip", "setLineDash", "createLinearGradient",
+        "createRadialGradient", "createConicGradient", "createPattern", "addColorStop", "drawImage", "getImageData",
+        "putImageData", "createImageData", "save", "restore", "translate", "rotate", "scale", "transform",
+        "setTransform", "resetTransform", "isPointInPath",
+    };
+
+    private const string CanvasKind = "canvas 2D context (`.getContext()` and its methods) - a missing feature";
+
     /// <summary>A problem message reduced to the construct it is about, so it can be counted.</summary>
     private static string Kind(string problem)
     {
+        var canvas = Regex.Match(problem, @"`\.(\w+)\(\)`, which the prelude does not provide");
+        if (canvas.Success && CanvasMethods.Contains(canvas.Groups[1].Value)) return CanvasKind;
         var at = problem.IndexOf(" at line", StringComparison.Ordinal);
         if (at > 0) problem = problem.Substring(0, at);
         at = problem.IndexOf(" (line", StringComparison.Ordinal);

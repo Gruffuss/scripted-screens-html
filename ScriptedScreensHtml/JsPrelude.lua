@@ -468,6 +468,206 @@ function js_error(message)
            stack = "", __error = true }
 end
 
+-- ---- Promise ----------------------------------------------------------------------------------
+--
+-- A promise's reactions never run inside the call that settles it: they go on the microtask
+-- queue, which a browser drains the moment the running script returns. This chunk is driven once
+-- a frame, so js_microtasks() is called where a script "returns" here - after the page's own
+-- top-level code, at the end of each frame's callbacks, and after every event delivered - which
+-- is the finest grain there is. The queue is one flat list kept for the life of the chunk, three
+-- slots a job (the function and two arguments), so queueing allocates nothing and draining an
+-- empty queue is one comparison: a page that never makes a promise pays nothing per frame.
+-- Those three calls belong to the chunk's runtime, not to this prelude: nothing here drains on its
+-- own, because a drain inside a call the page made - `el.click()`, `dispatchEvent` - would run the
+-- reactions BEFORE the rest of the page's own line, which is the one order a browser never gives.
+--
+-- Not here: async/await. That is a translation - a function body has to become resumable - and it
+-- belongs to the compiler, which refuses it by name.
+
+local PENDING, FULFILLED, REJECTED = 0, 1, 2
+local MT, MT_head, MT_tail = {}, 0, 0
+
+local function enqueue(job, a, b)
+  MT[MT_tail + 1], MT[MT_tail + 2], MT[MT_tail + 3] = job, a, b
+  MT_tail = MT_tail + 3
+end
+
+-- A job that throws propagates to the host, as a timer callback's error does, and the jobs behind
+-- it are kept for the next drain: the head has moved past the failed one before it runs.
+function js_microtasks()
+  while MT_head < MT_tail do                 -- a job may queue more, and they run in this drain
+    local i = MT_head + 1
+    MT_head = i + 2
+    local job, a, b = MT[i], MT[i + 1], MT[i + 2]
+    MT[i], MT[i + 1], MT[i + 2] = nil, nil, nil
+    job(a, b)
+  end
+  MT_head, MT_tail = 0, 0
+end
+
+function queueMicrotask(fn) enqueue(fn) end
+
+local PromiseClass
+local settle, resolvePromise
+
+local function isPromise(v) return type(v) == "table" and rawget(v, "__promise") == true end
+
+-- A promise made from inside, with no executor to run.
+local function fresh() return setmetatable({ __promise = true, __state = PENDING }, PromiseClass.__proto) end
+
+-- One reaction is three slots on the promise: the two handlers (false to pass the outcome
+-- through) and the promise the handler's result settles (false for none - the combinators keep
+-- their own). A handler's throw is the child's rejection, as in a browser; nothing escapes here.
+local function runReaction(p, i)
+  local r = p.__reactions
+  local handler
+  if p.__state == FULFILLED then handler = r[i] else handler = r[i + 1] end
+  local child = r[i + 2]
+  if not handler then
+    if child then settle(child, p.__state, p.__value) end
+    return
+  end
+  local ok, v = pcall(handler, p.__value)
+  if not child then return end
+  if ok then resolvePromise(child, v) else settle(child, REJECTED, v) end
+end
+
+local function react(p, onFul, onRej, child)
+  local r = p.__reactions
+  if r == nil then r = {} p.__reactions = r end
+  local n = #r
+  r[n + 1], r[n + 2], r[n + 3] = onFul or false, onRej or false, child or false
+  if p.__state ~= PENDING then enqueue(runReaction, p, n + 1) end
+end
+
+-- A rejection nobody handles is noted, as a browser logs "Uncaught (in promise)". The check is a
+-- job behind the rejection rather than a test at the rejection, so a catch attached later in the
+-- same script - `var p = Promise.reject(e); p.catch(f)` - counts as handling. Without this a
+-- page whose chain threw looked like a page that had stopped, with nothing anywhere to say why.
+local UNHANDLED = "an unhandled promise rejection: a promise was rejected and nothing had a then/catch on it by the time the microtasks ran"
+local function checkUnhandled(p)
+  if p.__reactions ~= nil then return end
+  local v = p.__value
+  DOM.note(UNHANDLED, type(v) == "table" and v.message or js_str(v))
+end
+
+settle = function(p, state, value)
+  if p.__state ~= PENDING then return end
+  p.__state, p.__value = state, value
+  local r = p.__reactions
+  if r ~= nil then for i = 1, #r, 3 do enqueue(runReaction, p, i) end
+  elseif state == REJECTED then enqueue(checkUnhandled, p) end
+end
+
+-- Resolving with a promise adopts it; with a foreign thenable - an object carrying its own then()
+-- - asks it to call back; with anything else, fulfils.
+resolvePromise = function(p, v)
+  if p.__state ~= PENDING then return end
+  if v == p then settle(p, REJECTED, js_error("a promise cannot resolve to itself")) return end
+  if isPromise(v) then react(v, false, false, p) return end
+  if type(v) == "table" and type(v["then"]) == "function" then
+    local ok, err = pcall(js_m, v, "then",
+      function(x) resolvePromise(p, x) end, function(e) settle(p, REJECTED, e) end)
+    if not ok then settle(p, REJECTED, err) end
+    return
+  end
+  settle(p, FULFILLED, v)
+end
+
+local function aggregate(errors)
+  local e = js_error("All promises were rejected")
+  e.name, e.errors = "AggregateError", errors
+  return e
+end
+
+-- all, allSettled, any and race: one result, one reaction per input, and which outcome ends it.
+local function combine(list, kind)
+  local out = fresh()
+  local n = js_len(list)
+  if n == 0 then
+    if kind == "any" then settle(out, REJECTED, aggregate(js_array({}, 0)))
+    elseif kind ~= "race" then settle(out, FULFILLED, js_array({}, 0)) end   -- race stays pending
+    return out
+  end
+  local results, left = {}, n
+  for i = 0, n - 1 do
+    local item = list[i]
+    local p = item
+    if not isPromise(p) then p = fresh() resolvePromise(p, item) end
+    react(p,
+      function(v)
+        if kind == "all" then results[i] = v
+        elseif kind == "allSettled" then results[i] = { status = "fulfilled", value = v }
+        else settle(out, FULFILLED, v) return end             -- race and any: the first to fulfil
+        left = left - 1
+        if left == 0 then settle(out, FULFILLED, js_array(results, n)) end
+      end,
+      function(e)
+        if kind == "any" then results[i] = e
+        elseif kind == "allSettled" then results[i] = { status = "rejected", reason = e }
+        else settle(out, REJECTED, e) return end              -- all and race: the first to reject
+        left = left - 1
+        if left == 0 then
+          if kind == "any" then settle(out, REJECTED, aggregate(js_array(results, n)))
+          else settle(out, FULFILLED, js_array(results, n)) end
+        end
+      end, false)
+  end
+  return out
+end
+
+PromiseClass = js_class("Promise", nil, {
+  __ctor = function(self, executor)
+    self.__promise, self.__state = true, PENDING
+    if type(executor) ~= "function" then
+      error("Promise resolver " .. js_str(executor) .. " is not a function")
+    end
+    local ok, err = pcall(executor,
+      function(v) resolvePromise(self, v) end, function(e) settle(self, REJECTED, e) end)
+    if not ok then settle(self, REJECTED, err) end
+  end,
+  -- `then` is a Lua keyword, so it is spelled as a key; the dispatcher reaches it by name anyway.
+  ["then"] = function(self, onFul, onRej)
+    local child = fresh()
+    react(self, type(onFul) == "function" and onFul or false,
+                type(onRej) == "function" and onRej or false, child)
+    return child
+  end,
+  catch = function(self, onRej) return js_m(self, "then", nil, onRej) end,
+  -- The callback runs either way and the outcome passes through it, unless it throws - or returns
+  -- a promise, which is waited for first.
+  finally = function(self, fn)
+    if type(fn) ~= "function" then return js_m(self, "then") end
+    return js_m(self, "then",
+      function(v)
+        local r = fn()
+        if isPromise(r) then return js_m(r, "then", function() return v end) end
+        return v
+      end,
+      function(e)
+        local r = fn()
+        if isPromise(r) then return js_m(r, "then", function() error(e, 0) end) end
+        error(e, 0)
+      end)
+  end,
+}, nil, nil, {
+  resolve = function(v)
+    if isPromise(v) then return v end
+    local p = fresh()
+    resolvePromise(p, v)
+    return p
+  end,
+  reject = function(e) local p = fresh() settle(p, REJECTED, e) return p end,
+  all = function(list) return combine(list, "all") end,
+  allSettled = function(list) return combine(list, "allSettled") end,
+  any = function(list) return combine(list, "any") end,
+  race = function(list) return combine(list, "race") end,
+})
+
+Promise = PromiseClass
+
+function js_promise(executor) return js_new(PromiseClass, executor) end
+
 -- ---- Date -------------------------------------------------------------------------------------
 --
 -- `js_now()` counts milliseconds since the scene was applied, which is all a page needs for
@@ -1378,7 +1578,12 @@ function js_m(obj, name, ...)
     end
     local viaIndex = obj[name]
     if type(viaIndex) == "function" then return viaIndex(...) end
-    local m = ArrayMethods[name] or ObjectMethods[name]
+    -- An array method only on something with a length: an array, or a view that derives one, as
+    -- classList does. Any table used to reach ArrayMethods, so `ctx.fill()` on an object with no
+    -- `length` ran Array.fill and died inside it with a Lua message about nil, where the refusal
+    -- below names the call the page made - and a canvas context is exactly the receiver whose
+    -- method names overlap the array's (fill, save, translate).
+    local m = (type(obj.length) == "number" and ArrayMethods[name]) or ObjectMethods[name]
     if m then return m(obj, ...) end
   elseif type(obj) == "string" then
     local m = StringMethods[name]
@@ -2411,12 +2616,19 @@ function js_tabular(s)
   return (s:gsub('%d+', function(run) return '<mspace=0.6em>' .. run .. '</mspace>' end))
 end
 
-DOM = { writes = {}, order = {}, missing = {}, listeners = {}, captures = 0 }
+DOM = { writes = {}, order = {}, missing = {}, notes = {}, listeners = {}, captures = 0 }
 
 function DOM.reset()
-  DOM.writes, DOM.order, DOM.missing = {}, {}, {}
+  DOM.writes, DOM.order, DOM.missing, DOM.notes = {}, {}, {}, {}
   DOM.listeners, DOM.captures = {}, 0
 end
+
+-- What the page asked for that a compiled page cannot give, said once. A read the chunk cannot
+-- answer used to hand back nil and nothing else, and a page dividing by a scrollHeight it never
+-- had looked like a page that did nothing. Keyed by the reason, which is a constant string, with
+-- the element as the value, so noting it from a per-frame read allocates nothing; the host drains
+-- and logs the table the way it drains DOM.missing.
+function DOM.note(why, what) DOM.notes[why] = what == nil and true or what end
 
 -- A page assigning `undefined` has still written: `log.scrollTop = log.scrollHeight` does exactly
 -- that here, since nothing lays out and scrollHeight is not a thing a compiled page has. Storing
@@ -3166,9 +3378,24 @@ end
 ElementReads.offsetWidth, ElementReads.offsetHeight = boxed(3, 0), boxed(4, 0)
 ElementReads.clientWidth, ElementReads.clientHeight = boxed(5, 0), boxed(6, 0)
 ElementReads.offsetLeft, ElementReads.offsetTop = boxed(7, nil), boxed(8, nil)
--- Deliberately NOT scrollHeight or scrollTop. `log.scrollTop = log.scrollHeight` is the idiom for
--- pinning a log to its foot, and the record of that write reading `undefined` is what says the page
--- asked for something a compiled page does not have. A zero would make it look answered.
+-- Deliberately NOT a number for scrollHeight or scrollTop. `log.scrollTop = log.scrollHeight` is
+-- the idiom for pinning a log to its foot, and the record of that write reading `undefined` is
+-- what says the page asked for something a compiled page does not have - a zero would make it
+-- look answered. The read is noted, so the log says so too. An offset the page itself wrote does
+-- read back, unclamped: a browser clamps it to the scroll range, and the chunk has no range to
+-- clamp against, so what the page set is the one honest number there is.
+local NO_SCROLL = "a compiled page has no scroll state: the scene scrolls on the vector side and the offset never comes back to the chip"
+local function unscrolled(key)
+  return function(el)
+    local own = key ~= nil and rawget(el, "__props")[key] or nil
+    if own ~= nil then return own end
+    DOM.note(NO_SCROLL, rawget(el, "__id"))
+    return nil
+  end
+end
+ElementReads.scrollTop, ElementReads.scrollLeft = unscrolled("scrollTop"), unscrolled("scrollLeft")
+-- Read-only in a browser, so a write to either is not an answer.
+ElementReads.scrollWidth, ElementReads.scrollHeight = unscrolled(nil), unscrolled(nil)
 
 ElementReads.parentNode = function(el)
   local up = rawget(el, "__parent")
@@ -3263,12 +3490,19 @@ ElementReads.nodeValue = function(el)
 end
 ElementReads.data = ElementReads.nodeValue
 
+-- An element the script built carries `__tag`; one of the page's own markup has its tag in TAG.
+local function isMarkup(el) return rawget(el, "__tag") == nil end
+
 -- Enough of a NamedNodeMap to be counted and read. Built per call rather than kept, because it has
--- to follow setAttribute and className, and nothing reads it on a per-frame path.
+-- to follow setAttribute and className, and nothing reads it on a per-frame path. `id` is an
+-- attribute only where the element has one: the page's markup always does, a created element
+-- only once the script assigns it - its internal id is not an attribute anyone wrote.
 ElementReads.attributes = function(el)
   local out, n = {}, 0
-  out[n] = { name = "id", value = rawget(el, "__id") } n = n + 1
-  local className = rawget(el, "__props").className
+  if isMarkup(el) or rawget(el, "__props").id ~= nil then
+    out[n] = { name = "id", value = ElementReads.id(el) } n = n + 1
+  end
+  local className = ElementReads.className(el)
   if className ~= nil and className ~= "" then
     out[n] = { name = "class", value = js_str(className) } n = n + 1
   end
@@ -3278,6 +3512,94 @@ ElementReads.attributes = function(el)
   end
   return js_array(out, n)
 end
+
+-- ---- the markup a script reads back ---------------------------------------------------------
+-- Exact or nothing. What the script wrote, and what it built, can be given back verbatim; the
+-- TEXT of the page's own markup is not in the chunk - it was laid out at compile time - so a
+-- markup element nothing wrote to answers nil and says why, rather than a plausible half.
+
+local NO_MARKUP = "the page's own markup is not in the chunk: it was laid out once, at compile time, so only what the script wrote or built can be read back"
+
+local function escapeText(s)
+  return (js_str(s):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+end
+
+local function attrText(el)
+  local s = ""
+  if isMarkup(el) or rawget(el, "__props").id ~= nil then
+    s = ' id="' .. js_str(ElementReads.id(el)):gsub('"', "&quot;") .. '"'
+  end
+  local cls = ElementReads.className(el)
+  if cls ~= nil and cls ~= "" then s = s .. ' class="' .. js_str(cls):gsub('"', "&quot;") .. '"' end
+  local t = rawget(el, "__attrs")
+  if t ~= nil then
+    for k, v in pairs(t) do s = s .. " " .. k .. '="' .. js_str(v):gsub('"', "&quot;") .. '"' end
+  end
+  return s
+end
+
+local serialise
+
+-- The inside of a node, or nil where it is not known exactly.
+local function innerOf(el, out, n)
+  local props = rawget(el, "__props")
+  if props.innerHTML ~= nil then n = n + 1 out[n] = js_str(props.innerHTML) return n end
+  local text = props.textContent or props.innerText
+  if text ~= nil then n = n + 1 out[n] = escapeText(text) return n end
+  if isMarkup(el) then return nil end
+  local list = rawget(el, "__kids")
+  if list ~= nil then
+    for i = 1, #list do
+      n = serialise(list[i], out, n)
+      if n == nil then return nil end
+    end
+  end
+  return n
+end
+
+serialise = function(el, out, n)
+  if rawget(el, "__textnode") then
+    n = n + 1 out[n] = escapeText(rawget(el, "__props").textContent or "")
+    return n
+  end
+  local tag = rawget(el, "__tag") or TAG[rawget(el, "__id")]
+  if tag == nil or tag == "#fragment" then return innerOf(el, out, n) end
+  n = n + 1 out[n] = "<" .. tag .. attrText(el) .. ">"
+  n = innerOf(el, out, n)
+  if n == nil then return nil end
+  n = n + 1 out[n] = "</" .. tag .. ">"
+  return n
+end
+
+local function joined(el, n, out)
+  if n == nil then DOM.note(NO_MARKUP, rawget(el, "__id")) return nil end
+  return concat(out, "", 1, n)
+end
+
+-- What was written reads back as it was written, with no table and no join: it is the one read of
+-- these a page makes per tick (`log.innerHTML = line + log.innerHTML`), and it used to be free.
+ElementReads.innerHTML = function(el)
+  local written = rawget(el, "__props").innerHTML
+  if written ~= nil then return js_str(written) end
+  local out = {}
+  return joined(el, innerOf(el, out, 0), out)
+end
+ElementReads.outerHTML = function(el) local out = {} return joined(el, serialise(el, out, 0), out) end
+
+-- Text: what was written (an innerHTML with its tags stripped), or what was built.
+ElementReads.textContent = function(el)
+  local props = rawget(el, "__props")
+  local text = props.textContent or props.innerText
+  if text ~= nil then return text end
+  if props.innerHTML ~= nil then return (js_str(props.innerHTML):gsub("<[^>]*>", "")) end
+  if isMarkup(el) then DOM.note(NO_MARKUP, rawget(el, "__id")) return nil end
+  local list, out = rawget(el, "__kids"), {}
+  if list ~= nil then
+    for i = 1, #list do out[i] = ElementReads.textContent(list[i]) or "" end
+  end
+  return concat(out)
+end
+ElementReads.innerText = ElementReads.textContent
 
 ElementReads.tagName = function(el)
   if rawget(el, "__textnode") or rawget(el, "__fragment") then return nil end
@@ -3306,14 +3628,49 @@ ElementReads.dataset = function(el)
   return ds
 end
 
--- The element's OWN style, which is all a compiled page can answer with: the cascade ran at compile
--- time and its result is in the scene, not in the chunk. So a page reads back what its script has
--- set and nothing else - a value that came from the stylesheet reads as nil, not as the stylesheet's
--- value. Returning the live style object rather than a copy is deliberate: it costs no allocation
--- and getPropertyValue works on it unchanged.
+-- The element's own writes first, then its box: the cascade ran at compile time and its result is
+-- in the scene, not in the chunk, but the compiler did measure every element, so `width` and
+-- `height` are the real laid-out numbers rather than nothing. Anything else the stylesheet gave
+-- the element - a colour, a font size - is not here, and reading it is noted rather than answered
+-- with nil alone, which used to read as "the property is unset". One view per element, made on
+-- first use, so a read in a render loop allocates nothing.
+local NO_CASCADE = "getComputedStyle: the cascade ran at compile time, so only what the script wrote and the element's laid-out size are in the chunk"
+
+local ComputedMeta = {}
+ComputedMeta.__index = function(cs, key)
+  if key == "getPropertyValue" then return rawget(cs, "__get") end
+  local el = rawget(cs, "__el")
+  local own = rawget(rawget(el, "__style"), "__props")[key]
+  if own ~= nil then return own end
+  local b = BOXES[rawget(el, "__id")]
+  if b ~= nil then
+    -- A box is fixed for the life of the chunk, so its two strings are built once and kept on it.
+    if key == "width" then
+      local s = b.width
+      if s == nil then s = js_str(b[3]) .. "px" b.width = s end
+      return s
+    end
+    if key == "height" then
+      local s = b.height
+      if s == nil then s = js_str(b[4]) .. "px" b.height = s end
+      return s
+    end
+  end
+  DOM.note(NO_CASCADE, key)
+  return nil
+end
+-- Read-only, as a browser's is.
+ComputedMeta.__newindex = function() end
+
 function getComputedStyle(el)
   if type(el) ~= "table" then return nil end
-  return rawget(el, "__style")
+  local cs = rawget(el, "__computed")
+  if cs == nil then
+    cs = setmetatable({ __el = el }, ComputedMeta)
+    rawset(cs, "__get", function(name) return cs[cssKey(name)] end)
+    rawset(el, "__computed", cs)
+  end
+  return cs
 end
 -- ---- events ---------------------------------------------------------------------------------
 -- A compiled page is still interactive. `addEventListener` used to be a no-op here, so every
@@ -3361,10 +3718,17 @@ end
 -- DOM.captures counts the capturing listeners that exist anywhere. It is zero on every ordinary
 -- page, and DOM.fire skips the whole downward walk while it is, so the phase costs nothing until
 -- something asks for it.
+-- No keyboard event reaches a console page - the game keeps the keyboard - so a key listener is
+-- kept, never fires, and is noted once: a page waiting on one otherwise looks like a page whose
+-- handler is broken.
+local NO_KEYBOARD = "no keyboard event reaches a console page: the game keeps the keyboard, so a keydown/keyup/keypress listener never fires"
+
 function DOM.on(id, kind, fn, options)
   if fn == nil or id == nil then return end
+  kind = js_str(kind)
+  if kind == "keydown" or kind == "keyup" or kind == "keypress" then DOM.note(NO_KEYBOARD, id) end
   local capture, once = optionsOf(options)
-  local list = listeners(id, js_str(kind), true)
+  local list = listeners(id, kind, true)
   -- A browser ignores a repeat registration of the same function at the same phase.
   for i = 1, #list do
     if entryFn(list[i]) == fn and entryCapture(list[i]) == capture then return end
@@ -3470,30 +3834,36 @@ local function ancestorAt(id, up)
   return at
 end
 
---- Fires one event at `id`, down to it and back up, as a browser does.
-function DOM.fire(id, kind, x, y)
-  if id == nil or kind == nil then return nil end
-  kind = js_str(kind)
-  local ev = make_event(id, kind, x, y)
-
+local function walk(ev, id, kind)
   if DOM.captures > 0 then
     local depth, at, guard = 0, PARENT[id], 0
     while at ~= nil and guard < 64 do depth = depth + 1 at = PARENT[at] guard = guard + 1 end
     for up = depth, 1, -1 do
       local step = ancestorAt(id, up)
       if step == nil then break end
-      if deliver(ev, step, kind, 1) or ev.__stop then return ev end
+      if deliver(ev, step, kind, 1) or ev.__stop then return end
     end
   end
 
-  if deliver(ev, id, kind, 2) or ev.__stop or not ev.bubbles then return ev end
+  if deliver(ev, id, kind, 2) or ev.__stop or not ev.bubbles then return end
 
   local at, guard = PARENT[id], 0
   while at ~= nil and guard < 64 do
     guard = guard + 1
-    if deliver(ev, at, kind, 3) or ev.__stop then return ev end
+    if deliver(ev, at, kind, 3) or ev.__stop then return end
     at = PARENT[at]
   end
+end
+
+--- Fires one event at `id`, down to it and back up, as a browser does. It does NOT drain the
+--- microtasks the handlers queued: `el.click()` and `dispatchEvent` come through here from the
+--- page's own code, and a browser runs those reactions only once the script that made the call
+--- has finished. The host's `event` entry drains after it, for a click the player made.
+function DOM.fire(id, kind, x, y)
+  if id == nil or kind == nil then return nil end
+  kind = js_str(kind)
+  local ev = make_event(id, kind, x, y)
+  walk(ev, id, kind)
   return ev
 end
 
@@ -3546,11 +3916,6 @@ function requestAnimationFrame(fn) Pending.frame[#Pending.frame + 1] = fn return
 function setInterval(fn, ms) Pending.timers[#Pending.timers + 1] = { fn = fn, ms = ms } return #Pending.timers end
 function setTimeout(fn, ms) Pending.timers[#Pending.timers + 1] = { fn = fn, ms = ms, once = true } return #Pending.timers end
 
--- A microtask runs before the next render in a browser and on the next frame here, which is the
--- finest grain a chunk driven once a frame has. Worth knowing for ordering against a timer set in
--- the same breath; nothing else about it differs.
-function queueMicrotask(fn) return setTimeout(fn, 0) end
-
 -- Cancelling is emptying the slot, not removing it: the handle a page holds is the index it was
 -- given, and closing the gap would silently renumber every timer set after it. clearInterval was a
 -- no-op here, so a page that started a poll and then stopped it kept polling for ever.
@@ -3580,4 +3945,6 @@ function addEventListener(kind, fn, options) DOM.on("window", kind, fn, options)
 function removeEventListener(kind, fn, options) DOM.off("window", kind, fn, options) end
 window.addEventListener = addEventListener
 window.removeEventListener = removeEventListener
+-- As a browser's is: a page that reaches its constructors through the global object finds this one.
+window.Promise = Promise
 document.dispatchEvent = function(ev) DOM.fire("document", ev ~= nil and ev.type or nil, 0, 0) return true end

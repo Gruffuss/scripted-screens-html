@@ -75,6 +75,10 @@ internal sealed class DomWrites
     private static readonly HashSet<string> Schedulers = new(StringComparer.Ordinal)
     {
         "requestAnimationFrame", "setInterval", "setTimeout", "addEventListener", "setImmediate",
+        // a microtask or a promise reaction runs later than the code that queued it, so what it
+        // writes is a runtime write; without these its writes were never mapped and DOM.bind
+        // dropped them without a word
+        "queueMicrotask", "then", "catch", "finally",
     };
 
     private readonly Dictionary<string, FunctionInfo> _functions = new(StringComparer.Ordinal);

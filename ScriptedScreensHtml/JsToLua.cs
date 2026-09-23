@@ -67,7 +67,7 @@ internal sealed class JsToLua
         "undefined", "requestAnimationFrame", "setTimeout", "setInterval", "clearInterval", "Object",
         "location", "Map", "Set", "WeakMap", "WeakSet", "Error", "TypeError", "RangeError", "Array",
         "RegExp", "clearTimeout", "cancelAnimationFrame", "addEventListener", "removeEventListener",
-        "getComputedStyle", "globalThis", "queueMicrotask",
+        "getComputedStyle", "globalThis", "queueMicrotask", "Promise",
     };
 
     /// <summary>
@@ -140,6 +140,8 @@ internal sealed class JsToLua
         "getMonth", "getSeconds", "getTimezoneOffset", "toISOString",
         "toLocaleDateString", "toLocaleTimeString",
         "createTextNode", "createDocumentFragment", "insertAdjacentText",
+        // Promise: the prelude's microtask queue, drained by the chunk's runtime tail, frame and event
+        "then", "catch", "finally", "resolve", "reject", "all", "allSettled", "any", "race",
     };
 
     /// <summary>Property names the page itself defines, so its own methods are not reported as unknown.</summary>
@@ -1958,6 +1960,7 @@ internal sealed class JsToLua
     /// </summary>
     private static readonly Dictionary<string, string> Constructors = new(StringComparer.Ordinal)
     {
+        ["Promise"] = "js_promise",
         ["Map"] = "js_map", ["Set"] = "js_set", ["WeakMap"] = "js_map", ["WeakSet"] = "js_set",
         ["Array"] = "js_new_array", ["Error"] = "js_error", ["TypeError"] = "js_error",
         ["RangeError"] = "js_error", ["Date"] = "js_date", ["Object"] = "js_new_object",
