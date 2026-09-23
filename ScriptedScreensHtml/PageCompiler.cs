@@ -403,7 +403,7 @@ internal static class PageCompiler
             {
                 var child = parent[i];
                 if (child.name is { Length: > 0 } name && absolute.TryGetValue(child, out var at)
-                    && (available.Contains(name + "_x") || available.Contains(name + "_y")))
+                    && (available.Contains(DomSlots.Slot(name) + "_x") || available.Contains(DomSlots.Slot(name) + "_y")))
                     into.Add((name, at.x - from.x, at.y - from.y));
                 Collect(child, from, into);
             }
@@ -519,7 +519,7 @@ internal static class PageCompiler
             if (!hidden.TryGetValue(other, out var after))
             {
                 // Only the element's own slots vanish with it, and its opacity is what hides it.
-                if (slot == id + "_o") { toggle.Shown.Add((slot, pair.Value.Number)); toggle.Hidden.Add((slot, 0)); }
+                if (slot == DomSlots.Slot(id) + "_o") { toggle.Shown.Add((slot, pair.Value.Number)); toggle.Hidden.Add((slot, 0)); }
                 continue;
             }
             var before = pair.Value;

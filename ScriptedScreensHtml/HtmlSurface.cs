@@ -1390,7 +1390,10 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         var built = _built!;
         var sample = new List<KeyValuePair<string, SS.UiValue>>(_dataPending!);
-        _dataPending = null;
+        // A new structure is sent under the other prefix (Translate, below the compile), and a line
+        // with no id that a measured declaration moves has to be written under that name.
+        var prefix = _slotPrefix;
+        var sendPrefix = _lastTemplate == null || template == _lastTemplate ? prefix : prefix == "L" ? "M" : "L";
         try
         {
             // The lock: a bool's two states are two more layouts of this page (PageCompiler.ToggleOf),
@@ -1401,7 +1404,9 @@ internal sealed class HtmlSurface : MonoBehaviour
                     id => built.ById.TryGetValue(id, out var ve) ? TextCss(built, ve) : null,
                     _shapes.Keys,
                     id => PageCompiler.ToggleOf(built, id),
-                    m => ScriptedScreensHtmlPlugin.Log?.LogWarning($"html \"{ElementId}\": {m}"));
+                    m => ScriptedScreensHtmlPlugin.Log?.LogWarning($"html \"{ElementId}\": {m}"),
+                    (id, property, value) => DataSlots.Sample(built, id, property, value, prefix, ReshowBools),
+                    prefix, sendPrefix);
             if (HtmlConfig.Diagnostics)
                 ScriptedScreensHtmlPlugin.Log?.LogInfo(
                     $"html \"{ElementId}\": data compiled - {_dataSlots.Count} key(s) write slots directly; no layout, translate or emit per tick");
@@ -1413,6 +1418,8 @@ internal sealed class HtmlSurface : MonoBehaviour
             _dataRefused = "the data compile threw";
             ScriptedScreensHtmlPlugin.Log?.LogError($"html \"{ElementId}\": data compile failed, later payloads are dropped: {ex}");
         }
+        // only now: a measurement's re-cascade re-shows what the pending payload keeps shown
+        _dataPending = null;
         _releasePending = true;
     }
 
@@ -2569,7 +2576,9 @@ internal sealed class HtmlSurface : MonoBehaviour
             // A compiled page's values come from its own Lua, and its DOM has been let go. Binding
             // into a rebuilt copy would cost a rebuild per tick and draw nothing, since the copy is
             // not what the console shows.
-            if (_compiled != null || _released) return;
+            // A compiled page's script is in its chip: the payload goes there, as its `data` event.
+            if (_compiled != null) { _compiled.Data(entries); return; }
+            if (_released) return;
             var kept = new List<KeyValuePair<string, SS.UiValue>>(entries);
             Post(() => BindData(kept));
         }
@@ -2687,8 +2696,15 @@ internal sealed class HtmlSurface : MonoBehaviour
                 // Its transition, if any, is the renderer's to run (DataSlots._eased). The emitter's
                 // tween would write an expression into the slot instead of the number the table
                 // writes, and the proof would disagree - for the sake of a glide the renderer does anyway.
-                if (HasTransition(ve) && !_muted.Contains(ve)) { lock (Tweens.Shared) Tweens.Override[ve] = (0f, Tweens.Easing.Default); _muted.Add(ve); }
+                // A custom property moves whatever reads it below, so their transitions go the same way.
+                Mute(ve, WritesCustom(entry.Value));
             }
+        }
+
+        void Mute(VisualElement ve, bool subtree)
+        {
+            if (HasTransition(ve) && !_muted.Contains(ve)) { lock (Tweens.Shared) Tweens.Override[ve] = (0f, Tweens.Easing.Default); _muted.Add(ve); }
+            if (subtree) for (var i = 0; i < ve.childCount; i++) Mute(ve[i], true);
         }
 
         _dirty = true;
@@ -2739,12 +2755,14 @@ internal sealed class HtmlSurface : MonoBehaviour
                 {
                     var l = TextTarget(ve, entry.Key);
                     if (l != null) l.text = v.String ?? string.Empty;
+                    if (_script == null) KeepText(ve, l?.text);
                     break;
                 }
                 case SS.UiValueType.Number:
                 {
                     var l = TextTarget(ve, entry.Key);
                     if (l != null) l.text = v.Number.ToString("G", CultureInfo.InvariantCulture);
+                    if (_script == null) KeepText(ve, l?.text);
                     break;
                 }
                 case SS.UiValueType.Bool:
@@ -2755,6 +2773,14 @@ internal sealed class HtmlSurface : MonoBehaviour
                     // was refused although a browser draws it. The value is put back by the table.
                     if (_script == null) { ve.style.display = DisplayStyle.Flex; break; }
                     ve.style.display = v.Bool ? DisplayStyle.Flex : DisplayStyle.None;
+                    break;
+                case SS.UiValueType.Map when v.Map != null && _script == null:
+                    // Kept on the node as an inline style, so a custom property's re-cascade - or a
+                    // capture's, when the table compiles - does not put the stylesheet back over it.
+                    if (DataSlots.Bind(_built!, ve, v.Map, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m)))
+                        ReshowBools();
+                    // `display` is the bool's two states: shown, as the bool's element is, below
+                    if (KeepsShown(v)) ve.style.display = DisplayStyle.Flex;
                     break;
                 case SS.UiValueType.Map when v.Map != null:
                     foreach (var decl in v.Map)
@@ -2773,13 +2799,56 @@ internal sealed class HtmlSurface : MonoBehaviour
         Wake(DataAwakeFrames);
     }
 
-    /// <summary>Whether a data value writes its element's opacity group: a bool (hide/show), or an opacity or visibility.</summary>
+    /// <summary>
+    /// Whether a data value writes its element's groups: a bool or a display (hide/show), an opacity
+    /// or visibility, or a transform - named up front, since a page translated once never gets the
+    /// frame on which the emitter would have seen it move.
+    /// </summary>
     private static bool WritesGroup(SS.UiValue v)
     {
         if (v.Type == SS.UiValueType.Bool) return true;
         if (v.Type != SS.UiValueType.Map || v.Map == null) return false;
-        foreach (var d in v.Map) if (d.Key is "opacity" or "visibility") return true;
+        foreach (var d in v.Map) if (d.Key is "opacity" or "visibility" or "transform" or "display") return true;
         return false;
+    }
+
+    /// <summary>Whether a data value hides and shows its element, which is then kept shown until the table compiles.</summary>
+    private static bool KeepsShown(SS.UiValue v)
+    {
+        if (v.Type == SS.UiValueType.Bool) return true;
+        if (v.Type != SS.UiValueType.Map || v.Map == null) return false;
+        foreach (var d in v.Map) if (d.Key == "display") return true;
+        return false;
+    }
+
+    /// <summary>Whether a data value sets a custom property, which moves whatever reads it below the element.</summary>
+    private static bool WritesCustom(SS.UiValue v)
+    {
+        if (v.Type != SS.UiValueType.Map || v.Map == null) return false;
+        foreach (var d in v.Map) if (d.Key != null && d.Key.StartsWith("--", StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// A no-script page's elements that data shows and hides, shown again: a re-cascade (a custom
+    /// property's) puts their stylesheet `display` back, and the compile needs their lines drawn.
+    /// </summary>
+    private void ReshowBools()
+    {
+        if (_dataPending == null) return;
+        foreach (var pair in _dataPending)
+            if (KeepsShown(pair.Value) && _byId.TryGetValue(pair.Key, out var shown)) shown.style.display = DisplayStyle.Flex;
+    }
+
+    /// <summary>
+    /// A data text kept on the element's node too, as a script's textContent is (ScriptHost): a
+    /// re-cascade rebuilds a label's rich text from its node, and would put the markup's "--" back.
+    /// </summary>
+    private void KeepText(VisualElement ve, string? text)
+    {
+        if (text == null || _built == null || !_built.NodeOf.TryGetValue(ve, out var node) || node.IsText) return;
+        node.Children.Clear();
+        node.Children.Add(new HtmlNode { Text = text, Parent = node });
     }
 
     private void OnDestroy()

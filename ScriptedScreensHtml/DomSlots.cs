@@ -222,13 +222,15 @@ internal static class DomSlots
     {
         if (string.IsNullOrEmpty(id))
             return Result.No("the element has no id, so nothing in the scene is named after it");
+        // `tank-1` draws as `tank_1_w`: the scene's names are identifiers (SceneSlots.Friendly)
+        var named = Slot(id);
 
         // Text is a slot on the label's own line and carries the element's bare name. It is never an
         // expression: the renderer's T.text takes a value, not a formula, so every textContent write
         // stays a write however pure the value that produced it.
         if (property is "textContent" or "innerText")
-            return available.Contains(id)
-                ? Result.Ok(id)
+            return available.Contains(named)
+                ? Result.Ok(named)
                 : Result.No($"\"{id}\" draws no text, so there is no slot to write");
 
         // `innerHTML#3` - one hole of a markup write, already resolved to its slot by MarkupSlots.
@@ -251,7 +253,7 @@ internal static class DomSlots
         if (GroupKeys.TryGetValue(css, out var groupKeys))
         {
             var slots = new string[groupKeys.Length];
-            for (var i = 0; i < groupKeys.Length; i++) slots[i] = id + "_" + groupKeys[i];
+            for (var i = 0; i < groupKeys.Length; i++) slots[i] = named + "_" + groupKeys[i];
             foreach (var slot in slots)
                 if (!available.Contains(slot))
                     // The wrapper exists but carries no id, so its numbers have positional names
@@ -270,7 +272,7 @@ internal static class DomSlots
         // already the transform scale, and the two shapes would collide on x, y, w and h.
         if (Companion.Contains(css))
         {
-            var border = id + VectorEmitter.BorderIdSuffix + "_" + key;
+            var border = named + VectorEmitter.BorderIdSuffix + "_" + key;
             return available.Contains(border)
                 ? Result.Ok(border)
                 // Either this element draws no border at all, or it draws one of the several-sided
@@ -292,13 +294,13 @@ internal static class DomSlots
         // the background instead of the text, silently, and only on the elements that have both.
         if (css == "color" && box.HasBackground)
         {
-            var label = id + SceneSlots.SecondSuffix + "_" + key;
+            var label = named + SceneSlots.SecondSuffix + "_" + key;
             return available.Contains(label)
                 ? Result.Ok(label)
                 : Result.No($"\"{id}\" paints a background and draws no text over it, so `color` has no slot");
         }
 
-        var name = id + "_" + key;
+        var name = named + "_" + key;
         if (!available.Contains(name))
             return Result.No($"\"{id}\" emits no {key}, so `{css}` has no slot");
 
@@ -307,7 +309,7 @@ internal static class DomSlots
         // by half of it when centred and all of it when right-aligned, its own height when clipped.
         // No number written to both lines draws what a re-layout would, and a number written to the
         // first alone leaves the text behind - so it is refused, rather than either, silently.
-        if (key is "w" or "h" or "x" or "y" && available.Contains(id + SceneSlots.SecondSuffix + "_" + key))
+        if (key is "w" or "h" or "x" or "y" && available.Contains(named + SceneSlots.SecondSuffix + "_" + key))
             return Result.No($"\"{id}\" draws text over its box, and the emitter sizes the text's rect from the box's, so `{css}` is not a value");
 
         // A percentage is of the containing block's content box: its width across, its height down.
@@ -338,7 +340,7 @@ internal static class DomSlots
             var bias = new List<double> { origin };
             foreach (var child in box.Inside)
             {
-                var childSlot = child.Id + "_" + key;
+                var childSlot = Slot(child.Id) + "_" + key;
                 if (!available.Contains(childSlot)) continue;
                 slots.Add(childSlot);
                 bias.Add(origin + (vertical ? child.Dy : child.Dx));
@@ -419,6 +421,25 @@ internal static class DomSlots
                 slots.AddRange(mapped.Slots);
             }
         return group ? Result.Group(slots.ToArray()) : Result.Ok(slots.ToArray());
+    }
+
+    /// <summary>
+    /// An element id as the scene names its slots: an identifier the vector mod's expressions can
+    /// read, so a dash, a space or an accent is an underscore and a leading digit gets one in front -
+    /// the rule SceneSlots applies when it splits. Composing slot names from the raw id found nothing
+    /// for `tank-1`, the commonest spelling of an HTML id, and every write to it was refused.
+    /// </summary>
+    internal static string Slot(string id)
+    {
+        var clean = id.Length > 0 && !(id[0] >= '0' && id[0] <= '9');
+        foreach (var c in id) if (!Identifier(c)) { clean = false; break; }
+        if (clean) return id;
+        var sb = new System.Text.StringBuilder(id.Length + 1);
+        if (id.Length > 0 && id[0] >= '0' && id[0] <= '9') sb.Append('_');
+        foreach (var c in id) sb.Append(Identifier(c) ? c : '_');
+        return sb.ToString();
+
+        static bool Identifier(char c) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
     }
 
     /// <summary>`backgroundColor` as `background-color`: a script writes one spelling, CSS the other.</summary>

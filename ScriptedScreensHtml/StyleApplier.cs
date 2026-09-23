@@ -522,6 +522,28 @@ internal static class StyleApplier
                 }
                 break;
             }
+            // The individual transform properties. They were only ever reset, so a stylesheet using
+            // `rotate: 45deg` drew nothing turned. UI Toolkit keeps one of each, the same slots
+            // `transform` fills, so on an element that declares both, the later declaration wins
+            // that component where CSS would compose them.
+            case "rotate":
+                s.rotate = v == "none" ? new Rotate(0) : new Rotate(Angle(v.AsSpan().Trim()));
+                break;
+            case "translate":
+            {
+                if (v == "none") { s.translate = new Translate(0, 0); break; }
+                var tp = v.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                s.translate = new Translate(Len(tp[0].AsSpan()).value, tp.Length > 1 ? Len(tp[1].AsSpan()).value : new Length(0));
+                break;
+            }
+            case "scale":
+            {
+                if (v == "none") { s.scale = new Scale(Vector2.one); break; }
+                var sp = v.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var sx = Num(sp[0].AsSpan());
+                s.scale = new Scale(new Vector2(sx, sp.Length > 1 ? Num(sp[1].AsSpan()) : sx));
+                break;
+            }
             case "transform-origin":
             {
                 var parts = v.Split(' ', StringSplitOptions.RemoveEmptyEntries);

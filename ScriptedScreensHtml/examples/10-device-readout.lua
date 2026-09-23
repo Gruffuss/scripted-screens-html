@@ -1,8 +1,10 @@
 -- 10-device-readout.lua -- one real tank on a console. Paste into a Lua chip.
 -- Shows: a page fed by a device on the data network. Lua finds the tank by its Labeller
 -- name, reads its pressure and temperature twice a second, and sends finished text, a bar
--- width and colour, and an alarm flag. The page does the rest: a CSS transition slides the
--- bar to each new width, and nothing runs between ticks.
+-- width and colour, a needle's angle, and an alarm flag. The page does the rest: CSS
+-- transitions slide the bar and swing the needle to each new value, and nothing runs
+-- between ticks. The dial is plain HTML: a half-round box, a thin box turned with
+-- `transform: rotate()` about its foot, and a round hub.
 --
 -- Setup: label a tank (or a gas sensor, a pipe analyser: anything that reports Pressure and
 -- Temperature) with the Labeller, put the same name in TANK below, and have the device on
@@ -38,6 +40,11 @@ ui:element({
   .value { width: 150px; text-align: right; font-weight: 600; }
   .track { height: 16px; background: #172033; border-radius: 8px; }
   .fill { height: 100%; width: 0%; background: #2E8B6E; border-radius: 8px; transition: width 0.6s ease; }
+  .dial { position: relative; width: 160px; height: 88px; margin: 16px auto 0 auto; }
+  .face { position: absolute; left: 0; top: 0; width: 160px; height: 80px; background: #172033; border-radius: 80px 80px 0 0; }
+  .needle { position: absolute; left: 78px; top: 10px; width: 4px; height: 70px; background: #38BDF8; border-radius: 2px;
+            transform-origin: 50% 100%; transform: rotate(-90deg); transition: transform 0.6s ease; }
+  .hub { position: absolute; left: 72px; top: 72px; width: 16px; height: 16px; border-radius: 8px; background: #E4F1F7; }
   #alarm { margin-top: 20px; padding: 10px; background: #B5352C; border-radius: 8px; font-weight: 600; text-align: center; }
 </style>
 </head>
@@ -46,6 +53,7 @@ ui:element({
   <div id="status">Looking for the device...</div>
   <div class="row"><span>Pressure</span><span class="value" id="pressure">--</span></div>
   <div class="track"><div class="fill" id="bar"></div></div>
+  <div class="dial"><div class="face"></div><div class="needle" id="needle"></div><div class="hub"></div></div>
   <div class="row"><span>Temperature</span><span class="value" id="temp">--</span></div>
   <div id="alarm">OVER PRESSURE</div>
 </body>
@@ -94,6 +102,7 @@ function tick(dt)
         pressure = kpa and string.format("%.0f kPa", kpa) or "--",
         temp = kelvin and string.format("%.1f °C", kelvin - 273.15) or "--",
         bar = { width = string.format("%d%%", pct), ["background-color"] = colour },  -- CSS on id="bar"
+        needle = { transform = string.format("rotate(%ddeg)", math.floor(pct * 1.8 - 90)) }, -- empty points left, full right
         alarm = kpa ~= nil and kpa >= ALARM_KPA,                              -- shows or hides id="alarm"
     } })
     ui:commit()
