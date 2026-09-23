@@ -555,6 +555,11 @@ internal sealed class HtmlSurface : MonoBehaviour
         _dataSlots = null;
         _dataToProve = null;
         _dataNamed = false;
+        if (_muted.Count > 0)
+        {
+            lock (Tweens.Shared) foreach (var ve in _muted) Tweens.Override.Remove(ve);
+            _muted.Clear();
+        }
         _released = true;
 
         if (HtmlConfig.Diagnostics)
@@ -572,6 +577,8 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>Reused per send; only the slots whose value actually moved go in it.</summary>
     private readonly List<SS.UiProp> _propScratch = new(32);
     private readonly List<SS.UiProp> _easedScratch = new(8);
+    /// <summary>Elements whose emitter tween this surface muted, so a rebuilt page can unmute them: the override table is static and keyed by element.</summary>
+    private readonly List<VisualElement> _muted = new();
 
     /// <summary>
     /// Puts the page back when something needs it: a capture, a rebuild, or the compiled run giving up.
@@ -2516,7 +2523,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                 // tween would write an expression into the slot instead of the number the fast path
                 // writes, the proof would disagree, and the page would stay on the full path - for
                 // the sake of a glide the renderer does anyway.
-                if (HasTransition(ve)) lock (Tweens.Shared) Tweens.Override[ve] = (0f, Easing.Default);
+                if (HasTransition(ve)) { lock (Tweens.Shared) Tweens.Override[ve] = (0f, Tweens.Easing.Default); _muted.Add(ve); }
             }
             if (named > 0)
             {
