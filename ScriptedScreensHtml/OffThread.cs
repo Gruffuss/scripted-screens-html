@@ -160,7 +160,8 @@ internal static class OffThread
 
     /// <summary>
     /// Copies every element under <paramref name="root"/> into <paramref name="boxes"/> (reusing the
-    /// entries), and drops the entries of elements no longer in the tree. Game thread only.
+    /// entries), and drops the entries of elements no longer in the tree. Runs on whichever thread
+    /// owns the page at the time: the game thread at build, the page thread per frame.
     /// </summary>
     internal static void Capture(VisualElement root, HtmlRenderer.Result built, Dictionary<VisualElement, Box> boxes, List<VisualElement> scratch)
     {

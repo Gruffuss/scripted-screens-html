@@ -61,15 +61,45 @@ internal static class DomSlots
         /// not measure them, and those two properties are then refused rather than guessed.
         /// </summary>
         public readonly double ParentW, ParentH, W, H;
+        /// <summary>
+        /// The containing block's CONTENT box, which is what a `%` length is a percentage of - not
+        /// its border box (<see cref="ParentW"/>), which is what `right` is measured across. The two
+        /// differ by the block's padding and border, so a bar in a padded track resolved "62%"
+        /// against the wrong width and the proof refused it. NaN when the caller did not measure it.
+        /// </summary>
+        public readonly double ContentW, ContentH;
+        /// <summary>
+        /// Whether this element's WIDTH moves nothing else although it is in normal flow. CSS: the
+        /// width of a block-level box in a block container (the bar in a track) is local - a
+        /// sibling sits below it whatever its width, and the container's width comes from above,
+        /// not from its content. The caller proves it from the layout (PageCompiler.BoxOf); this
+        /// only trusts it. Height is never local in flow: the next sibling sits below it.
+        /// </summary>
+        public readonly bool LocalWidth;
 
         public Box(bool outOfFlow, double parentX, double parentY, bool hasBackground,
                    IReadOnlyList<(string Id, double Dx, double Dy)>? inside = null,
-                   double parentW = double.NaN, double parentH = double.NaN, double w = double.NaN, double h = double.NaN)
+                   double parentW = double.NaN, double parentH = double.NaN, double w = double.NaN, double h = double.NaN,
+                   bool localWidth = false, double contentW = double.NaN, double contentH = double.NaN)
         {
             OutOfFlow = outOfFlow; ParentX = parentX; ParentY = parentY; HasBackground = hasBackground;
             Inside = inside ?? Array.Empty<(string, double, double)>();
-            ParentW = parentW; ParentH = parentH; W = w; H = h;
+            ParentW = parentW; ParentH = parentH; W = w; H = h; LocalWidth = localWidth;
+            ContentW = contentW; ContentH = contentH;
         }
+    }
+
+    /// <summary>
+    /// What a bool data key writes: every slot value of the element shown, and of it hidden. Hiding
+    /// a box in normal flow closes the gap it left, so a state is the element's own opacity plus
+    /// every sibling that moved - captured from the laid-out page once, by PageCompiler.ToggleOf.
+    /// </summary>
+    internal sealed class Toggle
+    {
+        public readonly List<(string Slot, double Value)> Shown = new();
+        public readonly List<(string Slot, double Value)> Hidden = new();
+        /// <summary>Why the two states could not be captured, or null.</summary>
+        public string? Problem;
     }
 
     /// <summary>What a write maps to, or why it does not.</summary>
@@ -93,11 +123,19 @@ internal static class DomSlots
         public readonly string? Problem;
         /// <summary>True when the write needs the element's transform group to carry its id.</summary>
         public readonly bool NeedsGroup;
+        /// <summary>
+        /// What a percentage value is a percentage OF: the containing block's width for a
+        /// horizontal size or position, its height for a vertical one, NaN for everything else
+        /// and where the caller did not measure it. <see cref="Length"/> then refuses a `%`
+        /// rather than writing the bare number, which is what "62%" became before this existed.
+        /// </summary>
+        public readonly double PercentOf;
 
-        private Result(string[] slots, double[] bias, string? problem, bool needsGroup, double[]? scale = null)
+        private Result(string[] slots, double[] bias, string? problem, bool needsGroup, double[]? scale = null, double percentOf = double.NaN)
         {
             Slots = slots; Bias = bias; Problem = problem; NeedsGroup = needsGroup;
             Scale = scale ?? Ones(slots.Length);
+            PercentOf = percentOf;
         }
 
         private static double[] Ones(int n)
@@ -108,9 +146,10 @@ internal static class DomSlots
         }
 
         public static Result Ok(params string[] slots) => new(slots, new double[slots.Length], null, false);
+        public static Result Sized(string[] slots, double percentOf) => new(slots, new double[slots.Length], null, false, null, percentOf);
         public static Result Shifted(string slot, double bias) => new(new[] { slot }, new[] { bias }, null, false);
-        public static Result Shifted(string[] slots, double[] bias) => new(slots, bias, null, false);
-        public static Result Scaled(string[] slots, double[] bias, double[] scale) => new(slots, bias, null, false, scale);
+        public static Result Shifted(string[] slots, double[] bias, double percentOf = double.NaN) => new(slots, bias, null, false, null, percentOf);
+        public static Result Scaled(string[] slots, double[] bias, double[] scale, double percentOf = double.NaN) => new(slots, bias, null, false, scale, percentOf);
         public static Result Group(params string[] slots) => new(slots, new double[slots.Length], null, true);
         public static Result No(string why) => new(Array.Empty<string>(), Array.Empty<double>(), why, false);
         public bool Mapped => Problem == null;
@@ -241,8 +280,10 @@ internal static class DomSlots
         }
 
         // The condition that makes the rest sound. In normal flow this element's size and position
-        // decide where its siblings go, and only the layout engine knows that.
-        if (!box.OutOfFlow && (key is "w" or "h" or "x" or "y"))
+        // decide where its siblings go, and only the layout engine knows that - except a width the
+        // layout has already shown to be local (Box.LocalWidth): a block's width in a block
+        // container moves no sibling and resizes no parent, which is how a bar fills its track.
+        if (!box.OutOfFlow && (key is "w" or "h" or "x" or "y") && !(key == "w" && box.LocalWidth))
             return Result.No($"\"{id}\" is in normal flow, so changing its {css} moves its siblings");
 
         // An element that paints a background emits its box and its text as two lines carrying the
@@ -260,6 +301,17 @@ internal static class DomSlots
         var name = id + "_" + key;
         if (!available.Contains(name))
             return Result.No($"\"{id}\" emits no {key}, so `{css}` has no slot");
+
+        // A box with text is two lines under one id (see the `color` case above), and the emitter
+        // sizes the label's rect FROM the box's: wider by a slack for TextMeshPro's measure, shifted
+        // by half of it when centred and all of it when right-aligned, its own height when clipped.
+        // No number written to both lines draws what a re-layout would, and a number written to the
+        // first alone leaves the text behind - so it is refused, rather than either, silently.
+        if (key is "w" or "h" or "x" or "y" && available.Contains(id + SceneSlots.SecondSuffix + "_" + key))
+            return Result.No($"\"{id}\" draws text over its box, and the emitter sizes the text's rect from the box's, so `{css}` is not a value");
+
+        // A percentage is of the containing block's content box: its width across, its height down.
+        var percentOf = key is "w" or "x" ? box.ContentW : key is "h" or "y" ? box.ContentH : double.NaN;
 
         // The scene is in absolute coordinates and CSS is not, so a position carries its containing
         // block's origin - and everything inside this element has to move with it, because each
@@ -291,12 +343,56 @@ internal static class DomSlots
                 slots.Add(childSlot);
                 bias.Add(origin + (vertical ? child.Dy : child.Dx));
             }
-            if (!far) return Result.Shifted(slots.ToArray(), bias.ToArray());
+            if (!far) return Result.Shifted(slots.ToArray(), bias.ToArray(), percentOf);
             var scale = new double[slots.Count];
             for (var i = 0; i < scale.Length; i++) scale[i] = -1;
-            return Result.Scaled(slots.ToArray(), bias.ToArray(), scale);
+            return Result.Scaled(slots.ToArray(), bias.ToArray(), scale, percentOf);
         }
+        if (key is "w" or "h")
+            return Result.Sized(new[] { name }, percentOf);
         return Result.Ok(name);
+    }
+
+    /// <summary>
+    /// A CSS length as the number the scene takes: <c>px</c> (or no unit) as it stands, <c>%</c> of
+    /// <paramref name="percentOf"/>; null for anything else - a colour, a keyword, a unit this does
+    /// not resolve (em, vw), or a percentage of a size nobody measured. The caller decides whether
+    /// null means "write it as text" (a colour) or "refuse" (a length it cannot place).
+    /// </summary>
+    /// <remarks>
+    /// A percentage is snapped to the whole pixel the layout would give it. Yoga rounds every box to
+    /// the pixel grid, so the emitter draws 278 for 62% of 448 and the proof against it is exact only
+    /// if this says 278 too; the renderer would take 277.76 just as happily.
+    ///
+    /// Runs on every data tick, so it reads the string in place: no substring for the number and
+    /// none for the unit.
+    /// </remarks>
+    internal static double? Length(string? css, double percentOf = double.NaN)
+    {
+        if (string.IsNullOrEmpty(css)) return null;
+        var i = 0;
+        while (i < css!.Length && char.IsWhiteSpace(css[i])) i++;
+        var start = i;
+        if (i < css.Length && (css[i] == '-' || css[i] == '+')) i++;
+        var digits = 0;
+        while (i < css.Length && (char.IsDigit(css[i]) || css[i] == '.')) { if (css[i] != '.') digits++; i++; }
+        if (digits == 0) return null;
+        if (!double.TryParse(css.AsSpan(start, i - start), NumberStyles.Float, CultureInfo.InvariantCulture, out var v)) return null;
+        var end = css.Length;
+        while (end > i && char.IsWhiteSpace(css[end - 1])) end--;
+        var unit = end - i;
+        if (unit == 0 || (unit == 2 && css[i] == 'p' && css[i + 1] == 'x')) return v;
+        if (unit != 1 || css[i] != '%' || double.IsNaN(percentOf)) return null;
+        return Math.Floor(v * percentOf / 100 + 0.5);
+    }
+
+    /// <summary>Whether a CSS value is a length at all (starts like a number), as opposed to a colour or a keyword.</summary>
+    internal static bool LooksLikeLength(string? css)
+    {
+        if (string.IsNullOrEmpty(css)) return false;
+        var i = 0;
+        while (i < css!.Length && char.IsWhiteSpace(css[i])) i++;
+        return i < css.Length && (char.IsDigit(css[i]) || css[i] == '.' || css[i] == '-' || css[i] == '+');
     }
 
     /// <summary>

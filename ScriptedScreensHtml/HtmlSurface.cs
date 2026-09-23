@@ -1279,6 +1279,9 @@ internal sealed class HtmlSurface : MonoBehaviour
                 if (!_dataSlots.Proven) _dataRefused = _dataSlots.Problem;
                 _releasePending = true;
             }
+            // Any emit after the table proved - the proof tick's, a capture's - carries the bools'
+            // actual state rather than the shown layout the page was emitted with.
+            if (_dataSlots is { Proven: true } overlay) overlay.Overlay(_slotScratch);
             if (template == _lastTemplate)
             {
                 List<SS.UiProp>? patch = null;
@@ -2454,10 +2457,8 @@ internal sealed class HtmlSurface : MonoBehaviour
             if (_script == null && _dataSlots is { Proven: true } fast)
             {
                 if (fast.Apply(entries) is { } direct) SendCompiled(direct);
-                else if (_dataDropped++ == 0)
-                    ScriptedScreensHtmlPlugin.Log?.LogWarning(
-                        $"html \"{ElementId}\": a payload carried a key the compiled page has no slot for; it is dropped, "
-                        + "as is any later one like it. A data page's keys are fixed by its first payload.");
+                // DataSlots.Refuse has already said which key, declaration and value, once.
+                else _dataDropped++;
                 _dataFastTicks++;
                 return;
             }
@@ -2592,7 +2593,8 @@ internal sealed class HtmlSurface : MonoBehaviour
                 id => PageCompiler.BoxFor(_built, id, _slotScratch.Keys),
                 id => _byId.TryGetValue(id, out var ve) ? _built.CssOf(ve) : null,
                 id => _shapes.ContainsKey(id),
-                _slotScratch.Keys);
+                _slotScratch.Keys,
+                id => PageCompiler.ToggleOf(_built, id));
             if (_dataSlots.Problem == null) _dataToProve = new List<KeyValuePair<string, SS.UiValue>>(entries);
             else
             {
@@ -2668,6 +2670,11 @@ internal sealed class HtmlSurface : MonoBehaviour
                     break;
                 }
                 case SS.UiValueType.Bool:
+                    // A data page's bool is a toggle (both states captured by ToggleOf, written by
+                    // DataSlots.Apply and Overlay) or a compile refusal. Setting display here would
+                    // take the element's lines out of the scene the proof and both states need -
+                    // from the first payload on, since ToggleOf restores whatever display it found.
+                    if (_script == null) break;
                     ve.style.display = v.Bool ? DisplayStyle.Flex : DisplayStyle.None;
                     break;
                 case SS.UiValueType.Map when v.Map != null:

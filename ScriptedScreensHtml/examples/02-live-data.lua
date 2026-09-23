@@ -38,7 +38,7 @@ ui:element({
   <div class="track"><div class="fill" id="bar"></div></div>
   <div class="row"><span>Temperature</span><span id="temp">--</span></div>
   <div id="alarm">OVER PRESSURE</div>
-  <div class="note">Values arrive from Lua every second; the bar animates through a CSS transition.</div>
+  <div class="note" id="note">Values arrive from Lua every second; the bar animates through a CSS transition.</div>
 </body>
 </html>
 ]] },

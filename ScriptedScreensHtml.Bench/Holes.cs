@@ -119,7 +119,8 @@ internal static class Holes
             // The first few text misses in context. Which shape of markup they sit in is the whole
             // question, and it is cheaper to look than to reason about it.
             var shown = 0;
-            for (var h = 0; h < holes && shown < 4; h++)
+            var showAll = Environment.GetEnvironmentVariable("HOLES_ALL") != null;
+            for (var h = 0; h < holes && (showAll || shown < 4); h++)
             {
                 if (landed.ContainsKey(h)) continue;
                 var sentinel = Markup.Sentinel(h);

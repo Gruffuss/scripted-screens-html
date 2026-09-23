@@ -7,6 +7,7 @@ using System.Text.RegularExpressions;
 using Lua;
 using Lua.Standard;
 using ScriptedScreensHtml;
+using UnityEngine;
 
 namespace ScriptedScreensHtml.Tests;
 
@@ -112,6 +113,13 @@ internal static class CompiledPageTests
         check(DomSlots.Map("e", "textContent", box, keys).Slots.SequenceEqual(new[] { "e" })
               && DomSlots.Map("e", "style.fontSize", box, keys).Slots.SequenceEqual(new[] { "e_size" }),
               "slots: textContent and fontSize map to the same slots as before");
+        // The emitter sizes the label's rect FROM the box's - slack, a centred shift, a clipped
+        // height - so no one number moves both lines to where a re-layout would. Refused, naming
+        // the text, rather than the box moved without its text or the text put off by the slack.
+        var width = DomSlots.Map("e", "style.width", box, keys);
+        check(!width.Mapped && width.Problem!.Contains("draws text over its box"),
+              "slots: a size write on a box with text is refused, not written to both lines - " + (width.Problem ?? "(mapped)"));
+        check(!DomSlots.Map("e", "style.top", box, keys).Mapped, "slots: a position write on a box with text is refused too");
     }
 
     /// <summary>
@@ -175,6 +183,165 @@ internal static class CompiledPageTests
         check(Num(sent, "e_y") == 176, $"compiled: bottom = 4px puts e_y at {Num(sent, "e_y")} (0 + 200 - 20 - 4 = 176)");
     }
 
+    /// <summary>
+    /// The four keys of a data-driven page reach slots: a block bar's `%` width inside a block
+    /// track, a text span, a flex child's width still refused, and a bool as two states carrying
+    /// the sibling under it.
+    /// </summary>
+    /// <remarks>
+    /// Mirrors examples/02-live-data, where each of these was a refusal and the refusal kept the
+    /// whole page on a layout, translate and emit per tick. The page is built, laid out and emitted
+    /// here exactly as a surface does it, so the boxes, the block widths and the slot names are the
+    /// emitter's rather than a hand-written approximation of them.
+    ///
+    /// The width check is the proof in miniature: what <c>Length("62%")</c> gives against what the
+    /// emitter drew for the same CSS. The bool check reads the states off the laid-out page; the
+    /// unnamed sibling is the refusal that matters, since the alternative is an alarm that vanishes
+    /// while the note under it stays put.
+    /// </remarks>
+    private static void DataSlotsFixture(Action<bool, string> check)
+    {
+        const string head = "<html><head><meta name=\"viewport\" content=\"width=480\"><style>"
+            + "body{background:#0B1622;color:#E4F1F7;padding:16px;font-size:14px}"
+            + ".row{display:flex;justify-content:space-between;margin:8px 0 4px 0}"
+            + ".track{height:14px;background:#172033;border-radius:7px;overflow:hidden}"
+            + ".pad{padding:3px 6px}"
+            + ".fill{height:100%;width:62%;background:#2E8B6E;border-radius:7px}"
+            + "#alarm{margin-top:16px;padding:10px;background:#B5352C;border-radius:8px;text-align:center}"
+            + ".note{margin-top:16px;color:#7A93A6;font-size:12px}"
+            + "</style></head><body>"
+            + "<div class=\"row\"><span>Pressure</span><span id=\"pressure\">--</span></div>"
+            + "<div class=\"track\"><div class=\"fill\" id=\"bar\"></div></div>"
+            + "<div class=\"track pad\"><div class=\"fill\" id=\"bar2\"></div></div>"
+            + "<div class=\"row\"><span>Temperature</span><span id=\"temp\">--</span></div>"
+            + "<div id=\"alarm\">OVER PRESSURE</div>";
+        const string tail = "</body></html>";
+
+        var (built, values) = Emitted(head + "<div class=\"note\" id=\"note\">Values arrive from Lua every second.</div>" + tail, Driven);
+        var available = values.Keys.ToHashSet(StringComparer.Ordinal);
+        double N(string k) => values.TryGetValue(k, out var v) && v.IsNumber ? v.Number : double.NaN;
+
+        // (1) the bar: a block in a block track, so its width is local and maps although in flow
+        var bar = PageCompiler.BoxFor(built, "bar", available);
+        var width = bar is { } bb ? DomSlots.Map("bar", "style.width", bb, available) : DomSlots.Result.No("no box");
+        check(width.Mapped && width.Slots.SequenceEqual(new[] { "bar_w" }),
+              "data: a block bar's width inside a block track maps to bar_w" + (width.Mapped ? "" : " - " + width.Problem));
+        check(bar is { LocalWidth: true } && Math.Abs(width.PercentOf - 448) < 0.01,
+              $"data: the width's percentage is of the track's width, 448 (got {width.PercentOf})");
+
+        // (2) "62%" resolves to what the emitter drew for width:62% - the proof in miniature
+        var pct = DomSlots.Length("62%", width.PercentOf);
+        check(pct is { } p && Math.Abs(p - N("bar_w")) < 0.01,
+              $"data: 62% of the track is {pct?.ToString(CultureInfo.InvariantCulture) ?? "null"}, and the emitter drew bar_w = {N("bar_w")}");
+        check(DomSlots.Length("62%") == null && DomSlots.Length("1em", 448) == null && DomSlots.Length("12px", 448) == 12,
+              "data: a % of nothing measured and an em are refused, px passes through");
+        // A % is of the block's CONTENT box: the padded track draws 448 wide and offers 436
+        var bar2 = PageCompiler.BoxFor(built, "bar2", available);
+        var width2 = bar2 is { } b2 ? DomSlots.Map("bar2", "style.width", b2, available) : DomSlots.Result.No("no box");
+        var pct2 = DomSlots.Length("62%", width2.PercentOf);
+        check(width2.Mapped && Math.Abs(width2.PercentOf - 436) < 0.01 && pct2 is { } p2 && Math.Abs(p2 - N("bar2_w")) < 0.01,
+              $"data: 62% in a padded track is of its content box, 436 (got {width2.PercentOf}): {pct2?.ToString(CultureInfo.InvariantCulture) ?? "null"} against the emitter's bar2_w = {N("bar2_w")}");
+
+        var colour = DomSlots.Map("bar", "style.background-color", bar!.Value, available);
+        var text = PageCompiler.BoxFor(built, "pressure", available) is { } pb ? DomSlots.Map("pressure", "textContent", pb, available) : DomSlots.Result.No("no box");
+        check(colour.Mapped && colour.Slots.SequenceEqual(new[] { "bar_f" }) && text.Mapped && text.Slots.SequenceEqual(new[] { "pressure" }),
+              "data: the bar's colour and the span's text map to bar_f and pressure");
+
+        // a flex child's width, and any height in flow, stay refused with the reason intact
+        var flex = DomSlots.Map("pressure", "style.width", PageCompiler.BoxFor(built, "pressure", available)!.Value, available);
+        check(!flex.Mapped && flex.Problem!.Contains("is in normal flow, so changing its width moves its siblings"),
+              "data: a flex child's width is still refused - " + flex.Problem);
+        var height = DomSlots.Map("bar", "style.height", bar.Value, available);
+        check(!height.Mapped && height.Problem!.Contains("moves its siblings"), "data: the bar's height is still refused in flow");
+
+        // (3) the bool: two states, the element's opacity and the note that closes the gap
+        var toggle = PageCompiler.ToggleOf(built, "alarm");
+        check(toggle.Problem == null, "data: alarm's shown and hidden states are captured" + (toggle.Problem == null ? "" : " - " + toggle.Problem));
+        if (toggle.Problem == null)
+        {
+            double In(List<(string Slot, double Value)> s, string k) => s.FirstOrDefault(e => e.Slot == k) is { Slot: not null } e ? e.Value : double.NaN;
+            check(In(toggle.Shown, "alarm_o") == 1 && In(toggle.Hidden, "alarm_o") == 0,
+                  $"data: the states hide alarm through alarm_o ({In(toggle.Shown, "alarm_o")} -> {In(toggle.Hidden, "alarm_o")})");
+            var shownY = In(toggle.Shown, "note_y");
+            var hiddenY = In(toggle.Hidden, "note_y");
+            check(Math.Abs(shownY - N("note_y")) < 0.01 && hiddenY < shownY - 16,
+                  $"data: the note rides up when alarm hides (note_y {shownY} -> {hiddenY}, the scene's {N("note_y")})");
+            check(built.NamedGroups.Contains("alarm"), "data: capturing the states names alarm's opacity group for the emitter");
+        }
+
+        // (4) a class state puts a box's label where the emitter draws it for the moved box - not at
+        // the box's own coordinate, which a centred label sits half the slack to the left of
+        const string moveHead = "<html><head><meta name=\"viewport\" content=\"width=480\"><style>"
+            + "body{padding:10px}#a{width:200px;padding:6px;background:#333;text-align:center}.up{margin-left:40px}"
+            + "</style></head><body>";
+        var (rested, rest) = Emitted(moveHead + "<div id=\"a\">Hi</div><div id=\"b\">below</div></body></html>", "a");
+        var (_, moved) = Emitted(moveHead + "<div id=\"a\" class=\"up\">Hi</div><div id=\"b\">below</div></body></html>", "a");
+        var state = PageCompiler.StateOf("a", "up", rested, rested.Root.panel!, new Vector2(rested.ViewportWidth, rested.ViewportWidth),
+                                         PageCompiler.Absolute(rested), rest);
+        double S(string k) => state != null && state.Numbers.FirstOrDefault(n => n.Slot == k) is { Slot: not null } n ? n.Value : double.NaN;
+        double M(string k) => moved.TryGetValue(k, out var v) && v.IsNumber ? v.Number : double.NaN;
+        check(state != null && Math.Abs(S("a_x") - M("a_x")) < 0.01 && Math.Abs(S("a__2_x") - M("a__2_x")) < 0.01 && M("a__2_x") != M("a_x"),
+              $"data: a class state puts a box's label where the emitter draws it (a_x {S("a_x")} vs {M("a_x")}, a__2_x {S("a__2_x")} vs {M("a__2_x")})");
+
+        // the note without an id has no slot to move: refused, naming it, rather than left behind
+        var (plain, _) = Emitted(head + "<div class=\"note\">Values arrive from Lua every second.</div>" + tail, Driven);
+        var unnamed = PageCompiler.ToggleOf(plain, "alarm");
+        check(unnamed.Problem is { } why && why.Contains("has no id") && why.Contains("Values arrive"),
+              "data: hiding alarm over an unnamed note is refused, naming the note - " + (unnamed.Problem ?? "(mapped)"));
+    }
+
+    /// <summary>The ids the fixture's data drives, named as the surface names them so the scene carries their slots.</summary>
+    private static readonly string[] Driven = { "pressure", "temp", "bar", "bar2", "alarm" };
+
+    /// <summary>A page built, laid out and emitted as a surface does it, with its slot values.</summary>
+    /// <remarks>
+    /// Build installs the applier's @supports oracle and the page's viewport into CssParser's
+    /// statics, and they stay. CssTests runs after this and expects the parser's own defaults -
+    /// with the oracle left in place its `@supports` checks answered from the applier and two
+    /// failed. Everything set here is put back.
+    /// </remarks>
+    private static (HtmlRenderer.Result Built, Dictionary<string, SceneSlots.Value> Values) Emitted(string html, params string[] driven)
+    {
+        var oracle = CssParser.SupportsOracle;
+        var (vw, vh) = (CssParser.ViewportWidth, CssParser.ViewportHeight);
+        var aspect = HtmlRenderer.SurfaceAspect;
+        var mainThread = OffThread.MainThreadId;
+        var values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+        try
+        {
+            ResolvedStyle.DefaultFace = FontLibrary.Default();
+            HtmlRenderer.SurfaceAspect = 1f;
+            OffThread.MainThreadId = Environment.CurrentManagedThreadId;
+            OffThread.Job = OffThread.Globals.Take();
+            var built = HtmlRenderer.Build(html, FontLibrary.Default());
+            HtmlRenderer.NameDrivenGroups(built);
+            foreach (var id in driven) built.Driven.Add(id);
+            var panel = new Panel(built.Root);
+            foreach (var grid in built.Grids)
+                if (built.LayoutAttached.Add(grid)) GridLayout.Attach(grid, built);
+            PostLayout.Attach(built);
+            var boxes = new Dictionary<VisualElement, OffThread.Box>();
+            OffThread.Boxes = boxes;
+            var size = new Vector2(built.ViewportWidth, built.ViewportWidth);
+            panel.Layout(size.x, size.y);
+            OffThread.Capture(built.Root, built, boxes, new List<VisualElement>());
+            OffThread.Active = true;
+            var output = VectorEmitter.Emit(built, built.Root, size.x, size.y);
+            SceneSlots.Split(output.Chars, output.Length, values);
+            return (built, values);
+        }
+        finally
+        {
+            OffThread.Active = false;
+            OffThread.Boxes = null;
+            OffThread.MainThreadId = mainThread;
+            HtmlRenderer.SurfaceAspect = aspect;
+            CssParser.SupportsOracle = oracle;
+            CssParser.ViewportWidth = vw;
+            CssParser.ViewportHeight = vh;
+        }
+    }
+
     /// <summary>A small page compiled against a hand-made slot set and loaded, or null with the reason checked.</summary>
     private static LuaState? Loaded(string root, string script, ICollection<string> available, DomSlots.Box box,
                                     Action<bool, string> check, string what)
@@ -233,6 +400,8 @@ internal static class CompiledPageTests
         LabelSlots(check);
         VisibilitySlots(root, check);
         FarEdgeSlots(root, check);
+        DataSlotsFixture(check);
+        DataSlotsTests.Run(check);
 
         Dictionary<string, LuaValue> sent;
         LuaValue snap;

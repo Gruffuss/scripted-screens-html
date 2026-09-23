@@ -20,6 +20,7 @@
         <Compile Include="..\ScriptedScreensHtml\TextMeasure.cs" />
         <Compile Include="..\ScriptedScreensHtml\JsNumber.cs" />
         <Compile Include="..\ScriptedScreensHtml\JsToLua.cs" />
+        <Compile Include="..\ScriptedScreensHtml\JsEngine.cs" />
         <Compile Include="..\ScriptedScreensHtml\DomWrites.cs" />
         <Compile Include="..\ScriptedScreensHtml\DomSlots.cs" />
         <Compile Include="..\ScriptedScreensHtml\CompiledPage.cs" />
@@ -42,6 +43,12 @@
         <Compile Include="..\ScriptedScreensHtml\Tweens.cs" />
         <Compile Include="..\ScriptedScreensHtml\CssTransition.cs" />
         <Compile Include="..\ScriptedScreensHtml\VectorEmitter.cs" />
+        <!-- The half of the compiler that needs the layout engine: a data-driven page's boxes and
+             its bool states are read from the laid-out, emitted page, as a surface does it. -->
+        <Compile Include="..\ScriptedScreensHtml\PageCompiler.cs" />
+        <Compile Include="..\ScriptedScreensHtml\MarkupSlots.cs" />
+        <!-- The data fast path: its own file stands in for the three ScriptedScreens value types it reads. -->
+        <Compile Include="..\ScriptedScreensHtml\DataSlots.cs" />
         <Compile Include="..\ScriptedScreensHtml.Bench\Stubs.cs" />
         <Compile Include="CssLanguage.cs" />
         <Compile Include="CssTransitionTests.cs" />
@@ -63,6 +70,7 @@
         <Compile Include="PreludeRuntime.cs" />
         <Compile Include="JsToLuaTests.cs" />
         <Compile Include="CompiledPageTests.cs" />
+        <Compile Include="DataSlotsTests.cs" />
     </ItemGroup>
     <ItemGroup>
       <PackageReference Include="Jint" Version="4.16.2" />
