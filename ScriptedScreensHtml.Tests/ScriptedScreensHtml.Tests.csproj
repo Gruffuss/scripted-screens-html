@@ -40,9 +40,11 @@
         <Compile Include="..\ScriptedScreensHtml\CanvasElement.cs" />
         <Compile Include="..\ScriptedScreensHtml\Animation.cs" />
         <Compile Include="..\ScriptedScreensHtml\Tweens.cs" />
+        <Compile Include="..\ScriptedScreensHtml\CssTransition.cs" />
         <Compile Include="..\ScriptedScreensHtml\VectorEmitter.cs" />
         <Compile Include="..\ScriptedScreensHtml.Bench\Stubs.cs" />
         <Compile Include="CssLanguage.cs" />
+        <Compile Include="CssTransitionTests.cs" />
         <Compile Include="DomLanguage.cs" />
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />

@@ -153,13 +153,16 @@ internal static class VectorBridge
 
     /// <summary>Send a data payload (values and node patches) through the data element's host.</summary>
     public static void Data(object? board, object? cartridge, object? visor, SS.BoardState state, string surface,
-        string elementId, string sceneId, SS.UiValue? data, SS.UiValue? nodes, bool snap = false)
+        string elementId, string sceneId, SS.UiValue? data, SS.UiValue? nodes, bool snap = false, SS.UiValue? ease = null)
     {
         Scratch.Clear();
         Scratch.Add(new SS.UiProp { Key = "scene", Value = SS.UiValue.FromString(sceneId) });
         Scratch.Add(new SS.UiProp { Key = "keep", Value = SS.UiValue.FromNumber(1f) });
         // vector 0.11.26 (ask 19): the payload's numbers apply at once, as a browser shows them
         if (snap) Scratch.Add(new SS.UiProp { Key = "snap", Value = SS.UiValue.FromNumber(1f) });
+        // vector 0.11.33: per-name glide timing, { name = { seconds, curve } }, for the names this
+        // payload moves. A property of the change, like snap: stated on every payload that moves them.
+        if (ease != null) Scratch.Add(new SS.UiProp { Key = "ease", Value = ease.Value });
         if (data != null) Scratch.Add(new SS.UiProp { Key = "data", Value = data.Value });
         if (nodes != null) Scratch.Add(new SS.UiProp { Key = "nodes", Value = nodes.Value });
         Send(board, cartridge, visor, state, surface, new SS.UiElement { Id = elementId, Type = "vector", Props = Scratch.ToArray() });

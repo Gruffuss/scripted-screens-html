@@ -47,22 +47,21 @@ internal sealed class DataSlots
     private readonly Dictionary<string, List<Target>> _byKey = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// Slots whose element has a CSS transition. They are sent without <c>snap</c>, so the renderer
-    /// glides them from what is on screen over the gap to the next payload; every other slot snaps,
-    /// as a browser does.
+    /// Slots whose property has a CSS transition, with its duration and curve. They are sent without
+    /// <c>snap</c> and with the renderer's <c>ease</c> timing (vector 0.11.33), so the renderer runs
+    /// the glide the CSS declares; every other slot snaps, as a browser does.
     /// </summary>
     /// <remarks>
-    /// This used to be a refusal: a transition is compiled into the scene as an expression, only the
-    /// emitter can write one, so any transitioned key kept the whole page on the full path - a
-    /// layout, translate and emit per tick, for ever, for one gliding bar. The renderer's own easing
-    /// is the same glide without the emit. What it cannot do yet is the CSS duration and curve: it
-    /// eases over the payload gap, linearly. Per-name timing on the payload is asked of the renderer;
-    /// until it lands, a data-driven transition runs at the tick rate rather than its declared
-    /// duration, and that is recorded as a known gap rather than hidden.
+    /// This used to be a refusal: a transition was compiled into the scene as an expression, only the
+    /// emitter could write one, so any transitioned key kept the whole page on the full path - a
+    /// layout, translate and emit per tick, for ever, for one gliding bar. The renderer glides a value
+    /// itself, and since 0.11.33 for a stated duration and curve; timing is a property of the change
+    /// there, as in CSS, so it goes on every payload that moves the slot, not once. A delay rides as
+    /// the array's third element, only when there is one.
     /// </remarks>
-    private readonly HashSet<string> _eased = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (float Dur, string Curve, float Delay)> _eased = new(StringComparer.Ordinal);
 
-    internal bool IsEased(string slot) => _eased.Contains(slot);
+    internal bool TryEase(string slot, out (float Dur, string Curve, float Delay) timing) => _eased.TryGetValue(slot, out timing);
 
     /// <summary>
     /// Per text slot, the em width its digit runs are monospaced at, or absent for plain text.
@@ -101,7 +100,7 @@ internal sealed class DataSlots
     /// </remarks>
     internal static DataSlots Build(IReadOnlyList<KeyValuePair<string, SS.UiValue>> sample,
                                     Func<string, DomSlots.Box?> boxOf,
-                                    Func<string, bool> transitioned,
+                                    Func<string, IReadOnlyDictionary<string, string>?> cssOf,
                                     Func<string, bool> isShape,
                                     ICollection<string> available)
     {
@@ -121,10 +120,10 @@ internal sealed class DataSlots
             var box = boxOf(key);
             if (box == null) { map.Problem = $"\"{key}\" names no element in the page"; return map; }
 
-            // A transitioned element's slots glide on the renderer instead of jumping (see _eased);
-            // the surface has muted the emitter's own tween for it, so the emitted scene carries the
-            // plain number this would write and the proof below still holds.
-            var eased = transitioned(key);
+            // A transitioned property's slots glide on the renderer instead of jumping (see _eased);
+            // the surface has muted the emitter's own tween for the element, so the emitted scene
+            // carries the plain number this would write and the proof below still holds.
+            var css = cssOf(key);
 
             var targets = new List<Target>();
             switch (entry.Value.Type)
@@ -145,8 +144,12 @@ internal sealed class DataSlots
                     {
                         var mapped = DomSlots.Map(key, "style." + decl.Key, box.Value, available);
                         if (!mapped.Mapped) { map.Problem = $"\"{key}\".{decl.Key} - {mapped.Problem}"; return map; }
+                        var timing = css != null ? CssTransition.For(css, decl.Key) : null;
                         for (var i = 0; i < mapped.Slots.Length; i++)
+                        {
                             targets.Add(new Target(mapped.Slots[i], mapped.Bias[i], isText: false, mapped.Scale[i]));
+                            if (timing is { } tm) map._eased[mapped.Slots[i]] = tm;
+                        }
                     }
                     break;
                 }
@@ -163,7 +166,6 @@ internal sealed class DataSlots
             }
 
             if (targets.Count > 0) map._byKey[key] = targets;
-            if (eased) foreach (var t in targets) map._eased.Add(t.Slot);
         }
 
         if (map._byKey.Count == 0) map.Problem = "the payload placed nothing";

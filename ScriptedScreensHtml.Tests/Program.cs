@@ -457,6 +457,7 @@ ScriptedScreensHtml.Tests.ClassTests.Run(Check);
 ScriptedScreensHtml.Tests.SyntaxTests.Run(Check);
 ScriptedScreensHtml.Tests.PreludeRuntime.Run(Check);
 ScriptedScreensHtml.Tests.CompiledPageTests.Run(Check);
+ScriptedScreensHtml.Tests.CssTransitionTests.Run(Check);
 ScriptedScreensHtml.Tests.CssTests.Run(Check);
 
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");

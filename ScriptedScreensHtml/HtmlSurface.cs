@@ -577,6 +577,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>Reused per send; only the slots whose value actually moved go in it.</summary>
     private readonly List<SS.UiProp> _propScratch = new(32);
     private readonly List<SS.UiProp> _easedScratch = new(8);
+    private readonly List<SS.UiProp> _easeTiming = new(8);
     /// <summary>Elements whose emitter tween this surface muted, so a rebuilt page can unmute them: the override table is static and keyed by element.</summary>
     private readonly List<VisualElement> _muted = new();
 
@@ -1337,6 +1338,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         // has always diffed against _sentValues; the compiled path never did.
         _propScratch.Clear();
         _easedScratch.Clear();
+        _easeTiming.Clear();
         foreach (var pair in values)
         {
             var now = pair.Value is double d
@@ -1344,21 +1346,33 @@ internal sealed class HtmlSurface : MonoBehaviour
                 : new SceneSlots.Value((string)pair.Value);
             if (_sentValues.TryGetValue(pair.Key, out var was) && was.Equals(now)) continue;
             _sentValues[pair.Key] = now;
-            // A slot under a CSS transition goes in its own payload without snap: the renderer
-            // records snap per name from the latest payload that carries it, so the two payloads
-            // leave each name with the behaviour its CSS asked for.
-            var eased = _dataSlots != null && _dataSlots.IsEased(pair.Key);
-            (eased ? _easedScratch : _propScratch).Add(new SS.UiProp
+            var prop = new SS.UiProp
             {
                 Key = pair.Key,
                 Value = now.IsNumber ? SS.UiValue.FromNumber(now.Number) : SS.UiValue.FromString(now.Text ?? string.Empty),
-            });
+            };
+            // A slot under a CSS transition goes in its own payload, without snap and with the
+            // renderer's `ease` timing (vector 0.11.33): a property of the change, so it is stated on
+            // every payload that moves the slot. Everything else snaps, as a browser does.
+            if (_dataSlots != null && _dataSlots.TryEase(pair.Key, out var timing))
+            {
+                _easedScratch.Add(prop);
+                _easeTiming.Add(new SS.UiProp
+                {
+                    Key = pair.Key,
+                    Value = SS.UiValue.FromArray(timing.Delay > 0f
+                        ? new[] { SS.UiValue.FromNumber(timing.Dur), SS.UiValue.FromString(timing.Curve), SS.UiValue.FromNumber(timing.Delay) }
+                        : new[] { SS.UiValue.FromNumber(timing.Dur), SS.UiValue.FromString(timing.Curve) }),
+                });
+            }
+            else _propScratch.Add(prop);
         }
         if (_easedScratch.Count > 0)
         {
             var glide = _easedScratch.ToArray();
             VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
-                new SS.UiValue { Type = SS.UiValueType.Map, Map = glide }, null, snap: false);
+                new SS.UiValue { Type = SS.UiValueType.Map, Map = glide }, null, snap: false,
+                ease: new SS.UiValue { Type = SS.UiValueType.Map, Map = _easeTiming.ToArray() });
             _patchSends++;
             _patchSlots += glide.Length;
         }
@@ -2538,7 +2552,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             _dataSlots = DataSlots.Build(
                 entries,
                 id => PageCompiler.BoxFor(_built, id, _slotScratch.Keys),
-                id => _byId.TryGetValue(id, out var ve) && HasTransition(ve),
+                id => _byId.TryGetValue(id, out var ve) ? _built.CssOf(ve) : null,
                 id => _shapes.ContainsKey(id),
                 _slotScratch.Keys);
             if (_dataSlots.Problem == null) _dataToProve = new List<KeyValuePair<string, SS.UiValue>>(entries);
