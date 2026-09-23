@@ -16,419 +16,614 @@ namespace ScriptedScreensHtml;
 ///
 /// It is also the <i>easiest</i> case in the compiler, because the hard half is already absent. No
 /// JavaScript, no call graph, no state enumeration: a data key names an element, the value says
-/// what to write, and <see cref="DomSlots"/> already knows which slot that lands on. This is the
-/// same mapping the compiled script path uses, reached from the other end.
+/// what to write, and <see cref="DomSlots"/> already knows which slot that lands on.
 ///
-/// <b>It proves itself before it is trusted.</b> The first payload runs the ordinary path anyway -
-/// the page has to be laid out at least once - so this computes what it <i>would</i> have sent and
-/// compares against what the emitter actually produced. Only on a match does the fast path switch
-/// on. A disagreement disables it and says so, rather than quietly drawing something else.
+/// <b>Compiled once, against the emit that drew the first payload.</b> Everything the mapping needs
+/// from the page - every element's box, the CSS of the ones that transition, the scene's slot
+/// names - is copied out at that moment, so the page can be let go and a key or declaration first
+/// seen later still maps on arrival, from the copy. The first payload's keys are also PROVEN: what
+/// this would write is compared with what the emitter drew for the same values.
+///
+/// <b>The unit of refusal is the key, never the page.</b> A key naming no element, a declaration
+/// with no slot, a value in a unit that cannot be written, a proof that disagrees - each drops that
+/// key (or that declaration), says so once, and every other key keeps applying. Within one payload a
+/// key is written whole or not at all, so no frame shows half of a value.
 /// </remarks>
 internal sealed class DataSlots
 {
-    /// <summary>One data key and where its value goes.</summary>
+    /// <summary>One slot a declaration writes, and how the value becomes the slot's.</summary>
     private readonly struct Target
     {
         public readonly string Slot;
         public readonly double Bias;
-        /// <summary>Text goes through as a string; everything else is a number the scene reads.</summary>
-        public readonly bool IsText;
-
-        /// <summary>
-        /// What the value is multiplied by before the bias is added: 1 for everything except a
-        /// far-edge position, where it is -1. Carried here because a mapping that produced it and a
-        /// consumer that dropped it would put `right` on the wrong side of its parent, silently.
-        /// </summary>
+        /// <summary>-1 for a far-edge position (`right` grows as `x` shrinks), 1 otherwise.</summary>
         public readonly double Scale;
-        /// <summary>What a `%` value is a percentage of (the containing block's size), NaN when it cannot be.</summary>
-        public readonly double PercentOf;
-        /// <summary>
-        /// The CSS declaration this is a target of (<c>width</c>), for a key whose value is a map;
-        /// null for text. A declaration lands on one slot per line it reaches, so a payload's
-        /// declarations are matched to their targets by name - not by position, which paired
-        /// declaration i with target i and broke on the first declaration with two slots.
-        /// </summary>
-        public readonly string? Decl;
-        public Target(string slot, double bias, bool isText, double scale = 1, double percentOf = double.NaN, string? decl = null)
-        { Slot = slot; Bias = bias; IsText = isText; Scale = scale; PercentOf = percentOf; Decl = decl; }
+        public Target(string slot, double bias, double scale) { Slot = slot; Bias = bias; Scale = scale; }
     }
 
-    private readonly Dictionary<string, List<Target>> _byKey = new(StringComparer.Ordinal);
+    /// <summary>What a declaration's value is, which decides how a payload's string becomes a number or a colour.</summary>
+    private enum Kind { Length, Colour, Opacity, Visibility }
+
+    private sealed class Decl
+    {
+        public Target[] Targets = Array.Empty<Target>();
+        public Kind Kind;
+        /// <summary>What a `%` is of (the containing block's content box), shared by every target.</summary>
+        public double PercentOf = double.NaN;
+        /// <summary>Why this declaration has no slot, said once. The key's other declarations still apply.</summary>
+        public string? No;
+        /// <summary>A value it could not place has been reported; later ones are dropped quietly.</summary>
+        public bool Warned;
+        /// <summary>A colour as last converted, so an unchanged one is not parsed and formatted again every tick.</summary>
+        public string? LastIn, LastOut;
+    }
+
+    /// <summary>A bool's two states: its element's opacity and every slot that hiding it moves.</summary>
+    private sealed class Toggle
+    {
+        public string[] Slots = Array.Empty<string>();
+        public float[] Shown = Array.Empty<float>();
+        public float[] Hidden = Array.Empty<float>();
+    }
+
+    private sealed class Entry
+    {
+        /// <summary>The element's box as compiled; null for a key naming no element.</summary>
+        public DomSlots.Box? Box;
+        public bool Shape;
+        /// <summary>The whole key, refused: its proof disagreed. Said once.</summary>
+        public string? No;
+        public string? Text, TextNo;
+        /// <summary>The text's `text-transform`, null for none.</summary>
+        public string? Case;
+        public Dictionary<string, Decl>? Decls;
+        public Toggle? Toggle;
+        public string? BoolNo;
+        /// <summary>A value of a kind this key cannot take has been reported.</summary>
+        public bool Warned;
+        // The text as last formatted and shaped, so an unchanged value builds no string per tick.
+        public bool HasNumber;
+        public float LastNumber;
+        public string? LastNumberText, LastIn, LastOut;
+    }
+
+    private readonly Dictionary<string, Entry> _keys = new(StringComparer.Ordinal);
+
+    // ---- what the page was, copied out while it existed ----
+    private readonly Dictionary<string, DomSlots.Box> _boxes = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, IReadOnlyDictionary<string, string>> _transitions = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _shapes = new(StringComparer.Ordinal);
+    /// <summary>Elements whose digits the emitter monospaces, so one whose width was never drawn can say so.</summary>
+    private readonly HashSet<string> _tabular = new(StringComparer.Ordinal);
+    /// <summary>Per element, its `text-transform` (inherited ones included): the emitter cases the text it draws.</summary>
+    private readonly Dictionary<string, string> _case = new(StringComparer.Ordinal);
+    /// <summary>Per element with one px corner radius: the radius as declared, and its `rx` slot.</summary>
+    private readonly Dictionary<string, (double R, string Slot)> _radius = new(StringComparer.Ordinal);
+    private HashSet<string> _available = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Names the scene reads as <c>$name</c> that are not its own slots: an SVG expression's inputs.
+    /// Only these are worth forwarding as data - and a key that is ALSO a slot name must not be,
+    /// since the raw value would overwrite what the slot write put there (a tabular label's
+    /// monospacing, on every tick whose value had not changed).
+    /// </summary>
+    private readonly HashSet<string> _reads = new(StringComparer.Ordinal);
+    private readonly Action<string> _warn;
+    // Only while Compile runs: the page, and the scene it is checked against. Nulled after, so a
+    // released page is not kept alive through them.
+    private Func<string, DomSlots.Toggle>? _toggleOf;
+    private IReadOnlyDictionary<string, SceneSlots.Value>? _scene;
+
+    /// <summary>What the last Apply wrote. Reused: a tick allocates nothing here.</summary>
+    private readonly Dictionary<string, SceneSlots.Value> _out = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// Per bool key, the two states it picks between, and which one it is in. A bool shows or hides
-    /// an element; in normal flow that moves what follows, so the state is the element's opacity
-    /// plus every sibling that closes the gap, captured once from the laid-out page.
+    /// The value every slot this has written holds now, so a scene the full path emits after the
+    /// compile - the proof tick's, a capture's - shows the data rather than whatever the page's DOM
+    /// last held. Written on the game thread (Apply), read on the page's (Overlay).
     /// </summary>
-    private readonly Dictionary<string, DomSlots.Toggle> _toggles = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, bool> _shown = new(StringComparer.Ordinal);
-
-    /// <summary>
-    /// Whether this key is a bool the fast path toggles. The surface then keeps the element in the
-    /// layout whatever the value: the scene it proves against and later writes into has to carry
-    /// the element's lines, and a `display: none` would take them out.
-    /// </summary>
-    internal bool Toggles(string key) => Problem == null && _toggles.ContainsKey(key);
+    private readonly Dictionary<string, SceneSlots.Value> _last = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Slots whose property has a CSS transition, with its duration and curve. They are sent without
     /// <c>snap</c> and with the renderer's <c>ease</c> timing (vector 0.11.33), so the renderer runs
     /// the glide the CSS declares; every other slot snaps, as a browser does.
     /// </summary>
-    /// <remarks>
-    /// This used to be a refusal: a transition was compiled into the scene as an expression, only the
-    /// emitter could write one, so any transitioned key kept the whole page on the full path - a
-    /// layout, translate and emit per tick, for ever, for one gliding bar. The renderer glides a value
-    /// itself, and since 0.11.33 for a stated duration and curve; timing is a property of the change
-    /// there, as in CSS, so it goes on every payload that moves the slot, not once. A delay rides as
-    /// the array's third element, only when there is one.
-    /// </remarks>
     private readonly Dictionary<string, (float Dur, string Curve, float Delay)> _eased = new(StringComparer.Ordinal);
 
     internal bool TryEase(string slot, out (float Dur, string Curve, float Delay) timing) => _eased.TryGetValue(slot, out timing);
 
     /// <summary>
-    /// Per text slot, the em width its digit runs are monospaced at, or absent for plain text.
+    /// Per text slot, the <c>&lt;mspace=Xem&gt;</c> its digit runs are wrapped in, or absent for plain
+    /// text. `font-variant-numeric: tabular-nums` makes the emitter wrap every digit run, with X from
+    /// the element's measured font - which is the layout this class exists not to do - so it is read
+    /// off the emitted scene, for every text slot that drew a digit, when the page is compiled.
     /// </summary>
-    /// <remarks>
-    /// `font-variant-numeric: tabular-nums` makes the emitter wrap every digit run in
-    /// `&lt;mspace=Xem&gt;`, and X comes from the element's measured font - which is exactly the
-    /// layout this class exists not to do. So it is LEARNED from the value the emitter produced,
-    /// during the same comparison that proves the mapping. That is sound because the em is a
-    /// property of the element's font size: it cannot change without a relayout, and a relayout
-    /// rebuilds all of this anyway.
-    ///
-    /// Found by the check rather than by reading the emitter: the first run refused with
-    /// `the emitter drew "&lt;mspace=0.57em&gt;58&lt;/mspace&gt;.&lt;mspace=0.57em&gt;9&lt;/mspace&gt;",
-    /// this would write "58.9"`, which named the problem and its size in one line.
-    /// </remarks>
     private readonly Dictionary<string, string> _mspace = new(StringComparer.Ordinal);
     private readonly System.Text.StringBuilder _shaped = new(64);
 
-    /// <summary>Why the fast path is off, or null while it is on.</summary>
-    internal string? Problem { get; private set; }
+    /// <summary>Whether the scene reads any data name that is not one of its own slots (see <see cref="_reads"/>).</summary>
+    internal bool ReadsAny => _reads.Count > 0;
 
-    /// <summary>
-    /// Why a later payload could not be placed, naming the key and the value, or null. A page's
-    /// keys, declarations and units are fixed by the payload it was built from; one that carries
-    /// anything else is dropped whole (HtmlSurface.ApplyPairs), and this is the reason, said once.
-    /// </summary>
-    internal string? Refused { get; private set; }
+    internal bool Reads(string name) => _reads.Contains(name);
 
-    /// <summary>True once the first payload has been checked against the emitter and agreed.</summary>
-    internal bool Proven { get; private set; }
-
-    /// <summary>Data keys this knows how to place. A payload naming anything else is not handled.</summary>
-    internal int Count => _byKey.Count;
-
-    /// <summary>
-    /// Works out where every key in a payload would go, or gives the reason it cannot.
-    /// </summary>
-    /// <remarks>
-    /// One refusal anywhere disables the whole payload rather than the key. A payload half applied
-    /// through slots and half through a re-layout would draw a frame that is neither, and the
-    /// failure would be intermittent - visible only on the ticks where the awkward key changed.
-    /// </remarks>
-    /// <param name="toggleOf">
-    /// What a bool key's element looks like shown and hidden (PageCompiler.ToggleOf). Null when the
-    /// caller cannot lay the page out, and every bool is then refused, saying so.
-    /// </param>
-    internal static DataSlots Build(IReadOnlyList<KeyValuePair<string, SS.UiValue>> sample,
-                                    Func<string, DomSlots.Box?> boxOf,
-                                    Func<string, IReadOnlyDictionary<string, string>?> cssOf,
-                                    Func<string, bool> isShape,
-                                    ICollection<string> available,
-                                    Func<string, DomSlots.Toggle>? toggleOf = null)
+    /// <summary>Keys that place something, for the diagnostics line.</summary>
+    internal int Count
     {
-        var map = new DataSlots();
-        foreach (var entry in sample)
+        get
         {
-            var key = entry.Key;
-            if (string.IsNullOrEmpty(key)) { map.Problem = "a payload carried an empty key"; return map; }
+            var n = 0;
+            foreach (var e in _keys.Values)
+                if (e.No == null && (e.Text != null || e.Toggle != null || e.Decls != null)) n++;
+            return n;
+        }
+    }
 
-            // An SVG shape's value is read by the vector mod straight from $name, so the scene text
-            // does not change and there is nothing here to place. It is already as cheap as this
-            // would make it.
-            if (isShape(key)) { map.Problem = $"\"{key}\" is an svg shape, which the scene already reads as $ {key}"; return map; }
+    private DataSlots(Action<string> warn) => _warn = warn;
 
-            // A `$name` the scene reads as an expression, with no element of that name, is the same
-            // story - already free, and not ours to route.
-            var box = boxOf(key);
-            if (box == null) { map.Problem = $"\"{key}\" names no element in the page"; return map; }
-
-            // A transitioned property's slots glide on the renderer instead of jumping (see _eased);
-            // the surface has muted the emitter's own tween for the element, so the emitted scene
-            // carries the plain number this would write and the proof below still holds.
-            var css = cssOf(key);
-
-            var targets = new List<Target>();
-            switch (entry.Value.Type)
-            {
-                case SS.UiValueType.String:
-                case SS.UiValueType.Number:
-                {
-                    var mapped = DomSlots.Map(key, "textContent", box.Value, available);
-                    if (!mapped.Mapped) { map.Problem = $"\"{key}\" - {mapped.Problem}"; return map; }
-                    for (var i = 0; i < mapped.Slots.Length; i++)
-                        targets.Add(new Target(mapped.Slots[i], mapped.Bias[i], isText: true, mapped.Scale[i]));
-                    break;
-                }
-
-                case SS.UiValueType.Map when entry.Value.Map != null:
-                {
-                    foreach (var decl in entry.Value.Map)
-                    {
-                        var mapped = DomSlots.Map(key, "style." + decl.Key, box.Value, available);
-                        if (!mapped.Mapped) { map.Problem = $"\"{key}\".{decl.Key} - {mapped.Problem}"; return map; }
-                        // A length is written as a number, and only px and % resolve to one here:
-                        // "62%" is of the containing block, which the mapping measured or did not.
-                        // Checked on the sample so the page is refused before it is compiled; a
-                        // later payload in another unit is dropped by Apply, which says so.
-                        if (decl.Value.Type == SS.UiValueType.String && DomSlots.LooksLikeLength(decl.Value.String)
-                            && DomSlots.Length(decl.Value.String, mapped.PercentOf) == null)
-                        {
-                            map.Problem = $"\"{key}\".{decl.Key} = \"{decl.Value.String}\" - only px and % lengths can be written directly"
-                                          + (double.IsNaN(mapped.PercentOf) ? ", and the containing block's size was not measured" : string.Empty);
-                            return map;
-                        }
-                        var timing = css != null ? CssTransition.For(css, decl.Key) : null;
-                        for (var i = 0; i < mapped.Slots.Length; i++)
-                        {
-                            targets.Add(new Target(mapped.Slots[i], mapped.Bias[i], isText: false, mapped.Scale[i], mapped.PercentOf, decl.Key));
-                            if (timing is { } tm) map._eased[mapped.Slots[i]] = tm;
-                        }
-                    }
-                    break;
-                }
-
-                // Shows or hides the element: a two-value STATE, the same thing a class toggle is.
-                // Hiding a box in normal flow closes the gap it left, so each state carries the
-                // element's opacity and every sibling that moves, and the value picks one.
-                case SS.UiValueType.Bool:
-                {
-                    if (toggleOf == null) { map.Problem = $"\"{key}\" is a bool, and there is no way to lay the page out with the element hidden"; return map; }
-                    var toggle = toggleOf(key);
-                    if (toggle.Problem != null) { map.Problem = $"\"{key}\" - {toggle.Problem}"; return map; }
-                    map._toggles[key] = toggle;
-                    map._shown[key] = entry.Value.Bool;
-                    break;
-                }
-
-                default:
-                    map.Problem = $"\"{key}\" carries a {entry.Value.Type}, which has no slot";
-                    return map;
-            }
-
-            if (targets.Count > 0 || map._toggles.ContainsKey(key)) map._byKey[key] = targets;
+    /// <summary>
+    /// Compiles a page's data against the scene that drew its first payload: maps every key, proves
+    /// each against what the emitter drew, and copies out everything a later key needs.
+    /// </summary>
+    /// <param name="sample">Every key the page has been sent so far, as the scene shows them.</param>
+    /// <param name="scene">That scene's slot values (SceneSlots.Split).</param>
+    /// <param name="template">That scene's template, for the names it reads as data.</param>
+    /// <param name="ids">Every element id in the page, whose box is copied for a key that arrives later.</param>
+    /// <param name="boxOf">An element's box (PageCompiler.BoxFor), given the scene's slot names.</param>
+    /// <param name="toggleOf">
+    /// What a bool key's element looks like shown and hidden (PageCompiler.ToggleOf). Only while
+    /// compiling: its states are two layouts, and the page is let go afterwards.
+    /// </param>
+    internal static DataSlots Compile(IReadOnlyList<KeyValuePair<string, SS.UiValue>> sample,
+                                      IReadOnlyDictionary<string, SceneSlots.Value> scene,
+                                      string template,
+                                      IEnumerable<string> ids,
+                                      Func<string, HashSet<string>, DomSlots.Box?> boxOf,
+                                      Func<string, IReadOnlyDictionary<string, string>?> cssOf,
+                                      IEnumerable<string> shapes,
+                                      Func<string, DomSlots.Toggle>? toggleOf,
+                                      Action<string> warn)
+    {
+        var map = new DataSlots(warn);
+        map._available = new HashSet<string>(scene.Keys, StringComparer.Ordinal);
+        foreach (var id in shapes) map._shapes.Add(id);
+        foreach (var id in ids)
+        {
+            // Synthetic ids (`__3`) are the emitter's, not the author's: nothing sends data to them.
+            if (string.IsNullOrEmpty(id) || id.StartsWith("__", StringComparison.Ordinal) || map._shapes.Contains(id)) continue;
+            if (boxOf(id, map._available) is { } box) map._boxes[id] = box;
+            if (cssOf(id) is not { } css) continue;
+            if (css.ContainsKey("transition") || css.ContainsKey("transition-property") || css.ContainsKey("transition-duration"))
+                map._transitions[id] = css;
+            // the emitter's own test for monospacing a label's digits (VectorEmitter, tabular-nums)
+            if (css.TryGetValue("font-variant-numeric", out var numeric) && numeric.Contains("tabular")) map._tabular.Add(id);
+            if (css.TryGetValue("text-transform", out var textCase)) map._case[id] = textCase.Trim().ToLowerInvariant();
+            // One px radius on all four corners is the `rx` slot the emitter clamps; a % or four
+            // radii are not a single number, and the emitter writes those as a literal array.
+            if (css.TryGetValue("border-radius", out var radius) && DomSlots.Length(radius) is double px && px > 0 && map._available.Contains(id + "_rx"))
+                map._radius[id] = (px, id + "_rx");
+        }
+        map.ReadNames(template, scene);
+        foreach (var pair in scene)
+        {
+            if (pair.Value.IsNumber || pair.Value.Text == null) continue;
+            var at = pair.Value.Text.IndexOf("<mspace=", StringComparison.Ordinal);
+            var close = at < 0 ? -1 : pair.Value.Text.IndexOf('>', at);
+            if (close > at) map._mspace[pair.Key] = pair.Value.Text.Substring(at, close - at + 1);
         }
 
-        if (map._byKey.Count == 0) map.Problem = "the payload placed nothing";
+        // Each key is written as the proof reads it - a bool as shown, which is how the scene was
+        // emitted (the element stays in the layout whatever the value) - and checked against what
+        // was drawn. A disagreement refuses that key alone.
+        map._toggleOf = toggleOf;
+        map._scene = scene;
+        try
+        {
+            for (var i = 0; i < sample.Count; i++)
+            {
+                var key = sample[i].Key;
+                if (string.IsNullOrEmpty(key)) continue;
+                map._out.Clear();
+                map.Write(key, sample[i].Value, proving: true);
+                if (map.Disagrees(scene) is { } why) map.Refuse(map.EntryOf(key), $"\"{key}\" - {why}");
+            }
+        }
+        finally { map._toggleOf = null; map._scene = null; }
+
+        // The payload's actual values, bools included, are what a scene emitted from here on shows.
+        map.Apply(sample);
         return map;
     }
 
-    /// <summary>What this payload writes, or null when it carries anything the first payload did not (see <see cref="Refused"/>).</summary>
-    internal Dictionary<string, object>? Apply(IReadOnlyList<KeyValuePair<string, SS.UiValue>> entries) => Apply(entries, proving: false);
-
-    /// <param name="proving">
-    /// Read every bool as shown and remember nothing. The scene the proof runs against was emitted
-    /// with the element in the layout whatever the value (see <see cref="Toggles"/>), so the shown
-    /// state is the one it can be checked against; the hidden state's numbers come from the same
-    /// layout and only their slots' presence is provable.
-    /// </param>
-    private Dictionary<string, object>? Apply(IReadOnlyList<KeyValuePair<string, SS.UiValue>> entries, bool proving)
+    /// <summary>
+    /// What this payload writes: every key it can place, each whole. Keys, declarations and kinds of
+    /// value seen for the first time are mapped now, from what was copied at compile.
+    /// </summary>
+    /// <remarks>Runs on every data tick: the result is a reused buffer, valid until the next call.</remarks>
+    internal Dictionary<string, SceneSlots.Value> Apply(IReadOnlyList<KeyValuePair<string, SS.UiValue>> entries)
     {
-        if (Problem != null) return null;
-        Dictionary<string, object>? values = null;
-
-        foreach (var entry in entries)
+        _out.Clear();
+        for (var i = 0; i < entries.Count; i++)
         {
-            var key = entry.Key ?? string.Empty;
-            if (!_byKey.TryGetValue(key, out var targets))
-                return Refuse(key, null, null, "is not a key the first payload carried", proving);
-            // a bool became a string, or a string a bool: a different shape, not a different value
-            if (_toggles.ContainsKey(key) != (entry.Value.Type == SS.UiValueType.Bool))
-                return Refuse(key, null, null, "carries a different kind of value from the first payload's", proving);
+            var entry = entries[i];
+            if (!string.IsNullOrEmpty(entry.Key)) Write(entry.Key, entry.Value, proving: false);
+        }
+        lock (_last)
+            foreach (var pair in _out) _last[pair.Key] = pair.Value;
+        return _out;
+    }
 
-            switch (entry.Value.Type)
+    /// <summary>Puts every value this has written over a scene the full path just emitted.</summary>
+    internal void Overlay(Dictionary<string, SceneSlots.Value> scene)
+    {
+        lock (_last)
+            foreach (var pair in _last)
+                if (scene.ContainsKey(pair.Key)) scene[pair.Key] = pair.Value;
+    }
+
+    /// <summary>One key's values into <see cref="_out"/>, whole or not at all.</summary>
+    private void Write(string key, in SS.UiValue value, bool proving)
+    {
+        var e = EntryOf(key);
+        if (e.No != null) return;
+        if (e.Box == null)
+        {
+            // An SVG shape's array is bound in the scene as $key[i] and is forwarded, which already
+            // makes it free. Its points string or attribute map are the shape's geometry - literal
+            // arrays in the structure, not values.
+            if (e.Shape && value.Type != SS.UiValueType.Array && !e.Warned)
             {
-                case SS.UiValueType.Bool:
+                e.Warned = true;
+                Say($"\"{key}\" is an svg shape, and its {(value.Type == SS.UiValueType.Map ? "attributes are" : "points are")} the scene's structure, not a value - send an array (bound as ${key}[i]) or write the attribute as an expression over ${key}; dropped");
+            }
+            return;
+        }
+
+        switch (value.Type)
+        {
+            case SS.UiValueType.String:
+            case SS.UiValueType.Number:
+            {
+                var slot = TextSlot(key, e);
+                if (slot != null) _out[slot] = new SceneSlots.Value(TextOf(e, slot, value));
+                break;
+            }
+
+            // Shows or hides the element: a two-value STATE, the same thing a class toggle is.
+            case SS.UiValueType.Bool:
+            {
+                var t = ToggleFor(key, e);
+                if (t == null) break;
+                var state = proving || value.Bool ? t.Shown : t.Hidden;
+                for (var i = 0; i < t.Slots.Length; i++) _out[t.Slots[i]] = new SceneSlots.Value(state[i]);
+                break;
+            }
+
+            case SS.UiValueType.Map when value.Map != null:
+            {
+                // Two passes: nothing is written until every declaration this key can place has a
+                // value it can place. A declaration with no slot at all is skipped every tick alike,
+                // so it never makes a frame differ from the one before.
+                var props = value.Map;
+                for (var i = 0; i < props.Length; i++)
                 {
-                    var shown = proving || entry.Value.Bool;
-                    // written on the game thread (ApplyPairs) and read by Overlay on the page's
-                    if (!proving) lock (_shown) _shown[key] = shown;
-                    var toggle = _toggles[key];
-                    foreach (var (slot, v) in shown ? toggle.Shown : toggle.Hidden) (values ??= New())[slot] = v;
-                    break;
-                }
-
-                case SS.UiValueType.String:
-                    foreach (var t in targets) (values ??= New())[t.Slot] = Shape(t.Slot, entry.Value.String ?? string.Empty);
-                    break;
-
-                case SS.UiValueType.Number:
-                    foreach (var t in targets)
-                        (values ??= New())[t.Slot] = t.IsText
-                            ? Shape(t.Slot, entry.Value.Number.ToString("G", CultureInfo.InvariantCulture))
-                            : entry.Value.Number * t.Scale + t.Bias;
-                    break;
-
-                case SS.UiValueType.Map when entry.Value.Map != null:
-                {
-                    // Each declaration goes to the targets Build paired with its NAME: one per slot
-                    // it reaches, so counting them is no pairing, and a declaration the first
-                    // payload never carried has none.
-                    for (var i = 0; i < entry.Value.Map.Length; i++)
+                    var d = DeclOf(key, e, props[i].Key ?? string.Empty);
+                    if (d.No != null || Resolve(d, props[i].Value, out _, out _)) continue;
+                    if (!d.Warned)
                     {
-                        var d = entry.Value.Map[i];
-                        var placed = false;
-                        double? n = null;
-                        foreach (var t in targets)
-                        {
-                            if (!string.Equals(t.Decl, d.Key, StringComparison.Ordinal)) continue;
-                            if (!placed)
-                            {
-                                placed = true;
-                                // resolved once: every target of one declaration shares its % base
-                                if (d.Value.Type == SS.UiValueType.Number) n = d.Value.Number;
-                                else if (DomSlots.Length(d.Value.String, t.PercentOf) is { } len) n = len;
-                                else if (DomSlots.LooksLikeLength(d.Value.String))
-                                    return Refuse(key, d.Key, d.Value.String, "is not a px or % length", proving);
-                            }
-                            (values ??= New())[t.Slot] = n is { } v ? v * t.Scale + t.Bias : (object)(d.Value.String ?? string.Empty);
-                        }
-                        if (!placed) return Refuse(key, d.Key, null, "is not a declaration the first payload carried", proving);
+                        d.Warned = true;
+                        Say($"\"{key}\".{props[i].Key} = {Show(props[i].Value)} is not a value this can write ({Expected(d)}) - the key is dropped for that payload and applies again with the next that it can place");
                     }
-                    break;
+                    return;
                 }
+                double? w = null, h = null, r = null;
+                for (var i = 0; i < props.Length; i++)
+                {
+                    var d = DeclOf(key, e, props[i].Key ?? string.Empty);
+                    if (d.No != null) continue;
+                    Resolve(d, props[i].Value, out var number, out var text);
+                    foreach (var t in d.Targets)
+                        _out[t.Slot] = text != null ? new SceneSlots.Value(text) : new SceneSlots.Value((float)(number * t.Scale + t.Bias));
+                    switch (props[i].Key)
+                    {
+                        case "width": w = number; break;
+                        case "height": h = number; break;
+                        case "border-radius" or "borderRadius": r = number; break;
+                    }
+                }
+                // CSS scales a radius down when two of them overflow a side, and the emitter does the
+                // same (VectorEmitter.Radii) - without it a bar written below twice its radius is a
+                // self-intersecting shape. The width moved, so the clamp has to move with it.
+                if ((w != null || h != null || r != null) && _radius.TryGetValue(key, out var round))
+                {
+                    var box = e.Box.Value;
+                    var clamped = Math.Min(r ?? round.R, Math.Min((w ?? box.W) / 2, (h ?? box.H) / 2));
+                    if (!double.IsNaN(clamped)) _out[round.Slot] = new SceneSlots.Value((float)Math.Max(0, clamped));
+                }
+                break;
+            }
 
-                default:
-                    return Refuse(key, null, null, "carries a value of a kind that has no slot", proving);
+            default:
+                // An array on an element is forwarded (the scene may read it as $key[i]); it has no slot of its own.
+                if (!e.Warned && !(value.Type == SS.UiValueType.Array && Reads(key)))
+                {
+                    e.Warned = true;
+                    Say($"\"{key}\" carries a {value.Type}, which no slot of an element takes - dropped");
+                }
+                break;
+        }
+    }
+
+    private Entry EntryOf(string key)
+    {
+        if (_keys.TryGetValue(key, out var e)) return e;
+        e = new Entry();
+        _keys[key] = e;
+        if (_shapes.Contains(key)) e.Shape = true;
+        else if (_boxes.TryGetValue(key, out var box)) e.Box = box;
+        // A name the scene reads as $key (an SVG expression's input) is forwarded, which is all it
+        // needs; anything else is a key naming nothing, and a browser would ignore it too.
+        else if (!ReadsKey(key)) Say($"\"{key}\" names no element in the page, and the scene reads no ${key} - dropped; the rest applies");
+        return e;
+    }
+
+    private string? TextSlot(string key, Entry e)
+    {
+        if (e.Text != null || e.TextNo != null) return e.Text;
+        var mapped = DomSlots.Map(key, "textContent", e.Box!.Value, _available);
+        if (mapped.Mapped) { e.Text = mapped.Slots[0]; _case.TryGetValue(key, out e.Case); }
+        else { e.TextNo = mapped.Problem; Say($"\"{key}\" as text - {mapped.Problem}; dropped"); }
+        // The cell width is the face's widest digit, measured by the emitter; it is only known here
+        // from a label that drew a digit when the page compiled. Said rather than drawn otherwise.
+        if (e.Text != null && _tabular.Contains(key) && !_mspace.ContainsKey(e.Text))
+            Say($"\"{key}\" is tabular-nums, and it drew no digit when the page compiled, so the cell width is unknown - its digits are drawn proportional; send a number in the first payload");
+        return e.Text;
+    }
+
+    private Decl DeclOf(string key, Entry e, string name)
+    {
+        e.Decls ??= new Dictionary<string, Decl>(StringComparer.Ordinal);
+        if (e.Decls.TryGetValue(name, out var d)) return d;
+        d = new Decl { Kind = KindOf(name) };
+        e.Decls[name] = d;
+        if (name is "transform")
+        {
+            d.No = "a transform's value is a function list, which this does not parse";
+        }
+        else
+        {
+            var mapped = DomSlots.Map(key, "style." + name, e.Box!.Value, _available);
+            if (!mapped.Mapped) d.No = mapped.Problem;
+            // The element's opacity group carries an id only when something named it before the
+            // scene was emitted (HtmlSurface does, for a bool or an opacity in the first payload):
+            // naming every group would make the renderer retain every element's props.
+            else if (mapped.NeedsGroup) d.No = $"\"{key}\"'s opacity group was not named when the page was compiled - send `{name}` in the first payload";
+            else
+            {
+                d.PercentOf = mapped.PercentOf;
+                d.Targets = new Target[mapped.Slots.Length];
+                for (var i = 0; i < d.Targets.Length; i++) d.Targets[i] = new Target(mapped.Slots[i], mapped.Bias[i], mapped.Scale[i]);
+                if (_transitions.TryGetValue(key, out var css) && CssTransition.For(css, name) is { } timing)
+                    foreach (var slot in mapped.Slots) _eased[slot] = timing;
             }
         }
-        return values;
+        if (d.No != null) Say($"\"{key}\".{name} - {d.No}; that declaration is dropped, the key's others apply");
+        return d;
     }
 
     /// <summary>
-    /// Drops the payload, naming what could not be placed - once. After the first the reason
-    /// stands and nothing is built per tick; a proof's refusal is Prove's to report.
+    /// A bool's two states, captured while the page exists. Only the slots hiding the element
+    /// actually moves go in, each at the value the LIVE scene holds - the capture is a second
+    /// layout of the page, and it can differ from the emitted one by a fraction of a pixel (a body
+    /// 479.96 high against the 480 drawn), which the proof would read as a disagreement and which
+    /// written back would nudge a box that never moved. Hidden is the live value plus how far
+    /// hiding moved it.
     /// </summary>
-    private Dictionary<string, object>? Refuse(string key, string? decl, string? value, string what, bool proving)
+    private Toggle? ToggleFor(string key, Entry e)
     {
-        if (Refused == null)
+        if (e.Toggle != null || e.BoolNo != null) return e.Toggle;
+        if (_toggleOf == null || _scene == null)
         {
-            Refused = $"\"{key}\"{(decl != null ? "." + decl : string.Empty)}{(value != null ? " = \"" + value + "\"" : string.Empty)} {what}";
-            if (!proving)
-                ScriptedScreensHtmlPlugin.Log?.LogWarning(
-                    $"html: a data payload is dropped, as is any later one like it - {Refused}. A data page's keys, declarations and units are fixed by its first payload.");
+            e.BoolNo = "is a bool first sent after the page was compiled, and hiding an element moves what follows it, which only a layout can say - send it in the first payload";
+            Say($"\"{key}\" {e.BoolNo}; dropped");
+            return null;
+        }
+        var captured = _toggleOf(key);
+        if (captured.Problem != null)
+        {
+            e.BoolNo = captured.Problem;
+            Say($"\"{key}\" as a bool - {captured.Problem}; dropped");
+            return null;
+        }
+        var own = key + "_o";
+        var slots = new List<string>();
+        var shown = new List<float>();
+        var hidden = new List<float>();
+        foreach (var (slot, before) in captured.Shown)
+        {
+            var after = before;
+            foreach (var h in captured.Hidden) if (h.Slot == slot) { after = h.Value; break; }
+            var isOwn = slot == own;
+            // half a pixel: two layouts of one page round differently, and a real move - the gap an
+            // element leaves - is at least a line
+            if (!isOwn && Math.Abs(after - before) < 0.5) continue;
+            if (!_scene.TryGetValue(slot, out var live) || !live.IsNumber)
+            {
+                e.BoolNo = $"hiding it moves slot \"{slot}\", which is not in the emitted scene";
+                Say($"\"{key}\" as a bool - {e.BoolNo}; dropped");
+                return null;
+            }
+            slots.Add(slot);
+            shown.Add(live.Number);
+            hidden.Add(isOwn ? 0f : live.Number + (float)(after - before));
+        }
+        return e.Toggle = new Toggle { Slots = slots.ToArray(), Shown = shown.ToArray(), Hidden = hidden.ToArray() };
+    }
+
+    /// <summary>A declaration's value as the number or colour its slots take; false when it is neither.</summary>
+    private static bool Resolve(Decl d, in SS.UiValue v, out double number, out string? text)
+    {
+        number = 0;
+        text = null;
+        switch (d.Kind)
+        {
+            case Kind.Colour:
+                if (v.Type != SS.UiValueType.String || string.IsNullOrEmpty(v.String)) return false;
+                if (!string.Equals(v.String, d.LastIn, StringComparison.Ordinal))
+                {
+                    // As the emitter writes a colour (VectorEmitter.Hex), so `red` and `rgb()` land as
+                    // the same #RRGGBB the scene holds - raw, they would disagree with the proof, and
+                    // the renderer does not read `rgb()` at all.
+                    d.LastOut = StyleApplier.TryColor(v.String!, out var c) ? VectorEmitter.Hex(c) : null;
+                    d.LastIn = v.String;
+                }
+                text = d.LastOut;
+                return text != null;
+
+            case Kind.Visibility:
+                if (v.Type != SS.UiValueType.String) return false;
+                var word = v.String?.Trim();
+                if (word is "hidden" or "collapse") { number = 0; return true; }
+                // ponytail: visible is opacity 1, not the element's own; compose the two when a page needs both
+                if (word == "visible") { number = 1; return true; }
+                return false;
+
+            default:
+                if (v.Type == SS.UiValueType.Number) { number = v.Number; return true; }
+                if (v.Type != SS.UiValueType.String) return false;
+                // opacity takes a percentage of 1, as CSS does
+                if (d.Kind == Kind.Opacity && DomSlots.Length(v.String, 100) is { } pct && v.String!.TrimEnd().EndsWith("%", StringComparison.Ordinal))
+                { number = pct / 100; return true; }
+                if (DomSlots.Length(v.String, d.PercentOf) is not { } len) return false;
+                number = len;
+                return true;
+        }
+    }
+
+    private static Kind KindOf(string name) => name switch
+    {
+        "background" or "background-color" or "backgroundColor" or "color" or "border-color" or "borderColor" => Kind.Colour,
+        "opacity" => Kind.Opacity,
+        "visibility" => Kind.Visibility,
+        _ => Kind.Length,
+    };
+
+    private static string Expected(Decl d) => d.Kind switch
+    {
+        Kind.Colour => "a colour",
+        Kind.Visibility => "visible, hidden or collapse",
+        Kind.Opacity => "a number or a %",
+        _ => double.IsNaN(d.PercentOf) ? "px, as the containing block's size was not measured for a %" : "px or %",
+    };
+
+    private static string Show(in SS.UiValue v) => v.Type switch
+    {
+        SS.UiValueType.String => "\"" + v.String + "\"",
+        SS.UiValueType.Number => v.Number.ToString(CultureInfo.InvariantCulture),
+        SS.UiValueType.Bool => v.Bool ? "true" : "false",
+        _ => "a " + v.Type,
+    };
+
+    /// <summary>The text as the emitter would have drawn it, built only when the value changed.</summary>
+    private string TextOf(Entry e, string slot, in SS.UiValue v)
+    {
+        string raw;
+        if (v.Type == SS.UiValueType.Number)
+        {
+            if (!e.HasNumber || !e.LastNumber.Equals(v.Number))
+            {
+                e.HasNumber = true;
+                e.LastNumber = v.Number;
+                e.LastNumberText = v.Number.ToString("G", CultureInfo.InvariantCulture);
+            }
+            raw = e.LastNumberText!;
+        }
+        else raw = v.String ?? string.Empty;
+
+        var tabular = _mspace.TryGetValue(slot, out var open);
+        if ((!tabular && e.Case == null) || raw.Length == 0) return raw;
+        if (!string.Equals(raw, e.LastIn, StringComparison.Ordinal))
+        {
+            // Cased first, as the emitter does, and only then are the digit runs given their cells.
+            var cased = e.Case == null ? raw : VectorEmitter.Transform(raw, e.Case);
+            if (tabular)
+            {
+                _shaped.Clear();
+                var i = 0;
+                while (i < cased.Length)
+                {
+                    if (!char.IsDigit(cased[i])) { _shaped.Append(cased[i++]); continue; }
+                    var start = i;
+                    while (i < cased.Length && char.IsDigit(cased[i])) i++;
+                    _shaped.Append(open).Append(cased, start, i - start).Append("</mspace>");
+                }
+                cased = _shaped.ToString();
+            }
+            e.LastIn = raw;
+            e.LastOut = cased;
+        }
+        return e.LastOut!;
+    }
+
+    /// <summary>Why what <see cref="_out"/> holds is not what the emitter drew, or null when it is.</summary>
+    private string? Disagrees(IReadOnlyDictionary<string, SceneSlots.Value> scene)
+    {
+        foreach (var pair in _out)
+        {
+            if (!scene.TryGetValue(pair.Key, out var was)) return $"slot \"{pair.Key}\" is not in the emitted scene";
+            var mine = pair.Value;
+            if (mine.IsNumber
+                    ? !was.IsNumber || Math.Abs(was.Number - mine.Number) > 0.01f
+                    : was.IsNumber || !SameText(was.Text, mine.Text))
+                return $"slot \"{pair.Key}\": the emitter drew {Show(was)}, this would write {Show(mine)}";
         }
         return null;
     }
 
     /// <summary>
-    /// Checks this against what the emitter actually produced, and turns the fast path on only if
-    /// they agree.
+    /// Equal, or equal once the emitter's &lt;noparse&gt; guard is taken off. That guard is for the
+    /// scene reader, which types a quoted "3" as a number; a data value arrives as a string and needs
+    /// none, and TextMeshPro draws the two alike.
     /// </summary>
-    /// <remarks>
-    /// The comparison is the whole safety argument. Everything else here is a rule about what
-    /// <i>should</i> land where; this is the one place that looks at what did.
-    /// </remarks>
-    internal void Prove(IReadOnlyList<KeyValuePair<string, SS.UiValue>> entries,
-                        IReadOnlyDictionary<string, SceneSlots.Value> emitted,
-                        Action<string> warn)
+    private static bool SameText(string? drawn, string? mine)
     {
-        if (Problem != null || Proven) return;
-
-        var mine = Apply(entries, proving: true);
-        if (mine == null) { Problem = Refused ?? "the payload placed nothing to check"; Refused = null; return; }
-
-        foreach (var pair in mine)
-        {
-            if (!emitted.TryGetValue(pair.Key, out var was))
-            {
-                Problem = $"slot \"{pair.Key}\" is not in the emitted scene";
-                break;
-            }
-            if (pair.Value is string s)
-            {
-                // A text slot the emitter monospaces differs only by the wrapping, and the wrapping
-                // is learnable from this very comparison.
-                if (!was.IsNumber && was.Text != null && LearnMspace(pair.Key, s, was.Text)) continue;
-                if (was.IsNumber || !string.Equals(was.Text, s, StringComparison.Ordinal))
-                {
-                    Problem = $"slot \"{pair.Key}\": the emitter drew \"{(was.IsNumber ? was.Number.ToString(CultureInfo.InvariantCulture) : was.Text)}\", this would write \"{s}\"";
-                    break;
-                }
-            }
-            else if (pair.Value is double d)
-            {
-                if (!was.IsNumber || Math.Abs(was.Number - d) > 0.01)
-                {
-                    Problem = $"slot \"{pair.Key}\": the emitter drew {(was.IsNumber ? was.Number.ToString(CultureInfo.InvariantCulture) : was.Text)}, this would write {d.ToString("0.##", CultureInfo.InvariantCulture)}";
-                    break;
-                }
-            }
-        }
-
-        if (Problem != null)
-        {
-            warn($"html: data slots disagree with the emitter and stay off - {Problem}");
-            return;
-        }
-        Proven = true;
+        const string open = "<noparse>", close = "</noparse>";
+        if (string.Equals(drawn, mine, StringComparison.Ordinal)) return true;
+        return drawn != null && mine != null && drawn.Length == mine.Length + open.Length + close.Length
+               && drawn.StartsWith(open, StringComparison.Ordinal) && drawn.EndsWith(close, StringComparison.Ordinal)
+               && string.CompareOrdinal(drawn, open.Length, mine, 0, mine.Length) == 0;
     }
 
-    /// <summary>
-    /// Writes each bool's current state over a scene the full path just emitted.
-    /// </summary>
-    /// <remarks>
-    /// Once a bool is a toggle its element stays in the layout, so a full-path emit draws it shown
-    /// with its siblings where the shown layout puts them - the proof tick, and any re-emit after
-    /// it. This puts the actual state back before the scene is sent. Whole states only: with a slot
-    /// missing the structure is not the one the state was captured from, and half a state (hidden
-    /// but the gap still open) is worse than the shown frame the proof will have flagged.
-    /// </remarks>
-    internal void Overlay(Dictionary<string, SceneSlots.Value> scene)
-    {
-        // on the page thread, against a state Apply writes on the game thread
-        lock (_shown)
-            foreach (var pair in _toggles)
-            {
-                var state = _shown.TryGetValue(pair.Key, out var shown) && shown ? pair.Value.Shown : pair.Value.Hidden;
-                var whole = true;
-                foreach (var (slot, _) in state) if (!scene.ContainsKey(slot)) { whole = false; break; }
-                if (!whole) continue;
-                foreach (var (slot, v) in state) scene[slot] = new SceneSlots.Value((float)v);
-            }
-    }
+    private static string Show(SceneSlots.Value v) =>
+        v.IsNumber ? v.Number.ToString("0.##", CultureInfo.InvariantCulture) : "\"" + v.Text + "\"";
 
-    /// <summary>The text as the emitter would have drawn it: digit runs monospaced, when this slot is.</summary>
-    private string Shape(string slot, string text)
+    /// <summary>The names after each `$` in the template that are not the scene's own slots.</summary>
+    private void ReadNames(string template, IReadOnlyDictionary<string, SceneSlots.Value> scene)
     {
-        if (!_mspace.TryGetValue(slot, out var open) || text.Length == 0) return text;
-        _shaped.Clear();
         var i = 0;
-        while (i < text.Length)
+        while (i < template.Length)
         {
-            if (!char.IsDigit(text[i])) { _shaped.Append(text[i++]); continue; }
+            if (template[i++] != '$') continue;
             var start = i;
-            while (i < text.Length && char.IsDigit(text[i])) i++;
-            _shaped.Append(open).Append(text, start, i - start).Append("</mspace>");
+            while (i < template.Length && (char.IsLetterOrDigit(template[i]) || template[i] == '_')) i++;
+            if (i == start) continue;
+            var name = template.Substring(start, i - start);
+            if (!scene.ContainsKey(name)) _reads.Add(name);
         }
-        return _shaped.ToString();
     }
 
-    /// <summary>Learns a slot's monospacing from what the emitter drew, when that is the only difference.</summary>
-    private bool LearnMspace(string slot, string mine, string emitted)
+    /// <summary>Whether the scene reads the key itself or a name flattened from it (`co2` as `$co2_gasFill`).</summary>
+    private bool ReadsKey(string key)
     {
-        const string tag = "<mspace=";
-        var at = emitted.IndexOf(tag, StringComparison.Ordinal);
-        if (at < 0) return false;
-        var close = emitted.IndexOf('>', at);
-        if (close < 0) return false;
-        var open = emitted.Substring(at, close - at + 1);
-        _mspace[slot] = open;
-        return string.Equals(Shape(slot, mine), emitted, StringComparison.Ordinal);
+        foreach (var name in _reads)
+            if (name.StartsWith(key, StringComparison.Ordinal) && (name.Length == key.Length || name[key.Length] == '_')) return true;
+        return false;
     }
 
-    private static Dictionary<string, object> New() => new(StringComparer.Ordinal);
+    private void Refuse(Entry e, string why)
+    {
+        e.No = why;
+        Say(why + "; the key is dropped, the rest applies");
+    }
+
+    private void Say(string what) => _warn("data " + what);
 }

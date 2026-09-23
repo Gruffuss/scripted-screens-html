@@ -41,25 +41,31 @@ internal sealed class HtmlSurface : MonoBehaviour
     private CompiledRun? _compiled;
     /// <summary>Where a data key's value lands in the scene, for a page with no script to compile.</summary>
     private DataSlots? _dataSlots;
-    private List<KeyValuePair<string, SS.UiValue>>? _dataToProve;
+    /// <summary>
+    /// Every key sent before the data compile, merged, later wins: all of them are in the DOM by the
+    /// next emit, which is the one the compile maps and proves them against.
+    /// </summary>
+    private Dictionary<string, SS.UiValue>? _dataPending;
     /// <summary>Data ticks that skipped layout, translate and emit entirely (diagnostics).</summary>
     private int _dataFastTicks;
-    /// <summary>Payloads dropped after the page's data compile was refused, for the diagnostics line.</summary>
+    /// <summary>The FontLibrary.Generation this page last laid out under.</summary>
+    private int _fontGeneration;
+    /// <summary>Payloads dropped after the page's data compile failed outright, for the diagnostics line.</summary>
     private int _dataDropped;
-    /// <summary>Why the data compile was refused, or null. Set once; a later payload does no work.</summary>
+    /// <summary>Why the data compile failed outright (it threw), or null. Set once; a later payload does no work.</summary>
     private string? _dataRefused;
-    /// <summary>The element ids the data drives, so a page rebuilt for a capture names the same slots.</summary>
+    /// <summary>Elements whose opacity group the data drives (a bool, an opacity), so a rebuilt page names them again.</summary>
     private readonly HashSet<string> _dataDriven = new(StringComparer.Ordinal);
-    /// <summary>Whether the elements this page's data drives have been named for the emitter.</summary>
-    private bool _dataNamed;
     internal object? Visor;
     internal string ElementId = string.Empty;
     /// <summary>The data element's id: the vector mod needs a host of its own for a data payload.</summary>
     internal string DataElementId = string.Empty;
+    /// <summary>The vector scene id ("html:" and the element id), built once: every payload names it, and a concatenation per send was garbage per tick.</summary>
+    private string SceneId => ReferenceEquals(_sceneIdOf, ElementId) ? _sceneId! : _sceneId = "html:" + (_sceneIdOf = ElementId);
+    private string? _sceneId, _sceneIdOf;
     private bool _dirty;
     private int _dScript, _dAnim, _dTween, _dDom, _dOther;   // dirty causes since the last diagnostics line
     private int _gateSkips;   // frames the page was due for and wanted nothing from
-    private string _lastScene = string.Empty;
     /// <summary>The structure the vector mod has (the scene with its values as $slots), and the values it was last sent.</summary>
     private string? _lastTemplate;
     private readonly Dictionary<string, SceneSlots.Value> _sentValues = new(StringComparer.Ordinal);
@@ -96,8 +102,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         _source = source;
         // New source, new compile: the data mapping, its refusal and the names it drove belong to
         // the page that was, and the released working set must not stand in for the new one.
-        _dataSlots = null; _dataToProve = null; _dataNamed = false;
-        _dataRefused = null; _dataDriven.Clear();
+        _dataSlots = null; _dataPending = null;
+        _dataRefused = null; _dataDriven.Clear(); _easeValues.Clear();
         _released = false;
         if (!Surfaces.Contains(this))
             Surfaces.Add(this);
@@ -147,9 +153,11 @@ internal sealed class HtmlSurface : MonoBehaviour
         // compiled console silently stopped ticking the moment it was released. The page did not
         // error and did not go blank; it just stopped moving, and only "sent 1 patches" in the
         // diagnostics said so.
-        // A data page is released the same way once its table has proved itself or been refused,
-        // and only once the emit that proved it has gone out (no job in flight).
-        if (_compiled == null && _releasePending && IsCurrent && _pageState == PageIdle)
+        // A data page is released the same way once its table is compiled, and only once the emit
+        // that proved it has gone out: no job in flight, and none owed - a job whose tree changed
+        // under it (FinishJob's stale branch) sent nothing and is retried, and releasing first
+        // would leave the console on the scene before it.
+        if (_compiled == null && _releasePending && IsCurrent && _pageState == PageIdle && !_dirty)
         {
             _releasePending = false;
             ReleaseWorkingSet();
@@ -209,7 +217,13 @@ internal sealed class HtmlSurface : MonoBehaviour
             return; // the page thread owns the page until its frame ends
         if (_pageState == PageDone)
             FinishJob();
-        if (FontLibrary.ResolvePending()) { _dirty = true; _dOther++; }
+        // A face arriving re-lays out EVERY page showing it, not only the one whose Update drained
+        // the queue. Not a released page (compiled, or a data page after its table): it returned at
+        // the _panel guard above, on purpose. Its scene already names the face, and the vector mod
+        // looks faces up by name on every rebuild, so the glyphs change anyway; a relayout would
+        // move boxes under a slot table compiled against the old ones. Its metrics stay the
+        // fallback's, which the emitter's label slack absorbs.
+        if (FontLibrary.ResolvePending() | _fontGeneration != FontLibrary.Generation) { _fontGeneration = FontLibrary.Generation; _dirty = true; _dOther++; }
         if (_scriptPending && _script != null)
         {
             // the page script starts once the page exists; its engine thread runs it
@@ -570,10 +584,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         _animations.Clear();
         _boxes.Clear();
         _boxScratch.Clear();
-        // The proven slot table is what serves every later payload; it references nothing released.
-        if (_dataSlots is not { Proven: true }) _dataSlots = null;
-        _dataToProve = null;
-        _dataNamed = false;
+        // The compiled slot table is what serves every later payload; it references nothing released.
+        _dataPending = null;
         if (_muted.Count > 0)
         {
             lock (Tweens.Shared) foreach (var ve in _muted) Tweens.Override.Remove(ve);
@@ -612,9 +624,13 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{ElementId}\": rebuilding the page - something asked for it after it was released");
         _released = false;
         Build();
-        // The rebuilt page must emit the same slots the proven table writes, or the values the
-        // console keeps receiving would name nothing in the new structure.
-        if (_built != null) foreach (var id in _dataDriven) _built.Driven.Add(id);
+        // The rebuilt page must emit the same slots the compiled table writes, or the values the
+        // console keeps receiving would name nothing in the new structure: every id is Driven again
+        // by the build, and the opacity groups the data named are named again here.
+        if (_built != null) foreach (var id in _dataDriven) { _built.Driven.Add(id); _built.NamedGroups.Add(id); }
+        // A data page needed only that one emit (a capture): its values come from the table
+        // (DataSlots.Overlay), and nothing else will ask for the page again.
+        if (_dataSlots != null) _releasePending = true;
         return _built != null;
     }
 
@@ -658,6 +674,14 @@ internal sealed class HtmlSurface : MonoBehaviour
         // element's box already carries its id for. Cheap: one AST walk per build, and the set is
         // the handful a page really animates - four on the game page.
         NameDrivenGroups(built);
+        // A page with no script is driven by data, and any element with an id may be what a key
+        // names. Driven from the first emit, so that scene already carries every slot a key can
+        // write - even a zero radius or width - and the first payload compiles against the very
+        // next emit, with no emit spent only on naming. Groups are not named here: a named node
+        // makes the renderer retain its props, so only the data that needs one names it (BindById).
+        if (string.IsNullOrWhiteSpace(built.Script))
+            foreach (var id in built.ById.Keys)
+                if (!id.StartsWith("__", StringComparison.Ordinal)) built.Driven.Add(id);
 
         // Reports only. The page still runs on the interpreter below; this says whether the compiler
         // that will replace it can handle this page, on this machine, under Mono.
@@ -1255,7 +1279,17 @@ internal sealed class HtmlSurface : MonoBehaviour
                 // The element the chunk will write to itself, named the same way this mod names it,
                 // so the chunk's set_props lands on the surface this page already draws.
                 _compiled = CompiledRun.Start(PageKey, holder, _built!, _panel!, layout, _slotScratch,
-                                              (Surface, ElementId, "html:" + ElementId));
+                                              (Surface, ElementId, SceneId));
+                // A page whose markup the compiler laid out itself (every alternative and row at its
+                // maximum, holes named) draws THAT structure, and its chunk writes those slot names:
+                // the interpreter's emit of whichever state the page happened to be in would have
+                // slots the chunk never writes and lack the ones it does.
+                if (_compiled?.Structure is { } compiledStructure && _compiled.StructureValues is { } opening)
+                {
+                    template = compiledStructure;
+                    _slotScratch.Clear();
+                    foreach (var kv in opening) _slotScratch[kv.Key] = kv.Value;
+                }
                 // The page's motion goes into the structure as expressions of t, so nothing computes
                 // or sends it again. This has to happen before the template is compared and sent -
                 // it IS the structure - and the slots it covers leave the value table with it.
@@ -1265,23 +1299,15 @@ internal sealed class HtmlSurface : MonoBehaviour
                 // structure has been emitted, never before - the scene is what the chip writes into.
                 if (_compiled != null) _releasePending = true;
             }
-            // The emitter has just said what every slot really is, which is the only honest check
-            // available for the data fast path: what it WOULD have written, against what was drawn.
-            if (_dataToProve is { } proving && _dataSlots != null)
-            {
-                _dataToProve = null;
-                _dataSlots.Prove(proving, _slotScratch, m => ScriptedScreensHtmlPlugin.Log?.LogWarning(m));
-                if (_dataSlots.Proven && HtmlConfig.Diagnostics)
-                    ScriptedScreensHtmlPlugin.Log?.LogInfo(
-                        $"html \"{ElementId}\": data writes {_dataSlots.Count} slot(s) directly - no layout, translate or emit per tick");
-                // Either way the page is done: proven, its values go from ApplyPairs and nothing
-                // needs the dom, cascade, layout or engine again; disproven, it is refused for good.
-                if (!_dataSlots.Proven) _dataRefused = _dataSlots.Problem;
-                _releasePending = true;
-            }
-            // Any emit after the table proved - the proof tick's, a capture's - carries the bools'
-            // actual state rather than the shown layout the page was emitted with.
-            if (_dataSlots is { Proven: true } overlay) overlay.Overlay(_slotScratch);
+            // A data page compiles here, against the emit that drew its first payload: the emitter
+            // has just said what every slot really is, which is the only honest check there is -
+            // what the table WOULD write, against what was drawn. Built in the same emit rather
+            // than the next, so a label empty until its first value already has its slot.
+            if (_dataPending != null && _script == null && _dataSlots == null && _built != null)
+                CompileData(template);
+            // Any emit after the compile - the proof tick's, a capture's - carries the data's values
+            // (bools included) rather than whatever the page's DOM last held.
+            _dataSlots?.Overlay(_slotScratch);
             if (template == _lastTemplate)
             {
                 List<SS.UiProp>? patch = null;
@@ -1310,21 +1336,29 @@ internal sealed class HtmlSurface : MonoBehaviour
                 string Cut(string[] lines) => k < lines.Length ? lines[k].Substring(Math.Min(from, lines[k].Length), Math.Min(120, Math.Max(0, lines[k].Length - from))).Trim() : "(end)";
                 r.Why = $"html \"{ElementId}\": new structure ({was.Length} -> {cur.Length} lines), first difference at line {k}: \"{Cut(was)}\" -> \"{Cut(cur)}\"; last in-place miss: {HtmlRenderer.LastMorphMiss ?? "none"}";
             }
-            // A new structure restarts the vector clock: running tweens are written against that moment.
-            if (_tweens.Any && _lastTemplate != null)
+            // The compiled structure keeps its own slot names - its chunk writes exactly those - so it
+            // is never re-emitted from the page, re-split or given the other prefix.
+            if (_compiled?.Structure == null)
             {
-                _tweens.Epoch = now;
-                output = VectorEmitter.Emit(_built!, _content!, layout.x, layout.y, _tweens, now, ScrollSet);
-                r.Output = output;
+                // A new structure restarts the vector clock: running tweens are written against that moment.
+                if (_tweens.Any && _lastTemplate != null)
+                {
+                    _tweens.Epoch = now;
+                    output = VectorEmitter.Emit(_built!, _content!, layout.x, layout.y, _tweens, now, ScrollSet);
+                    r.Output = output;
+                }
+                // A new structure takes the other slot names: its values, sent before it, must not land on
+                // the structure still on screen (where the same name means another value). Two sets alternate,
+                // so the vector mod's table stays bounded.
+                if (_lastTemplate != null)
+                    _slotPrefix = _slotPrefix == "L" ? "M" : "L";
+                template = SceneSlots.Split(output.Chars, output.Length, _slotScratch, _slotPrefix);
+                // Split again, so the data's values go over again: without this a new structure - the
+                // compile tick's, whose bool named an opacity group - went out with the DOM's values,
+                // a hidden alarm drawn shown until a payload next moved it.
+                _dataSlots?.Overlay(_slotScratch);
             }
-            // A new structure takes the other slot names: its values, sent before it, must not land on
-            // the structure still on screen (where the same name means another value). Two sets alternate,
-            // so the vector mod's table stays bounded.
-            if (_lastTemplate != null)
-                _slotPrefix = _slotPrefix == "L" ? "M" : "L";
-            template = SceneSlots.Split(output.Chars, output.Length, _slotScratch, _slotPrefix);
             _tweens.Epoch = now;
-            _lastScene = output.Scene;
             _lastTemplate = template;
             _sentValues.Clear();
             var values = new SS.UiProp[_slotScratch.Count];
@@ -1347,6 +1381,57 @@ internal sealed class HtmlSurface : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Compiles a data page against the scene just split: maps and proves the keys sent so far, and
+    /// copies out what a key sent later needs. The page is let go on the next Update. Page thread
+    /// (or the game thread inside a capture), with the page not changing under it.
+    /// </summary>
+    private void CompileData(string template)
+    {
+        var built = _built!;
+        var sample = new List<KeyValuePair<string, SS.UiValue>>(_dataPending!);
+        _dataPending = null;
+        try
+        {
+            // The lock: a bool's two states are two more layouts of this page (PageCompiler.ToggleOf),
+            // and layout is one page at a time.
+            lock (CascadeGate)
+                _dataSlots = DataSlots.Compile(sample, _slotScratch, template, built.ById.Keys,
+                    (id, available) => PageCompiler.BoxFor(built, id, available),
+                    id => built.ById.TryGetValue(id, out var ve) ? TextCss(built, ve) : null,
+                    _shapes.Keys,
+                    id => PageCompiler.ToggleOf(built, id),
+                    m => ScriptedScreensHtmlPlugin.Log?.LogWarning($"html \"{ElementId}\": {m}"));
+            if (HtmlConfig.Diagnostics)
+                ScriptedScreensHtmlPlugin.Log?.LogInfo(
+                    $"html \"{ElementId}\": data compiled - {_dataSlots.Count} key(s) write slots directly; no layout, translate or emit per tick");
+        }
+        catch (Exception ex)
+        {
+            // Not a refusal - a defect. Said with its stack, and the page keeps what it showed rather
+            // than going back to a layout per tick.
+            _dataRefused = "the data compile threw";
+            ScriptedScreensHtmlPlugin.Log?.LogError($"html \"{ElementId}\": data compile failed, later payloads are dropped: {ex}");
+        }
+        _releasePending = true;
+    }
+
+    /// <summary>
+    /// An element's record with the text properties a browser inherits filled in from its ancestors,
+    /// as the emitter reads a label's (VectorEmitter.WithInherited): `tabular-nums` on the body
+    /// monospaces every label under it. A copy only when something is added.
+    /// </summary>
+    private static Dictionary<string, string> TextCss(HtmlRenderer.Result built, VisualElement ve)
+    {
+        var own = built.CssOf(ve);
+        Dictionary<string, string>? merged = null;
+        for (var p = ve.parent; p != null; p = p.parent)
+            foreach (var pair in built.CssOf(p))
+                if (VectorEmitter.Inherits(pair.Key) && !own.ContainsKey(pair.Key) && (merged == null || !merged.ContainsKey(pair.Key)))
+                    (merged ??= new Dictionary<string, string>(own, StringComparer.Ordinal))[pair.Key] = pair.Value;
+        return merged ?? own;
+    }
+
     private static SS.UiProp Prop(string key, SceneSlots.Value v) =>
         new() { Key = key, Value = v.IsNumber ? SS.UiValue.FromNumber(v.Number) : SS.UiValue.FromString(v.Text ?? string.Empty) };
 
@@ -1358,7 +1443,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// the renderer cannot tell, and neither can anything between here and it. `snap` for the same
     /// reason a patch uses it: a browser does not ease, so neither should this.
     /// </remarks>
-    private void SendCompiled(System.Collections.Generic.Dictionary<string, object> values)
+    private void SendCompiled(Dictionary<string, SceneSlots.Value> values)
     {
         if (State is not SS.BoardState state || values.Count == 0) return;
 
@@ -1370,48 +1455,53 @@ internal sealed class HtmlSurface : MonoBehaviour
         _easeTiming.Clear();
         foreach (var pair in values)
         {
-            var now = pair.Value is double d
-                ? new SceneSlots.Value((float)d)
-                : new SceneSlots.Value((string)pair.Value);
+            var now = pair.Value;
             if (_sentValues.TryGetValue(pair.Key, out var was) && was.Equals(now)) continue;
             _sentValues[pair.Key] = now;
-            var prop = new SS.UiProp
-            {
-                Key = pair.Key,
-                Value = now.IsNumber ? SS.UiValue.FromNumber(now.Number) : SS.UiValue.FromString(now.Text ?? string.Empty),
-            };
+            var prop = Prop(pair.Key, now);
             // A slot under a CSS transition goes in its own payload, without snap and with the
             // renderer's `ease` timing (vector 0.11.33): a property of the change, so it is stated on
             // every payload that moves the slot. Everything else snaps, as a browser does.
             if (_dataSlots != null && _dataSlots.TryEase(pair.Key, out var timing))
             {
                 _easedScratch.Add(prop);
-                _easeTiming.Add(new SS.UiProp
-                {
-                    Key = pair.Key,
-                    Value = SS.UiValue.FromArray(timing.Delay > 0f
+                // the same timing every time, so built once per slot
+                if (!_easeValues.TryGetValue(pair.Key, out var ease))
+                    _easeValues[pair.Key] = ease = SS.UiValue.FromArray(timing.Delay > 0f
                         ? new[] { SS.UiValue.FromNumber(timing.Dur), SS.UiValue.FromString(timing.Curve), SS.UiValue.FromNumber(timing.Delay) }
-                        : new[] { SS.UiValue.FromNumber(timing.Dur), SS.UiValue.FromString(timing.Curve) }),
-                });
+                        : new[] { SS.UiValue.FromNumber(timing.Dur), SS.UiValue.FromString(timing.Curve) });
+                _easeTiming.Add(new SS.UiProp { Key = pair.Key, Value = ease });
             }
             else _propScratch.Add(prop);
         }
         if (_easedScratch.Count > 0)
         {
-            var glide = _easedScratch.ToArray();
-            VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
-                new SS.UiValue { Type = SS.UiValueType.Map, Map = glide }, null, snap: false,
-                ease: new SS.UiValue { Type = SS.UiValueType.Map, Map = _easeTiming.ToArray() });
+            VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, SceneId,
+                new SS.UiValue { Type = SS.UiValueType.Map, Map = Exact(_easedScratch, _easedArrays) }, null, snap: false,
+                ease: new SS.UiValue { Type = SS.UiValueType.Map, Map = Exact(_easeTiming, _easeArrays) });
             _patchSends++;
-            _patchSlots += glide.Length;
+            _patchSlots += _easedScratch.Count;
         }
         if (_propScratch.Count == 0) return;
-        var props = _propScratch.ToArray();
 
-        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
-            new SS.UiValue { Type = SS.UiValueType.Map, Map = props }, null, snap: HtmlConfig.SnapData);
+        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, SceneId,
+            new SS.UiValue { Type = SS.UiValueType.Map, Map = Exact(_propScratch, _propArrays) }, null, snap: HtmlConfig.SnapData);
         _patchSends++;
-        _patchSlots += props.Length;
+        _patchSlots += _propScratch.Count;
+    }
+
+    // One array per length, per list, reused for every payload of that length: a map is an array
+    // and the renderer reads it to the end, and it copies what it keeps (SceneParser.ReadData), so
+    // the array is free again when the call returns. Separate per list because one call can carry
+    // two of the same length (the eased values and their timings).
+    private readonly Dictionary<int, SS.UiProp[]> _propArrays = new(), _easedArrays = new(), _easeArrays = new(), _dataArrays = new();
+    private readonly Dictionary<string, SS.UiValue> _easeValues = new(StringComparer.Ordinal);
+
+    private static SS.UiProp[] Exact(List<SS.UiProp> list, Dictionary<int, SS.UiProp[]> arrays)
+    {
+        if (!arrays.TryGetValue(list.Count, out var array)) arrays[list.Count] = array = new SS.UiProp[list.Count];
+        list.CopyTo(array);
+        return array;
     }
 
     /// <summary>Hands a finished translation to the vector mod. Game thread.</summary>
@@ -1477,7 +1567,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                 _lastPatchDump = OffThread.Seconds;
                 DumpScene(output.Scene);
             }
-            VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
+            VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, SceneId,
                 new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Patch }, null, snap: HtmlConfig.SnapData);
             _patchSends++;
             _patchSlots += r.Patch.Length;
@@ -1486,9 +1576,9 @@ internal sealed class HtmlSurface : MonoBehaviour
         }
         _structureSends++;
         // the values first, so the structure never shows an unbound slot
-        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
+        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, SceneId,
             new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Values ?? Array.Empty<SS.UiProp>() }, null, snap: HtmlConfig.SnapData);
-        VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId, r.Structure);
+        VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, SceneId, r.Structure);
         if (HtmlConfig.Diagnostics)
             ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: emitted {output.Nodes} vector nodes, {output.Scene.Length} chars");
         if (HtmlConfig.DumpScenes)
@@ -1500,10 +1590,14 @@ internal sealed class HtmlSurface : MonoBehaviour
             _sceneLive = true;
             if (_forwarded.Count > 0)
             {
+                // Not a name the structure has a slot for: its value just went with the structure, as
+                // the page drew it, and a raw string sent after would overwrite it - a label keyed
+                // by its element's id losing its tabular monospacing until the value next changed.
                 var all = new List<SS.UiProp>(_forwarded.Count);
                 foreach (var kv in _forwarded)
-                    all.Add(new SS.UiProp { Key = kv.Key, Value = kv.Value });
-                SendData(all);
+                    if (!_slotScratch.ContainsKey(kv.Key))
+                        all.Add(new SS.UiProp { Key = kv.Key, Value = kv.Value });
+                if (all.Count > 0) SendData(all);
             }
         }
     }
@@ -2431,11 +2525,16 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         if (data.Type != SS.UiValueType.Map || data.Map == null)
             return;
-        var pairs = new List<KeyValuePair<string, SS.UiValue>>(data.Map.Length);
+        // Reused: every tick of a compiled data page passes through here, and the payload is read
+        // and done with inside the call. Only the page thread, before the compile, keeps one, and
+        // ApplyPairs copies it for that.
+        _pairScratch.Clear();
         foreach (var e in data.Map)
-            pairs.Add(new KeyValuePair<string, SS.UiValue>(e.Key, e.Value));
-        ApplyPairs(pairs);
+            _pairScratch.Add(new KeyValuePair<string, SS.UiValue>(e.Key, e.Value));
+        ApplyPairs(_pairScratch);
     }
+
+    private readonly List<KeyValuePair<string, SS.UiValue>> _pairScratch = new();
 
     internal void ApplyData(Dictionary<string, SS.UiValue> merged)
     {
@@ -2448,28 +2547,31 @@ internal sealed class HtmlSurface : MonoBehaviour
         var d0 = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
-            // the vector scene's copy goes now (the vector mod is the game thread's); the page's on its thread
-            ForwardData(entries);
-            // A data page whose slot table has proved itself is compiled: the values go to the scene
-            // from here, on the game thread the renderer expects, and the page - released by then -
-            // is not touched. This ran on the page thread before, which would have handed the
-            // renderer a payload from a worker; it never showed because no page ever proved.
-            if (_script == null && _dataSlots is { Proven: true } fast)
+            // A data page whose slot table is compiled: the values go to the scene from here, on the
+            // game thread the renderer expects, and the page - released by then - is not touched.
+            // Each key is placed or dropped on its own (DataSlots says which, once); nothing here
+            // allocates, and only the names the scene reads as $name are forwarded as data.
+            if (_script == null && _dataSlots is { } fast)
             {
-                if (fast.Apply(entries) is { } direct) SendCompiled(direct);
-                // DataSlots.Refuse has already said which key, declaration and value, once.
-                else _dataDropped++;
+                // The table is set inside the page thread's frame that compiled it, and that frame is
+                // still writing _sentValues: wait it out. Free every tick after, the page being idle.
+                Hold();
+                if (fast.ReadsAny) ForwardData(entries, fast);
+                SendCompiled(fast.Apply(entries));
                 _dataFastTicks++;
                 return;
             }
-            // Refused at compile: the page keeps what it showed. It is not laid out again for a
-            // value it cannot place - that was a layout, translate and emit per tick, for ever.
+            // the vector scene's copy goes now (the vector mod is the game thread's); the page's on its thread
+            ForwardData(entries, null);
+            // The data compile threw: the page keeps what it showed. It is not laid out again for a
+            // value - that was a layout, translate and emit per tick, for ever.
             if (_script == null && _dataRefused != null) { _dataDropped++; return; }
             // A compiled page's values come from its own Lua, and its DOM has been let go. Binding
             // into a rebuilt copy would cost a rebuild per tick and draw nothing, since the copy is
             // not what the console shows.
             if (_compiled != null || _released) return;
-            Post(() => BindData(entries));
+            var kept = new List<KeyValuePair<string, SS.UiValue>>(entries);
+            Post(() => BindData(kept));
         }
         finally { _allUpdateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - d0; }
     }
@@ -2479,7 +2581,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         // Ids bind first, always: a key naming an element is the simplest contract a page
         // has. A script's data handler gets the same payload as an event afterwards; keys
         // it consumes that match no id are not warned about when a script is present.
-        BindById(entries, quiet: _script != null);
+        BindById(entries);
         if (_script != null)
         {
             _script.EmitData(ToJson(entries));
@@ -2497,18 +2599,23 @@ internal sealed class HtmlSurface : MonoBehaviour
     private readonly Dictionary<string, SS.UiValue> _forwarded = new(StringComparer.Ordinal);
     private bool _sceneLive;
 
-    private void ForwardData(List<KeyValuePair<string, SS.UiValue>> entries)
+    /// <param name="only">A compiled data page's table: then only the names its scene reads as $name go.</param>
+    private void ForwardData(List<KeyValuePair<string, SS.UiValue>> entries, DataSlots? only)
     {
-        var flat = new List<SS.UiProp>();
+        _flatScratch.Clear();
         foreach (var e in entries)
-            Flatten(flat, e.Key, e.Value);
-        if (flat.Count == 0)
+            Flatten(e.Key, e.Value, only);
+        if (_flatScratch.Count == 0)
             return;
-        foreach (var p in flat)
+        foreach (var p in _flatScratch)
             _forwarded[p.Key] = p.Value;
         if (_sceneLive)
-            SendData(flat);
+            SendData(_flatScratch);
     }
+
+    private readonly List<SS.UiProp> _flatScratch = new(32);
+    /// <summary>`co2` + `gasFill` as `co2_gasFill`, made once: a tick builds no name.</summary>
+    private readonly Dictionary<string, Dictionary<string, string>> _flatNames = new(StringComparer.Ordinal);
 
     /// <summary>The shorthand or either longhand a page is as likely to write (Tailwind emits the longhands).</summary>
     private bool HasTransition(VisualElement ve)
@@ -2521,7 +2628,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         if (string.IsNullOrEmpty(DataElementId) || State is not SS.BoardState state || !IsCurrent)
             return;
-        var map = new SS.UiValue { Type = SS.UiValueType.Map, Map = props.ToArray() };
+        var map = new SS.UiValue { Type = SS.UiValueType.Map, Map = Exact(props, _dataArrays) };
         // snap, because a browser snaps. A value assignment moves a box at once unless a CSS
         // transition says otherwise, and a transition is compiled INTO the scene as an expression by
         // the emitter - so the renderer easing on top of that is a second animation nobody asked for.
@@ -2531,82 +2638,56 @@ internal sealed class HtmlSurface : MonoBehaviour
         // fed twice a second never stops being animated and rebuilds its mesh at up to 60 Hz for
         // ever. Snapped values open no window: the scene goes static between payloads and a tick
         // costs exactly one rebuild.
-        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, DataElementId, "html:" + ElementId, map, null, snap: HtmlConfig.SnapData);
+        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, DataElementId, SceneId, map, null, snap: HtmlConfig.SnapData);
     }
 
-    private static void Flatten(List<SS.UiProp> into, string key, SS.UiValue v)
+    private void Flatten(string key, SS.UiValue v, DataSlots? only)
     {
         switch (v.Type)
         {
             case SS.UiValueType.Number:
             case SS.UiValueType.String:
             case SS.UiValueType.Array:
-                into.Add(new SS.UiProp { Key = key, Value = v });
+                if (only == null || only.Reads(key)) _flatScratch.Add(new SS.UiProp { Key = key, Value = v });
                 break;
             case SS.UiValueType.Bool:
-                into.Add(new SS.UiProp { Key = key, Value = SS.UiValue.FromNumber(v.Bool ? 1f : 0f) });
+                if (only == null || only.Reads(key)) _flatScratch.Add(new SS.UiProp { Key = key, Value = SS.UiValue.FromNumber(v.Bool ? 1f : 0f) });
                 break;
             case SS.UiValueType.Map when v.Map != null:
+                if (!_flatNames.TryGetValue(key, out var names)) _flatNames[key] = names = new Dictionary<string, string>(StringComparer.Ordinal);
                 foreach (var e in v.Map)
-                    Flatten(into, key + "_" + e.Key, e.Value);
+                {
+                    var field = e.Key ?? string.Empty;
+                    if (!names.TryGetValue(field, out var name)) names[field] = name = key + "_" + field;
+                    Flatten(name, e.Value, only);
+                }
                 break;
         }
     }
 
-    private void BindById(List<KeyValuePair<string, SS.UiValue>> entries, bool quiet = false)
+    private void BindById(List<KeyValuePair<string, SS.UiValue>> entries)
     {
-        // A page with no script compiles too: its first payload names the elements the data drives
-        // (one re-emit, so the scene carries their slots), the second builds the slot table and the
-        // emit after it proves the table against what was drawn (DataSlots.Prove). From then on
-        // ApplyPairs writes values straight to the scene and this is never reached again.
-        // The emitter names what a SCRIPT drives, and a page with no script told it nothing - so the
-        // scene carried no slot for any of these keys and the fast path could never engage. Naming
-        // them costs one extra emit, once, and the map is built on the tick after that, when the
-        // slots it is going to bind to actually exist.
-        if (_script == null && !_dataNamed && entries.Count > 0 && _built != null)
+        // A page with no script compiles from its first payload: every key goes into the DOM below,
+        // and the emit that draws them compiles the table against what it drew (CompileData) - no
+        // emit spent on anything else, since every element with an id was named for the emitter
+        // when the page was built. Payloads that arrive before that emit merge, later wins. From
+        // then on ApplyPairs writes values straight to the scene and this is never reached again.
+        if (_script == null && _dataSlots == null && _built != null)
         {
-            _dataNamed = true;
-            var named = 0;
             foreach (var entry in entries)
             {
-                if (string.IsNullOrEmpty(entry.Key) || !_byId.TryGetValue(entry.Key, out var ve) || !_built.Driven.Add(entry.Key)) continue;
-                named++;
-                _dataDriven.Add(entry.Key);
+                if (string.IsNullOrEmpty(entry.Key)) continue;
+                // Made on the first real key: the data element is created with `data = {}`, and a
+                // compile over nothing would release the page before its bools were ever seen.
+                (_dataPending ??= new Dictionary<string, SS.UiValue>(StringComparer.Ordinal))[entry.Key] = entry.Value;
+                if (!_byId.TryGetValue(entry.Key, out var ve)) continue;
+                // A bool hides its element through the element's opacity group, and an opacity
+                // writes it: named now, so the scene the compile checks carries `<id>_o`.
+                if (WritesGroup(entry.Value) && _built.NamedGroups.Add(entry.Key)) _dataDriven.Add(entry.Key);
                 // Its transition, if any, is the renderer's to run (DataSlots._eased). The emitter's
-                // tween would write an expression into the slot instead of the number the fast path
-                // writes, the proof would disagree, and the page would stay on the full path - for
-                // the sake of a glide the renderer does anyway.
-                if (HasTransition(ve)) { lock (Tweens.Shared) Tweens.Override[ve] = (0f, Tweens.Easing.Default); _muted.Add(ve); }
-            }
-            if (named > 0)
-            {
-                _dirty = true; _dOther++;
-                if (HtmlConfig.Diagnostics)
-                    ScriptedScreensHtmlPlugin.Log?.LogInfo(
-                        $"html \"{ElementId}\": named {named} element(s) the data drives; re-emitting so the scene carries their slots");
-            }
-        }
-        else if (_script == null && _dataSlots == null && entries.Count > 0 && _built != null)
-        {
-            _dataSlots = DataSlots.Build(
-                entries,
-                id => PageCompiler.BoxFor(_built, id, _slotScratch.Keys),
-                id => _byId.TryGetValue(id, out var ve) ? _built.CssOf(ve) : null,
-                id => _shapes.ContainsKey(id),
-                _slotScratch.Keys,
-                id => PageCompiler.ToggleOf(_built, id));
-            if (_dataSlots.Problem == null) _dataToProve = new List<KeyValuePair<string, SS.UiValue>>(entries);
-            else
-            {
-                // The contract: a page is compiled once and not touched again until its source
-                // changes. A key the compiler cannot place is therefore a compile refusal, said once
-                // where the author looks, and the page keeps what it showed - not a slower path that
-                // lays it out on every tick for ever, which is what this was.
-                _dataRefused = _dataSlots.Problem;
-                _releasePending = true;
-                ScriptedScreensHtmlPlugin.Log?.LogWarning(
-                    $"html \"{ElementId}\": data compile refused - {_dataSlots.Problem}. The page keeps its first values; later payloads are dropped.");
-                return;
+                // tween would write an expression into the slot instead of the number the table
+                // writes, and the proof would disagree - for the sake of a glide the renderer does anyway.
+                if (HasTransition(ve) && !_muted.Contains(ve)) { lock (Tweens.Shared) Tweens.Override[ve] = (0f, Tweens.Easing.Default); _muted.Add(ve); }
             }
         }
 
@@ -2646,13 +2727,10 @@ internal sealed class HtmlSurface : MonoBehaviour
                 continue;
             }
 
+            // A key naming no element: a page with a script may consume it in its handler, and a
+            // page without one is told by its data compile, once, unless the scene reads it as $name.
             if (string.IsNullOrEmpty(entry.Key) || !_byId.TryGetValue(entry.Key, out var ve))
-            {
-                // a key the scene reads as $name (an svg expression) is a legitimate target too
-                if (!string.IsNullOrEmpty(entry.Key) && !quiet && _lastScene.Length > 0 && _lastScene.IndexOf("$" + entry.Key, StringComparison.Ordinal) < 0)  // before the first scene nothing is known yet
-                    ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: data key \"{entry.Key}\" matches no element id and no $ expression");
                 continue;
-            }
 
             var v = entry.Value;
             switch (v.Type)
@@ -2671,10 +2749,11 @@ internal sealed class HtmlSurface : MonoBehaviour
                 }
                 case SS.UiValueType.Bool:
                     // A data page's bool is a toggle (both states captured by ToggleOf, written by
-                    // DataSlots.Apply and Overlay) or a compile refusal. Setting display here would
-                    // take the element's lines out of the scene the proof and both states need -
-                    // from the first payload on, since ToggleOf restores whatever display it found.
-                    if (_script == null) break;
+                    // DataSlots.Apply and Overlay) or a refusal of that key. The element is SHOWN
+                    // whatever the value, so the scene the compile checks carries its lines: an
+                    // alert hidden by its CSS until data shows it had no slots there, and its bool
+                    // was refused although a browser draws it. The value is put back by the table.
+                    if (_script == null) { ve.style.display = DisplayStyle.Flex; break; }
                     ve.style.display = v.Bool ? DisplayStyle.Flex : DisplayStyle.None;
                     break;
                 case SS.UiValueType.Map when v.Map != null:
@@ -2692,6 +2771,15 @@ internal sealed class HtmlSurface : MonoBehaviour
         // ponytail: a fixed awake window. Transitions longer than ~1 s freeze until the
         // next data tick; derive it from the page's longest transition if that bites.
         Wake(DataAwakeFrames);
+    }
+
+    /// <summary>Whether a data value writes its element's opacity group: a bool (hide/show), or an opacity or visibility.</summary>
+    private static bool WritesGroup(SS.UiValue v)
+    {
+        if (v.Type == SS.UiValueType.Bool) return true;
+        if (v.Type != SS.UiValueType.Map || v.Map == null) return false;
+        foreach (var d in v.Map) if (d.Key is "opacity" or "visibility") return true;
+        return false;
     }
 
     private void OnDestroy()

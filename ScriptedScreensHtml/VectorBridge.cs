@@ -40,6 +40,12 @@ internal static class VectorBridge
                                       SS.BoardState state, string surface, SS.UiElement element);
     private static PostfixCall? _call;
     private static readonly List<SS.UiProp> Scratch = new(8);
+    // A data payload goes out every tick a value moves, so its element and props array are reused
+    // rather than allocated per send. Safe because the vector postfix reads Props (ReadData,
+    // PatchNodes copy what they keep) and holds neither the element nor the array afterwards, and
+    // because this is the game thread only. One array per length: Props is an array, not a count.
+    private static readonly SS.UiElement DataElement = new() { Type = "vector" };
+    private static readonly SS.UiProp[]?[] DataProps = new SS.UiProp[]?[8];
 
     public static bool Available
     {
@@ -165,7 +171,11 @@ internal static class VectorBridge
         if (ease != null) Scratch.Add(new SS.UiProp { Key = "ease", Value = ease.Value });
         if (data != null) Scratch.Add(new SS.UiProp { Key = "data", Value = data.Value });
         if (nodes != null) Scratch.Add(new SS.UiProp { Key = "nodes", Value = nodes.Value });
-        Send(board, cartridge, visor, state, surface, new SS.UiElement { Id = elementId, Type = "vector", Props = Scratch.ToArray() });
+        var props = DataProps[Scratch.Count] ??= new SS.UiProp[Scratch.Count];
+        Scratch.CopyTo(props);
+        DataElement.Id = elementId;
+        DataElement.Props = props;
+        Send(board, cartridge, visor, state, surface, DataElement);
     }
 
     private static void Send(object? board, object? cartridge, object? visor, SS.BoardState state, string surface, SS.UiElement element)
