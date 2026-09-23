@@ -12,8 +12,6 @@ decompiled/
 # The vector mod has its own repository: github.com/Gruffuss/scripted-screens-vector.
 # It sits beside this one on disk because the HTML mod drives it at runtime.
 ScriptedScreensVector/
-ScriptedScreensVector.Tests/
-vector-format-spec.md
 
 # The Fonts mod has its own repository too: github.com/Gruffuss/scripted-screens-fonts.
 # It sits beside this one on disk because the HTML mod draws in its typefaces at runtime.
