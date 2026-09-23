@@ -218,6 +218,8 @@ internal sealed class JsToLua
     internal string Translate(Node e) => Expr(e);
     /// <summary>For a hook: one line of output at the current depth.</summary>
     internal void Emit(string line) => Line(line);
+    /// <summary>For a hook: an expression evaluated for its effect, as a statement of its own.</summary>
+    internal void Effect(Expression e) => ExprStatement(e);
     /// <summary>For a hook: something it cannot translate, reported with its line.</summary>
     internal void Refuse(Node n, string what) => Unsupported(n, what);
 

@@ -244,9 +244,12 @@ internal static class Probe4
     /// A plain chunk driven by steps: a tick of <c>Dt</c> seconds, or a click on the node <c>Click</c>
     /// delivered to the scene element's on_click as the vector mod delivers it. <paramref name="data"/>
     /// is what the data element holds at the end: its opening values with every patch merged in, as
-    /// the vector mod keeps them for a `keep = 1` element.
+    /// the vector mod keeps them for a `keep = 1` element. <paramref name="persist"/> is the chip's
+    /// ic.persist store (stationeers://lua/api/persist: string keys and values, 128/8192-character
+    /// limits, set returns true): what it holds before the chunk loads, and what it holds afterwards.
     /// </summary>
-    internal static List<string> DrivePlain(string lua, IEnumerable<(double Dt, string? Click)> steps, out Dictionary<string, Lua.LuaValue> data)
+    internal static List<string> DrivePlain(string lua, IEnumerable<(double Dt, string? Click)> steps, out Dictionary<string, Lua.LuaValue> data,
+                                            Dictionary<string, string>? persist = null)
     {
         data = new Dictionary<string, Lua.LuaValue>(StringComparer.Ordinal);
         var state = Lua.LuaState.Create();
@@ -289,8 +292,22 @@ ss = { ui = { surface = function(name) put('surface ' .. name) return surface en
 AUTHOR_TICKS = 0
 function tick(dt) AUTHOR_TICKS = AUTHOR_TICKS + 1 end
 AUTHOR = tick
+PERSIST = {}
+ic = { persist = {
+  get = function(k) return PERSIST[k] end,
+  set = function(k, v)
+    if type(k) ~= 'string' or type(v) ~= 'string' or #k > 128 or #v > 8192 then return false end
+    PERSIST[k] = v
+    return true
+  end,
+  has = function(k) return PERSIST[k] ~= nil end,
+  delete = function(k) PERSIST[k] = nil return true end,
+  clear = function() for k in pairs(PERSIST) do PERSIST[k] = nil end return true end,
+} }
 ", "stub");
         if (stub != null) return new List<string> { "FAILED stub: " + stub };
+        if (persist != null && state.Environment["PERSIST"].TryRead<Lua.LuaTable>(out var seed))
+            foreach (var pair in persist) seed[pair.Key] = pair.Value;
         var env = new Lua.LuaTable();
         env.Metatable = new Lua.LuaTable();
         env.Metatable["__index"] = state.Environment;
@@ -312,6 +329,16 @@ AUTHOR = tick
         if (state.Environment["LOG"].TryRead<Lua.LuaTable>(out var lines))
             for (var i = 1; lines[(double)i].TryRead<string>(out var line); i++) log.Add(line);
         if (run != null) log.Add("FAILED ticks: " + run);
+        if (persist != null && state.Environment["PERSIST"].TryRead<Lua.LuaTable>(out var kept))
+        {
+            persist.Clear();
+            var at = Lua.LuaValue.Nil;
+            while (kept.TryGetNext(at, out var pair))
+            {
+                at = pair.Key;
+                if (at.TryRead<string>(out var k) && pair.Value.TryRead<string>(out var v)) persist[k] = v;
+            }
+        }
         if (state.Environment["DATA"].TryRead<Lua.LuaTable>(out var held))
         {
             var key = Lua.LuaValue.Nil;

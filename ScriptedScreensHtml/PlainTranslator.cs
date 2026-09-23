@@ -43,14 +43,47 @@ internal static class PlainTranslator
     private static readonly Dictionary<string, string> OtherGlobals = new(StringComparer.Ordinal)
     {
         ["window"] = "window", ["requestAnimationFrame"] = "requestAnimationFrame",
-        ["cancelAnimationFrame"] = "cancelAnimationFrame", ["localStorage"] = "localStorage",
-        ["performance"] = "performance.now()", ["Date"] = "Date", ["location"] = "location",
+        ["cancelAnimationFrame"] = "cancelAnimationFrame",
+        ["performance"] = "performance.now()", ["Date"] = "Date",
         ["getComputedStyle"] = "getComputedStyle", ["globalThis"] = "globalThis",
         ["queueMicrotask"] = "queueMicrotask", ["Promise"] = "Promise", ["addEventListener"] = "a window event listener",
         ["removeEventListener"] = "a window event listener",
     };
 
     private static readonly HashSet<string> TimerNames = new(StringComparer.Ordinal) { "setTimeout", "setInterval", "clearTimeout", "clearInterval" };
+
+    /// <summary>The browser's globals translated here, bare or as members of <c>window</c>.</summary>
+    private static readonly HashSet<string> WindowNames = new(StringComparer.Ordinal)
+    {
+        "location", "localStorage", "sessionStorage", "innerWidth", "innerHeight", "devicePixelRatio", "console",
+    };
+
+    /// <summary>
+    /// What a page loaded from no URL sees in <c>location</c> (about:blank): a console holds one page, compiled
+    /// onto it, and was never navigated to.
+    /// </summary>
+    private static readonly Dictionary<string, string> Blank = new(StringComparer.Ordinal)
+    {
+        ["href"] = "about:blank", ["protocol"] = "about:", ["host"] = "", ["hostname"] = "", ["port"] = "",
+        ["pathname"] = "blank", ["search"] = "", ["hash"] = "", ["origin"] = "null",
+    };
+
+    /// <summary>
+    /// Attributes the renderer draws from itself rather than through CSS, or keeps for its own use: a script
+    /// changing one would need the page built again, which a laid-out state is not.
+    /// </summary>
+    private static readonly HashSet<string> Drawn = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "width", "height", "href", "type", "open", "x", "y", "viewbox", "value", "src", "srcset", "media", "d", "usemap",
+        "stop-opacity", "stop-color", "start", "span", "size", "rows", "cols", "rel", "preserveaspectratio", "popover",
+        "points", "offset", "name", "for", "font-weight", "font-style", "fill", "face", "content", "colspan", "rowspan",
+        "color", "rx", "ry", "r", "cx", "cy", "fx", "fy", "stroke", "stroke-width", "stroke-opacity", "stroke-dasharray",
+        "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "fill-opacity", "n", "marker",
+        "text-anchor", "vector-effect", "stops", "spreadmethod", "shape-rendering", "refx", "refy", "x1", "x2", "y1",
+        "y2", "transform", "dir", "max", "min", "low", "high", "optimum", "checked", "selected", "disabled",
+        "data-click", "data-control", "data-pseudo", "data-marker", "data-marker-image", "data-content", "data-listed",
+        "data-popover-open", "data-empty-cells", "data-focus", "data-modal",
+    };
 
     /// <summary>
     /// The page compiled to its scene and plain Lua, or null with the reasons in <paramref name="refused"/>
@@ -168,10 +201,34 @@ internal static class PlainTranslator
         public bool Listens;
         /// <summary>A label with no text in the page, laid out holding a line so there is a text to write into.</summary>
         public bool Empty;
+        /// <summary>setAttribute, removeAttribute, toggleAttribute, hidden and dataset writes, each by its attribute's name.</summary>
+        public readonly List<AttrOp> AttrOps = new();
+        /// <summary>The script reads attributes by a name only known at run time, so every one is kept.</summary>
+        public bool AttrsByName;
+        /// <summary>What the script reads back of what it wrote: textContent, className, style.&lt;property&gt;.</summary>
+        public bool TextRead, ClassRead;
+        public readonly HashSet<string> StyleReads = new(StringComparer.Ordinal);
 
         public TextPlan? Text;
         public readonly Dictionary<string, StylePlan> StylePlans = new(StringComparer.Ordinal);
         public ClassPlan? Class;
+        /// <summary>The Lua table holding this element's attributes, when the script changes or looks them up by a run-time name.</summary>
+        public string? AttrTable;
+
+        /// <summary>Whether the script changes what this element draws, so the scene has to name it.</summary>
+        public bool Written => Texts.Count > 0 || Styles.Count > 0 || ClassOps.Count > 0 || ClassNames.Count > 0 || Listens || AttrOps.Any(o => o.Facet);
+        public bool Facets => ClassOps.Count > 0 || ClassNames.Count > 0 || AttrOps.Any(o => o.Facet);
+    }
+
+    /// <summary>One attribute write: set (with its value), remove, toggle (with its force), or hidden (set by truthiness).</summary>
+    private sealed class AttrOp
+    {
+        public Expression At = null!;
+        public string Name = string.Empty;
+        public string Verb = string.Empty;
+        public Expression? Value;
+        /// <summary>Whether CSS selects on the attribute (or it is hidden): a laid-out state rather than a script value.</summary>
+        public bool Facet;
     }
 
     /// <summary>A piece of a written text: a literal, or a value with the printf format its placeholder takes.</summary>
@@ -190,6 +247,8 @@ internal static class PlainTranslator
         public string Template = string.Empty;
         /// <summary>Per write, what it sets: a slot and a literal, or a slot and the value of a hole.</summary>
         public readonly Dictionary<Expression, List<(string Slot, string? Literal, Piece? Hole)>> Writes = new();
+        /// <summary>The text as textContent reads it back: literals, and slots printed as JavaScript prints them.</summary>
+        public readonly List<(string? Literal, string? Slot, Piece? Hole)> Read = new();
     }
 
     private sealed class StylePlan
@@ -200,6 +259,13 @@ internal static class PlainTranslator
         /// <summary>A value from a fixed set: what each draws, every slot any of them moves.</summary>
         public Dictionary<object, Dictionary<string, SceneSlots.Value>>? States;
         public readonly Dictionary<Expression, Expression> Holes = new();
+        /// <summary>When the script reads the property back: the value last written, and how the browser prints it.</summary>
+        public string? ReadVar;
+        public string Unit = string.Empty;
+        public string? ReadInitial;
+        public Dictionary<object, string>? Printed;
+        /// <summary>A value (written, or the page's own) the browser gives back in a form not translated.</summary>
+        public bool Unprintable;
     }
 
     private sealed class ClassPlan
@@ -210,6 +276,13 @@ internal static class PlainTranslator
         public readonly Dictionary<int, Dictionary<string, SceneSlots.Value>> States = new();
         /// <summary>Each class string className can be given, as which of <see cref="Names"/> it turns on.</summary>
         public readonly Dictionary<string, HashSet<string>> Sets = new(StringComparer.Ordinal);
+        /// <summary>Classes the element keeps whatever the script does, for classList.contains.</summary>
+        public readonly List<string> Fixed = new();
+        /// <summary>Attributes CSS selects on, each with the values it can hold (the first, null, is absent).</summary>
+        public readonly List<(string Name, List<string?> Options, Dictionary<object, int> Index)> Attrs = new();
+        /// <summary>The class attribute as the page wrote it, for a className read before any change; null with no read.</summary>
+        public string? Raw;
+        public List<string>? Order;
     }
 
     private sealed class Page
@@ -228,8 +301,21 @@ internal static class PlainTranslator
         private readonly HashSet<Node> _elementDeclarations = new();
         /// <summary>Expressions evaluated for their effect that are DOM operations, and the element they act on.</summary>
         private readonly Dictionary<Expression, Target> _ops = new();
-        private readonly HashSet<Expression> _dropped = new();
+        /// <summary>Expressions in <see cref="_lua"/> that are writes: their value is undefined, so they stand as statements anywhere.</summary>
+        private readonly HashSet<Node> _effects = new();
+        /// <summary>Reads that yield a boolean, and reads that yield null or undefined as Lua's nil, with the text JavaScript prints for it.</summary>
+        private readonly HashSet<Node> _bool = new();
+        private readonly Dictionary<Node, string> _null = new();
+        /// <summary>A console call's arguments that do something, evaluated where the call stood.</summary>
+        private readonly Dictionary<Node, List<Expression>> _consoleKept = new();
         private bool _timers;
+        /// <summary>Expressions the Lua writes itself: a browser global read, an element read, an attribute or storage call.</summary>
+        private readonly Dictionary<Node, Func<JsToLua, string>> _lua = new();
+        /// <summary>Nodes of what a dropped console call would have printed: never evaluated, so never checked.</summary>
+        private readonly HashSet<Node> _ignored = new();
+        private bool _void, _hashWrites, _reload, _localStorage, _sessionStorage, _attrs;
+        /// <summary>The page as its source wrote it, by id: what a read of anything the script never wrote answers.</summary>
+        private Dictionary<string, HtmlNode>? _source;
 
         public readonly List<string> Warnings = new();
         /// <summary>Every slot the program writes, in the order first met.</summary>
@@ -348,6 +434,7 @@ internal static class PlainTranslator
         /// <summary>One node of the script: an element reference, a timer, or a browser global, each checked where it stands.</summary>
         private void Visit(Node n)
         {
+            if (_ignored.Contains(n)) return;
             switch (n)
             {
                 case CallExpression c when c.Callee is MemberExpression { Object: Identifier { Name: "document" }, Property: Identifier { Name: "getElementById" } }:
@@ -366,11 +453,13 @@ internal static class PlainTranslator
                                     + ", which is outside the translated DOM features");
                     return;
 
-                case Identifier { Name: "console" } con when !Declared("console") && Reference(con):
-                    // `console.log(...)` says something to a developer tool the chip does not have: dropped.
-                    if (_parent[con] is MemberExpression cm && cm.Object == con && _parent[cm] is CallExpression lc && lc.Callee == cm && Effect(lc))
-                        _dropped.Add(lc);
-                    else Refuse(con, "console used as a value");
+                case Identifier g when WindowNames.Contains(g.Name) && !Declared(g.Name) && Reference(g):
+                    Global(g, g.Name);
+                    return;
+
+                case Identifier { Name: "window" } w when !Declared("window") && Reference(w)
+                        && _parent[w] is MemberExpression { Computed: false, Property: Identifier wp } wm && wm.Object == w && WindowNames.Contains(wp.Name):
+                    Global(wm, wp.Name);
                     return;
 
                 case Identifier g when TimerNames.Contains(g.Name) && !Declared(g.Name) && Reference(g):
@@ -422,6 +511,12 @@ internal static class PlainTranslator
                         if (t.Ve is not Label) Refuse(m, $"textContent of \"{t.Name}\", which holds elements rather than text, replaces them");
                         else { t.Texts.Add((text.At, text.Value)); _ops[text.At] = t; }
                     }
+                    else if (prop.Name == "textContent" && !WrittenTo(m))
+                    {
+                        // what the program last wrote, or the page's own text: never a DOM
+                        t.TextRead = true;
+                        _lua[m] = lua => TextRead(t, m, lua);
+                    }
                     else Refuse(m, $"reading or computing with .{prop.Name} of \"{t.Name}\" (element reads are not translated yet)");
                     return;
 
@@ -434,7 +529,15 @@ internal static class PlainTranslator
                         list.Add((style.At, style.Value));
                         _ops[style.At] = t;
                     }
-                    else Refuse(m, $"this use of .style on \"{t.Name}\" (only assigning style.<property> is translated)");
+                    else if (gp is MemberExpression r && r.Object == m && (r.Computed ? r.Property is StringLiteral : r.Property is Identifier)
+                             && !WrittenTo(r) && !(_parent[r] is CallExpression rc && rc.Callee == r)
+                             && DomSlots.Dashed(r.Property is Identifier ri ? ri.Name : ((StringLiteral)r.Property).Value) is var read
+                             && read is not ("css-text" or "length" or "parent-rule"))
+                    {
+                        t.StyleReads.Add(read);
+                        _lua[r] = lua => StyleRead(t, read, r, lua);
+                    }
+                    else Refuse(m, $"this use of .style on \"{t.Name}\" (assigning and reading style.<property> are translated)");
                     return;
 
                 case "className":
@@ -443,7 +546,33 @@ internal static class PlainTranslator
                         if (Finite(cls.Value) is not { } values || values.Any(v => v is not string)) Refuse(cls.Value, $"className of \"{t.Name}\" set to a value only known at run time");
                         else { t.ClassNames.Add((cls.At, values)); _ops[cls.At] = t; }
                     }
-                    else Refuse(m, $"reading .className of \"{t.Name}\" (element reads are not translated yet)");
+                    else if (!WrittenTo(m))
+                    {
+                        t.ClassRead = true;
+                        _lua[m] = _ => ClassNameRead(t);
+                    }
+                    else Refuse(m, $"this use of .className of \"{t.Name}\"");
+                    return;
+
+                case "getAttribute" or "hasAttribute" or "setAttribute" or "removeAttribute" or "toggleAttribute":
+                    if (gp is CallExpression ac && ac.Callee == m && !ac.Arguments.Any(a => a is SpreadElement)) Attribute(t, prop.Name, ac);
+                    else Refuse(m, $".{prop.Name} of \"{t.Name}\" used as a value");
+                    return;
+
+                case "hidden":
+                    if (Assigned(m) is { } hid) AttrWrite(t, hid.At, "hidden", "hidden", hid.Value);
+                    else if (!WrittenTo(m)) { _bool.Add(m); _lua[m] = lua => AttrRead(t, true, "hidden", null, lua); }
+                    else Refuse(m, $"this use of .hidden of \"{t.Name}\"");
+                    return;
+
+                case "dataset":
+                    Dataset(t, m);
+                    return;
+
+                case "classList" when gp is MemberExpression { Computed: false, Property: Identifier { Name: "contains" } } has && has.Object == m
+                                       && _parent[has] is CallExpression hc && hc.Callee == has && hc.Arguments.Count == 1 && hc.Arguments[0] is Expression key:
+                    _bool.Add(hc);
+                    _lua[hc] = lua => Contains(t, key, lua);
                     return;
 
                 case "classList":
@@ -521,6 +650,297 @@ internal static class PlainTranslator
                 }
             }
             return false;
+        }
+
+        /// <summary>Whether an expression is written to rather than read: assigned, updated or deleted.</summary>
+        private bool WrittenTo(Expression e)
+            => _parent.TryGetValue(e, out var p)
+               && (p is AssignmentExpression a && a.Left == e || p is UpdateExpression || p is NonUpdateUnaryExpression { Operator: Operator.Delete });
+
+        /// <summary>Whether evaluating an expression does nothing but yield its value: no call, assignment, update, new or delete in it.</summary>
+        private static bool Pure(Node e) => e switch
+        {
+            Acornima.Ast.Literal or Identifier or ThisExpression or FunctionExpression or ArrowFunctionExpression => true,
+            TemplateLiteral t => t.Expressions.All(Pure),
+            MemberExpression m => Pure(m.Object) && (!m.Computed || Pure(m.Property)),
+            NonLogicalBinaryExpression b => Pure(b.Left) && Pure(b.Right),
+            LogicalExpression l => Pure(l.Left) && Pure(l.Right),
+            NonUpdateUnaryExpression u => u.Operator != Operator.Delete && Pure(u.Argument),
+            ConditionalExpression c => Pure(c.Test) && Pure(c.Consequent) && Pure(c.Alternate),
+            ArrayExpression a => a.Elements.All(x => x == null || x is not SpreadElement && Pure(x)),
+            ObjectExpression o => o.Properties.All(p => p is Property { Computed: false, Value: var v } && Pure(v)),
+            CallExpression { Callee: MemberExpression { Object: Identifier { Name: "document" }, Property: Identifier { Name: "getElementById" } } } c
+                => c.Arguments.All(Pure),
+            _ => false,
+        };
+
+        // ---- the browser's globals: window, location, storage, console -------------------------------
+
+        private const string Elsewhere = "a console holds only the page compiled onto it, and has no network to fetch another";
+
+        /// <summary>A global of the browser, bare or as a member of <c>window</c>, checked where it stands.</summary>
+        private void Global(Expression g, string name)
+        {
+            var p = _parent[g];
+            if (p is NonUpdateUnaryExpression { Operator: Operator.TypeOf } && name is not ("innerWidth" or "innerHeight" or "devicePixelRatio"))
+            {
+                _lua[p] = _ => "\"object\"";
+                return;
+            }
+            switch (name)
+            {
+                case "innerWidth" or "innerHeight" or "devicePixelRatio":
+                    if (WrittenTo(g)) { Refuse(g, name + " written by the script (not translated yet)"); return; }
+                    // The console is the window, and its size is the one the page is compiled for; a CSS
+                    // pixel is one unit of the console's canvas.
+                    _lua[g] = _ => name switch
+                    {
+                        "innerWidth" => JsToLuaNumber(Math.Floor(_size.x)),
+                        "innerHeight" => JsToLuaNumber(Math.Floor(_size.y)),
+                        _ => "1",
+                    };
+                    return;
+                case "console": Console(g); return;
+                case "location": Location(g); return;
+                default: Storage(g, name); return;
+            }
+        }
+
+        /// <summary>
+        /// A console call. A chip has no developer console, so the call goes - and what its arguments do (a
+        /// call, an assignment) stays, evaluated as the browser evaluates them.
+        /// </summary>
+        private void Console(Expression con)
+        {
+            if (_parent[con] is MemberExpression { Computed: false, Property: Identifier } m && m.Object == con && !WrittenTo(m))
+            {
+                if (_parent[m] is CallExpression c && c.Callee == m)
+                {
+                    var kept = new List<Expression>();
+                    foreach (var a in c.Arguments)
+                    {
+                        var arg = a is SpreadElement spread ? spread.Argument : (Expression)a;
+                        if (!Pure(arg)) kept.Add(arg);
+                        else foreach (var x in Markup.Everything(a)) _ignored.Add(x);
+                    }
+                    _effects.Add(c);
+                    _consoleKept[c] = kept;
+                    _lua[c] = lua =>
+                    {
+                        if (kept.Count == 0) return "nil";
+                        _void = true;
+                        return "v_void(" + string.Join(", ", kept.Select(lua.Translate)) + ")";
+                    };
+                }
+                // passed along as a function (`list.forEach(console.log)`): one that does nothing
+                else _lua[m] = _ => { _void = true; return "v_void"; };
+                return;
+            }
+            Refuse(con, "console used as a value (its methods are removed at compile)");
+        }
+
+        private void Location(Expression loc)
+        {
+            var p = _parent[loc];
+            if (p is AssignmentExpression { Operator: Operator.Assignment } set && set.Left == loc)
+            {
+                Navigate(set, set.Right, "location = …");
+                return;
+            }
+            if (p is MemberExpression { Computed: false, Property: Identifier prop } m && m.Object == loc)
+            {
+                var gp = _parent[m];
+                if (Blank.ContainsKey(prop.Name))
+                {
+                    if (gp is AssignmentExpression { Operator: Operator.Assignment } a && a.Left == m)
+                    {
+                        if (prop.Name == "hash") HashWrite(a, a.Right);
+                        else if (prop.Name == "href") Navigate(a, a.Right, "location.href = …");
+                        else Refuse(a, $"location.{prop.Name} = …, which loads another document: {Elsewhere}");
+                        return;
+                    }
+                    if (!WrittenTo(m))
+                    {
+                        var what = prop.Name;
+                        _lua[m] = _ => LocationRead(what);
+                        return;
+                    }
+                }
+                else if (gp is CallExpression c && c.Callee == m)
+                    switch (prop.Name)
+                    {
+                        case "toString":
+                            _lua[c] = _ => LocationRead("href");
+                            return;
+                        case "assign" or "replace" when c.Arguments.Count >= 1 && c.Arguments[0] is Expression url:
+                            Navigate(c, url, $"location.{prop.Name}()");
+                            return;
+                        case "reload":
+                            // the page starts again from its source, as a browser loads it again (the
+                            // storage and the URL stay); after the script that asked has finished
+                            _reload = true;
+                            _effects.Add(c);
+                            _lua[c] = _ => "v_askreload()";
+                            return;
+                    }
+                else if (prop.Name == "ancestorOrigins" && gp is MemberExpression { Computed: false, Property: Identifier ap } am && am.Object == m)
+                {
+                    // an empty list: a console's page is embedded in nothing
+                    if (ap.Name == "length" && !WrittenTo(am)) { _lua[am] = _ => "0"; return; }
+                    if (ap.Name is "item" or "contains" && _parent[am] is CallExpression ac && ac.Callee == am && ac.Arguments.All(Pure))
+                    {
+                        if (ap.Name == "item") _null[ac] = "null"; else _bool.Add(ac);
+                        _lua[ac] = _ => ap.Name == "item" ? "nil" : "false";
+                        return;
+                    }
+                }
+            }
+            Refuse(loc, "location used this way (its properties, assign, replace, reload and toString are translated)");
+        }
+
+        /// <summary>
+        /// A navigation. A fragment of this page (<c>#settings</c>) is the one place a console page can go: it
+        /// stays, and only its hash changes. Anywhere else is another document.
+        /// </summary>
+        private void Navigate(Expression at, Expression url, string what)
+        {
+            if (Fragment(url)) { HashWrite(at, url); return; }
+            Refuse(at, $"{what} to {(Finite(url) != null ? "another document" : "a URL only known at run time, which may be another document")}: {Elsewhere}");
+        }
+
+        /// <summary>Whether a URL is a fragment of this page in every run: it starts with `#`.</summary>
+        private bool Fragment(Expression url) => url switch
+        {
+            StringLiteral s => s.Value.StartsWith("#", StringComparison.Ordinal),
+            TemplateLiteral t => (t.Quasis[0].Value.Cooked ?? string.Empty).StartsWith("#", StringComparison.Ordinal),
+            NonLogicalBinaryExpression { Operator: Operator.Addition } b => Fragment(b.Left),
+            ConditionalExpression c => Fragment(c.Consequent) && Fragment(c.Alternate),
+            _ => Finite(url) is { Count: > 0 } all && all.All(v => v is string s && s.StartsWith("#", StringComparison.Ordinal)),
+        };
+
+        private void HashWrite(Expression at, Expression value)
+        {
+            _hashWrites = true;
+            _effects.Add(at);
+            _lua[at] = lua => "v_sethash(" + lua.Translate(value) + ")";
+        }
+
+        /// <summary>A location property as the program holds it: the hash it last set, or the constant about:blank has.</summary>
+        private string LocationRead(string what)
+            => _hashWrites && what is "hash" or "href" ? (what == "hash" ? "V_HASH" : "V_HREF") : Q(Blank[what]);
+
+        /// <summary>
+        /// localStorage (the chip's own store, which outlives a game restart as a browser's outlives a reload)
+        /// and sessionStorage (the program's memory, which a location.reload keeps).
+        /// </summary>
+        private void Storage(Expression s, string name)
+        {
+            var table = name == "localStorage" ? "V_LS" : "V_SS";
+            if (name == "localStorage") _localStorage = true; else _sessionStorage = true;
+            if (_parent[s] is MemberExpression { Computed: false, Property: Identifier prop } m && m.Object == s)
+            {
+                if (prop.Name == "length" && !WrittenTo(m)) { _lua[m] = _ => table + ".n"; return; }
+                if (_parent[m] is CallExpression c && c.Callee == m && !c.Arguments.Any(a => a is SpreadElement))
+                {
+                    var args = c.Arguments.Cast<Expression>().ToList();
+                    Func<JsToLua, string>? f = (prop.Name, args.Count) switch
+                    {
+                        ("getItem", >= 1) => lua => table + ".vals[" + Str(lua, args[0]) + "]",
+                        ("setItem", >= 2) => lua => "v_sset(" + table + ", " + Str(lua, args[0]) + ", " + Str(lua, args[1]) + ")",
+                        ("removeItem", >= 1) => lua => "v_srm(" + table + ", " + Str(lua, args[0]) + ")",
+                        ("clear", _) => _ => "v_sclear(" + table + ")",
+                        ("key", >= 1) => lua => "v_skeyat(" + table + ", " + lua.Translate(args[0]) + ")",
+                        _ => null,
+                    };
+                    if (f != null)
+                    {
+                        if (prop.Name is "setItem" or "removeItem" or "clear") _effects.Add(c);
+                        if (prop.Name is "getItem" or "key") _null[c] = "null";
+                        _lua[c] = f;
+                        return;
+                    }
+                }
+            }
+            Refuse(s, $"{name} used this way (getItem, setItem, removeItem, clear, key and length are translated; named properties are not yet)");
+        }
+
+        /// <summary>A value as JavaScript's String() gives it: a literal as it stands.</summary>
+        private static string Str(JsToLua lua, Expression e) => e is StringLiteral s ? JsToLua.Quote(s.Value) : "js_str(" + lua.Translate(e) + ")";
+
+        // ---- attributes -----------------------------------------------------------------------------------
+
+        private void Attribute(Target t, string verb, CallExpression call)
+        {
+            var args = call.Arguments.Cast<Expression>().ToList();
+            if (args.Count < (verb == "setAttribute" ? 2 : 1)) { Refuse(call, $"{verb} on \"{t.Name}\" without its arguments"); return; }
+            var read = verb is "getAttribute" or "hasAttribute";
+            if (args[0] is not StringLiteral lit)
+            {
+                if (read)
+                {
+                    t.AttrsByName = true;
+                    if (verb == "hasAttribute") _bool.Add(call); else _null[call] = "null";
+                    _lua[call] = lua => AttrRead(t, verb == "hasAttribute", null, args[0], lua);
+                }
+                else Refuse(call, $"{verb} on \"{t.Name}\" with a name only known at run time");
+                return;
+            }
+            var name = lit.Value.ToLowerInvariant();
+            if (read)
+            {
+                if (name is "class" or "style") Refuse(call, $"{verb}('{name}') on \"{t.Name}\" (className, classList and style are translated; the attribute itself is not yet)");
+                else
+                {
+                    if (verb == "hasAttribute") _bool.Add(call); else _null[call] = "null";
+                    _lua[call] = lua => AttrRead(t, verb == "hasAttribute", name, null, lua);
+                }
+                return;
+            }
+            AttrWrite(t, call, name, verb switch { "setAttribute" => "set", "removeAttribute" => "remove", _ => "toggle" },
+                      verb == "removeAttribute" || args.Count < 2 ? null : args[1]);
+        }
+
+        /// <summary>
+        /// An attribute write. One that CSS selects on changes which rules match, so it is laid out as a
+        /// class is: a state per value it can hold. `hidden` is the browser's own `[hidden] {display: none}`.
+        /// Any other is the program's own value, for the script to read back.
+        /// </summary>
+        private void AttrWrite(Target t, Expression at, string name, string verb, Expression? value)
+        {
+            if (name is "class" or "style" or "id") { Refuse(at, $"the {name} attribute written by {verb} on \"{t.Name}\" (className, classList and style are translated; this is not yet)"); return; }
+            if (name.StartsWith("on", StringComparison.Ordinal)) { Refuse(at, $"an event handler attribute ({name}) written on \"{t.Name}\""); return; }
+            if (Drawn.Contains(name)) { Refuse(at, $"the {name} attribute of \"{t.Name}\", which the page draws from directly rather than through CSS (not translated yet)"); return; }
+            var op = new AttrOp { At = at, Name = name, Verb = verb, Value = value, Facet = name == "hidden" || _built.AttributeSelectors.Contains(name) };
+            if (op.Facet && verb == "set" && (Finite(value!) is not { } values || values.Any(v => v is not (string or double))))
+            {
+                Refuse(value!, $"the {name} attribute of \"{t.Name}\", which CSS selects on, set to a value only known at run time");
+                return;
+            }
+            t.AttrOps.Add(op);
+            if (verb != "toggle") _effects.Add(at);
+            _lua[at] = lua => AttrLua(t, op, lua);
+        }
+
+        /// <summary><c>el.dataset.fooBar</c>: the attribute <c>data-foo-bar</c>, read, written, deleted or tested with `in`.</summary>
+        private void Dataset(Target t, MemberExpression ds)
+        {
+            static string Data(string key) => "data-" + Regex.Replace(key, "[A-Z]", c => "-" + c.Value.ToLowerInvariant());
+            var gp = _parent[ds];
+            if (gp is MemberExpression d && d.Object == ds && (d.Computed ? d.Property is StringLiteral : d.Property is Identifier))
+            {
+                var name = Data(d.Property is Identifier k ? k.Name : ((StringLiteral)d.Property).Value);
+                if (Assigned(d) is { } w) { AttrWrite(t, w.At, name, "set", w.Value); return; }
+                if (_parent[d] is NonUpdateUnaryExpression { Operator: Operator.Delete } del) { AttrWrite(t, del, name, "remove", null); return; }
+                if (!WrittenTo(d) && !(_parent[d] is CallExpression dc && dc.Callee == d)) { _null[d] = "undefined"; _lua[d] = lua => AttrRead(t, false, name, null, lua); return; }
+            }
+            else if (gp is NonLogicalBinaryExpression { Operator: Operator.In, Left: StringLiteral key } test && test.Right == ds)
+            {
+                var name = Data(key.Value);
+                _bool.Add(test);
+                _lua[test] = lua => AttrRead(t, true, name, null, lua);
+                return;
+            }
+            Refuse(ds, $"this use of .dataset on \"{t.Name}\" (reading, writing, deleting and testing one named key are translated)");
         }
 
         // ---- values the script can write ---------------------------------------------------------------
@@ -774,6 +1194,9 @@ internal static class PlainTranslator
 
             foreach (var t in _order)
             {
+                // Only what the script changes is named: a read is answered by the program, and a name
+                // would only make the renderer keep the element's props.
+                if (!t.Written) continue;
                 // A synthetic id is not addressable: the element gets a name of its own, for good, as
                 // HtmlRenderer.Nameable names what a class moves.
                 if (t.Ve.name.StartsWith("__", StringComparison.Ordinal))
@@ -790,6 +1213,8 @@ internal static class PlainTranslator
                 foreach (var css in t.Styles.Keys)
                     if (css is "opacity" or "visibility" or "transform") _built.NamedGroups.Add(t.Name);
                 if (t.Listens && !Clickable(t.Node)) t.Node.Attributes["data-click"] = "1";
+                // hidden takes the element out of the layout; the scene keeps its shapes and a `v` to show them
+                if (t.AttrOps.Any(o => o.Name == "hidden")) { _hide.Add(t); _built.NamedGroups.Add(t.Name); }
                 // An empty label draws nothing, so a text written into it later has nowhere to go: it is
                 // laid out holding a line of text from the start, and opens empty.
                 if (t.Texts.Count > 0 && t.Ve is Label label && label.text.Length == 0)
@@ -805,7 +1230,7 @@ internal static class PlainTranslator
 
             panel.Layout(size.x, size.y);
             foreach (var t in _order) if (t.Texts.Count > 0) _restHeight[t] = t.Ve.layout.height;
-            _template = PageCompiler.Emitted(_built, panel, rest);
+            _template = Emit(rest);
             // Laid out once more with nothing changed: the page as it settles, which is what the scene
             // carries and what every state is compared against.
             _baseline = Variant(() => { }, () => { }) ?? rest;
@@ -821,9 +1246,10 @@ internal static class PlainTranslator
                     Style(t, pair.Key, pair.Value, available, absolute);
                     if (_refused.Count > 0) return _template;
                 }
-                if (t.ClassOps.Count > 0 || t.ClassNames.Count > 0) Classes(t);
+                if (t.Facets) Classes(t);
                 if (_refused.Count > 0) return _template;
             }
+            Reads();
             return _template;
         }
 
@@ -838,26 +1264,35 @@ internal static class PlainTranslator
         private void Pristine()
         {
             if (string.IsNullOrEmpty(_built.Source)) return;
-            var written = _order.Where(t => t.Texts.Count > 0 || t.Styles.Count > 0 || t.ClassOps.Count > 0 || t.ClassNames.Count > 0).ToList();
+            var written = _order.Where(t => t.Texts.Count > 0 || t.Styles.Count > 0 || t.Facets).ToList();
             if (written.Count == 0) return;
-            var source = new Dictionary<string, HtmlNode>(StringComparer.Ordinal);
-            Index(HtmlParser.Parse(_built.Source, _ => { }));
+            var source = Source();
             foreach (var t in written)
             {
                 if (!source.TryGetValue(t.Name, out var o)) continue;
                 var node = t.Node;
                 var (cls, style, script) = (node.Attr("class") ?? string.Empty, node.Attr("style"), node.ScriptStyle);
                 var (was, wasStyle) = (o.Attr("class") ?? string.Empty, o.Attr("style"));
-                if (cls != was || style != wasStyle || script != null)
+                // the attributes CSS selects on that the script sets, and hidden with what it does to display
+                var attrs = t.AttrOps.Where(a => a.Facet).Select(a => a.Name).Distinct().Where(a => node.Attr(a) != o.Attr(a)).ToList();
+                var hides = t.AttrOps.Any(a => a.Name == "hidden");
+                if (cls != was || style != wasStyle || script != null || attrs.Count > 0 || hides)
                 {
+                    var live = attrs.Select(a => (a, node.Attr(a))).ToList();
+                    var display = t.Ve.style.display;
                     node.ScriptStyle = null;
                     if (wasStyle == null) node.Attributes.Remove("style"); else node.Attributes["style"] = wasStyle;
+                    foreach (var a in attrs) if (o.Attr(a) is { } v) node.Attributes[a] = v; else node.Attributes.Remove(a);
+                    if (hides) t.Ve.style.display = StyleKeyword.Null;
                     _built.Reclass(t.Ve, was);
+                    if (hides && node.Attr("hidden") != null) t.Ve.style.display = DisplayStyle.None;
                     _restore.Add(() =>
                     {
                         node.ScriptStyle = script;
                         if (style == null) node.Attributes.Remove("style"); else node.Attributes["style"] = style;
+                        foreach (var (a, v) in live) if (v != null) node.Attributes[a] = v; else node.Attributes.Remove(a);
                         _built.Reclass(t.Ve, cls);
+                        t.Ve.style.display = display;
                     });
                 }
                 if (t.Texts.Count > 0 && t.Ve is Label label)
@@ -870,13 +1305,25 @@ internal static class PlainTranslator
                     _restore.Add(() => { label.text = text; node.Children.Clear(); node.Children.AddRange(children); });
                 }
             }
+        }
+
+        /// <summary>The page as its source wrote it, by id, parsed once.</summary>
+        private Dictionary<string, HtmlNode> Source()
+        {
+            if (_source != null) return _source;
+            _source = new Dictionary<string, HtmlNode>(StringComparer.Ordinal);
+            if (!string.IsNullOrEmpty(_built.Source)) Index(HtmlParser.Parse(_built.Source, _ => { }));
+            return _source;
 
             void Index(HtmlNode n)
             {
-                if (n.Attr("id") is { } id && !source.ContainsKey(id)) source[id] = n;
+                if (n.Attr("id") is { } id && !_source.ContainsKey(id)) _source[id] = n;
                 foreach (var c in n.Children) Index(c);
             }
         }
+
+        /// <summary>An element as its source wrote it (its live node when the source has no id for it).</summary>
+        private HtmlNode SourceNode(Target t) => Source().TryGetValue(t.Name, out var o) ? o : t.Node;
 
         public void Restore()
         {
@@ -895,6 +1342,65 @@ internal static class PlainTranslator
             node.Children.Add(new HtmlNode { Text = text, Parent = node });
         }
 
+        // ---- hidden: out of the layout, and still in the scene -------------------------------------------
+
+        /// <summary>Elements the script hides and shows through `hidden`, in document order.</summary>
+        private readonly List<Target> _hide = new();
+
+        private static IEnumerable<VisualElement> Subtree(VisualElement ve)
+        {
+            yield return ve;
+            foreach (var child in ve.Children())
+                foreach (var d in Subtree(child)) yield return d;
+        }
+
+        /// <summary>
+        /// The page as it is laid out now, emitted and split. A scene cannot gain or lose shapes, so an
+        /// element hidden in this layout keeps its shapes, in a group whose `v` is 0 (display: none to the
+        /// vector mod: not drawn, not clickable). They are where this same layout puts the element shown -
+        /// laid out once more with it alone shown - so that another state showing it later finds it where
+        /// the browser would, and so a state that moves it says so.
+        /// </summary>
+        private string Emit(Dictionary<string, SceneSlots.Value> values)
+        {
+            if (_hide.Count == 0) return PageCompiler.Emitted(_built, _panel, values);
+            var shown = new bool[_hide.Count];
+            var text = PageCompiler.Emitted(_built, _panel, values, boxes =>
+            {
+                for (var i = 0; i < _hide.Count; i++) shown[i] = _hide[i].Ve.resolvedStyle.display != DisplayStyle.None;
+                for (var i = 0; i < _hide.Count; i++)
+                {
+                    if (shown[i]) continue;
+                    var ve = _hide[i].Ve;
+                    var was = ve.style.display;
+                    ve.style.display = StyleKeyword.Null;
+                    _panel.Layout(_size.x, _size.y);
+                    var open = PageCompiler.Captured(_built);
+                    foreach (var d in Subtree(ve))
+                        if (open.TryGetValue(d, out var b)) boxes[d] = b;
+                    ve.style.display = was;
+                }
+                if (shown.Any(x => !x)) _panel.Layout(_size.x, _size.y);
+            });
+            var lines = text.Split('\n');
+            for (var i = 0; i < _hide.Count; i++)
+            {
+                var name = _hide[i].Name;
+                var tail = " id=" + name + " {";
+                var k = Array.FindIndex(lines, l => l.TrimStart().StartsWith("G ", StringComparison.Ordinal) && l.EndsWith(tail, StringComparison.Ordinal));
+                if (k < 0)
+                {
+                    // with no group to carry its v, a hidden element would be drawn: never that
+                    Refuse(_hide[i].AttrOps.First(o => o.Name == "hidden").At, $"hidden on \"{name}\": its group in the scene carries no name");
+                    continue;
+                }
+                var slot = DomSlots.Slot(name) + "_v";
+                lines[k] = lines[k].Substring(0, lines[k].Length - tail.Length) + " v=$" + slot + tail;
+                values[slot] = new SceneSlots.Value(shown[i] ? 1f : 0f);
+            }
+            return string.Join("\n", lines);
+        }
+
         /// <summary>
         /// The page drawn in one more state, or null when that state changes the scene's structure -
         /// a shape added or taken away is not a value.
@@ -907,7 +1413,7 @@ internal static class PlainTranslator
                 _panel.Layout(_size.x, _size.y);
                 laidOut?.Invoke();
                 var values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
-                return PageCompiler.Emitted(_built, _panel, values) == _template ? values : null;
+                return Emit(values) == _template ? values : null;
             }
             finally
             {
@@ -984,7 +1490,7 @@ internal static class PlainTranslator
                     was.Add((label, label.text, new List<HtmlNode>(t.Node.Children)));
                     Text(label, t.Node, Marker);
                 }
-                PageCompiler.Emitted(_built, _panel, marked);
+                Emit(marked);
             }
             finally
             {
@@ -1047,9 +1553,10 @@ internal static class PlainTranslator
                     var k = 0;
                     foreach (var piece in writes[0].Parts)
                     {
-                        if (piece.Literal != null) { body.Append(Tmp(piece.Literal)); continue; }
+                        if (piece.Literal != null) { body.Append(Tmp(piece.Literal)); plan.Read.Add((piece.Literal, null, null)); continue; }
                         var name = Unique(slot + "_p" + k.ToString(CultureInfo.InvariantCulture));
                         body.Append("{$").Append(name).Append(':').Append(piece.Format).Append('}');
+                        plan.Read.Add((null, name, piece));
                         opening.Add((name, values[k]));
                         foreach (var (w, parts) in writes)
                             Add(plan, w, name, null, parts.Where(p => p.Hole != null).ElementAt(k));
@@ -1062,6 +1569,7 @@ internal static class PlainTranslator
                     // of slots: a write fills its own run and empties every other, so nothing is built.
                     var whole = Unique(slot + "_p0");
                     body.Append("{$").Append(whole).Append('}');
+                    plan.Read.Add((null, whole, null));
                     opening.Add((whole, new SceneSlots.Value(shown)));
                     var runs = new List<(string Sig, List<string> Slots)>();
                     foreach (var (w, parts) in writes)
@@ -1083,6 +1591,7 @@ internal static class PlainTranslator
                                 body.Append("{$").Append(name);
                                 if (p.Hole != null) body.Append(':').Append(p.Format);
                                 body.Append('}');
+                                plan.Read.Add((null, name, p.Hole != null ? p : null));
                                 opening.Add((name, new SceneSlots.Value(string.Empty)));
                             }
                             runs.Add(run);
@@ -1310,6 +1819,7 @@ internal static class PlainTranslator
             var units = numbers.Select(n => n!.Value.Unit).Distinct().ToList();
             if (units.Count != 1) { Refuse(at, $"{facet} is written in more than one unit ({string.Join(", ", units)})"); return; }
             var unit = units[0];
+            plan.Unit = unit;
             double factor;
             if (unit == "px" || unit.Length == 0 && css is "opacity") factor = 1;
             else if (unit == "%" && !double.IsNaN(mapped.PercentOf)) factor = mapped.PercentOf / 100;
@@ -1370,10 +1880,16 @@ internal static class PlainTranslator
 
         // ---- classes ----------------------------------------------------------------------------------
 
+        /// <summary>
+        /// Every combination of the classes and the CSS-selected attributes the script changes on one
+        /// element, laid out: the class and attribute states it can draw. At most 64.
+        /// </summary>
         private void Classes(Target t)
         {
-            var at = t.ClassOps.Count > 0 ? t.ClassOps[0].At : t.ClassNames[0].At;
-            var initial = (t.Node.Attr("class") ?? string.Empty).Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries).Distinct().ToList();
+            var at = t.ClassOps.Count > 0 ? t.ClassOps[0].At : t.ClassNames.Count > 0 ? t.ClassNames[0].At : t.AttrOps.First(o => o.Facet).At;
+            var source = SourceNode(t);
+            var raw = source.Attr("class");
+            var initial = (raw ?? string.Empty).Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries).Distinct().ToList();
             var plan = new ClassPlan { Var = "V_C" + (_order.Count(x => x.Class != null) + 1).ToString(CultureInfo.InvariantCulture) };
             foreach (var op in t.ClassOps) foreach (var n in op.Names) if (!plan.Names.Contains(n)) plan.Names.Add(n);
             foreach (var (_, values) in t.ClassNames)
@@ -1382,29 +1898,299 @@ internal static class PlainTranslator
                         if (!plan.Names.Contains(n)) plan.Names.Add(n);
             // className replaces them all, so the classes the page starts with can change too
             if (t.ClassNames.Count > 0) foreach (var n in initial) if (!plan.Names.Contains(n)) plan.Names.Add(n);
-            if (plan.Names.Count > 6) { Refuse(at, $"the script changes {plan.Names.Count} classes of \"{t.Name}\", more than the 6 whose every combination is laid out"); return; }
             foreach (var n in plan.Names) plan.Initial[n] = initial.Contains(n);
             foreach (var (_, values) in t.ClassNames)
                 foreach (string v in values)
                     plan.Sets[v] = new HashSet<string>(v.Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries), StringComparer.Ordinal);
-
             var fixedClasses = initial.Where(n => !plan.Names.Contains(n)).ToList();
-            var was = t.Node.Attr("class") ?? string.Empty;
+            plan.Fixed.AddRange(fixedClasses);
+            if (t.ClassRead) { plan.Raw = raw ?? string.Empty; plan.Order = initial; }
+
+            // Each attribute CSS selects on, with every value the script can give it and the page's own;
+            // absent is the first. A number is the text JavaScript makes of it, and the Lua matches both.
+            foreach (var group in t.AttrOps.Where(o => o.Facet).GroupBy(o => o.Name))
+            {
+                var options = new List<string?> { null };
+                var index = new Dictionary<object, int>();
+                void Option(string v, object? alias = null)
+                {
+                    if (!options.Contains(v)) options.Add(v);
+                    index[v] = options.IndexOf(v);
+                    if (alias != null) index[alias] = options.IndexOf(v);
+                }
+                if (source.Attr(group.Key) is { } own) Option(own);
+                foreach (var op in group)
+                    if (op.Verb == "set") foreach (var v in Finite(op.Value!)!) Option(v is double d ? JsToLuaNumber(d) : (string)v, v is double ? v : null);
+                    else if (op.Verb is "toggle" or "hidden") Option(string.Empty);
+                plan.Attrs.Add((group.Key, options, index));
+            }
+            var total = (1 << plan.Names.Count) * plan.Attrs.Aggregate(1, (a, x) => a * x.Options.Count);
+            if (plan.Names.Count > 6 || total > 64)
+            {
+                Refuse(at, $"the script changes {plan.Names.Count} classes and {plan.Attrs.Count} attributes of \"{t.Name}\", {total} combinations, more than the 64 that are laid out");
+                return;
+            }
+
+            var node = t.Node;
+            var was = node.Attr("class") ?? string.Empty;
+            var wasAttrs = plan.Attrs.Select(a => node.Attr(a.Name)).ToList();
+            var wasDisplay = t.Ve.style.display;
+            var hides = plan.Attrs.Any(a => a.Name == "hidden");
+            void Apply(string cls, IReadOnlyList<string?> attrs)
+            {
+                for (var i = 0; i < plan.Attrs.Count; i++)
+                    if (attrs[i] is { } v) node.Attributes[plan.Attrs[i].Name] = v; else node.Attributes.Remove(plan.Attrs[i].Name);
+                if (hides) t.Ve.style.display = StyleKeyword.Null;
+                _built.Reclass(t.Ve, cls);
+                // the browser's own [hidden] { display: none }, as the page was built with it
+                if (hides && node.Attr("hidden") != null) t.Ve.style.display = DisplayStyle.None;
+            }
             var moved = new HashSet<string>(StringComparer.Ordinal);
-            var facet = $"the classes of \"{t.Name}\"";
-            for (var key = 0; key < 1 << plan.Names.Count; key++)
+            var facet = $"the classes and attributes of \"{t.Name}\"";
+            for (var key = 0; key < total; key++)
             {
                 var on = new List<string>(fixedClasses);
                 for (var i = 0; i < plan.Names.Count; i++) if ((key & (1 << i)) != 0) on.Add(plan.Names[i]);
                 var cls = string.Join(" ", on);
-                var drawn = Variant(() => _built.Reclass(t.Ve, cls), () => _built.Reclass(t.Ve, was));
-                if (drawn == null) { Refuse(at, $"class \"{cls}\" on \"{t.Name}\" changes the scene's structure, which is not a value"); return; }
+                var attrs = new List<string?>();
+                var rest = key >> plan.Names.Count;
+                foreach (var a in plan.Attrs) { attrs.Add(a.Options[rest % a.Options.Count]); rest /= a.Options.Count; }
+                var drawn = Variant(() => Apply(cls, attrs), () => { Apply(was, wasAttrs); t.Ve.style.display = wasDisplay; });
+                if (drawn == null)
+                {
+                    var described = cls + string.Concat(plan.Attrs.Select((a, i) => attrs[i] == null ? string.Empty : $" [{a.Name}=\"{attrs[i]}\"]"));
+                    Refuse(at, $"class \"{described.Trim()}\" on \"{t.Name}\" changes the scene's structure, which is not a value");
+                    return;
+                }
                 plan.States[key] = drawn;
                 moved.UnionWith(Moved(drawn));
             }
             Complete(plan.States.Values, moved);
             foreach (var slot in moved) if (!Claim(slot, facet, at)) return;
             t.Class = plan;
+        }
+
+        // ---- reads: what the script wrote, answered by the program --------------------------------------
+
+        /// <summary>Constant tables the chunk declares once (a class list looked up by a run-time name).</summary>
+        private readonly List<string> _consts = new();
+        private bool _cssNum, _toFixedRead, _untmp;
+
+        /// <summary>What the program keeps for the script to read back: each element's attributes, and each style value it writes.</summary>
+        private void Reads()
+        {
+            var tables = 0;
+            var values = 0;
+            foreach (var t in _order)
+            {
+                if (t.AttrOps.Count > 0 || t.AttrsByName)
+                {
+                    t.AttrTable = t.Class != null ? t.Class.Var + ".at" : "V_AT" + (++tables).ToString(CultureInfo.InvariantCulture);
+                    _attrs = true;
+                }
+                var declared = Declarations(SourceNode(t));
+                foreach (var css in t.StyleReads)
+                {
+                    if (!t.StylePlans.TryGetValue(css, out var plan)) continue;
+                    plan.ReadVar = "V_SV" + (++values).ToString(CultureInfo.InvariantCulture);
+                    declared.TryGetValue(css, out var own);
+                    if (plan.Linear != null)
+                    {
+                        // the number last written; the page's own, when its unit is the one written
+                        var m = own == null ? null : Regex.Match(own, @"^([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)([a-zA-Z%]*)$");
+                        if (m is { Success: true } && string.Equals(m.Groups[2].Value, plan.Unit, StringComparison.OrdinalIgnoreCase))
+                            plan.ReadInitial = JsToLuaNumber(double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture));
+                        else plan.Unprintable = own != null;
+                        continue;
+                    }
+                    plan.Printed = new Dictionary<object, string>();
+                    foreach (var value in plan.States!.Keys)
+                        if (CssPrinted(value is double d ? JsToLuaNumber(d) : (string)value) is { } printed) plan.Printed[value] = printed;
+                        else plan.Unprintable = true;
+                    if (own != null)
+                    {
+                        if (CssPrinted(own) is { } ownPrinted) { plan.Printed[own] = ownPrinted; plan.ReadInitial = Q(own); }
+                        else plan.Unprintable = true;
+                    }
+                }
+            }
+        }
+
+        private string TextRead(Target t, Node at, JsToLua lua)
+        {
+            if (t.Text is { } plan)
+            {
+                if (plan.Read.Count == 0) return "\"\"";
+                var escaped = plan.Template.Contains("<noparse>", StringComparison.Ordinal) || _rest.Values.Any(v => v.Text?.Contains("<noparse>") == true);
+                var parts = new List<string>();
+                foreach (var (literal, slot, hole) in plan.Read)
+                {
+                    if (literal != null) { parts.Add(Q(literal)); continue; }
+                    var v = "V_D[" + Q(slot!) + "]";
+                    if (hole?.Digits is { } n) { _toFixedRead = true; parts.Add("v_tofixed(" + v + ", " + n.ToString(CultureInfo.InvariantCulture) + ")"); }
+                    else if (hole == null && escaped) { _untmp = true; parts.Add("v_untmp(" + v + ")"); }
+                    else parts.Add("js_str(" + v + ")");
+                }
+                return parts.Count == 1 ? parts[0] : "(" + string.Join(" .. ", parts) + ")";
+            }
+            if (_order.Any(o => o != t && o.Texts.Count > 0 && Inside(o.Ve, t.Ve)))
+            {
+                lua.Refuse(at, $"reading textContent of \"{t.Name}\", which holds text the script writes (not translated yet)");
+                return "nil";
+            }
+            // nothing writes it: the text the page's source gives it, whitespace and all
+            return Q(TextContent(SourceNode(t)));
+        }
+
+        private static bool Inside(VisualElement ve, VisualElement of)
+        {
+            for (var p = ve.parent; p != null; p = p.parent) if (p == of) return true;
+            return false;
+        }
+
+        /// <summary>A node's textContent: every text under it as the source wrote it.</summary>
+        private static string TextContent(HtmlNode n)
+        {
+            if (n.IsText) return n.Raw != null ? HtmlParser.DecodeEntities(n.Raw) : n.Text;
+            var sb = new StringBuilder();
+            foreach (var c in n.Children) sb.Append(TextContent(c));
+            return sb.ToString();
+        }
+
+        private string ClassNameRead(Target t)
+            => t.Class is { Order: not null } c
+                ? "(" + c.Var + ".raw or table.concat(" + c.Var + ".order, \" \"))"
+                : Q(SourceNode(t).Attr("class") ?? string.Empty);
+
+        private string Contains(Target t, Expression key, JsToLua lua)
+        {
+            var k = key is StringLiteral s ? Q(s.Value) : "js_str(" + lua.Translate(key) + ")";
+            if (t.Class != null) return "(" + t.Class.Var + ".on[" + k + "] == true)";
+            var classes = (SourceNode(t).Attr("class") ?? string.Empty).Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries).Distinct().ToList();
+            if (key is StringLiteral lit) return classes.Contains(lit.Value) ? "true" : "false";
+            var name = "V_K" + (_consts.Count + 1).ToString(CultureInfo.InvariantCulture);
+            _consts.Add("local " + name + " = " + Table(classes.Select(c => (c, "true"))));
+            return "(" + name + "[" + k + "] == true)";
+        }
+
+        /// <summary>
+        /// A style property read back, as the browser's inline style gives it: the value the script last
+        /// wrote (a colour as rgb(), a length to six figures, a keyword in lower case), else what the style
+        /// attribute says, else "".
+        /// </summary>
+        private string StyleRead(Target t, string css, Node at, JsToLua lua)
+        {
+            bool Related(string p) => p != css && (p.StartsWith(css + "-", StringComparison.Ordinal) || css.StartsWith(p + "-", StringComparison.Ordinal));
+            var declared = Declarations(SourceNode(t));
+            if (t.Styles.Keys.Any(Related) || declared.Keys.Any(Related))
+            {
+                lua.Refuse(at, $"reading style.{css} of \"{t.Name}\", which a shorthand or longhand of it also sets (not translated yet)");
+                return "nil";
+            }
+            if (t.StylePlans.TryGetValue(css, out var plan) && plan.ReadVar != null)
+            {
+                if (plan.Linear != null && plan.Unprintable)
+                {
+                    lua.Refuse(at, $"reading style.{css} of \"{t.Name}\", whose style attribute gives it in another unit than the script writes (not translated yet)");
+                    return "nil";
+                }
+                if (plan.Linear != null)
+                {
+                    _cssNum = true;
+                    return "v_cssnum(" + plan.ReadVar + ", " + Q(plan.Unit) + ")";
+                }
+                if (plan.Unprintable)
+                {
+                    lua.Refuse(at, $"reading style.{css} of \"{t.Name}\", written a value the browser gives back in a form not translated yet");
+                    return "nil";
+                }
+                return "(" + plan.ReadVar + "P[" + plan.ReadVar + "] or \"\")";
+            }
+            if (!declared.TryGetValue(css, out var own)) return "\"\"";
+            if (CssPrinted(own) is { } printed) return Q(printed);
+            lua.Refuse(at, $"reading style.{css} of \"{t.Name}\", whose value the browser gives back in a form not translated yet");
+            return "nil";
+        }
+
+        /// <summary>A style attribute as its declarations, by property.</summary>
+        private static Dictionary<string, string> Declarations(HtmlNode node)
+        {
+            var found = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var part in (node.Attr("style") ?? string.Empty).Split(';'))
+            {
+                var colon = part.IndexOf(':');
+                if (colon <= 0) continue;
+                found[part.Substring(0, colon).Trim().ToLowerInvariant()] = part.Substring(colon + 1).Trim();
+            }
+            return found;
+        }
+
+        /// <summary>A CSS value as a browser's inline style gives it back, or null for a form not translated.</summary>
+        internal static string? CssPrinted(string value)
+        {
+            var v = value.Trim();
+            if (v.Length == 0) return string.Empty;
+            var hex = Regex.Match(v, "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$");
+            if (hex.Success)
+            {
+                var h = hex.Groups[1].Value;
+                if (h.Length <= 4) h = string.Concat(h.Select(c => new string(c, 2)));
+                int B(int i) => Convert.ToInt32(h.Substring(i * 2, 2), 16);
+                if (h.Length == 6) return $"rgb({B(0)}, {B(1)}, {B(2)})";
+                // the fewest decimals that come back to the same byte
+                var a = Math.Round(B(3) / 255.0, 2);
+                if ((int)Math.Round(a * 255) != B(3)) a = Math.Round(B(3) / 255.0, 3);
+                return $"rgba({B(0)}, {B(1)}, {B(2)}, {a.ToString("0.###", CultureInfo.InvariantCulture)})";
+            }
+            var num = Regex.Match(v, @"^([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)([a-zA-Z%]*)$");
+            if (num.Success)
+                return double.Parse(num.Groups[1].Value, CultureInfo.InvariantCulture).ToString("G6", CultureInfo.InvariantCulture).Replace("E", "e")
+                       + num.Groups[2].Value.ToLowerInvariant();
+            return Regex.IsMatch(v, "^[a-zA-Z-]+$") ? v.ToLowerInvariant() : null;
+        }
+
+        /// <summary>
+        /// An attribute read: from the program's table when the script changes this element's attributes
+        /// (or reads them by a run-time name), else the constant the page's source gives it.
+        /// </summary>
+        private string AttrRead(Target t, bool has, string? name, Expression? byName, JsToLua lua)
+        {
+            if (t.AttrTable != null)
+            {
+                var v = t.AttrTable + "[" + (name != null ? Q(name) : "string.lower(js_str(" + lua.Translate(byName!) + "))") + "]";
+                return has ? "(" + v + " ~= nil)" : "v_attr(" + v + ")";
+            }
+            var own = SourceNode(t).Attr(name!);
+            return has ? (own != null ? "true" : "false") : own != null ? Q(own) : "nil";
+        }
+
+        private static string AttrLua(Target t, AttrOp op, JsToLua lua)
+        {
+            var at = t.AttrTable!;
+            var c = op.Facet ? t.Class!.Var : "nil";
+            var n = Q(op.Name);
+            return op.Verb switch
+            {
+                "set" => "v_setattr(" + at + ", " + n + ", " + lua.Translate(op.Value!) + ", " + c + ")",
+                "remove" => "v_rmattr(" + at + ", " + n + ", " + c + ")",
+                "toggle" => "v_toggleattr(" + at + ", " + n + ", " + (op.Value != null ? lua.Translate(op.Value) : "nil") + ", " + c + ")",
+                _ => "v_hidden(" + at + ", " + lua.Translate(op.Value!) + ", " + c + ")",
+            };
+        }
+
+        /// <summary>An element's attributes as the program's table starts: the page's own, but for id, class and style.</summary>
+        private string AttrInitial(Target t)
+        {
+            var node = SourceNode(t);
+            var pairs = new List<(string, string)>();
+            if (node.AttributeCount > 0)
+                foreach (var pair in node.Attributes)
+                {
+                    var key = pair.Key.ToLowerInvariant();
+                    if (key is "id" or "class" or "style") continue;
+                    pairs.Add((key, Q(pair.Value)));
+                }
+            return Table(pairs);
         }
 
         // ---- the program ------------------------------------------------------------------------------
@@ -1415,7 +2201,20 @@ internal static class PlainTranslator
             if (s is VariableDeclaration && _elementDeclarations.Contains(s)) return true;
             if (s is ExpressionStatement es) s = es.Expression;
             if (s is not Expression e) return false;
-            if (_dropped.Contains(e)) return true;
+            if (_lua.TryGetValue(e, out var own))
+            {
+                // A concise arrow's body is its return value: only a write, which yields nothing, is a statement there.
+                if (_parent.TryGetValue(e, out var holder) && holder is ArrowFunctionExpression && !Effectual(e)) return false;
+                if (_consoleKept.TryGetValue(e, out var kept))
+                {
+                    foreach (var arg in kept) lua.Effect(arg);
+                    return true;
+                }
+                var code = own(lua);
+                if (Call.IsMatch(code)) lua.Emit(code);
+                else if (code != "nil") lua.Emit("local __discard = " + code);
+                return true;
+            }
             if (!_ops.TryGetValue(e, out var t)) return false;
 
             if (e is AssignmentExpression { Left: MemberExpression m } a)
@@ -1424,6 +2223,17 @@ internal static class PlainTranslator
                 {
                     var css = DomSlots.Dashed(m.Property is Identifier si ? si.Name : ((StringLiteral)m.Property).Value);
                     var plan = t.StylePlans[css];
+                    if (plan.ReadVar != null)
+                    {
+                        // read back later: the value is kept as written, and printed only when read
+                        lua.Emit("do");
+                        lua.Emit("  local v = " + lua.Translate(plan.States != null ? a.Right : plan.Holes[e]));
+                        lua.Emit("  " + plan.ReadVar + " = v");
+                        if (plan.States != null) lua.Emit("  v_state(" + plan.Var + ", v)");
+                        else foreach (var (slot, sa, sb) in plan.Linear!) lua.Emit("  v_set(" + Q(slot) + ", " + Affine("v", sa, sb) + ")");
+                        lua.Emit("end");
+                        return true;
+                    }
                     if (plan.States != null)
                     {
                         lua.Emit("v_state(" + plan.Var + ", " + lua.Translate(a.Right) + ")");
@@ -1468,20 +2278,29 @@ internal static class PlainTranslator
             foreach (var name in op.Names)
             {
                 var on = c + ".on[" + Q(name) + "]";
-                lua.Emit(on + " = " + (op.Verb switch
+                var want = op.Verb switch
                 {
                     "add" => "true",
                     "remove" => "false",
                     _ => op.Force != null ? "js_truthy(" + lua.Translate(op.Force) + ")" : "not " + on,
-                }));
+                };
+                // className is read back: the classes' order is kept as the attribute holds it
+                lua.Emit(t.Class.Order != null ? "v_classop(" + c + ", " + Q(name) + ", " + want + ")" : on + " = " + want);
             }
             lua.Emit("v_class(" + c + ")");
             return true;
         }
 
+        /// <summary>A call, which Lua takes as a statement of its own.</summary>
+        private static readonly Regex Call = new(@"^[A-Za-z_][A-Za-z0-9_.]*\(.*\)$", RegexOptions.Singleline);
+
+        /// <summary>Whether an expression the Lua writes itself is a write, whose value (undefined) nothing needs.</summary>
+        private bool Effectual(Expression e) => _effects.Contains(e) || e is AssignmentExpression;
+
         /// <summary>Timers, and anything the analysis let through that must not reach the DOM-less Lua.</summary>
         public string? Expression(JsToLua lua, Node e)
         {
+            if (_lua.TryGetValue(e, out var own)) return own(lua);
             if (e is CallExpression { Callee: Identifier callee } call && TimerNames.Contains(callee.Name) && !Declared(callee.Name))
             {
                 string Arg(int i) => i < call.Arguments.Count ? lua.Translate(call.Arguments[i]) : "nil";
@@ -1504,7 +2323,9 @@ internal static class PlainTranslator
                 _fixed = true;
                 return "v_fixed(" + v + ", " + n.ToString(CultureInfo.InvariantCulture) + ")";
             }
-            return Boolean(hole.Hole!) ? "js_str(" + v + ")" : v;
+            if (Boolean(hole.Hole!) || _bool.Contains(hole.Hole!)) return "js_str(" + v + ")";
+            // a read that can be null prints "null", as JavaScript's string conversion does
+            return _null.TryGetValue(hole.Hole!, out var none) ? "(" + v + " or " + Q(none) + ")" : v;
         }
 
         /// <summary>Whether the program rounds a toFixed value, so the chunk carries v_fixed.</summary>
@@ -1551,6 +2372,14 @@ internal static class PlainTranslator
             sb.Append("local function v_set(k, v)\n  if V_D[k] ~= v then V_D[k] = v V_P[k] = v V_E[k] = V_EASE[k] end\nend\n");
             sb.Append("local function v_flush()\n  if next(V_P) == nil then return end\n  V_DATA:set_props(V_SEND)\n  ui:commit()\n");
             sb.Append("  for k in pairs(V_P) do V_P[k] = nil end\n  for k in pairs(V_E) do V_E[k] = nil end\nend\n");
+            if (_reload)
+            {
+                sb.Append("-- location.reload(): the page starts again from its source once the script that asked has run\n");
+                sb.Append("local V_D0 = ").Append(Table(Written.Select(s => (s, Value(Opening[s]))))).Append('\n');
+                sb.Append("local V_RELOAD = false\nlocal v_main, v_reload\n");
+                sb.Append("local function v_askreload() V_RELOAD = true end\n");
+                sb.Append("local function v_reset(t, t0)\n  for k in pairs(t) do t[k] = nil end\n  for k, v in pairs(t0) do t[k] = v end\nend\n");
+            }
 
             if (states.Count > 0)
             {
@@ -1569,25 +2398,77 @@ internal static class PlainTranslator
             {
                 sb.Append("local function v_class(c)\n  local key, bit, names, on = 0, 1, c.names, c.on\n");
                 sb.Append("  for i = 1, #names do if on[names[i]] then key = key + bit end bit = bit + bit end\n");
+                if (classes.Any(t => t.Class!.Attrs.Count > 0))
+                {
+                    // each attribute CSS selects on: the index of the value it holds, absent 0
+                    sb.Append("  local attrs, at = c.attrs, c.at\n  if attrs then\n    for i = 1, #attrs do\n");
+                    sb.Append("      local a = attrs[i]\n      local v = at[a.name]\n      if v ~= nil then key = key + bit * (a.index[v] or 0) end\n");
+                    sb.Append("      bit = bit * a.n\n    end\n  end\n");
+                }
                 sb.Append("  for k, v in pairs(c.states[key]) do v_set(k, v) end\nend\n");
+                if (classes.Any(t => t.Class!.Order != null))
+                {
+                    // className is read back, so the class attribute's order is kept as a browser keeps it
+                    sb.Append("local function v_classop(c, name, want)\n  local on, order = c.on, c.order\n  c.raw = nil\n");
+                    sb.Append("  if want and not on[name] then order[#order + 1] = name\n");
+                    sb.Append("  elseif not want and on[name] then\n    for i = 1, #order do if order[i] == name then table.remove(order, i) break end end\n  end\n");
+                    sb.Append("  on[name] = want\nend\n");
+                }
                 if (classes.Any(t => t.Class!.Sets.Count > 0))
                 {
                     sb.Append("local function v_classname(c, value)\n  local want = c.sets[value]\n  if want == nil then return end\n");
-                    sb.Append("  for i = 1, #c.names do c.on[c.names[i]] = want[c.names[i]] == true end\n  v_class(c)\nend\n");
+                    sb.Append("  for i = 1, #c.names do c.on[c.names[i]] = want[c.names[i]] == true end\n");
+                    if (classes.Any(t => t.Class!.Order != null))
+                    {
+                        sb.Append("  if c.order then\n    local list, order = c.lists[value], c.order\n");
+                        sb.Append("    for i = #order, 1, -1 do order[i] = nil end\n    for i = 1, #list do order[i] = list[i] end\n    c.raw = value\n  end\n");
+                    }
+                    sb.Append("  v_class(c)\nend\n");
                 }
                 foreach (var t in classes)
                 {
                     var plan = t.Class!;
-                    sb.Append("-- the classes of \"").Append(t.Name).Append("\" the script changes, and what each combination draws\n");
+                    var on = Table(plan.Fixed.Select(n => (n, "true")).Concat(plan.Names.Select(n => (n, plan.Initial[n] ? "true" : "false"))));
+                    sb.Append("-- the classes").Append(plan.Attrs.Count > 0 ? " and attributes" : string.Empty).Append(" of \"").Append(t.Name)
+                      .Append("\" the script changes, and what each combination draws\n");
                     sb.Append("local ").Append(plan.Var).Append(" = {\n");
-                    sb.Append("  on = ").Append(Table(plan.Names.Select(n => (n, plan.Initial[n] ? "true" : "false")))).Append(",\n");
+                    sb.Append("  on = ").Append(on).Append(",\n");
                     sb.Append("  names = { ").Append(string.Join(", ", plan.Names.Select(Q))).Append(" },\n");
+                    if (plan.Attrs.Count > 0)
+                    {
+                        sb.Append("  attrs = {");
+                        foreach (var (name, options, index) in plan.Attrs)
+                            sb.Append("\n    { name = ").Append(Q(name)).Append(", n = ").Append(options.Count.ToString(CultureInfo.InvariantCulture))
+                              .Append(", index = { ").Append(string.Join(", ", index.Where(x => x.Value > 0).Select(x => "[" + (x.Key is double d ? JsToLuaNumber(d) : Q((string)x.Key)) + "] = " + x.Value.ToString(CultureInfo.InvariantCulture))))
+                              .Append(" } },");
+                        sb.Append("\n  },\n");
+                    }
+                    if (t.AttrTable == plan.Var + ".at")
+                    {
+                        sb.Append("  at = ").Append(AttrInitial(t)).Append(",\n");
+                        if (_reload) sb.Append("  at0 = ").Append(AttrInitial(t)).Append(",\n");
+                    }
+                    if (_reload) sb.Append("  on0 = ").Append(on).Append(",\n");
                     if (plan.Sets.Count > 0)
                     {
                         sb.Append("  sets = {");
                         foreach (var pair in plan.Sets)
                             sb.Append("\n    [").Append(Q(pair.Key)).Append("] = ").Append(Table(pair.Value.Select(n => (n, "true")))).Append(',');
                         sb.Append("\n  },\n");
+                    }
+                    if (plan.Order != null)
+                    {
+                        var order = "{ " + string.Join(", ", plan.Order.Select(Q)) + " }";
+                        sb.Append("  order = ").Append(order).Append(", raw = ").Append(Q(plan.Raw!)).Append(",\n");
+                        if (_reload) sb.Append("  order0 = ").Append(order).Append(", raw0 = ").Append(Q(plan.Raw!)).Append(",\n");
+                        if (plan.Sets.Count > 0)
+                        {
+                            sb.Append("  lists = {");
+                            foreach (var pair in plan.Sets)
+                                sb.Append("\n    [").Append(Q(pair.Key)).Append("] = { ")
+                                  .Append(string.Join(", ", pair.Key.Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries).Distinct().Select(Q))).Append(" },");
+                            sb.Append("\n  },\n");
+                        }
                     }
                     sb.Append("  states = {\n");
                     foreach (var pair in plan.States)
@@ -1596,6 +2477,8 @@ internal static class PlainTranslator
                     sb.Append("  },\n}\n");
                 }
             }
+            var browser = Browser();
+            sb.Append(browser);
             if (_timers)
             {
                 sb.Append("-- the page's timers, run from the chip's tick in the order they fall due (times in ms)\n");
@@ -1613,7 +2496,7 @@ internal static class PlainTranslator
                 sb.Append("         or V_DUE[s] == V_DUE[best] and V_ID[s] < V_ID[best]) then best = s end\n    end\n");
                 sb.Append("    if best == nil then break end\n    local fn = V_FN[best]\n    V_NOW = V_DUE[best]\n");
                 sb.Append("    if V_EVERY[best] then V_DUE[best] = V_DUE[best] + V_EVERY[best] else V_FN[best] = nil V_ID[best] = nil end\n");
-                sb.Append("    fn()\n  end\n  V_NOW = V_CLOCK\nend\n");
+                sb.Append("    fn()\n").Append(_reload ? "    if V_RELOAD then break end\n" : string.Empty).Append("  end\n  V_NOW = V_CLOCK\nend\n");
             }
             if (listens)
             {
@@ -1625,11 +2508,15 @@ internal static class PlainTranslator
                 sb.Append("  list[#list + 1] = fn\nend\n");
                 sb.Append("local function v_click(nodeId)\n  local chain = V_LIVE and V_CHAIN[nodeId]\n  if not chain then return end\n");
                 sb.Append("  for c = 1, #chain do\n    local list = V_ON[chain[c]]\n    for i = 1, #list do list[i]() end\n");
-                sb.Append("    local f = V_ONCLICK[chain[c]]\n    if f then f() end\n  end\n  v_flush()\nend\n");
+                sb.Append("    local f = V_ONCLICK[chain[c]]\n    if f then f() end\n  end\n");
+                if (_reload) sb.Append("  if V_RELOAD then v_reload() end\n");
+                sb.Append("  v_flush()\nend\n");
             }
 
-            var helpers = Helpers(page + (_fixed ? " NumberMethods.toFixed" : string.Empty));
+            var reads = Reading();
+            var helpers = Helpers(page + browser + reads + (_fixed ? " NumberMethods.toFixed" : string.Empty));
             if (helpers.Length > 0) sb.Append("-- the JavaScript behaviours the script relies on\n").Append(helpers);
+            sb.Append(reads);
             if (_fixed)
             {
                 // The scene prints `%.nf` with .NET's rounding, which takes an exact half to even
@@ -1641,7 +2528,12 @@ internal static class PlainTranslator
                 sb.Append("  return (v < 0 and -r or r) / p\nend\n");
             }
 
-            sb.Append("\n-- the page's script\ndo\n").Append(page).Append("end\n\n");
+            if (_reload)
+            {
+                sb.Append(Reload());
+                sb.Append("\n-- the page's script, which a reload runs again\nv_main = function()\n").Append(page).Append("end\nv_main()\n\n");
+            }
+            else sb.Append("\n-- the page's script\ndo\n").Append(page).Append("end\n\n");
 
             // A long bracket no line of the scene closes: `stops=[[0,#fff],[1,#000]]` ends in `]]`.
             var level = "==";
@@ -1653,11 +2545,119 @@ internal static class PlainTranslator
             sb.Append("  rect = { unit = \"px\", x = -4, y = -4, w = 1, h = 1 }, props = { scene = SCENE, keep = 1, data = V_D } })\n");
             sb.Append("ui:commit()\n");
             sb.Append("for k in pairs(V_P) do V_P[k] = nil end\nfor k in pairs(V_E) do V_E[k] = nil end\n");
-            if (_timers)
+            if (_timers || _reload)
             {
-                sb.Append("\nfunction tick(dt)\n  if V_LIVE then\n    V_CLOCK = V_CLOCK + dt * 1000\n    v_run()\n    v_flush()\n  end\n");
+                sb.Append("\nfunction tick(dt)\n  if V_LIVE then\n");
+                if (_timers) sb.Append("    V_CLOCK = V_CLOCK + dt * 1000\n    v_run()\n");
+                if (_reload) sb.Append("    if V_RELOAD then v_reload() end\n");
+                sb.Append("    v_flush()\n  end\n");
                 sb.Append("  if V_AUTHOR then return V_AUTHOR(dt) end\nend\n");
             }
+            return sb.ToString();
+        }
+
+        /// <summary>The browser's pieces the program uses: attributes, the style values it reads back, location, storage, console.</summary>
+        private string Browser()
+        {
+            var sb = new StringBuilder();
+            if (_attrs)
+            {
+                sb.Append("-- attributes, as the browser stores them: a string, or nil for absent\n");
+                sb.Append("local function v_attr(v)\n  if v == nil or type(v) == \"string\" then return v end\n  return js_str(v)\nend\n");
+                sb.Append("local function v_setattr(at, name, v, c)\n  if v == nil then v = \"undefined\" elseif type(v) == \"table\" then v = js_str(v) end\n");
+                sb.Append("  at[name] = v\n  if c then v_class(c) end\nend\n");
+                sb.Append("local function v_rmattr(at, name, c)\n  at[name] = nil\n  if c then v_class(c) end\n  return true\nend\n");
+                sb.Append("local function v_toggleattr(at, name, force, c)\n  local on\n  if force == nil then on = at[name] == nil else on = js_truthy(force) end\n");
+                sb.Append("  if on then if at[name] == nil then at[name] = \"\" end else at[name] = nil end\n  if c then v_class(c) end\n  return on\nend\n");
+                sb.Append("local function v_hidden(at, v, c)\n  if js_truthy(v) then at.hidden = \"\" else at.hidden = nil end\n  if c then v_class(c) end\n  return v\nend\n");
+                foreach (var t in _order.Where(t => t.AttrTable != null && t.AttrTable.StartsWith("V_AT", StringComparison.Ordinal)))
+                {
+                    sb.Append("local ").Append(t.AttrTable).Append(" = ").Append(AttrInitial(t)).Append(" -- the attributes of \"").Append(t.Name).Append("\"\n");
+                    if (_reload) sb.Append("local ").Append(t.AttrTable).Append("0 = ").Append(AttrInitial(t)).Append('\n');
+                }
+            }
+            foreach (var plan in _order.SelectMany(t => t.StylePlans.Values).Where(p => p.ReadVar != null))
+            {
+                sb.Append("local ").Append(plan.ReadVar).Append(" = ").Append(plan.ReadInitial ?? "nil").Append(" -- a style value as written, for reading back\n");
+                if (plan.Printed != null)
+                    sb.Append("local ").Append(plan.ReadVar).Append("P = { ")
+                      .Append(string.Join(", ", plan.Printed.Select(p => "[" + (p.Key is double d ? JsToLuaNumber(d) : Q((string)p.Key)) + "] = " + Q(p.Value))))
+                      .Append(" }\n");
+            }
+            if (_hashWrites)
+            {
+                sb.Append("-- location: about:blank, and the fragment the page last navigated to\n");
+                sb.Append("local V_HASH, V_HREF = \"\", \"about:blank\"\n");
+                sb.Append("local V_PCT = { [\" \"] = \"%20\", [\"\\\"\"] = \"%22\", [\"<\"] = \"%3C\", [\">\"] = \"%3E\", [\"`\"] = \"%60\", [\"\\127\"] = \"%7F\" }\n");
+                sb.Append("for i = 0, 31 do V_PCT[string.char(i)] = string.format(\"%%%02X\", i) end\n");
+                sb.Append("local function v_sethash(v)\n  local f = js_str(v)\n  if string.sub(f, 1, 1) == \"#\" then f = string.sub(f, 2) end\n");
+                sb.Append("  f = string.gsub(f, \"[%c \\\"<>`]\", V_PCT)\n");
+                sb.Append("  V_HASH = f == \"\" and \"\" or \"#\" .. f\n  V_HREF = \"about:blank#\" .. f\n  return v\nend\n");
+            }
+            if (_localStorage || _sessionStorage)
+            {
+                sb.Append("-- Storage: values by key and the keys in order; localStorage kept in the chip's own store (ic.persist)\n");
+                sb.Append("local function v_storage(persist, list)\n  local s = { vals = {}, keys = {}, pos = {}, pk = {}, n = 0, persist = persist, list = list }\n");
+                sb.Append("  local ok, raw = false, nil\n  if persist then ok, raw = pcall(persist.get, list) end\n");
+                sb.Append("  if ok and type(raw) == \"string\" then\n    local i = 1\n    while i <= #raw do\n");
+                sb.Append("      local colon = string.find(raw, \":\", i, true)\n      if colon == nil then break end\n");
+                sb.Append("      local len = tonumber(string.sub(raw, i, colon - 1)) or 0\n      local k = string.sub(raw, colon + 1, colon + len)\n      i = colon + len + 1\n");
+                sb.Append("      local okv, v = pcall(persist.get, list .. \":\" .. k)\n");
+                sb.Append("      if okv and type(v) == \"string\" and s.pos[k] == nil then\n        s.n = s.n + 1 s.keys[s.n] = k s.pos[k] = s.n s.vals[k] = v\n      end\n");
+                sb.Append("    end\n  end\n  return s\nend\n");
+                sb.Append("local function v_quota()\n  error({ name = \"QuotaExceededError\", message = \"The quota has been exceeded.\", stack = \"\", __error = true }, 0)\nend\n");
+                sb.Append("local function v_skey(s, k)\n  local p = s.pk[k]\n  if p == nil then p = s.list .. \":\" .. k s.pk[k] = p end\n  return p\nend\n");
+                sb.Append("local function v_slist(s)\n  local parts = {}\n  for i = 1, s.n do parts[i] = #s.keys[i] .. \":\" .. s.keys[i] end\n");
+                sb.Append("  local ok, done = pcall(s.persist.set, s.list, table.concat(parts))\n  return ok and done ~= false\nend\n");
+                sb.Append("local function v_sset(s, k, v)\n  local was = s.vals[k]\n  if was == v then return end\n");
+                sb.Append("  if s.persist then\n    local ok, done = pcall(s.persist.set, v_skey(s, k), v)\n    if not ok or done == false then v_quota() end\n  end\n");
+                sb.Append("  s.vals[k] = v\n  if was ~= nil then return end\n  s.n = s.n + 1 s.keys[s.n] = k s.pos[k] = s.n\n");
+                sb.Append("  if s.persist and not v_slist(s) then\n    s.keys[s.n] = nil s.pos[k] = nil s.vals[k] = nil s.n = s.n - 1\n");
+                sb.Append("    pcall(s.persist.delete, v_skey(s, k))\n    v_quota()\n  end\nend\n");
+                sb.Append("local function v_srm(s, k)\n  local p = s.pos[k]\n  if p == nil then return end\n  table.remove(s.keys, p)\n");
+                sb.Append("  s.n = s.n - 1\n  for i = p, s.n do s.pos[s.keys[i]] = i end\n  s.pos[k] = nil s.vals[k] = nil\n");
+                sb.Append("  if s.persist then pcall(s.persist.delete, v_skey(s, k)) v_slist(s) end\nend\n");
+                sb.Append("local function v_sclear(s)\n  if s.n == 0 then return end\n");
+                sb.Append("  for i = s.n, 1, -1 do\n    local k = s.keys[i]\n    if s.persist then pcall(s.persist.delete, v_skey(s, k)) end\n");
+                sb.Append("    s.keys[i] = nil s.pos[k] = nil s.vals[k] = nil\n  end\n  s.n = 0\n  if s.persist then pcall(s.persist.delete, s.list) end\nend\n");
+                sb.Append("local function v_skeyat(s, i)\n  i = tonumber(i) or 0\n  if i ~= i then i = 0 end\n  return s.keys[math.floor(i) + 1]\nend\n");
+                if (_localStorage) sb.Append("local V_LS = v_storage(ic and ic.persist, \"html.ls\")\n");
+                if (_sessionStorage) sb.Append("local V_SS = v_storage(nil, \"html.ss\")\n");
+            }
+            if (_void) sb.Append("-- the console's methods: a chip has no console\nlocal function v_void() end\n");
+            foreach (var line in _consts) sb.Append(line).Append('\n');
+            return sb.ToString();
+        }
+
+        /// <summary>How the program prints what it reads back, after the prelude it prints with.</summary>
+        private string Reading()
+        {
+            var sb = new StringBuilder();
+            if (_toFixedRead) sb.Append("local function v_tofixed(v, n)\n  if type(v) ~= \"number\" then return v end\n  return NumberMethods.toFixed(v, n)\nend\n");
+            if (_untmp) sb.Append("local function v_untmp(v)\n  if type(v) ~= \"string\" then return js_str(v) end\n  return (string.gsub(v, \"<noparse><</noparse>\", \"<\"))\nend\n");
+            if (_cssNum) sb.Append("local function v_cssnum(v, unit)\n  if v == nil then return \"\" end\n  return string.format(\"%.6g\", v) .. unit\nend\n");
+            return sb.ToString();
+        }
+
+        /// <summary>location.reload(): everything the page's script set up, back to how the page's source has it, and the script run again.</summary>
+        private string Reload()
+        {
+            var sb = new StringBuilder("v_reload = function()\n  V_RELOAD = false\n");
+            if (_timers) sb.Append("  for s = 1, V_SLOTS do V_FN[s] = nil V_ID[s] = nil end\n");
+            if (_order.Any(t => t.Listens))
+                sb.Append("  for _, list in pairs(V_ON) do for i = #list, 1, -1 do list[i] = nil end end\n  for k in pairs(V_ONCLICK) do V_ONCLICK[k] = nil end\n");
+            foreach (var t in _order.Where(t => t.Class != null))
+            {
+                var c = t.Class!.Var;
+                sb.Append("  v_reset(").Append(c).Append(".on, ").Append(c).Append(".on0)\n");
+                if (t.AttrTable == c + ".at") sb.Append("  v_reset(").Append(c).Append(".at, ").Append(c).Append(".at0)\n");
+                if (t.Class.Order != null) sb.Append("  v_reset(").Append(c).Append(".order, ").Append(c).Append(".order0) ").Append(c).Append(".raw = ").Append(c).Append(".raw0\n");
+            }
+            foreach (var t in _order.Where(t => t.AttrTable != null && t.AttrTable.StartsWith("V_AT", StringComparison.Ordinal)))
+                sb.Append("  v_reset(").Append(t.AttrTable).Append(", ").Append(t.AttrTable).Append("0)\n");
+            foreach (var plan in _order.SelectMany(t => t.StylePlans.Values).Where(p => p.ReadVar != null))
+                sb.Append("  ").Append(plan.ReadVar).Append(" = ").Append(plan.ReadInitial ?? "nil").Append('\n');
+            sb.Append("  for k, v in pairs(V_D0) do v_set(k, v) end\n  v_main()\nend\n");
             return sb.ToString();
         }
 

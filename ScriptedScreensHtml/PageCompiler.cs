@@ -712,20 +712,18 @@ internal static class PageCompiler
     }
 
     /// <summary>The page as it is laid out now, emitted and split, leaving the surface's own capture alone.</summary>
-    internal static string Emitted(HtmlRenderer.Result built, Panel panel, Dictionary<string, SceneSlots.Value> values)
+    /// <param name="patch">Changes what the emitter reads of the layout before it emits (PlainTranslator: an element
+    /// hidden in one state keeps its shapes, from the layout that shows it).</param>
+    internal static string Emitted(HtmlRenderer.Result built, Panel panel, Dictionary<string, SceneSlots.Value> values,
+                                   Action<Dictionary<VisualElement, OffThread.Box>>? patch = null)
     {
         var wasBoxes = OffThread.Boxes;
         var wasActive = OffThread.Active;
         var wasJob = OffThread.Job;
-        // Capture clears the touch sets the surface's incremental capture relies on; put them back.
-        var touched = new HashSet<VisualElement>(built.Touched);
-        var deep = new HashSet<VisualElement>(built.TouchedDeep);
         try
         {
-            var boxes = new Dictionary<VisualElement, OffThread.Box>();
-            OffThread.Capture(built.Root, built, boxes, new List<VisualElement>());
-            built.Touched.UnionWith(touched);
-            built.TouchedDeep.UnionWith(deep);
+            var boxes = Captured(built);
+            patch?.Invoke(boxes);
             // As on a worker: from the captured boxes, with font questions deferred rather than
             // asked of TextMeshPro, whose lookups throw outside the player.
             OffThread.Boxes = boxes;
@@ -740,6 +738,19 @@ internal static class PageCompiler
             OffThread.Active = wasActive;
             OffThread.Job = wasJob;
         }
+    }
+
+    /// <summary>What the emitter reads of the page as it is laid out now, leaving the surface's own capture alone.</summary>
+    internal static Dictionary<VisualElement, OffThread.Box> Captured(HtmlRenderer.Result built)
+    {
+        // Capture clears the touch sets the surface's incremental capture relies on; put them back.
+        var touched = new HashSet<VisualElement>(built.Touched);
+        var deep = new HashSet<VisualElement>(built.TouchedDeep);
+        var boxes = new Dictionary<VisualElement, OffThread.Box>();
+        OffThread.Capture(built.Root, built, boxes, new List<VisualElement>());
+        built.Touched.UnionWith(touched);
+        built.TouchedDeep.UnionWith(deep);
+        return boxes;
     }
 
     /// <summary>A template line with its positional slot numbers blanked, so lines either side of a cut compare equal.</summary>

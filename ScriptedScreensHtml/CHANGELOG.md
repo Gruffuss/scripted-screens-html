@@ -2,6 +2,24 @@
 
 Newest first. The workshop page is a short overview; this file has the full history.
 
+## Unreleased
+
+- A page is compiled once, for the size of the console it sits on, into a vector scene and a short
+  Lua program on the console's chip, written the way a hand-made vector console is. After that,
+  nothing of this mod runs for it: the page's timers run on the chip's own tick, clicks arrive through
+  the scene, and only changed values are sent. This covers pages whose script uses `setTimeout`,
+  `setInterval` and their `clear` calls, click listeners and `onclick`, `getElementById`, writes to
+  `textContent`, `className`, `classList` and `style`, `toFixed`, `location` (a console page has no URL,
+  so it reads as `about:blank`; the `#hash` works), `localStorage` (kept in the chip's own store, so it
+  survives), `sessionStorage`, `innerWidth`/`innerHeight`, attributes (including ones CSS selects on),
+  `hidden`, `dataset`, and reading back what the script wrote. `console` calls are removed. Other pages
+  still run as before, and the log says which feature kept a page from compiling.
+- A console in a room with no player compiles and runs its page too; before, it waited until someone
+  walked in.
+- `parseInt` and `parseFloat` read a leading number as JavaScript does: `parseInt("10px")` is 10, not
+  NaN.
+- A stylesheet `%` width no longer overrides a width set later by a class or an inline style.
+
 ## 0.2.0
 
 - A page without a script, driven by Lua data, sends its values straight to the scene once the

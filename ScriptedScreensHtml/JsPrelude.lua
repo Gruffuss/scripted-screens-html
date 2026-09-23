@@ -2444,10 +2444,35 @@ end
 Boolean = setmetatable({}, { __call = function(_, v) return js_truthy(v) end })
 
 function isNaN(v) local n = js_num(v) return n ~= n end
-function parseFloat(v) return tonumber(v) or (0 / 0) end
+-- Both read the longest number the text STARTS with, as JavaScript's do: parseInt("10px") is 10
+-- and parseFloat("1.5em") 1.5, which is how a page reads a length back out of element.style.
+function parseFloat(v)
+  if type(v) == "number" then return v end
+  local s = string.match(js_str(v), "^%s*(.*)$")
+  local m = string.match(s, "^[+-]?%d+%.?%d*[eE][+-]?%d+") or string.match(s, "^[+-]?%.%d+[eE][+-]?%d+")
+            or string.match(s, "^[+-]?%d+%.?%d*") or string.match(s, "^[+-]?%.%d+")
+  if m then return tonumber(m) end
+  if string.match(s, "^[+-]?Infinity") then return string.sub(s, 1, 1) == "-" and -math.huge or math.huge end
+  return 0 / 0
+end
 function parseInt(v, base)
-  if type(v) == "number" then return Math.trunc(v) end
-  return tonumber(v, base) or (0 / 0)
+  if type(v) == "number" and (base == nil or base == 10) then return Math.trunc(v) end
+  local s = string.match(js_str(v), "^%s*(.*)$")
+  local sign, c = 1, string.sub(s, 1, 1)
+  if c == "-" then sign = -1 s = string.sub(s, 2) elseif c == "+" then s = string.sub(s, 2) end
+  base = math.floor(tonumber(base) or 0)
+  if (base == 0 or base == 16) and string.match(s, "^0[xX]") then base = 16 s = string.sub(s, 3) end
+  if base == 0 then base = 10 end
+  if base < 2 or base > 36 then return 0 / 0 end
+  local n, digits = 0, 0
+  for i = 1, #s do
+    local d = tonumber(string.sub(s, i, i), 36)
+    if d == nil or d >= base then break end
+    n = n * base + d
+    digits = digits + 1
+  end
+  if digits == 0 then return 0 / 0 end
+  return sign * n
 end
 
 Object = {

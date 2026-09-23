@@ -10,6 +10,8 @@ internal sealed class HtmlNode
 {
     public string? Tag;
     public string Text = string.Empty;
+    /// <summary>A text node's source text before whitespace was collapsed, entities still encoded (null for elements).</summary>
+    public string? Raw;
 
     // Made on demand. Half the nodes of a page are text, which never has either, and a page that
     // rebuilds through innerHTML parses its whole markup again two or three times a second: an
@@ -40,6 +42,7 @@ internal sealed class HtmlNode
     {
         Tag = null;
         Text = string.Empty;
+        Raw = null;
         Parent = null;
         Vars = null;
         ScriptStyle = null;
@@ -201,16 +204,24 @@ internal static class HtmlParser
             for (var n = current; n != null; n = n.Parent)
                 if (n.Tag is "pre" or "textarea") { preformatted = true; break; }
             string kept;
+            // the source's text, whitespace as written and entities as written: what the DOM's
+            // textContent holds, once decoded
+            var source = raw;
             if (preformatted)
             {
-                kept = DecodeEntities(raw.Replace("\r\n", "\n"));
-                if (current.Children.Count == 0 && kept.StartsWith("\n", StringComparison.Ordinal)) kept = kept.Substring(1);
+                source = raw.Replace("\r\n", "\n");
+                kept = DecodeEntities(source);
+                if (current.Children.Count == 0 && kept.StartsWith("\n", StringComparison.Ordinal))
+                {
+                    kept = kept.Substring(1);
+                    if (source.StartsWith("\n", StringComparison.Ordinal)) source = source.Substring(1);
+                }
             }
             else
                 kept = CollapseWhitespace(raw);
             if (kept.Length == 0)
                 return;
-            { var t = New(); t.Text = kept; t.Parent = current; current.Children.Add(t); }
+            { var t = New(); t.Text = kept; t.Raw = source; t.Parent = current; current.Children.Add(t); }
         }
 
         while (i < html.Length)

@@ -16,11 +16,11 @@ Rules and columns: see INSTRUCTION-SET.md.
 | Window.cancelAnimationFrame() | | | | |
 | Window.requestIdleCallback() | | | | |
 | Window.cancelIdleCallback() | | | | |
-| Window.innerWidth | | | | |
-| Window.innerHeight | | | | |
+| Window.innerWidth | ✅ | a constant: the width the page is laid out at on the console it is compiled for (its `<meta name=viewport>` width, else the console's canvas width; one CSS pixel is one canvas unit), floored as the browser's is. Writing it is refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "innerWidth, innerHeight and devicePixelRatio: the console the page is compiled for" | |
+| Window.innerHeight | ✅ | a constant: the height the page is laid out at, in the console's own proportions, floored | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "innerWidth, innerHeight and devicePixelRatio: the console the page is compiled for" | |
 | Window.outerWidth | | | | |
 | Window.outerHeight | | | | |
-| Window.devicePixelRatio | | | | |
+| Window.devicePixelRatio | ✅ | the constant 1: one CSS pixel is one unit of the console's canvas, and the vector scene has no pixels of its own | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "innerWidth, innerHeight and devicePixelRatio: the console the page is compiled for" | |
 | Window.getComputedStyle() | | | | |
 | Window.queueMicrotask() | | | | |
 | Window.structuredClone() | | | | |
@@ -51,21 +51,21 @@ Rules and columns: see INSTRUCTION-SET.md.
 
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
-| Window.location | | | | |
-| Location.href | | | | |
-| Location.protocol | | | | |
-| Location.host | | | | |
-| Location.hostname | | | | |
-| Location.port | | | | |
-| Location.pathname | | | | |
-| Location.search | | | | |
-| Location.hash | | | | |
-| Location.origin | | | | |
-| Location.ancestorOrigins | | | | |
-| Location.assign() | | | | |
-| Location.replace() | | | | |
-| Location.reload() | | | | |
-| Location.toString() | | | | |
+| Window.location | ✅ | no object on the chip: each member below is resolved at compile time; `typeof location` is "object"; `window.location` the same. `location = url` is a navigation (see href). The object passed around as a value is refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click" | |
+| Location.href | ✅ | read: "about:blank" (what a page loaded from no URL has), or `V_HREF` once the script navigates to a fragment. Set to a fragment (`#x`): the hash, below. Set to anything else: refused, it loads another document and a console holds only the page compiled onto it, with no network to fetch another | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click" | |
+| Location.protocol | ✅ | read: the constant "about:". Setting protocol, host, hostname, port, pathname or search is refused: it loads another document, and a console holds only the page compiled onto it and has no network to fetch another. | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click" | |
+| Location.host | ✅ | read: the constant "". Setting protocol, host, hostname, port, pathname or search is refused: it loads another document, and a console holds only the page compiled onto it and has no network to fetch another. | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click" | |
+| Location.hostname | ✅ | read: the constant "". Setting protocol, host, hostname, port, pathname or search is refused: it loads another document, and a console holds only the page compiled onto it and has no network to fetch another. | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click" | |
+| Location.port | ✅ | read: the constant "". Setting protocol, host, hostname, port, pathname or search is refused: it loads another document, and a console holds only the page compiled onto it and has no network to fetch another. | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click" | |
+| Location.pathname | ✅ | read: the constant "blank". Setting protocol, host, hostname, port, pathname or search is refused: it loads another document, and a console holds only the page compiled onto it and has no network to fetch another. | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click" | |
+| Location.search | ✅ | read: the constant "". Setting protocol, host, hostname, port, pathname or search is refused: it loads another document, and a console holds only the page compiled onto it and has no network to fetch another. | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click"; refusal "changing location.search" | |
+| Location.hash | ✅ | read: "" until the script sets one, then `V_HASH`. Set: `v_sethash` (a leading # dropped, space, ", <, >, ` and control characters percent-encoded as the URL spec does), which also sets `V_HREF`. No hashchange event (a window event, not translated) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click" | |
+| Location.origin | ✅ | read: the constant "null" (about:blank's opaque origin) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click" | |
+| Location.ancestorOrigins | ✅ | an empty list: `.length` is 0, `.item()` null, `.contains()` false (a console's page is embedded in nothing). Other uses refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click" | |
+| Location.assign() | ✅ | to a fragment of this page (`#x`, known to start with # at compile time): `v_sethash`. Anywhere else: refused, it loads another document and a console has no network to fetch another; a URL only known at run time is refused as possibly another document | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click"; refusal "location.assign to a URL only known at run time" | |
+| Location.replace() | ✅ | as assign(): the console keeps no history, so the two are one | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location.reload(): the page starts again ..." | |
+| Location.reload() | ✅ | `v_askreload()`; once the script that asked has finished (the timer callback or the click), `v_reload` clears every timer and listener, puts every class, attribute and scene value back as the page's source has them, and runs the page's script again (`v_main`); sessionStorage, localStorage and the hash are kept, as a browser keeps them | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location.reload(): the page starts again ..." | |
+| Location.toString() | ✅ | as href | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location: what a page loaded from no URL reads, and a hash set by a click" | |
 
 #### Window.history and the History interface
 
@@ -98,29 +98,29 @@ Rules and columns: see INSTRUCTION-SET.md.
 
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
-| console.log() | | | | |
-| console.info() | | | | |
-| console.warn() | | | | |
-| console.error() | | | | |
-| console.debug() | | | | |
-| console.table() | | | | |
-| console.group() | | | | |
-| console.groupCollapsed() | | | | |
-| console.groupEnd() | | | | |
-| console.time() | | | | |
-| console.timeEnd() | | | | |
-| console.timeLog() | | | | |
-| console.timeStamp() | | | | |
-| console.assert() | | | | |
-| console.count() | | | | |
-| console.countReset() | | | | |
-| console.trace() | | | | |
-| console.clear() | | | | |
-| console.dir() | | | | |
-| console.dirxml() | | | | |
-| console.exception() (non-standard) | | | | |
-| console.profile() (non-standard) | | | | |
-| console.profileEnd() (non-standard) | | | | |
+| console.log() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.log` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.info() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.info` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.warn() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.warn` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.error() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.error` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.debug() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.debug` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.table() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.table` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.group() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.group` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.groupCollapsed() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.groupCollapsed` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.groupEnd() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.groupEnd` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.time() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.time` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.timeEnd() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.timeEnd` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.timeLog() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.timeLog` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.timeStamp() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.timeStamp` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.assert() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.assert` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.count() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.count` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.countReset() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.countReset` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.trace() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.trace` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.clear() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.clear` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.dir() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.dir` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.dirxml() | ✅ | removed at compile: a chip has no console. An argument that does something (a call, an assignment, ++) is still evaluated where the call stood; `console.dirxml` passed as a function is `v_void`, which does nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.exception() (non-standard) | ✅ | removed at compile, as console.log | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.profile() (non-standard) | ✅ | removed at compile, as console.log | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
+| console.profileEnd() (non-standard) | ✅ | removed at compile, as console.log | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "console: every call goes, and what its arguments do stays"; "[console]: every console call is gone from the compiled Lua" | |
 
 #### Window.performance and the Performance interface
 
@@ -148,14 +148,14 @@ Rules and columns: see INSTRUCTION-SET.md.
 
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
-| Window.localStorage | | | | |
-| Window.sessionStorage | | | | |
-| Storage.length | | | | |
-| Storage.key() | | | | |
-| Storage.getItem() | | | | |
-| Storage.setItem() | | | | |
-| Storage.removeItem() | | | | |
-| Storage.clear() | | | | |
+| Window.localStorage | ✅ | a Lua table kept in the chip's own store, `ic.persist` (stationeers://lua/api/persist): each value under "html.ls:<key>", the keys in order under "html.ls", read back when the chunk loads, so values outlive a save/load or a game restart as a browser's outlive a reload. Limits are the store's: a key up to 120 characters, a value up to 8192, 32768 bytes per chip shared with the chip's own program; past them setItem throws QuotaExceededError. The store is keyed to the chip's source, so editing the page starts it empty. `typeof localStorage` is "object"; named properties (`localStorage.x`) are refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "sessionStorage and localStorage: setItem, getItem, key, length, removeItem and clear"; PlainTranslatorTests: "localStorage outlives a restart, as the chip's own store" (three console sizes) | |
+| Window.sessionStorage | ✅ | the same table in the program's memory only (`V_SS`): kept through location.reload(), gone when the page is compiled again | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "sessionStorage and localStorage: setItem, getItem, key, length, removeItem and clear"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "location.reload(): the page starts again ..." | |
+| Storage.length | ✅ | `V_LS.n` / `V_SS.n` | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "sessionStorage and localStorage: setItem, getItem, key, length, removeItem and clear" | |
+| Storage.key() | ✅ | `v_skeyat`: the keys in the order they were first set; null past the end | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "sessionStorage and localStorage: setItem, getItem, key, length, removeItem and clear" | |
+| Storage.getItem() | ✅ | `V_LS.vals[key]` (the key converted as String() converts it); null (nil) when absent, printed "null" in a text | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "sessionStorage and localStorage: setItem, getItem, key, length, removeItem and clear"; PlainTranslatorTests: "localStorage outlives a restart, as the chip's own store" (three console sizes) | |
+| Storage.setItem() | ✅ | `v_sset`: the value as String() gives it; written to `ic.persist` only when it changed, and the key list only when a key is new | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "sessionStorage and localStorage: setItem, getItem, key, length, removeItem and clear"; PlainTranslatorTests: "localStorage outlives a restart, as the chip's own store" (three console sizes) | |
+| Storage.removeItem() | ✅ | `v_srm` | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "sessionStorage and localStorage: setItem, getItem, key, length, removeItem and clear" | |
+| Storage.clear() | ✅ | `v_sclear`: only this page's keys; the chip program's own `ic.persist` keys are left alone | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "sessionStorage and localStorage: setItem, getItem, key, length, removeItem and clear" | |
 
 (Storage's five members are shared identically by both localStorage and sessionStorage — listed once per the task's grouping note.)
 
@@ -425,7 +425,7 @@ Rules and columns: see INSTRUCTION-SET.md.
 | Node.parentElement | | | | |
 | Node.parentNode | | | | |
 | Node.previousSibling | | | | |
-| Node.textContent | ✅ | writes: a text placeholder `{$id_pN:%...}` (numbers) or a constant-string slot. Reads are refused for now | PlainTranslatorTests: toFixed and a template literal; text written in two shapes; plain-counter in game | |
+| Node.textContent | ✅ | writes: a text placeholder `{$id_pN:%...}` (numbers) or a constant-string slot. Reads: a written label's text rebuilt from its slots as JavaScript prints them (`js_str`, toFixed); an element the script never writes, the constant text its source holds, whitespace as written. `+=` and reading an element whose inner labels the script writes are refused for now | PlainTranslatorTests: toFixed and a template literal; text written in two shapes; plain-counter in game; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: textContent, className, classList.contains and style answer what the script wrote" | |
 | Node.ELEMENT_NODE (constant = 1) | | | | |
 | Node.ATTRIBUTE_NODE (constant = 2) | | | | |
 | Node.TEXT_NODE (constant = 3) | | | | |
@@ -539,8 +539,8 @@ Note: same orphaned-page caveat as ParentNode above.
 | Element.attributes | | | | |
 | Element.childElementCount | | | | |
 | Element.children | | | | |
-| Element.classList | ✅ | class states, every combination laid out at compile time (up to 6 classes), `v_class`. `contains` (a read) is refused for now | PlainTranslatorTests: addEventListener('click') ...; 09-transition in game | |
-| Element.className | ✅ | writes from a fixed set: class states (`v_classname`). A value computed at run time is refused | PlainTranslatorTests: a colour picked by a condition ... className | |
+| Element.classList | ✅ | class states, every combination laid out at compile time (up to 6 classes, 64 states with the attributes CSS selects on), `v_class`. `contains`: see DOMTokenList.contains(); item, value and the rest are refused for now | PlainTranslatorTests: addEventListener('click') ...; 09-transition in game; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: textContent, className, classList.contains and style answer what the script wrote" | |
+| Element.className | ✅ | writes from a fixed set: class states (`v_classname`). A value computed at run time is refused. Reads: the class attribute as the page wrote it until the script changes it, then its classes in the order a browser keeps them (`V_Cn.order`, `table.concat` at the read) | PlainTranslatorTests: a colour picked by a condition ... className; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: textContent, className, classList.contains and style answer what the script wrote" | |
 | Element.clientHeight | | | | |
 | Element.clientLeft | | | | |
 | Element.clientTop | | | | |
@@ -579,7 +579,7 @@ Note: same orphaned-page caveat as ParentNode above.
 | Element.closest() | | | | |
 | Element.computedStyleMap() | | | | |
 | Element.getAnimations() | | | | |
-| Element.getAttribute() | | | | |
+| Element.getAttribute() | ✅ | an attribute the script changes (or looks up by a run-time name): the program's table of the element's attributes (`v_attr(at[name])`, the page's own values to start); any other, the constant its source gives, or null. `class` and `style` through it are refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "setAttribute, removeAttribute, toggleAttribute and dataset on attributes CSS selects on"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "attributes nothing selects on: kept as the program's own values" | |
 | Element.getAttributeNames() | | | | |
 | Element.getAttributeNode() | | | | |
 | Element.getAttributeNodeNS() | | | | |
@@ -591,7 +591,7 @@ Note: same orphaned-page caveat as ParentNode above.
 | Element.getElementsByTagName() | | | | |
 | Element.getElementsByTagNameNS() | | | | |
 | Element.getHTML() | | | | |
-| Element.hasAttribute() | | | | |
+| Element.hasAttribute() | ✅ | as getAttribute: `(at[name] ~= nil)`, or a constant | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "setAttribute, removeAttribute, toggleAttribute and dataset on attributes CSS selects on"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "attributes nothing selects on: kept as the program's own values" | |
 | Element.hasAttributeNS() | | | | |
 | Element.hasAttributes() | | | | |
 | Element.hasPointerCapture() | | | | |
@@ -606,7 +606,7 @@ Note: same orphaned-page caveat as ParentNode above.
 | Element.querySelectorAll() | | | | |
 | Element.releasePointerCapture() | | | | |
 | Element.remove() | | | | |
-| Element.removeAttribute() | | | | |
+| Element.removeAttribute() | ✅ | as setAttribute: `v_rmattr`, absent being one of the laid-out values | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "setAttribute, removeAttribute, toggleAttribute and dataset on attributes CSS selects on"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "attributes nothing selects on: kept as the program's own values" | |
 | Element.removeAttributeNode() | | | | |
 | Element.removeAttributeNS() | | | | |
 | Element.replaceChildren() | | | | |
@@ -618,7 +618,7 @@ Note: same orphaned-page caveat as ParentNode above.
 | Element.scrollIntoView() | | | | |
 | Element.scrollIntoViewIfNeeded() (non-standard) | | | | |
 | Element.scrollTo() | | | | |
-| Element.setAttribute() | | | | |
+| Element.setAttribute() | ✅ | an attribute CSS selects on (`[data-x]`, `[hidden]`, `aria-*` in a selector) changes which rules match: every value the script can give it, from a fixed set, is laid out with the element's classes as one set of states (`v_setattr` then `v_class`); a value only known at run time is refused. Any other attribute (`data-*`, `aria-*`, `role`, `title`...) is the program's own value, for the script to read back. Attributes the page draws from directly (width, src, value, svg geometry...), `on*`, `class`, `style` and `id`, and a name only known at run time, are refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "setAttribute, removeAttribute, toggleAttribute and dataset on attributes CSS selects on"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "attributes nothing selects on: kept as the program's own values"; refusals "an attribute CSS selects on, set to a value known only at run time", "an attribute the page draws from directly", "setAttribute with a name known only at run time" | |
 | Element.setAttributeNode() | | | | |
 | Element.setAttributeNodeNS() | | | | |
 | Element.setAttributeNS() | | | | |
@@ -627,7 +627,7 @@ Note: same orphaned-page caveat as ParentNode above.
 | Element.setHTMLUnsafe() | | | | |
 | Element.setPointerCapture() | | | | |
 | Element.startViewTransition() | | | | |
-| Element.toggleAttribute() | | | | |
+| Element.toggleAttribute() | ✅ | as setAttribute: `v_toggleattr` (present as ""), returning whether it is now present | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "setAttribute, removeAttribute, toggleAttribute and dataset on attributes CSS selects on" | |
 
 #### HTMLElement
 
@@ -641,12 +641,12 @@ Note: same orphaned-page caveat as ParentNode above.
 | HTMLElement.autocorrect | | | | |
 | HTMLElement.autofocus | | | | |
 | HTMLElement.contentEditable | | | | |
-| HTMLElement.dataset | | | | |
+| HTMLElement.dataset | ✅ | see DOMStringMap: each key is the attribute `data-<kebab-case key>`, through the attribute calls | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "setAttribute, removeAttribute, toggleAttribute and dataset on attributes CSS selects on"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "attributes nothing selects on: kept as the program's own values" | |
 | HTMLElement.dir | | | | |
 | HTMLElement.draggable | | | | |
 | HTMLElement.editContext | | | | |
 | HTMLElement.enterKeyHint | | | | |
-| HTMLElement.hidden | | | | |
+| HTMLElement.hidden | ✅ | the browser's own `[hidden] { display: none }` as laid-out states: the element keeps its shapes in the scene inside `G v=$name_v` (0: not drawn and not clickable, as display: none), placed where each layout would put it shown, and what follows moves up as the browser moves it (`v_hidden`). Read: `(at.hidden ~= nil)`. Two elements whose hiding moves the same box (two toggled panels above one list) are refused for now, as two elements' classes are | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "hidden: the element leaves the layout and comes back, and one hidden from the start shows" | |
 | HTMLElement.inert | | | | |
 | HTMLElement.innerText | | | | |
 | HTMLElement.inputMode | | | | |
@@ -661,7 +661,7 @@ Note: same orphaned-page caveat as ParentNode above.
 | HTMLElement.outerText | | | | |
 | HTMLElement.popover | | | | |
 | HTMLElement.spellcheck | | | | |
-| HTMLElement.style | ✅ | numbers (px, %, opacity): a slot through scale+offset from the layout; values from a fixed set (colours, words): laid-out states. Writes that move other boxes or use other units are refused | PlainTranslatorTests: setInterval + clearInterval; style.left in px and style.opacity; a colour picked by a condition; plain-counter in game | |
+| HTMLElement.style | ✅ | numbers (px, %, opacity): a slot through scale+offset from the layout; values from a fixed set (colours, words): laid-out states. Writes that move other boxes or use other units are refused. Reads of `style.<property>`: the value last written, kept as written (`V_SVn`) and printed as the browser's inline style gives it back (a length to six figures with its unit, a hex colour as rgb()/rgba(), a keyword in lower case), else what the style attribute says, else "". A property whose shorthand or longhand is also set, and a value in another form, are refused for now | PlainTranslatorTests: setInterval + clearInterval; style.left in px and style.opacity; a colour picked by a condition; plain-counter in game; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: textContent, className, classList.contains and style answer what the script wrote"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: a colour and a keyword written from a fixed set come back as the browser prints them" | |
 | HTMLElement.tabIndex | | | | |
 | HTMLElement.title | | | | |
 | HTMLElement.translate | | | | |
@@ -1391,7 +1391,7 @@ Note: this table covers the interface's own generic members only (indexed access
 | DOMTokenList.length | | | | |
 | DOMTokenList.value | | | | |
 | DOMTokenList.item() | | | | |
-| DOMTokenList.contains() | | | | |
+| DOMTokenList.contains() | ✅ | as `Element.classList`: `(V_Cn.on[name] == true)`; an element whose classes the script never changes answers from the page's source (a constant for a literal name) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: textContent, className, classList.contains and style answer what the script wrote" | |
 | DOMTokenList.add() | ✅ | as `Element.classList` | PlainTranslatorTests: 09-transition; the script's own logic ... | |
 | DOMTokenList.remove() | ✅ | as `Element.classList` | PlainTranslatorTests: the script's own logic ... | |
 | DOMTokenList.replace() | | | | |
@@ -1407,7 +1407,7 @@ Note: this table covers the interface's own generic members only (indexed access
 
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
-| DOMStringMap — dynamic named-property access only (`dataset.someName` getter/setter/deleter mapping to `data-some-name`); the spec defines no fixed member list, so this is grouped as a single indexed-access feature rather than enumerated | | | | |
+| DOMStringMap — dynamic named-property access only (`dataset.someName` getter/setter/deleter mapping to `data-some-name`); the spec defines no fixed member list, so this is grouped as a single indexed-access feature rather than enumerated | ✅ | `el.dataset.fooBar` is the attribute `data-foo-bar`: read, write, `delete` and `'fooBar' in el.dataset`, each as the attribute calls (Element.setAttribute); a key only known at run time, and the map as a value, are refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "setAttribute, removeAttribute, toggleAttribute and dataset on attributes CSS selects on"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "attributes nothing selects on: kept as the program's own values" | |
 
 #### NamedNodeMap
 
