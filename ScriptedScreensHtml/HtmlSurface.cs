@@ -394,8 +394,10 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>
     /// Cascade, layout and the shared state they use (counters, pending calc, the em size) are
     /// one page at a time; translation, the long part, runs on all page threads at once.
+    /// The compiler's own gate: a compile on a page thread takes it per cascade and per layout, so it
+    /// lays out between other pages' frames, never across one of them.
     /// </summary>
-    internal static readonly object CascadeGate = new();
+    internal static readonly object CascadeGate = PageCompiler.Gate;
 
     /// <summary>Runs <paramref name="work"/> on the page thread at the start of its next frame. Game thread.</summary>
     private void Post(Action work) => _inbox.Enqueue(work);
@@ -413,6 +415,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         _frameDiagnostics = HtmlConfig.Diagnostics;
         _frameResult = null;
         _frameError = null;
+        _compileStop = false;
         _pageDone.Reset();
         _pageState = PageRunning;
         _pageWake.Set();
@@ -664,6 +667,9 @@ internal sealed class HtmlSurface : MonoBehaviour
         _byId = built.ById;
         _shapes = built.Shapes;
         _built = built;
+        // So a page built again - a capture, the same push twice, fifteen consoles showing it -
+        // finds its compile rather than making it again.
+        PageCompiler.Remember(built, _source);
         AttachLayouts(built);
 
         _script?.Dispose();
@@ -683,9 +689,6 @@ internal sealed class HtmlSurface : MonoBehaviour
             foreach (var id in built.ById.Keys)
                 if (!id.StartsWith("__", StringComparison.Ordinal)) built.Driven.Add(id);
 
-        // Reports only. The page still runs on the interpreter below; this says whether the compiler
-        // that will replace it can handle this page, on this machine, under Mono.
-        CompileProbe.Run(PageKey, built.Script);
         if (!string.IsNullOrWhiteSpace(built.Script))
         {
             _script = new ScriptHost(
@@ -1135,6 +1138,14 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     /// <summary>The build this surface last tried to compile, so a failure is not retried every frame.</summary>
     private HtmlRenderer.Result? _compileTried;
+    /// <summary>
+    /// What the page thread compiled, for FinishJob to install on the game thread: the build and size
+    /// compiled, and the scene template and values the compile bound (the structure the chunk writes
+    /// into, when the compile does not bring its own).
+    /// </summary>
+    private (HtmlRenderer.Result Built, Vector2 Size, string Template, Dictionary<string, SceneSlots.Value> Values)? _compileReady;
+    /// <summary>Set by the game thread when it needs the page (Hold): a compile running on the page thread stops at its next step.</summary>
+    private volatile bool _compileStop;
     private readonly Dictionary<VisualElement, OffThread.Box> _boxes = new();
     private readonly List<VisualElement> _boxScratch = new();
     private double _lastCopyMs;
@@ -1161,6 +1172,9 @@ internal sealed class HtmlSurface : MonoBehaviour
             return;
         if (_pageState == PageRunning)
         {
+            // A compile in this frame takes seconds, and waiting it out here froze the game: it
+            // stops at its next step instead, puts the page back, and a later frame compiles again.
+            _compileStop = true;
             var w0 = Clock.Elapsed.TotalMilliseconds;
             _pageDone.Wait();
             _heldMs += Clock.Elapsed.TotalMilliseconds - w0;
@@ -1261,44 +1275,11 @@ internal sealed class HtmlSurface : MonoBehaviour
             var template = SceneSlots.Split(output.Chars, output.Length, _slotScratch, _slotPrefix);
             _allocSplit += Allocated() - sa;
             // The compiler needs the slot table, which only exists once the scene has been split,
-            // so this is the first moment a page can be compiled.
-            if (HtmlConfig.CompileProbe && !worker && _built != null && _panel != null)
-                CompileProbe.Full(PageKey, _built, _panel, layout, _slotScratch);
-
-            // Hand the page to its chip. From the next update this surface stops laying out, running
-            // the script and translating, which is the whole point; if it cannot be handed over the
-            // page carries on exactly as it does today.
-            // Whichever holds the chip. A console's host is a Motherboard and its `cartridge` is
-            // null; only a tablet has one. Gating on the cartridge alone meant no console ever
-            // reached this, which is why nothing happened the first time it was switched on.
-            var holder = Cartridge ?? Board;
-            if (HtmlConfig.RunCompiled && _compiled == null && !worker && _built != null && _panel != null
-                && holder != null && _compileTried != _built)
-            {
-                _compileTried = _built;
-                // The element the chunk will write to itself, named the same way this mod names it,
-                // so the chunk's set_props lands on the surface this page already draws.
-                _compiled = CompiledRun.Start(PageKey, holder, _built!, _panel!, layout, _slotScratch,
-                                              (Surface, ElementId, SceneId));
-                // A page whose markup the compiler laid out itself (every alternative and row at its
-                // maximum, holes named) draws THAT structure, and its chunk writes those slot names:
-                // the interpreter's emit of whichever state the page happened to be in would have
-                // slots the chunk never writes and lack the ones it does.
-                if (_compiled?.Structure is { } compiledStructure && _compiled.StructureValues is { } opening)
-                {
-                    template = compiledStructure;
-                    _slotScratch.Clear();
-                    foreach (var kv in opening) _slotScratch[kv.Key] = kv.Value;
-                }
-                // The page's motion goes into the structure as expressions of t, so nothing computes
-                // or sends it again. This has to happen before the template is compared and sent -
-                // it IS the structure - and the slots it covers leave the value table with it.
-                if (_compiled is { Expressions.Count: > 0 })
-                    template = Motion.Bake(template, _compiled.Expressions, _slotScratch);
-                // Everything above needed the page; from here nothing does. Released after the
-                // structure has been emitted, never before - the scene is what the chip writes into.
-                if (_compiled != null) _releasePending = true;
-            }
+            // so this is the first moment a page can be compiled - on the page's own thread and only
+            // there. A compile takes seconds for an innerHTML page, and it used to take them on the
+            // game thread's emit at push time, once per console. That emit (a push, a capture) now
+            // draws the page as the interpreter does, and FinishJob installs this on a later frame.
+            if (worker) CompileHere(layout, template);
             // A data page compiles here, against the emit that drew its first payload: the emitter
             // has just said what every slot really is, which is the only honest check there is -
             // what the table WOULD write, against what was drawn. Built in the same emit rather
@@ -1512,6 +1493,115 @@ internal sealed class HtmlSurface : MonoBehaviour
     }
 
     /// <summary>Hands a finished translation to the vector mod. Game thread.</summary>
+    /// <summary>
+    /// Compiles the page on its own thread, for FinishJob to install, and runs the compile probe.
+    /// Once per build; a build of a page compiled before at this size finds it in PageCompiler's
+    /// cache, so a capture or a second push costs a lookup here.
+    /// </summary>
+    private void CompileHere(Vector2 layout, string template)
+    {
+        var built = _built;
+        if (built == null || _panel == null || _compileTried == built || string.IsNullOrWhiteSpace(built.Script)) return;
+        // Whichever holds the chip. A console's host is a Motherboard and its `cartridge` is
+        // null; only a tablet has one. Gating on the cartridge alone meant no console ever
+        // reached this, which is why nothing happened the first time it was switched on.
+        var run = HtmlConfig.RunCompiled && _compiled == null && (Cartridge ?? Board) != null;
+        if (!run && !HtmlConfig.CompileProbe) return;
+        _compileTried = built;
+        PageCompiler.Cancelled = () => _compileStop;
+        try
+        {
+            // Reports only: whether the compiler can handle this page, on this machine, under Mono.
+            CompileProbe.Run(PageKey, built.Script);
+            CompileProbe.Full(PageKey, built, _panel, layout, _slotScratch);
+            // For the cache CompiledRun.Start reads on the game thread, which makes this console's
+            // chunk from it by filling in the element the chunk writes to - named the same way this
+            // mod names it, so the chunk's set_props lands on the surface this page already draws.
+            if (run) PageCompiler.Compile(built, _panel, layout, _slotScratch, (Surface, ElementId, SceneId));
+        }
+        finally { PageCompiler.Cancelled = null; }
+        // Stopped part way (the game thread needed the page): nothing was kept, so a later frame
+        // compiles again.
+        if (_compileStop) { _compileTried = null; return; }
+        if (run) _compileReady = (built, layout, template, new Dictionary<string, SceneSlots.Value>(_slotScratch, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// Hands a page the page thread compiled to its chip and sends the structure its chunk writes
+    /// into. From the next update this surface stops laying out, running the script and
+    /// translating, which is the whole point; a page that cannot be handed over carries on exactly
+    /// as it does today. Game thread. False when nothing was installed.
+    /// </summary>
+    private bool Install((HtmlRenderer.Result Built, Vector2 Size, string Template, Dictionary<string, SceneSlots.Value> Values) ready,
+                         SS.BoardState state)
+    {
+        // Only a compile the cache holds. CompiledRun.Start compiles whatever the cache lacks, and
+        // here that would be the game thread's frame again.
+        var holder = Cartridge ?? Board;
+        if (_compiled != null || holder == null || ready.Built != _built || _panel == null
+            || !PageCompiler.IsCompiled(ready.Built, ready.Size))
+            return false;
+        var l0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        _compiled = CompiledRun.Start(PageKey, holder, ready.Built, _panel, ready.Size, ready.Values,
+                                      (Surface, ElementId, SceneId));
+        // What is left on this frame: the chunk's load into the chip, and its first run.
+        if (HtmlConfig.Diagnostics)
+            ScriptedScreensHtmlPlugin.Log?.LogInfo(
+                $"html \"{ElementId}\": {(_compiled != null ? "installed" : "not installed")} on the game thread in "
+                + $"{(System.Diagnostics.Stopwatch.GetTimestamp() - l0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.0} ms "
+                + "(the compile ran on the page thread)");
+        if (_compiled == null) return false;
+        var template = ready.Template;
+        var values = ready.Values;
+        // A page whose markup the compiler laid out itself (every alternative and row at its
+        // maximum, holes named) draws THAT structure, and its chunk writes those slot names:
+        // the interpreter's emit of whichever state the page happened to be in would have
+        // slots the chunk never writes and lack the ones it does.
+        if (_compiled.Structure is { } compiledStructure && _compiled.StructureValues is { } opening)
+        {
+            template = compiledStructure;
+            values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+            foreach (var kv in opening) values[kv.Key] = kv.Value;
+        }
+        // The page's motion goes into the structure as expressions of t, so nothing computes
+        // or sends it again - it IS the structure - and the slots it covers leave the value
+        // table with it.
+        if (_compiled.Expressions.Count > 0)
+            template = Motion.Bake(template, _compiled.Expressions, values);
+        // Everything above needed the page; from here nothing does. Released on the next update,
+        // after this structure has gone out - the scene is what the chip writes into.
+        _releasePending = true;
+        _lastTemplate = template;
+        _sentValues.Clear();
+        var props = new SS.UiProp[values.Count];
+        var n = 0;
+        foreach (var kv in values)
+        {
+            props[n++] = Prop(kv.Key, kv.Value);
+            _sentValues[kv.Key] = kv.Value;
+        }
+        _structureSends++;
+        // the values first, so the structure never shows an unbound slot
+        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, SceneId,
+            new SS.UiValue { Type = SS.UiValueType.Map, Map = props }, null, snap: HtmlConfig.SnapData);
+        VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, SceneId, template);
+        _compiled.Resync();
+        return true;
+    }
+
+    /// <summary>
+    /// A structure or values just went out with the scene's resting values, so the chunk running
+    /// this page resends everything on its next frame. This surface's chunk, or - when this is a
+    /// capture's rebuild that has none - the live surface's, whose chunk is the one on screen.
+    /// </summary>
+    private void ResyncCompiled()
+    {
+        var run = _compiled;
+        if (run == null && !string.IsNullOrEmpty(PageKey) && Current.TryGetValue(PageKey, out var live) && live != this)
+            run = live._compiled;
+        run?.Resync();
+    }
+
     private void FinishJob()
     {
         if (_pageState != PageDone)
@@ -1542,6 +1632,14 @@ internal sealed class HtmlSurface : MonoBehaviour
             _lastTemplate = null;
             _dirty = true;
             _dOther++;
+            // A compile in this job was laid out on the same stale answers (a font still on its
+            // way): it is dropped, from the cache too, and made again on a later frame.
+            if (_compileReady is { } stale)
+            {
+                PageCompiler.Forget(stale.Built, stale.Size);
+                _compileReady = null;
+                _compileTried = null;
+            }
             return;
         }
         var output = r.Output;
@@ -1564,6 +1662,12 @@ internal sealed class HtmlSurface : MonoBehaviour
         ApplyExternals(output.Externals);
         if (State is not SS.BoardState state)
             return;
+        if (_compileReady is { } ready)
+        {
+            _compileReady = null;
+            // Installed, its structure went out in place of this job's scene.
+            if (Install(ready, state)) return;
+        }
         if (r.Structure == null)
         {
             if (r.Patch == null)
@@ -1578,6 +1682,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                 new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Patch }, null, snap: HtmlConfig.SnapData);
             _patchSends++;
             _patchSlots += r.Patch.Length;
+            ResyncCompiled();
             _allocSend += Allocated() - bs;
             return;
         }
@@ -1586,6 +1691,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, SceneId,
             new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Values ?? Array.Empty<SS.UiProp>() }, null, snap: HtmlConfig.SnapData);
         VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, SceneId, r.Structure);
+        ResyncCompiled();
         if (HtmlConfig.Diagnostics)
             ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: emitted {output.Nodes} vector nodes, {output.Scene.Length} chars");
         if (HtmlConfig.DumpScenes)
@@ -2858,6 +2964,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             Current.Remove(PageKey);
         _script?.Dispose();
         _pageStop = true;
+        _compileStop = true;
         _pageWake.Set();
     }
 }

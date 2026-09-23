@@ -378,6 +378,7 @@ internal static class CompiledPageTests
         if (root == null) { check(false, "compiled: cannot find the source folder"); return; }
 
         Markup(root, check);
+        CompiledOnce(check);
         MarkupGauges(check);
         MarkupRuntime(root, check);
         MarkupValues(root, check);
@@ -709,6 +710,54 @@ setInterval(step, 500);
     }
 
     /// <summary>
+    /// A page compiles once however often it is built: fifteen consoles showing it, a capture's
+    /// rebuild, the same push twice. A second build of the same source at the same size finds the
+    /// first compile, pointed at its own console, without laying anything out. And a compile its page
+    /// stopped wanting part way is kept by nothing.
+    /// </summary>
+    private static void CompiledOnce(Action<bool, string> check)
+    {
+        const string page = @"<meta name=""viewport"" content=""width=300"">
+<style>body{margin:0;background:#000;font-family:sans-serif}</style>
+<body><div id=""frame"" style=""width:300px;height:300px;display:flex;flex-direction:column""></div>
+<script>
+const st = { n: 3, hot: false };
+function render() {
+  document.getElementById('frame').innerHTML = '<div style=""height:40px;color:' + (st.hot ? '#ff0000' : '#ffffff') + '"">Count ' + st.n + ' units</div>';
+}
+function step() { st.n += 1; st.hot = !st.hot; render(); }
+render();
+setInterval(step, 500);
+</script></body>";
+        var source = "compiled once: " + page;
+        var one = ("main", "one", "html:one");
+        var two = ("main", "two", "html:two");
+        try
+        {
+            PageCompiler.Cancelled = () => true;
+            CompiledPage.Result stopped;
+            try { stopped = Probe4.Headless(page, source, one).Compiled; }
+            finally { PageCompiler.Cancelled = null; }
+            var e0 = MarkupSlots.Emits;
+            var first = Probe4.Headless(page, source, one).Compiled;
+            var e1 = MarkupSlots.Emits;
+            var second = Probe4.Headless(page, source, two).Compiled;
+            var e2 = MarkupSlots.Emits;
+            check(!stopped.Ok && e1 > e0, !stopped.Ok && e1 > e0
+                ? $"compiled once: a compile stopped part way is not kept - the next one lays the page out ({e1 - e0} layout(s))"
+                : $"compiled once: stopped {(stopped.Ok ? "compiled anyway" : "refused")}, the next compile laid out {e1 - e0} time(s)");
+            static string Line((string, string, string) t) => $"SURFACE, ELEMENT, SCENE = \"{t.Item1}\", \"{t.Item2}\", \"{t.Item3}\"";
+            var same = first.Ok && second.Ok && first.Lua!.Contains(Line(one), StringComparison.Ordinal)
+                       && second.Lua == first.Lua.Replace(Line(one), Line(two), StringComparison.Ordinal)
+                       && second.Structure == first.Structure && second.Bindings.Count == first.Bindings.Count;
+            check(same && e2 == e1, same && e2 == e1
+                ? "compiled once: the same page built again finds its compile, pointed at the new console, with no layout"
+                : $"compiled once: the second build laid out {e2 - e1} time(s); its chunk {(same ? "matches" : "differs from")} the first's but for the target");
+        }
+        catch (Exception ex) { check(false, "compiled once: threw - " + ex.Message.Split('\n')[0]); }
+    }
+
+    /// <summary>
     /// A page that draws with <c>innerHTML</c>, compiled once: its markup becomes the scene, and the
     /// chunk writes only what fills it.
     /// </summary>
@@ -773,22 +822,28 @@ setInterval(step, 500);
             return sent;
         }
         bool Holds(Dictionary<string, string> sent, string text) => sent.Values.Any(v => v.Contains(text, StringComparison.Ordinal));
+        // The scene prints the label round a placeholder (CompiledPage.Place), so the chunk writes
+        // the value that goes in it, never the whole string.
+        var countSlot = Regex.Match(compiled.Structure ?? string.Empty, "text=\"Count \\{\\$([A-Za-z0-9_]+)[^}]*\\} units\"").Groups[1].Value;
+        bool Counts(Dictionary<string, string> sent, string n) => countSlot.Length > 0 && sent.TryGetValue(countSlot, out var v) && v == n;
 
         var load = Do(compiled.Lua!, "page");
         var first = Sent();
-        check(load == null && Holds(first, "Count 3 units"), load != null
+        check(load == null && Counts(first, "3"), load != null
             ? "markup: the chunk does not load - " + load
-            : Holds(first, "Count 3 units")
-                ? "markup: the first render writes its label whole, literal text and value (\"Count 3 units\")"
-                : $"markup: the first render wrote {first.Count} value(s) and no \"Count 3 units\"");
+            : countSlot.Length == 0
+                ? "markup: the scene has no placeholder for the count in \"Count ... units\""
+                : Counts(first, "3")
+                    ? "markup: the first render writes the label's value into the placeholder the scene prints it round (\"Count {3} units\")"
+                    : $"markup: the first render wrote {first.Count} value(s) and not 3 into the count's placeholder");
 
         // A second of the page's own timer: two steps, two new rows, the count moved.
         foreach (var k in first.Keys.ToList()) Do("PAYLOAD[\"" + k + "\"] = nil", "clear");
         var frames = Do("for i = 1, 61 do frame(1 / 60) end", "frames");
         var later = Sent();
-        check(frames == null && Holds(later, "Count 5 units") && Holds(later, "line 5"), frames != null
+        check(frames == null && Counts(later, "5") && Holds(later, "line 5"), frames != null
             ? "markup: running frames failed - " + frames
-            : Holds(later, "Count 5 units") && Holds(later, "line 5")
+            : Counts(later, "5") && Holds(later, "line 5")
                 ? "markup: the page's timer re-renders by writing values - the count and the newest row"
                 : $"markup: after two steps the chunk wrote {later.Count} value(s), missing the count or the row");
         var rows = markup.Targets[0].Bindings.FirstOrDefault(b => b.Key.StartsWith("rows#", StringComparison.Ordinal));

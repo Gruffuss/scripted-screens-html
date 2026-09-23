@@ -146,9 +146,23 @@ internal static class Probe4
         // Exploration: a fixed seed, so two builds of a self-simulating page can be compared value for value.
         if (Environment.GetEnvironmentVariable("WHY_SEED") is { Length: > 0 } seed) Do("math.randomseed(" + int.Parse(seed) + ")", "seed");
         // Nothing is sent from here: the flush has no surface, so what a frame wrote stays in PAYLOAD.
-        var load = Do(compiled.Lua!, "page");
+        // Timed in two, as installing does it on the game thread (ChipHost.LoadInto): parsing and
+        // compiling the chunk, which needs no chip, and its first run, which needs the chip's VM.
+        string? load = null;
+        var l0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var l1 = l0;
+        try
+        {
+            var chunk = state.Load(compiled.Lua!.AsSpan(), "page", state.Environment);
+            l1 = System.Diagnostics.Stopwatch.GetTimestamp();
+            state.RunAsync(chunk).AsTask().GetAwaiter().GetResult();
+        }
+        catch (Exception ex) { load = ex.Message.Split('\n')[0]; }
+        var l2 = System.Diagnostics.Stopwatch.GetTimestamp();
         var first = Payload();
         Console.WriteLine($"  run: load {(load == null ? "ok" : "FAILED - " + load)}, first render wrote {first.Count} value(s)");
+        Console.WriteLine($"  install: {(l1 - l0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0} ms parsing and compiling the chunk, "
+                          + $"{(l2 - l1) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0} ms its first run");
         var leaks = first.Where(p => p.Value.ToString().Contains("98765") || p.Value.ToString().Contains("#0F0")).Select(p => p.Key).ToList();
         if (leaks.Count > 0) Console.WriteLine($"    SENTINEL in {leaks.Count} value(s): {string.Join(", ", leaks.Take(6))}");
         var frames = Do("for i = 1, 180 do frame(1 / 60) end", "frames");
@@ -210,7 +224,9 @@ internal static class Probe4
     /// first draws, its slots, and the compiler run over both. The static state it touches is put
     /// back afterwards.
     /// </summary>
-    internal static (CompiledPage.Result Compiled, MarkupSlots.Result? Markup) Headless(string page)
+    /// <param name="source">What the page was built from, as a surface remembers it (PageCompiler's cache); null compiles it afresh.</param>
+    internal static (CompiledPage.Result Compiled, MarkupSlots.Result? Markup) Headless(string page, string? source = null,
+        (string Surface, string Element, string Scene)? target = null)
     {
         var oracle = CssParser.SupportsOracle;
         var (vw, vh) = (CssParser.ViewportWidth, CssParser.ViewportHeight);
@@ -221,6 +237,7 @@ internal static class Probe4
             OffThread.MainThreadId = Environment.CurrentManagedThreadId;
             OffThread.Job = OffThread.Globals.Take();
             var built = HtmlRenderer.Build(page, FontLibrary.Default());
+            if (source != null) PageCompiler.Remember(built, source);
             HtmlRenderer.NameDrivenGroups(built);
             var panel = new Panel(built.Root);
             foreach (var grid in built.Grids)
@@ -239,7 +256,7 @@ internal static class Probe4
             var slots = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
             SceneSlots.Split(first.Chars, first.Length, slots);
 
-            var compiled = PageCompiler.Compile(built, panel, size, slots, ("main", "page", "html:page"), out var markup);
+            var compiled = PageCompiler.Compile(built, panel, size, slots, target ?? ("main", "page", "html:page"), out var markup);
             return (compiled, markup);
         }
         finally
@@ -257,8 +274,13 @@ internal static class Probe4
     {
         {
             var t0 = DateTime.UtcNow;
+            var bytes0 = GC.GetTotalAllocatedBytes(precise: true);
+            var (layouts0, builds0) = (MarkupSlots.Emits, MarkupSlots.Builds);
             var (compiled, markupResult) = Headless(page);
             var ms = (DateTime.UtcNow - t0).TotalMilliseconds;
+            // What the compile costs, against its budget: < 20 layouts, < 1 s, < 50 MB a page.
+            Console.WriteLine($"  cost: {ms:0} ms, {(GC.GetTotalAllocatedBytes(precise: true) - bytes0) / 1048576.0:0.0} MB, "
+                              + $"{MarkupSlots.Emits - layouts0} layouts, {MarkupSlots.Builds - builds0} builds");
             Console.WriteLine($"  compile: {(compiled.Ok ? "COMPILED" : "REFUSED")} in {ms:0} ms - lua {compiled.Lua?.Length ?? 0} chars, "
                               + $"{compiled.Bindings.Count} binding(s), {compiled.Problems.Count} problem(s), {compiled.Unmapped.Count} unmapped, {compiled.Warnings.Count} warning(s)");
             foreach (var p in compiled.Problems.Take(verbose ? 200 : 25)) Console.WriteLine("    problem: " + p);

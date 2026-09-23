@@ -245,13 +245,7 @@ internal sealed class Markup
     /// Reduces one <c>innerHTML</c> assignment.
     /// </summary>
     /// <param name="assignment">The whole assignment, so the function it sits in can be found.</param>
-    /// <param name="expand">
-    /// Holes whose values draw differently SHAPED markup - a shadow that comes and goes, an
-    /// animation that starts - so their element is written once per value and the page picks one.
-    /// The compiler finds these by laying the values out, in rounds: each set is by the index the
-    /// reduction had after the sets before it, since a copy of an element brings holes of its own.
-    /// </param>
-    internal static Markup Of(AssignmentExpression assignment, Script script, string? source = null, IReadOnlyList<ICollection<int>>? expand = null)
+    internal static Markup Of(AssignmentExpression assignment, Script script, string? source = null)
     {
         var m = new Markup(script) { _source = source, Start = assignment.Range.Start };
         foreach (var fd in JsToLua.LazyViews(script).Keys) if (fd.Id != null) m._viewFns.Add(fd.Id.Name);
@@ -262,14 +256,6 @@ internal sealed class Markup
         Merge(m.Parts);
         m.SplitStyles(m.Parts, new Cursor(), 0);
         m.Number(m.Parts);
-        foreach (var round in expand ?? Array.Empty<ICollection<int>>())
-        {
-            var targets = new HashSet<Hole>();
-            foreach (var i in round) if (i >= 0 && i < m.Holes.Count) targets.Add(m.Holes[i]);
-            m.Expand(m.Parts, targets);
-            m.Holes.Clear(); m.Choices.Clear(); m.Lists.Clear();
-            m.Number(m.Parts);
-        }
         if (!Structural(m.Parts))
             m._problems.Add(Line(assignment) + "the markup is computed rather than built from literals, so there is no structure to emit");
         return m;
@@ -2101,22 +2087,47 @@ internal sealed class Markup
     /// ternary between two pieces of markup. Holes that hang on the same test (`on ? a : b` three
     /// times in one tag) vary together, so they make one choice, not three.
     /// </remarks>
-    private void Expand(List<Part> parts, HashSet<Hole> targets)
+    /// <summary>
+    /// Writes the elements of these holes once per value, in this reduction: holes whose values draw
+    /// differently SHAPED markup - a shadow that comes and goes, an animation that starts - so the page
+    /// picks one. The compiler finds these by laying the values out; the markup is not reduced again.
+    /// </summary>
+    /// <param name="holes">By the index the reduction has now.</param>
+    /// <param name="inherit">
+    /// Those whose copies are written once per value too, wherever a copy of an element around them
+    /// puts them: the shape is the element's own, so it is its copies' as well.
+    /// </param>
+    internal void Expand(ICollection<int> holes, ICollection<int> inherit)
+    {
+        var targets = new HashSet<Hole>();
+        var inherited = new HashSet<Hole>();
+        foreach (var i in holes)
+            if (i >= 0 && i < Holes.Count)
+            {
+                targets.Add(Holes[i]);
+                if (inherit.Contains(i)) inherited.Add(Holes[i]);
+            }
+        Expand(Parts, targets, inherited);
+        Holes.Clear(); Choices.Clear(); Lists.Clear();
+        Number(Parts);
+    }
+
+    private void Expand(List<Part> parts, HashSet<Hole> targets, HashSet<Hole> inherited)
     {
         for (var guard = 0; guard < 256; guard++)
         {
-            if (!ExpandOne(parts, targets)) break;
+            if (!ExpandOne(parts, targets, inherited)) break;
         }
         foreach (var part in parts)
             switch (part)
             {
-                case Choice c: Expand(c.Then, targets); Expand(c.Else, targets); break;
-                case Rows r: foreach (var row in r.Each) Expand(row, targets); break;
+                case Choice c: Expand(c.Then, targets, inherited); Expand(c.Else, targets, inherited); break;
+                case Rows r: foreach (var row in r.Each) Expand(row, targets, inherited); break;
             }
     }
 
     /// <summary>Expands the first element in this list whose start tag holds a target. False when there is none.</summary>
-    private bool ExpandOne(List<Part> parts, HashSet<Hole> targets)
+    private bool ExpandOne(List<Part> parts, HashSet<Hole> targets, HashSet<Hole> inherited)
     {
         // The cursor's events place each start tag; the first holding a target is taken with
         // everything up to its end tag.
@@ -2181,12 +2192,12 @@ internal sealed class Markup
             }
         }
         if (open == null || end == null || found == null) return false;
-        Replace(parts, open.Value, end.Value, found);
+        Replace(parts, open.Value, end.Value, found, targets, inherited);
         return true;
     }
 
     /// <summary>The element between two positions, written once per value of its target holes.</summary>
-    private void Replace(List<Part> parts, (int Part, int At) from, (int Part, int At) to, List<Hole> holes)
+    private void Replace(List<Part> parts, (int Part, int At) from, (int Part, int At) to, List<Hole> holes, HashSet<Hole> targets, HashSet<Hole> inherited)
     {
         // Cut the element out: split the fixed text at each end so it is whole parts.
         var element = new List<Part>();
@@ -2234,7 +2245,7 @@ internal sealed class Markup
         // The element, with every assigned hole fixed, as a choice over the next variable's values.
         List<Part> Build(int v, Dictionary<Hole, string> fixedValues)
         {
-            if (v == variables.Count) return Copy(element, fixedValues);
+            if (v == variables.Count) return Copy(element, fixedValues, targets, inherited);
             var (test, paired, alone, values) = variables[v];
             if (test != null)
             {
@@ -2256,21 +2267,33 @@ internal sealed class Markup
     }
 
     /// <summary>A deep copy of parts, with some holes replaced by the text they are fixed to.</summary>
-    private static List<Part> Copy(List<Part> parts, Dictionary<Hole, string> fixedValues)
+    /// <param name="targets">Holes being written once per value.</param>
+    /// <param name="inherited">
+    /// Those whose copies are too: an element inside another that is written once per value is written
+    /// once per value in every copy of it - found here, rather than by laying the copies out and
+    /// compiling the page all over again to find the same thing.
+    /// </param>
+    private static List<Part> Copy(List<Part> parts, Dictionary<Hole, string> fixedValues, HashSet<Hole> targets, HashSet<Hole> inherited)
     {
         var copy = new List<Part>(parts.Count);
         foreach (var part in parts)
             switch (part)
             {
                 case Hole h when fixedValues.TryGetValue(h, out var text): copy.Add(new Fixed(text)); break;
-                case Hole h: copy.Add(new Hole(h.Value)); break;
+                case Hole h:
+                    {
+                        var copied = new Hole(h.Value);
+                        if (inherited.Contains(h)) { targets.Add(copied); inherited.Add(copied); }
+                        copy.Add(copied);
+                        break;
+                    }
                 case Push p: copy.Add(new Push(p.Handler)); break;
-                case Choice c: copy.Add(new Choice(c.Test, Copy(c.Then, fixedValues), Copy(c.Else, fixedValues)) { Expanded = c.Expanded, Depth = c.Depth }); break;
+                case Choice c: copy.Add(new Choice(c.Test, Copy(c.Then, fixedValues, targets, inherited), Copy(c.Else, fixedValues, targets, inherited)) { Expanded = c.Expanded, Depth = c.Depth }); break;
                 case Rows r:
                     {
                         var rows = new Rows(r.List);
                         rows.Items.AddRange(r.Items);
-                        foreach (var row in r.Each) rows.Each.Add(Copy(row, fixedValues));
+                        foreach (var row in r.Each) rows.Each.Add(Copy(row, fixedValues, targets, inherited));
                         copy.Add(rows);
                         break;
                     }

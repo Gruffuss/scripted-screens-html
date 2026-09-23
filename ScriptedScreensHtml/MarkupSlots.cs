@@ -79,9 +79,14 @@ internal static class MarkupSlots
         public readonly List<string> Roots = new();
         /// <summary>
         /// Holes whose values draw differently SHAPED markup: the compile runs again with their
-        /// elements written once per value (<see cref="Markup.Of"/>'s `expand`).
+        /// elements written once per value (<see cref="Markup.Expand"/>).
         /// </summary>
         public readonly HashSet<int> Expand = new();
+        /// <summary>
+        /// Those of <see cref="Expand"/> seen to change shape by laying their values out, which a copy
+        /// of the element carries with it; the others were only not found in the scene.
+        /// </summary>
+        public readonly HashSet<int> Inherit = new();
     }
 
     internal sealed class Result
@@ -123,9 +128,13 @@ internal static class MarkupSlots
     /// What the page held when it last ran, when known: a hole's value by target and index, a
     /// drive's value at index -1, a choice's side at -1000 - index, a list's length at -2000 - index.
     /// </param>
+    /// <param name="scout">
+    /// A first compile: its values and discovery come before its states, and it stops there when an
+    /// element has to be written once per value - the markup changes, and everything else with it.
+    /// </param>
     internal static Result Compile(HtmlRenderer.Result built, Panel panel,
                                    IReadOnlyList<(string Id, Markup Markup)> writes,
-                                   Func<string, int, string?>? probed = null)
+                                   Func<string, int, string?>? probed = null, bool scout = false)
     {
         var result = new Result();
         var pristine = new List<(VisualElement Ve, HtmlNode Node, string Html)>();
@@ -138,6 +147,10 @@ internal static class MarkupSlots
         // unit would stay where the stand-in number ended. The gated alternatives are added as found.
         var wasJoin = VectorEmitter.JoinRows;
         VectorEmitter.JoinRows = new HashSet<string>(StringComparer.Ordinal);
+        // What it gates is named for this compile only: a name left behind by an earlier one - of the
+        // same page before an element was written once per value - wrapped that element in a group
+        // with slots of its own, so the structure depended on how many times the page was compiled.
+        var wasNamed = new HashSet<string>(built.NamedGroups, StringComparer.Ordinal);
         try
         {
             foreach (var (id, markup) in writes)
@@ -152,7 +165,12 @@ internal static class MarkupSlots
                 result.Targets.Add(new Target { Id = id, Markup = markup, Drive = markup.Driver() });
             }
             if (result.Targets.Count == 0) return result;
-            new Compiler(built, panel, result, probed).Run();
+            new Compiler(built, panel, result, probed, scout).Run();
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            result.Problems.Add("the page stopped wanting its compile");
             return result;
         }
         catch (Exception ex)
@@ -164,20 +182,31 @@ internal static class MarkupSlots
         {
             VectorEmitter.NoCache = wasNoCache;
             VectorEmitter.JoinRows = wasJoin;
+            built.NamedGroups.Clear();
+            built.NamedGroups.UnionWith(wasNamed);
             // Put back, always, and checked: compiling mutates the live page, and a console drawing
             // sentinels where its readings belong is the failure this must never leave behind.
-            foreach (var (ve, node, html) in pristine)
+            lock (PageCompiler.Gate)
             {
-                ve.Clear();
-                node.Children.Clear();
-                HtmlRenderer.AppendFragment(ve, node, html, built);
+                foreach (var (ve, node, html) in pristine)
+                {
+                    ve.Clear();
+                    node.Children.Clear();
+                    HtmlRenderer.AppendFragment(ve, node, html, built);
+                }
+                Attach(built);
+                panel.Layout(panel.Width, panel.Height);
             }
-            Attach(built);
-            panel.Layout(panel.Width, panel.Height);
             foreach (var (ve, node, html) in pristine)
                 if (!string.Equals(HtmlRenderer.ToHtml(node, outer: false, keepIds: true), html, StringComparison.Ordinal))
                     ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: \"{ve.name}\" could not be put back after compiling its markup. This is a compiler bug, not a fault in the page.");
         }
+    }
+
+    /// <summary>A compile no longer wanted ends at its next build or layout, and puts the page back.</summary>
+    private static void Stop()
+    {
+        if (PageCompiler.Cancelled?.Invoke() == true) throw new OperationCanceledException();
     }
 
     /// <summary>Grids and post-layout passes for whatever was just appended, as the surface attaches them.</summary>
@@ -208,12 +237,19 @@ internal static class MarkupSlots
         private readonly List<Scene> _laid = new();
         /// <summary>While a value is moved to see what it writes: those layouts are not what the page opens with.</summary>
         private bool _probing;
+        /// <summary>A layout expected not to line up, perhaps: one that does not is an answer, not a fault.</summary>
+        private bool _quiet;
+        /// <summary>The last layout that did not line up, for saying whose lines changed.</summary>
+        private Scene? _misaligned;
         /// <summary>Each alternative's own `display`, which "shown" puts back.</summary>
         private readonly Dictionary<string, StyleEnum<DisplayStyle>> _display = new(StringComparer.Ordinal);
 
-        public Compiler(HtmlRenderer.Result built, Panel panel, Result result, Func<string, int, string?>? probed)
+        /// <summary>The first compile of a page, which may yet find an element to write once per value.</summary>
+        private readonly bool _scout;
+
+        public Compiler(HtmlRenderer.Result built, Panel panel, Result result, Func<string, int, string?>? probed, bool scout)
         {
-            _built = built; _panel = panel; _result = result; _probed = probed;
+            _built = built; _panel = panel; _result = result; _probed = probed; _scout = scout;
         }
 
         public void Run()
@@ -231,14 +267,31 @@ internal static class MarkupSlots
             Rounds();
             _union = UnionScene();
             Own();
+            Seed();
 
-            // 2. Every layout the page can take, and what each draws.
+            // 2. What each value writes - and, the first time, whether an element has to be written
+            // once per value, which changes the markup and so everything else: then the compile is
+            // only that. Otherwise its states are laid out from the union as it was built: measuring
+            // the values built some of its elements again, and discovery all of them.
+            if (_scout)
+            {
+                // A shape found: the only other thing worth knowing of this markup is which colours
+                // from a set are drawn inside something the scene reads once.
+                if (Shapes()) { Discover(colourSetsOnly: true); return; }
+                Holes();
+                Discover();
+                foreach (var t in _result.Targets) if (t.Expand.Count > 0) return;
+                foreach (var t in _result.Targets) Build(t, t.Union.Html);
+                Name();
+            }
+
+            // 3. Every layout the page can take, and what each draws.
             foreach (var t in _result.Targets) States(t);
-
-            // 3. What each value writes.
-            Numbers();
-            Variants();
-            Discover();
+            if (!_scout)
+            {
+                Holes();
+                Discover();
+            }
 
             // 4. The structure, gated, opening in the page's first layout.
             Structure();
@@ -266,6 +319,12 @@ internal static class MarkupSlots
         }
 
         private void BuildInner(Target t, string html)
+        {
+            Stop();
+            lock (PageCompiler.Gate) BuildLocked(t, html);
+        }
+
+        private void BuildLocked(Target t, string html)
         {
             var ve = _built.ById[t.Id];
             var node = _built.NodeOf[ve];
@@ -367,6 +426,10 @@ internal static class MarkupSlots
             public readonly Dictionary<string, SceneSlots.Value> Values = new(StringComparer.Ordinal);
             /// <summary>This layout's line to the union's line.</summary>
             public int[]? Map;
+            /// <summary>Among the layouts the opening values are read from.</summary>
+            public bool Laid;
+            /// <summary>The copies drawn where another copy was laid out (<see cref="Clone"/>): what they draw only mirrors it.</summary>
+            public readonly HashSet<string> Cloned = new(StringComparer.Ordinal);
         }
 
         /// <summary>Shows every alternative except the given ones, each with its own display.</summary>
@@ -395,11 +458,42 @@ internal static class MarkupSlots
         private Scene UnionScene()
         {
             Scene? merged = null;
+            _roundScenes.Clear();
             foreach (var config in _unionRounds)
             {
-                merged = merged == null ? Emit(Hidden(config)) : Merge(merged, Emit(Hidden(config)));
+                var scene = Emit(Hidden(config));
+                _roundScenes.Add((config, scene));
+                merged = merged == null ? scene : Merge(merged, scene);
             }
-            return merged ?? Emit(null);
+            if (merged == null) return Emit(null);
+            // Merged a state at a time, and split once: a line's slot names are its place in the whole.
+            if (_roundScenes.Count > 1)
+            {
+                var wasStops = SceneSlots.SlotStops;
+                SceneSlots.SlotStops = true;
+                try { merged.Lines = SceneSlots.Split(string.Join("\n", merged.Raw), merged.Values).Split('\n'); }
+                finally { SceneSlots.SlotStops = wasStops; }
+            }
+            return merged;
+        }
+
+        /// <summary>The states the union was merged from, as each was laid out.</summary>
+        private readonly List<(Config Config, Scene Scene)> _roundScenes = new();
+
+        /// <summary>
+        /// The states the union was merged from are layouts of the page like any other, so each is
+        /// matched with the union and kept: the state that needs it later does not lay it out again.
+        /// </summary>
+        private void Seed()
+        {
+            foreach (var (config, scene) in _roundScenes)
+            {
+                var key = config.Key();
+                if (_emitted.ContainsKey(key)) continue;
+                _emitted[key] = scene;
+                Aligned(config, scene, "a state the union is drawn from");
+            }
+            _roundScenes.Clear();
         }
 
         /// <summary>The states the union is merged from.</summary>
@@ -414,10 +508,11 @@ internal static class MarkupSlots
 
         private void Rounds()
         {
+            // No rounds of copies: every layout draws every copy of an element (Clone), so the union
+            // needs a state per alternative that is not a copy, and nothing more.
             _rounds.Clear();
-            _rounds.AddRange(Cover((t, choice) => Copied(t, choice), out _));
             _unionRounds.Clear();
-            foreach (var sides in Cover((_, _) => true, out var drives))
+            foreach (var sides in Cover((t, choice) => !Copied(t, choice), out var drives))
             {
                 var c = Base().Copy();
                 foreach (var pair in sides)
@@ -496,17 +591,17 @@ internal static class MarkupSlots
         /// among its siblings and its insides are merged in turn - so a line never pairs with its
         /// like in another copy's group.
         /// </summary>
+        /// <remarks>
+        /// The merged scene's lines are the lines each side had, not split again: two lines are
+        /// matched by what they are, never by where, so a line's slot names only have to be right
+        /// once the last state is merged (<see cref="UnionScene"/>).
+        /// </remarks>
         private Scene Merge(Scene a, Scene b)
         {
             var raw = new List<string>(a.Raw.Length + b.Raw.Length);
+            var lines = new List<string>(a.Raw.Length + b.Raw.Length);
             Siblings(0, a.Lines.Length, 0, b.Lines.Length);
-            var scene = new Scene();
-            var wasStops = SceneSlots.SlotStops;
-            SceneSlots.SlotStops = true;
-            try { scene.Lines = SceneSlots.Split(string.Join("\n", raw), scene.Values).Split('\n'); }
-            finally { SceneSlots.SlotStops = wasStops; }
-            scene.Raw = raw.ToArray();
-            return scene;
+            return new Scene { Lines = lines.ToArray(), Raw = raw.ToArray() };
 
             void Siblings(int aFrom, int aTo, int bFrom, int bTo)
             {
@@ -528,8 +623,10 @@ internal static class MarkupSlots
                         var (sa, ea) = ia[x++];
                         var (sb, eb) = ib[y++];
                         // the line with the radius, when only one of them has room for it
-                        raw.Add(Matches(a.Lines[sa], b.Lines[sb]) ? a.Raw[sa] : b.Raw[sb]);
-                        if (ea > sa) { Siblings(sa + 1, ea, sb + 1, eb); raw.Add(a.Raw[ea]); }
+                        var mine = Matches(a.Lines[sa], b.Lines[sb]);
+                        raw.Add(mine ? a.Raw[sa] : b.Raw[sb]);
+                        lines.Add(mine ? a.Lines[sa] : b.Lines[sb]);
+                        if (ea > sa) { Siblings(sa + 1, ea, sb + 1, eb); raw.Add(a.Raw[ea]); lines.Add(a.Lines[ea]); }
                     }
                     // Where either side's next item could come first, the one earlier in the markup
                     // does: the copies of one element shown in different rounds keep their order.
@@ -537,12 +634,12 @@ internal static class MarkupSlots
                              || lcs[x + 1, y] == lcs[x, y + 1] && Order(a.Lines, ia[x]) <= Order(b.Lines, ib[y])))
                     {
                         var (s0, e0) = ia[x++];
-                        for (var k = s0; k <= e0; k++) raw.Add(a.Raw[k]);
+                        for (var k = s0; k <= e0; k++) { raw.Add(a.Raw[k]); lines.Add(a.Lines[k]); }
                     }
                     else
                     {
                         var (s0, e0) = ib[y++];
-                        for (var k = s0; k <= e0; k++) raw.Add(b.Raw[k]);
+                        for (var k = s0; k <= e0; k++) { raw.Add(b.Raw[k]); lines.Add(b.Lines[k]); }
                     }
                 }
             }
@@ -579,12 +676,14 @@ internal static class MarkupSlots
             // Settled, as the surface settles a frame before it paints: a mixed calc() - a gauge's
             // `height: calc(62% - 12px)` - is written after layout from the parent's new size, and
             // one pass left it a layout behind, so the same value read differently in each probe.
-            for (var pass = 0; pass < 4; pass++)
-            {
-                var writes = PostLayout.LayoutWrites;
-                _panel.Layout(_panel.Width, _panel.Height);
-                if (PostLayout.LayoutWrites == writes) break;
-            }
+            Stop();
+            lock (PageCompiler.Gate)
+                for (var pass = 0; pass < 4; pass++)
+                {
+                    var writes = PostLayout.LayoutWrites;
+                    _panel.Layout(_panel.Width, _panel.Height);
+                    if (PostLayout.LayoutWrites == writes) break;
+                }
             TimeLayout.Stop();
             TimeEmit.Start();
             try { return EmittedInner(); } finally { TimeEmit.Stop(); }
@@ -602,6 +701,7 @@ internal static class MarkupSlots
             {
                 var boxes = new Dictionary<VisualElement, OffThread.Box>();
                 OffThread.Capture(_built.Root, _built, boxes, new List<VisualElement>());
+                Clone(boxes, scene.Cloned);
                 _built.Touched.UnionWith(touched);
                 _built.TouchedDeep.UnionWith(deep);
                 OffThread.Boxes = boxes;
@@ -628,6 +728,82 @@ internal static class MarkupSlots
                 OffThread.Job = wasJob;
             }
             return scene;
+        }
+
+        /// <summary>
+        /// Every copy of an element that this layout does not show, drawn where the shown copy is. The
+        /// copies of an element written once per value lay out alike and differ only in paint
+        /// (<see cref="Markup.Choice.Expanded"/>), so one layout places them all: each copy keeps its own
+        /// paint and takes the shown copy's boxes, and a layout per copy - the rounds this replaced -
+        /// has nothing left to say.
+        /// </summary>
+        /// <remarks>
+        /// Innermost choices first, so a copy of an element that holds copies of its own is taken from a
+        /// shown copy whose own copies are already in place.
+        /// </remarks>
+        private void Clone(Dictionary<VisualElement, OffThread.Box> boxes, HashSet<string> cloned)
+        {
+            foreach (var t in _result.Targets)
+                for (var i = t.Markup.Choices.Count - 1; i >= 0; i--)
+                {
+                    var ch = t.Markup.Choices[i];
+                    if (!Copied(t, ch.Index) || !t.Union.Sides.TryGetValue(ch.Index, out var sides)) continue;
+                    VisualElement? shown = null;
+                    foreach (var r in sides.Then) if (Displayed(r)) { shown = _elements[r]; break; }
+                    if (shown == null) foreach (var r in sides.Else) if (Displayed(r)) { shown = _elements[r]; break; }
+                    if (shown == null) continue;
+                    foreach (var r in sides.Then) Copy(t, r, shown);
+                    foreach (var r in sides.Else) Copy(t, r, shown);
+                }
+
+            void Copy(Target t, string root, VisualElement shown)
+            {
+                if (!_elements.TryGetValue(root, out var ve) || ve == shown || !boxes.TryGetValue(ve, out var b) || b.display != DisplayStyle.None) return;
+                if (Deep(shown, ve)) cloned.Add(root);
+                else Problem(t, $"the copies of \"{root}\" are not built alike, so one cannot be drawn where another is laid out");
+            }
+
+            bool Displayed(string root)
+                => _elements.TryGetValue(root, out var ve) && boxes.TryGetValue(ve, out var b) && b.display != DisplayStyle.None && !float.IsNaN(b.layout.width);
+
+            bool Deep(VisualElement from, VisualElement to)
+            {
+                if (from.childCount != to.childCount || !boxes.TryGetValue(from, out var a) || !boxes.TryGetValue(to, out var b)) return false;
+                // The box is the shown copy's; what the copy declares itself - a border one copy has and
+                // another does not - is its own, since a hidden element's layout reads as nothing.
+                var s = to.style;
+                b.display = a.display;
+                b.layout = a.layout;
+                b.marginBottom = a.marginBottom;
+                b.paddingTop = Pad(s.paddingTop, a.paddingTop); b.paddingRight = Pad(s.paddingRight, a.paddingRight);
+                b.paddingBottom = Pad(s.paddingBottom, a.paddingBottom); b.paddingLeft = Pad(s.paddingLeft, a.paddingLeft);
+                b.borderTopWidth = Width(s.borderTopWidth); b.borderRightWidth = Width(s.borderRightWidth);
+                b.borderBottomWidth = Width(s.borderBottomWidth); b.borderLeftWidth = Width(s.borderLeftWidth);
+                // What a percentage resolves against is the box, which the copy has only now.
+                b.borderTopLeftRadius = Radius(s.borderTopLeftRadius, a, b.borderTopLeftRadius);
+                b.borderTopRightRadius = Radius(s.borderTopRightRadius, a, b.borderTopRightRadius);
+                b.borderBottomRightRadius = Radius(s.borderBottomRightRadius, a, b.borderBottomRightRadius);
+                b.borderBottomLeftRadius = Radius(s.borderBottomLeftRadius, a, b.borderBottomLeftRadius);
+                if (s.translate.keyword == StyleKeyword.Undefined)
+                {
+                    var v = s.translate.value;
+                    if (v.x.unit == LengthUnit.Percent || v.y.unit == LengthUnit.Percent)
+                        b.translate = new Vector3(v.x.unit == LengthUnit.Percent ? v.x.value / 100f * a.layout.width : v.x.value,
+                                                  v.y.unit == LengthUnit.Percent ? v.y.value / 100f * a.layout.height : v.y.value, v.z);
+                }
+                for (var k = 0; k < from.childCount; k++)
+                    if (!Deep(from[k], to[k])) return false;
+                return true;
+            }
+
+            static float Pad(StyleLength p, float shown)
+                => p.keyword == StyleKeyword.Undefined && p.value.unit != LengthUnit.Percent ? p.value.value : shown;
+
+            static float Width(StyleFloat w) => w.keyword == StyleKeyword.Undefined ? w.value : 0f;
+
+            static float Radius(StyleLength r, OffThread.Box a, float own)
+                => r.keyword == StyleKeyword.Undefined && r.value.unit == LengthUnit.Percent
+                    ? r.value.value / 100f * Math.Min(a.layout.width, a.layout.height) : own;
         }
 
         private static readonly Regex DefId = new(@"\b(tw|scroll|clip|rad|grad|cut|tg|svg|cg|cclip|conic|stripes|bimg|ka|cpath|mask)(\d+)_(\d+)\b", RegexOptions.Compiled);
@@ -709,29 +885,32 @@ internal static class MarkupSlots
         /// wrapper group wraps (the first element inside it), and for a line with neither the
         /// element drawn just before it in the same group.
         /// </summary>
-        private void LineOwners()
+        private void LineOwners() => _lineOwner = Owners(_union.Lines);
+
+        /// <summary>The element each line of a scene is drawn for, as <see cref="LineOwners"/> says it.</summary>
+        private string?[] Owners(string[] lines)
         {
-            var lines = _union.Lines;
-            _lineOwner = new string?[lines.Length];
+            var owners = new string?[lines.Length];
             var stack = new List<(int Line, string? Owner)>();
             string? previous = null;
             for (var i = 0; i < lines.Length; i++)
             {
-                var own = IdOf(lines[i]);
+                var own = IdOf(lines[i]) ?? DefUser(lines[i]);
                 var opens = Braces(lines[i]);
                 string? owner = own;
                 if (owner == null && opens > 0)
                 {
                     // a wrapper: the first element drawn inside it
                     var end = Close(lines, i);
-                    for (var k = i + 1; k <= end && owner == null; k++) owner = IdOf(lines[k]);
+                    for (var k = i + 1; k <= end && owner == null; k++) owner = IdOf(lines[k]) ?? DefUser(lines[k]);
                 }
                 owner ??= previous ?? (stack.Count > 0 ? stack[stack.Count - 1].Owner : null);
-                _lineOwner[i] = owner;
+                owners[i] = owner;
                 if (opens > 0) { stack.Add((i, owner)); previous = null; }
                 else if (opens < 0) { if (stack.Count > 0) { previous = stack[stack.Count - 1].Owner; stack.RemoveAt(stack.Count - 1); } }
                 else previous = owner;
             }
+            return owners;
         }
 
         /// <summary>The union element a line carries the id of (a border companion counts as its element).</summary>
@@ -747,6 +926,19 @@ internal static class MarkupSlots
             var m = DefName.Match(id);
             return m.Success && _elements.ContainsKey(m.Groups["name"].Value) ? m.Groups["name"].Value : null;
         }
+
+        /// <summary>
+        /// The union element whose gradient or clip a line draws with: a striped background is a group
+        /// clipped to `stripes&lt;element&gt;_1` with no id of its own.
+        /// </summary>
+        private string? DefUser(string line)
+        {
+            foreach (Match m in DefUse.Matches(line))
+                if (_elements.ContainsKey(m.Groups["name"].Value)) return m.Groups["name"].Value;
+            return null;
+        }
+
+        private static readonly Regex DefUse = new(@"(?:clip|f|s|mask)=@?(?:tw|scroll|clip|rad|grad|cut|tg|svg|cg|cclip|conic|stripes|bimg|ka|cpath|mask)(?<name>\S+?)_\d+(?!\d)", RegexOptions.Compiled);
 
         /// <summary>Which gated roots each union line is drawn under: its group's lines, and the defs its elements mint.</summary>
         private void Own()
@@ -858,16 +1050,27 @@ internal static class MarkupSlots
         private Scene? Layout(Config config, string why)
         {
             var key = config.Key();
-            if (_emitted.TryGetValue(key, out var cached)) return cached.Map != null ? cached : null;
-            var hidden = Hidden(config);
-            var scene = Emit(hidden);
-            _emitted[key] = scene;
+            if (!_emitted.TryGetValue(key, out var scene))
+            {
+                scene = Emit(Hidden(config));
+                _emitted[key] = scene;
+                Aligned(config, scene, why);
+            }
+            if (scene.Map == null) return null;
+            // In the order they are first asked for, which is the order the opening values are read in.
+            if (!_probing && !scene.Laid) { scene.Laid = true; _laid.Add(scene); }
+            return scene;
+        }
 
+        /// <summary>A layout matched line for line against the union: its <see cref="Scene.Map"/>, or said why not.</summary>
+        private void Aligned(Config config, Scene scene, string why)
+        {
+            var absent = Absent(config);
             var kept = new List<int>(scene.Lines.Length);
             for (var i = 0; i < _union.Lines.Length; i++)
             {
                 var drop = false;
-                foreach (var o in _owners[i]) if (hidden.Contains(o)) { drop = true; break; }
+                foreach (var o in _owners[i]) if (absent.Contains(o)) { drop = true; break; }
                 if (!drop) kept.Add(i);
             }
             var map = Align(scene.Lines, kept, out var at, out var their);
@@ -875,12 +1078,11 @@ internal static class MarkupSlots
             {
                 var mine = at < scene.Lines.Length ? scene.Lines[at].Trim() : "(end)";
                 var theirs = their >= 0 && their < kept.Count ? _union.Lines[kept[their]].Trim() : "(end)";
-                _result.Problems.Add($"{why}: its lines do not match the union's at line {at} - \"{Short(mine)}\" against \"{Short(theirs)}\"");
-                return null;
+                if (!_quiet) _result.Problems.Add($"{why}: its lines do not match the union's at line {at} - \"{Short(mine)}\" against \"{Short(theirs)}\"");
+                _misaligned = scene;
+                return;
             }
             scene.Map = map;
-            if (!_probing) _laid.Add(scene);
-            return scene;
         }
 
         /// <summary>
@@ -1034,6 +1236,29 @@ internal static class MarkupSlots
             return hidden;
         }
 
+        /// <summary>
+        /// Every gated root a layout does not DRAW. A copy of an element is drawn whenever the copy the
+        /// layout shows is (<see cref="Clone"/>), so a choice between copies hides nothing here.
+        /// </summary>
+        private HashSet<string> Absent(Config c)
+        {
+            var absent = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var t in _result.Targets)
+                foreach (var root in t.Roots)
+                    if (!Drawn(c, t, t.Union.Path[root])) absent.Add(root);
+            return absent;
+        }
+
+        private static bool Drawn(Config c, Target t, (bool List, int Index, int Which)[] path)
+        {
+            foreach (var (list, index, which) in path)
+            {
+                if (list) { if (which >= (c.Counts.TryGetValue((t, index), out var n) ? n : 0)) return false; }
+                else if (!Copied(t, index) && Taken(c, t, index) != (which == 1)) return false;
+            }
+            return true;
+        }
+
         private static bool Shown(Config c, Target t, (bool List, int Index, int Which)[] path)
         {
             foreach (var (list, index, which) in path)
@@ -1144,7 +1369,83 @@ internal static class MarkupSlots
                 }
                 var roots = new List<string>();
                 foreach (var row in t.Union.Rows[l.Index]) roots.AddRange(row);
-                State(t, "rows#" + l.Index.ToString(CultureInfo.InvariantCulture), configs, roots);
+                var key = "rows#" + l.Index.ToString(CultureInfo.InvariantCulture);
+                if (Lengths(t, l.Index, configs) is { } laid) Bind(t, key, laid, roots);
+                else State(t, key, configs, roots);
+            }
+        }
+
+        /// <summary>
+        /// What a list draws at each length, from as few of them as say it: empty and full, then the
+        /// length halfway between two, which either lies on the line through them - and so does every
+        /// length between - or splits them in two. A row draws where it stands in the full list for as
+        /// long as it is drawn, and what the rows push along moves in step with how many there are, so
+        /// a list of rows alike is three layouts; one whose rows differ, or whose container only draws
+        /// with rows in it, is laid out at the lengths where that happens. Null when a list is too
+        /// short for this to lay out fewer.
+        /// </summary>
+        private List<(string Name, Config Config, Dictionary<string, SceneSlots.Value> Values)>? Lengths(
+            Target t, int list, List<(string Name, List<Config> Layouts)> configs)
+        {
+            var len = configs.Count - 1;
+            if (len < 3) return null;
+            var rowOf = new Dictionary<string, int>(StringComparer.Ordinal);
+            var rows = t.Union.Rows[list];
+            for (var k = 0; k < rows.Count; k++) foreach (var root in rows[k]) rowOf[root] = k;
+            var at = new Dictionary<string, SceneSlots.Value>?[len + 1];
+            if (Laid(0) is null || Laid(len) is null || !Between(0, len)) return null;
+
+            var laid = new List<(string, Config, Dictionary<string, SceneSlots.Value>)>();
+            for (var n = 0; n <= len; n++) laid.Add((configs[n].Name, configs[n].Layouts[0], at[n]!));
+            return laid;
+
+            Dictionary<string, SceneSlots.Value>? Laid(int n)
+                => at[n] = Layout(configs[n].Layouts[0], $"\"{t.Id}\" rows#{list} = {n}") is { } scene ? Values(scene) : null;
+
+            // Every length strictly between two laid out: read off them when the one halfway agrees.
+            bool Between(int lo, int hi)
+            {
+                if (hi - lo < 2) return true;
+                var mid = (lo + hi) / 2;
+                if (Laid(mid) is not { } real) return false;
+                if (Line(lo, hi, mid) is { } predicted && Agrees(predicted, real))
+                {
+                    for (var n = lo + 1; n < hi; n++) if (n != mid) at[n] = Line(lo, hi, n);
+                    return true;
+                }
+                return Between(lo, mid) && Between(mid, hi);
+            }
+
+            // What length n draws, from lengths lo and hi: a row's slots while it is drawn, everything
+            // else on the line through the two. Null when something is drawn at one and not the other.
+            Dictionary<string, SceneSlots.Value>? Line(int lo, int hi, int n)
+            {
+                var a = at[lo]!;
+                var b = at[hi]!;
+                var line = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+                foreach (var pair in b)
+                {
+                    var row = -1;
+                    for (var e = OwnerOf(pair.Key); e != null && row < 0; e = Up(e)) if (rowOf.TryGetValue(e, out var k)) row = k;
+                    if (row >= 0) { if (row < n) line[pair.Key] = pair.Value; continue; }
+                    if (!a.TryGetValue(pair.Key, out var was)) return null;
+                    if (Same(was, pair.Value)) { line[pair.Key] = pair.Value; continue; }
+                    if (!was.IsNumber || !pair.Value.IsNumber) return null;
+                    line[pair.Key] = new SceneSlots.Value(was.Number + (pair.Value.Number - was.Number) * (n - lo) / (hi - lo));
+                }
+                foreach (var key in a.Keys) if (!b.ContainsKey(key)) return null;
+                return line;
+            }
+
+            // A layout runs on whole pixels, so a line through two of them is half a pixel out at most.
+            static bool Agrees(Dictionary<string, SceneSlots.Value> predicted, Dictionary<string, SceneSlots.Value> real)
+            {
+                if (predicted.Count != real.Count) return false;
+                foreach (var pair in real)
+                    if (!predicted.TryGetValue(pair.Key, out var p) || p.IsNumber != pair.Value.IsNumber
+                        || (p.IsNumber ? Math.Abs(p.Number - pair.Value.Number) > 0.51f : !string.Equals(p.Text, pair.Value.Text, StringComparison.Ordinal)))
+                        return false;
+                return true;
             }
         }
 
@@ -1198,7 +1499,12 @@ internal static class MarkupSlots
                 }
                 laid.Add((name, layouts[0], merged));
             }
+            return Bind(t, key, laid, roots);
+        }
 
+        /// <summary>The states of one binding from what each draws: what differs, and the gates.</summary>
+        private Binding Bind(Target t, string key, List<(string Name, Config Config, Dictionary<string, SceneSlots.Value> Values)> laid, List<string> roots)
+        {
             var varies = Varies(laid.ConvertAll(l => l.Values));
             var binding = new Binding { Key = key };
             foreach (var (name, config, values) in laid)
@@ -1265,7 +1571,7 @@ internal static class MarkupSlots
         /// cascades, and a re-cascade of the same element kept the old pixels - `width:55.5%` measured
         /// as the 37% it replaced, and every bar read as a value that changed nothing.
         /// </remarks>
-        private Scene? Probe(Config at, Dictionary<(Target, int), string>? values, string why)
+        private Scene? Probe(Config at, Dictionary<(Target, int), string>? values, string why, bool quiet = false)
         {
             // Only the elements whose attributes hold a moved value are built again, in place: a
             // whole union is a quarter of a second, and a compile lays out hundreds of these.
@@ -1276,9 +1582,10 @@ internal static class MarkupSlots
             _override = values;
             try
             {
-                foreach (var (t, e) in touched) Rebuild(t, e);
+                Rebuild(touched);
                 if (touched.Count > 0) Name();
                 _probing = true;
+                _quiet = quiet;
                 _emitted.Remove(at.Key());
                 return Layout(at, why);
             }
@@ -1286,21 +1593,78 @@ internal static class MarkupSlots
             {
                 _emitted.Remove(at.Key());
                 _probing = false;
+                _quiet = false;
                 _override = null;
-                foreach (var (t, e) in touched) Rebuild(t, e);
+                Rebuild(touched);
                 if (touched.Count > 0) Name();
             }
         }
 
         /// <summary>
-        /// One union element built again where it stands, its attributes written from their pieces
+        /// Union elements built again where they stand, their attributes written from their pieces
         /// with the current fill. Rebuilt rather than re-cascaded: the renderer turns a percentage
         /// into pixels when it cascades, and a re-cascade kept the old pixels.
         /// </summary>
-        private void Rebuild(Target t, string element)
+        /// <remarks>
+        /// Together, and then attached together: attaching walks the page's post-layout passes, and
+        /// once per element it was most of what building one cost. One inside another that is built
+        /// again is built with it, from the attributes just written.
+        /// </remarks>
+        private void Rebuild(List<(Target T, string Element)> touched)
         {
-            if (!_elements.TryGetValue(element, out var ve) || ve.parent is not { } parent) return;
-            if (!_built.NodeOf.TryGetValue(ve, out var node) || !_built.NodeOf.TryGetValue(parent, out var parentNode)) return;
+            Stop();
+            var made = new List<(Target T, VisualElement Made, VisualElement Parent)>();
+            lock (PageCompiler.Gate)
+                foreach (var (t, e) in touched)
+                {
+                    if (touched.Exists(o => o.Element != e && Nested(o.Element, e) && Inside(e, o.Element))) continue;
+                    if (Rebuild(t, e) is { } m) made.Add((t, m.Made, m.Parent));
+                }
+            if (made.Count == 0) return;
+            TimeBuild.Start();
+            try
+            {
+                lock (PageCompiler.Gate) Attached(made);
+            }
+            finally { TimeBuild.Stop(); }
+        }
+
+        /// <summary>What was built again, attached as the surface attaches it.</summary>
+        private void Attached(List<(Target T, VisualElement Made, VisualElement Parent)> made)
+        {
+            {
+                Attach(_built);
+                // A mixed calc() is applied when its parent's size changes, and the parent of a rebuilt
+                // bar has not changed: without this the copy kept the percent alone, without its `- 12px`.
+                var fresh = new HashSet<VisualElement>();
+                foreach (var m in made) fresh.Add(m.Made);
+                foreach (var (owner, act) in _built.AfterRecascade.ToArray())
+                    for (var e = owner; e != null; e = e.parent)
+                        if (fresh.Contains(e)) { act(); break; }
+                var targets = new List<Target>();
+                var parents = new List<VisualElement>();
+                foreach (var m in made)
+                {
+                    if (!targets.Contains(m.T)) targets.Add(m.T);
+                    if (!parents.Contains(m.Parent)) parents.Add(m.Parent);
+                }
+                foreach (var t in targets) Animate(t);
+                foreach (var parent in parents) Rename(parent);
+            }
+        }
+
+        /// <summary>Whether one union element is inside another.</summary>
+        private bool Inside(string element, string ancestor)
+        {
+            for (var e = Up(element); e != null; e = Up(e)) if (e == ancestor) return true;
+            return false;
+        }
+
+        /// <summary>One union element built again where it stands; what was made, and where.</summary>
+        private (VisualElement Made, VisualElement Parent)? Rebuild(Target t, string element)
+        {
+            if (!_elements.TryGetValue(element, out var ve) || ve.parent is not { } parent) return null;
+            if (!_built.NodeOf.TryGetValue(ve, out var node) || !_built.NodeOf.TryGetValue(parent, out var parentNode)) return null;
             Builds++;
             TimeBuild.Start();
             try
@@ -1336,37 +1700,37 @@ internal static class MarkupSlots
                         Place();
                     }
                 }
-                Attach(_built);
-                // A mixed calc() is applied when its parent's size changes, and the parent of a rebuilt
-                // bar has not changed: without this the copy kept the percent alone, without its `- 12px`.
-                if (made != null)
-                    foreach (var (owner, act) in _built.AfterRecascade.ToArray())
-                        for (var e = owner; e != null; e = e.parent)
-                            if (e == made) { act(); break; }
-                Animate(t);
-                Rename(parent);
+                return made == null ? null : (made, parent);
             }
             finally { TimeBuild.Stop(); }
         }
 
         /// <summary>
-        /// Every number the page writes into a style: laid out at two values, and the slots that moved
-        /// give the line from the value to the slot.
+        /// Every number the page writes into a style, and every other style value drawn from a fixed
+        /// set: each moved, and what moved with it read off the layouts.
         /// </summary>
         /// <remarks>
         /// `width:62.3%` does not reach the scene as 62.3 - it is a width in scene units, of whatever
         /// the parent measures in the layout that shows it. So it is found by moving it: two points
         /// make a slope and an offset, which is all the chip needs, and a third says whether it is a
         /// line at all. A slot that moves out of proportion - text that wraps, a box at its minimum -
-        /// needs the layout engine a compiled page does not have: refused, by name.
+        /// needs the layout engine a compiled page does not have: refused, by name. A value from a
+        /// fixed set is laid out at each of its values, and what it changes is carried as a state; one
+        /// that changes the SHAPE of what is drawn - a shadow appearing, an animation starting -
+        /// cannot be a state on one shape, so its element is marked to be written once per value.
+        ///
+        /// Every value one layout of the page shows is moved in the same layouts: what each moved is
+        /// what lies inside its own element, so one layout answers for all of them. Only something
+        /// OUTSIDE every moved element that moved as well - a neighbour pushed along - needs a value
+        /// alone to say whose it is, and only those values are laid out alone.
         /// </remarks>
-        private void Numbers()
+        private void Holes()
         {
-            var groups = new List<(Target T, List<Markup.Hole> Holes, string Element, double V0, double Step, Config At)>();
+            var jobs = new List<Job>();
+            // Numbers: the same expression in the same scope is one value written twice - a hard stop
+            // is `C 0 62%, transparent 62%` - and moving one without the other draws another gradient.
             foreach (var t in _result.Targets)
             {
-                // The same expression in the same scope is one value written twice - a hard stop is
-                // `C 0 62%, transparent 62%` - and moving one without the other draws another gradient.
                 var byKey = new Dictionary<string, List<Markup.Hole>>(StringComparer.Ordinal);
                 foreach (var h in t.Markup.Holes)
                 {
@@ -1390,65 +1754,432 @@ internal static class MarkupSlots
                         continue;
                     }
                     if (Showing(t, t.Union.Path["#" + h.Index.ToString(CultureInfo.InvariantCulture)]) is not { } at) continue;
-                    groups.Add((t, holes, place.Element!, v0, Math.Abs(v0) > 20 ? v0 * 0.5 : 20, at));
+                    jobs.Add(new Job { T = t, Holes = holes, Element = place.Element!, At = at, V0 = v0, Step = Math.Abs(v0) > 20 ? v0 * 0.5 : 20 });
                 }
             }
+            jobs.AddRange(VariantJobs());
+            foreach (var (at, group) in ByLayout(jobs)) Together(at, group);
 
-            // One value at a time, at two distances: whatever moves moved because of it, and a slot
-            // that moves twice as far for twice the change is a line the chip can draw.
-            foreach (var g in groups)
+            // What each says, in the order they were found.
+            foreach (var job in jobs)
             {
-                // Measured from the element built again at its own value, not from the layout
-                // before: building an element again settles text a pixel differently.
-                if (Moved(g, 0) is not { } zero) continue;
-                var was = Values(zero);
-                var near = Moved(g, g.Step);
-                var far = near == null ? null : Moved(g, 2 * g.Step);
-                if (near == null || far == null) continue;
-                var farther = Values(far);
-                var slots = new HoleSlots { Kind = Kind.Number };
-                var bent = new List<string>();
-                foreach (var pair in Values(near))
+                if (job.Shaped && job.Alts == null) job.Alone = true;
+                if (job.Alone) Alone(job);
+                if (job.Alts == null) Number(job);
+                else Variant(job);
+            }
+        }
+
+        /// <summary>Every value from a fixed set that is not a colour, where a layout shows it.</summary>
+        private List<Job> VariantJobs()
+        {
+            var jobs = new List<Job>();
+            foreach (var t in _result.Targets)
+                foreach (var h in t.Markup.Holes)
                 {
-                    if (!pair.Value.IsNumber || !was.TryGetValue(pair.Key, out var w) || !w.IsNumber
-                        || !farther.TryGetValue(pair.Key, out var w2) || !w2.IsNumber) continue;
-                    var d1 = pair.Value.Number - w.Number;
-                    var d2 = w2.Number - w.Number;
-                    if (Math.Abs(d1) <= 0.05 && Math.Abs(d2) <= 0.05) continue;
-                    // The layout runs on whole pixels: a neighbour that settles one pixel over and
-                    // stays there whatever the value is rounding, not something the value places.
-                    if (Math.Abs(d1 - d2) < 0.05 && Math.Abs(d1) <= 1.01) continue;
-                    // Three whole-pixel readings of a straight line are each half a pixel out at
-                    // most, which bends it by up to two.
-                    if (Math.Abs(d2 - 2 * d1) > 2.01)
-                    {
-                        bent.Add(bent.Count > 0 ? pair.Key : $"{pair.Key} {w.Number:0.#}, {pair.Value.Number:0.#}, {w2.Number:0.#} at {g.V0:0.#}, {g.V0 + g.Step:0.#}, {g.V0 + 2 * g.Step:0.#}");
-                        continue;
-                    }
-                    // The slope from the two far points and the offset through all three, which
-                    // halves what the rounding costs.
-                    var scale = d2 / (2 * g.Step);
-                    var bias = (w.Number + pair.Value.Number + w2.Number) / 3 - scale * (g.V0 + g.Step);
-                    slots.To.Add((pair.Key, scale, bias));
+                    var place = t.Union.Holes[h.Index];
+                    if (place.Attribute is not ("style" or "class") || place.Element == null) continue;
+                    var alts = t.Markup.Enumerate(h.Value);
+                    if (alts == null || alts.Count < 2) continue;
+                    if (IsColourProperty(place.Property) || alts.TrueForAll(IsColour)) continue;
+                    if (Showing(t, t.Union.Path["#" + h.Index.ToString(CultureInfo.InvariantCulture)]) is not { } at) continue;
+                    jobs.Add(new Job { T = t, Holes = new List<Markup.Hole> { h }, Element = place.Element, At = at, Alts = alts });
                 }
-                var text = g.T.Markup.Text(g.Holes[0].Value);
-                if (bent.Count > 0)
-                    Problem(g.T, $"hole {g.Holes[0].Index} ({text}) moves {bent.Count} slot(s) - {string.Join(", ", bent.GetRange(0, Math.Min(4, bent.Count)))} - by amounts not in proportion to it, so where they land needs the layout engine");
-                if (slots.To.Count == 0)
+            return jobs;
+        }
+
+        /// <summary>
+        /// Values by the layout that shows them. A copy of an element is drawn in any layout that shows
+        /// the copy laid out (Clone), and moved with it: its own value moves with the laid-out copy's.
+        /// </summary>
+        private static List<(Config At, List<Job> Jobs)> ByLayout(List<Job> jobs)
+        {
+            var byLayout = new Dictionary<string, (Config At, List<Job> Jobs)>(StringComparer.Ordinal);
+            foreach (var job in jobs)
+            {
+                job.Showing = job.At;
+                var at = job.At.Copy();
+                foreach (var side in new List<(Target, int)>(at.Sides.Keys))
+                    if (Copied(side.Item1, side.Item2)) at.Sides.Remove(side);
+                job.At = at;
+                var key = at.Key();
+                if (!byLayout.TryGetValue(key, out var group)) byLayout[key] = group = (at, new List<Job>());
+                group.Jobs.Add(job);
+            }
+            return new List<(Config, List<Job>)>(byLayout.Values);
+        }
+
+        /// <summary>
+        /// Whether a value from a set draws another shape, asked before anything else is measured:
+        /// if one does, its element is written once per value, the markup changes, and everything
+        /// else measured of this one would be thrown away. So only shapes are looked at - each value
+        /// in the layout that shows it, against that layout as it was drawn.
+        /// </summary>
+        private bool Shapes()
+        {
+            var any = false;
+            foreach (var (at, jobs) in ByLayout(VariantJobs()))
+            {
+                if (Layout(at, "a state a value is shown in") is not { } before) continue;
+                var rounds = new List<List<Job>>();
+                foreach (var job in jobs)
                 {
-                    Problem(g.T, $"hole {g.Holes[0].Index} ({text}) changes nothing that is drawn");
-                    foreach (var h in g.Holes) _said.Add((g.T, h.Index));
+                    var home = rounds.Find(r => r.TrueForAll(o => !Nested(o.Element, job.Element)));
+                    if (home == null) rounds.Add(home = new List<Job>());
+                    home.Add(job);
+                }
+                foreach (var round in rounds)
+                {
+                    var levels = 0;
+                    foreach (var job in round) levels = Math.Max(levels, job.Levels);
+                    for (var level = 1; level < levels; level++)
+                    {
+                        var moving = round.FindAll(j => level < j.Levels && !j.Shaped);
+                        if (moving.Count == 0) continue;
+                        Set(moving, level);
+                        var scene = Quiet(at);
+                        var shaped = scene == null ? Shaped(before, _misaligned, moving) : new List<Job>();
+                        Set(moving, 0);
+                        // Something else changed shape too: each value alone says whose it was.
+                        if (shaped == null)
+                        {
+                            shaped = new List<Job>();
+                            foreach (var job in moving)
+                            {
+                                Set(new List<Job> { job }, level);
+                                if (Quiet(at) == null) shaped.Add(job);
+                                Set(new List<Job> { job }, 0);
+                            }
+                        }
+                        foreach (var job in shaped)
+                        {
+                            job.Shaped = true;
+                            job.T.Expand.Add(job.Holes[0].Index);
+                            job.T.Inherit.Add(job.Holes[0].Index);
+                            any = true;
+                        }
+                    }
+                }
+            }
+            return any;
+        }
+
+        /// <summary>One value moved to see what it writes: a number (one or more holes written with it) or a value from a set.</summary>
+        private sealed class Job
+        {
+            public Target T = null!;
+            public List<Markup.Hole> Holes = null!;
+            public string Element = string.Empty;
+            public Config At = null!;
+            /// <summary>Where the value is shown with its own copy laid out, for laying it out alone.</summary>
+            public Config Showing = null!;
+            /// <summary>A number: what the page draws, and how far each layout moves it.</summary>
+            public double V0, Step;
+            /// <summary>A value from a set: every value, the first what the page draws.</summary>
+            public List<string>? Alts;
+            /// <summary>What each layout draws, as far as it is this value's doing; null where it could not be laid out.</summary>
+            public Dictionary<string, SceneSlots.Value>?[] Laid = Array.Empty<Dictionary<string, SceneSlots.Value>?>();
+            /// <summary>Something outside every moved element moved too: laid out alone, to say whose it is.</summary>
+            public bool Alone;
+            /// <summary>Its element drew another shape at one of its values: written once per value instead.</summary>
+            public bool Shaped;
+            /// <summary>The layout of every value as the page draws it, with their elements built again, when it was made.</summary>
+            public Dictionary<string, SceneSlots.Value>? Rest;
+            /// <summary>Copies drawn where another was laid out, in the layouts this was read from.</summary>
+            public readonly HashSet<string> Mirrors = new(StringComparer.Ordinal);
+            public int Levels => Alts?.Count ?? 3;
+            public string Value(int level) => Alts == null
+                ? (V0 + level * Step).ToString("0.###", CultureInfo.InvariantCulture)
+                : Alts[level < Alts.Count ? level : 0];
+        }
+
+        /// <summary>
+        /// Every value one layout shows, moved in the same layouts. What changed inside a value's own
+        /// element is that value's; what changed outside all of them is a neighbour one of them pushed,
+        /// and the values that could have pushed it are laid out alone. A value that changes the shape
+        /// of its own element is told apart the same way, by whose lines are not the lines they were.
+        /// </summary>
+        /// <remarks>
+        /// A value on an element inside another's element - a bar in a card whose padding is a value
+        /// too - moves in a layout of its own: what changed inside both would be neither's alone. The
+        /// layout with every value as the page draws it is the same for all of them, and every element
+        /// compared is built again first: building an element again settles its text a pixel apart
+        /// from the first build, so every layout compared here is of rebuilt elements.
+        /// </remarks>
+        private void Together(Config at, List<Job> jobs)
+        {
+            var rounds = new List<List<Job>>();
+            foreach (var job in jobs)
+            {
+                var home = rounds.Find(r => r.TrueForAll(o => !Nested(o.Element, job.Element)));
+                if (home == null) rounds.Add(home = new List<Job>());
+                home.Add(job);
+            }
+
+            Set(jobs, 0);
+            if (Quiet(at) is not { } restScene) { foreach (var job in jobs) job.Alone = true; return; }
+            var rest = Values(restScene);
+            foreach (var job in jobs) job.Rest = rest;
+            foreach (var round in rounds)
+            {
+                var active = new List<Job>(round);
+                var levels = 0;
+                foreach (var job in round) levels = Math.Max(levels, job.Levels);
+                var laid = new Dictionary<string, SceneSlots.Value>[levels];
+                laid[0] = rest;
+                for (var level = 1; level < levels && active.Count > 0; level++)
+                {
+                    while (true)
+                    {
+                        var moving = active.FindAll(j => level < j.Levels);
+                        if (moving.Count == 0) { laid[level] = rest; break; }
+                        Set(moving, level);
+                        var scene = Quiet(at);
+                        if (scene != null) { laid[level] = Values(scene); Set(moving, 0); break; }
+                        // Some of them draw another shape: theirs are the elements whose lines changed.
+                        var shaped = Shaped(restScene, _misaligned, moving);
+                        Set(moving, 0);
+                        if (shaped == null || shaped.Count == 0)
+                        {
+                            foreach (var job in active) job.Alone = true;
+                            active.Clear();
+                            break;
+                        }
+                        foreach (var job in shaped) { job.Shaped = true; active.Remove(job); }
+                    }
+                }
+                if (active.Count == 0) continue;
+
+                // Every slot that is not the same in every layout, and whose it is.
+                var changed = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var pair in rest)
+                    for (var level = 1; level < levels; level++)
+                        if (!laid[level].TryGetValue(pair.Key, out var v) || !Same(v, pair.Value)) { changed.Add(pair.Key); break; }
+                var own = new Dictionary<Job, HashSet<string>>();
+                foreach (var job in active) own[job] = new HashSet<string>(StringComparer.Ordinal);
+                var pushed = new List<string>();
+                foreach (var slot in changed)
+                {
+                    var owner = active.Find(job => Within(slot, job.Element));
+                    if (owner != null) own[owner].Add(slot);
+                    else pushed.Add(slot);
+                }
+                // A neighbour moved. What can push it is a value whose own box changed, beside it or
+                // beside something it is inside: when one such value could have, it did; when several
+                // could have, only those, laid out alone, say which.
+                if (pushed.Count > 0)
+                {
+                    var movers = active.FindAll(job => { foreach (var slot in own[job]) if (Geometric(slot)) return true; return false; });
+                    foreach (var slot in pushed)
+                    {
+                        var could = movers.FindAll(job => Up(job.Element) is { } parent && Within(slot, parent));
+                        if (could.Count == 1) own[could[0]].Add(slot);
+                        else foreach (var job in could.Count == 0 ? movers : could) job.Alone = true;
+                    }
+                }
+
+                foreach (var job in active)
+                {
+                    if (job.Alone) continue;
+                    job.Laid = new Dictionary<string, SceneSlots.Value>?[job.Levels];
+                    for (var level = 0; level < job.Levels; level++)
+                    {
+                        // Only what it moved: everything else is the same at every level, which is all
+                        // the value's own reading needs of it.
+                        var mine = new Dictionary<string, SceneSlots.Value>(own[job].Count, StringComparer.Ordinal);
+                        foreach (var slot in own[job])
+                            if (laid[level].TryGetValue(slot, out var v)) mine[slot] = v;
+                        job.Laid[level] = mine;
+                    }
+                }
+            }
+        }
+
+        /// <summary>The elements of these values built again with each at the given level (0: as the page draws it).</summary>
+        private void Set(List<Job> jobs, int level)
+        {
+            var values = new Dictionary<(Target, int), string>();
+            var touched = new List<(Target T, string Element)>();
+            foreach (var job in jobs)
+            {
+                foreach (var h in job.Holes) values[(job.T, h.Index)] = job.Value(level);
+                if (!touched.Contains((job.T, job.Element))) touched.Add((job.T, job.Element));
+            }
+            _override = level == 0 ? null : values;
+            try { Rebuild(touched); }
+            finally { _override = null; }
+            Name();
+        }
+
+        /// <summary>A layout of the page as it stands, not what it opens with, and not a fault when it does not line up.</summary>
+        private Scene? Quiet(Config at)
+        {
+            _probing = true;
+            _quiet = true;
+            _misaligned = null;
+            try
+            {
+                _emitted.Remove(at.Key());
+                return Layout(at, "values moved together");
+            }
+            finally
+            {
+                _emitted.Remove(at.Key());
+                _probing = false;
+                _quiet = false;
+            }
+        }
+
+        /// <summary>
+        /// Which of these values drew another shape: the ones whose element's own lines are not the
+        /// lines it drew before. Null when something else changed shape too, which none of them owns.
+        /// </summary>
+        private List<Job>? Shaped(Scene before, Scene? after, List<Job> jobs)
+        {
+            if (after == null) return null;
+            var was = Lines(before.Lines);
+            var now = Lines(after.Lines);
+            var shaped = new List<Job>();
+            var changed = new List<string>();
+            foreach (var pair in was)
+                if (!now.TryGetValue(pair.Key, out var l) || !Alike(pair.Value, l)) changed.Add(pair.Key);
+            foreach (var pair in now)
+                if (!was.ContainsKey(pair.Key)) changed.Add(pair.Key);
+            foreach (var element in changed)
+            {
+                var job = jobs.Find(j => j.Element == element);
+                if (job == null) return null;
+                if (!shaped.Contains(job)) shaped.Add(job);
+            }
+            return shaped;
+
+            static bool Alike(List<string> a, List<string> b)
+            {
+                if (a.Count != b.Count) return false;
+                for (var i = 0; i < a.Count; i++)
+                    if (!Matches(a[i], b[i]) && !Matches(b[i], a[i])) return false;
+                return true;
+            }
+        }
+
+        /// <summary>A scene's lines by the element each is drawn for.</summary>
+        private Dictionary<string, List<string>> Lines(string[] lines)
+        {
+            var owners = Owners(lines);
+            var by = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var owner = owners[i] ?? string.Empty;
+                if (!by.TryGetValue(owner, out var list)) by[owner] = list = new List<string>();
+                list.Add(lines[i].Trim());
+            }
+            return by;
+        }
+
+        /// <summary>Whether either element is the other or inside it.</summary>
+        private bool Nested(string a, string b)
+        {
+            for (var e = a; e != null; e = Up(e)) if (e == b) return true;
+            for (var e = b; e != null; e = Up(e)) if (e == a) return true;
+            return false;
+        }
+
+        /// <summary>A position or a size: what a value that pushes its neighbours changes of its own.</summary>
+        private static bool Geometric(string slot)
+            => slot.EndsWith("_x", StringComparison.Ordinal) || slot.EndsWith("_y", StringComparison.Ordinal)
+               || slot.EndsWith("_w", StringComparison.Ordinal) || slot.EndsWith("_h", StringComparison.Ordinal);
+
+        /// <summary>One value laid out at each of its values with every other as the page draws it.</summary>
+        private void Alone(Job job)
+        {
+            job.Laid = new Dictionary<string, SceneSlots.Value>?[job.Levels];
+            for (var level = 0; level < job.Levels; level++)
+            {
+                // As the page draws it, in the layout it was measured together in: that one already.
+                if (level == 0 && job.Rest != null && job.Showing.Key() == job.At.Key()) { job.Laid[0] = job.Rest; continue; }
+                var moved = new Dictionary<(Target, int), string>();
+                foreach (var h in job.Holes) moved[(job.T, h.Index)] = job.Value(level);
+                var why = job.Alts == null
+                    ? $"\"{job.T.Id}\" hole {job.Holes[0].Index} moved by {(level * job.Step).ToString("0.###", CultureInfo.InvariantCulture)}"
+                    : $"\"{job.T.Id}\" hole {job.Holes[0].Index} = \"{Short(job.Value(level))}\"";
+                // A value that changes the shape of what is drawn is found here, and is not a fault.
+                var scene = Probe(job.Showing, moved, why, quiet: job.Alts != null);
+                if (scene == null) return;
+                job.Laid[level] = Values(scene);
+                job.Mirrors.UnionWith(scene.Cloned);
+            }
+        }
+
+        /// <summary>A number's line from the value to each slot, from the value laid out at three points.</summary>
+        private void Number(Job g)
+        {
+            // Measured from the element built again at its own value, not from the layout
+            // before: building an element again settles text a pixel differently.
+            if (g.Laid.Length < 3 || g.Laid[0] is not { } was || g.Laid[1] is not { } near || g.Laid[2] is not { } farther) return;
+            var slots = new HoleSlots { Kind = Kind.Number };
+            var bent = new List<string>();
+            foreach (var pair in near)
+            {
+                if (!pair.Value.IsNumber || !was.TryGetValue(pair.Key, out var w) || !w.IsNumber
+                    || !farther.TryGetValue(pair.Key, out var w2) || !w2.IsNumber) continue;
+                var d1 = pair.Value.Number - w.Number;
+                var d2 = w2.Number - w.Number;
+                if (Math.Abs(d1) <= 0.05 && Math.Abs(d2) <= 0.05) continue;
+                // The layout runs on whole pixels: a neighbour that settles one pixel over and
+                // stays there whatever the value is rounding, not something the value places.
+                if (Math.Abs(d1 - d2) < 0.05 && Math.Abs(d1) <= 1.01) continue;
+                // Another copy of the element, drawn where this one is laid out: it moved because
+                // it mirrors this copy, and its own hole writes it.
+                if (Mirrored(pair.Key, g.Mirrors)) continue;
+                // Three whole-pixel readings of a straight line are each half a pixel out at
+                // most, which bends it by up to two.
+                if (Math.Abs(d2 - 2 * d1) > 2.01)
+                {
+                    bent.Add(bent.Count > 0 ? pair.Key : $"{pair.Key} {w.Number:0.#}, {pair.Value.Number:0.#}, {w2.Number:0.#} at {g.V0:0.#}, {g.V0 + g.Step:0.#}, {g.V0 + 2 * g.Step:0.#}");
                     continue;
                 }
-                foreach (var h in g.Holes) g.T.Holes[h.Index] = slots;
+                // The slope from the two far points and the offset through all three, which
+                // halves what the rounding costs.
+                var scale = d2 / (2 * g.Step);
+                var bias = (w.Number + pair.Value.Number + w2.Number) / 3 - scale * (g.V0 + g.Step);
+                slots.To.Add((pair.Key, scale, bias));
             }
-
-            Scene? Moved((Target T, List<Markup.Hole> Holes, string Element, double V0, double Step, Config At) g, double by)
+            var text = g.T.Markup.Text(g.Holes[0].Value);
+            if (bent.Count > 0)
+                Problem(g.T, $"hole {g.Holes[0].Index} ({text}) moves {bent.Count} slot(s) - {string.Join(", ", bent.GetRange(0, Math.Min(4, bent.Count)))} - by amounts not in proportion to it, so where they land needs the layout engine");
+            if (slots.To.Count == 0)
             {
-                var moved = new Dictionary<(Target, int), string>();
-                foreach (var h in g.Holes) moved[(g.T, h.Index)] = (g.V0 + by).ToString("0.###", CultureInfo.InvariantCulture);
-                return Probe(g.At, moved, $"\"{g.T.Id}\" hole {g.Holes[0].Index} moved by {by.ToString("0.###", CultureInfo.InvariantCulture)}");
+                Problem(g.T, $"hole {g.Holes[0].Index} ({text}) changes nothing that is drawn");
+                foreach (var h in g.Holes) _said.Add((g.T, h.Index));
+                return;
             }
+            foreach (var h in g.Holes) g.T.Holes[h.Index] = slots;
+        }
+
+        /// <summary>A value from a set: what each value draws, as a state picked by the value; a shape per value when one cannot be laid out.</summary>
+        private void Variant(Job job)
+        {
+            var t = job.T;
+            var h = job.Holes[0];
+            var laid = new List<(string Name, Dictionary<string, SceneSlots.Value> Values)>();
+            for (var level = 0; level < job.Levels; level++)
+            {
+                if (job.Laid.Length <= level || job.Laid[level] is not { } values) { t.Expand.Add(h.Index); t.Inherit.Add(h.Index); return; }
+                laid.Add((job.Alts![level], values));
+            }
+            // Everything that differs is carried, the element's neighbours included: a padding
+            // that pushes the rows below it down is what the state is for.
+            var varies = Varies(laid.ConvertAll(l => l.Values));
+            varies.RemoveWhere(slot => Mirrored(slot, job.Mirrors));
+            if (varies.Count == 0) return;                                    // draws the same whatever it is
+            var states = new List<CompiledPage.StateValues>();
+            foreach (var (name, values) in laid)
+            {
+                var state = new CompiledPage.StateValues { Name = name };
+                Carry(state, varies, values);
+                states.Add(state);
+            }
+            t.Holes[h.Index] = new HoleSlots { Kind = Kind.Variant, States = states };
         }
 
         /// <summary>The scope a hole's expression is read in, so the same text in two helpers is not one value.</summary>
@@ -1463,8 +2194,26 @@ internal static class MarkupSlots
             return false;
         }
 
+        /// <summary>Whether a slot is drawn inside one of the given copies.</summary>
+        private bool Mirrored(string slot, HashSet<string> copies)
+        {
+            if (copies.Count == 0) return false;
+            for (var e = OwnerOf(slot); e != null; e = Up(e))
+                if (copies.Contains(e)) return true;
+            return false;
+        }
+
+        /// <summary>What <see cref="OwnerOf"/> said about each slot: a probe asks it of every slot that moved.</summary>
+        private readonly Dictionary<string, string?> _slotOwners = new(StringComparer.Ordinal);
+
         /// <summary>The union element a slot belongs to.</summary>
         private string? OwnerOf(string slot)
+        {
+            if (_slotOwners.TryGetValue(slot, out var known)) return known;
+            return _slotOwners[slot] = FindOwner(slot);
+        }
+
+        private string? FindOwner(string slot)
         {
             // A positional slot is a line with no id of its own - a wrapper group, a pseudo-element,
             // a second shape - and belongs to whoever that line is drawn for.
@@ -1486,55 +2235,17 @@ internal static class MarkupSlots
 
         private static readonly Regex DefSlot = new(@"^(tw|scroll|clip|rad|grad|cut|tg|svg|cg|cclip|conic|stripes|bimg|ka|cpath|mask)(?<name>.+?)_\d+_", RegexOptions.Compiled);
 
-        /// <summary>
-        /// Every hole drawn from a fixed set of values that is not a colour: each value laid out, and
-        /// what it changes carried as a state picked by the value itself. A value that changes the
-        /// SHAPE of what is drawn - a shadow appearing, an animation starting - cannot be a state on
-        /// one shape, so its element is marked to be written once per value.
-        /// </summary>
-        private void Variants()
-        {
-            foreach (var t in _result.Targets)
-                foreach (var h in t.Markup.Holes)
-                {
-                    var place = t.Union.Holes[h.Index];
-                    if (place.Attribute is not ("style" or "class") || place.Element == null) continue;
-                    var alts = t.Markup.Enumerate(h.Value);
-                    if (alts == null || alts.Count < 2) continue;
-                    if (IsColourProperty(place.Property) || alts.TrueForAll(IsColour)) continue;
-                    if (Showing(t, t.Union.Path["#" + h.Index.ToString(CultureInfo.InvariantCulture)]) is not { } at) continue;
-
-                    var laid = new List<(string Name, Dictionary<string, SceneSlots.Value> Values)>();
-                    var shaped = false;
-                    foreach (var alt in alts)
-                    {
-                        var scene = Probe(at, new Dictionary<(Target, int), string> { [(t, h.Index)] = alt }, $"\"{t.Id}\" hole {h.Index} = \"{Short(alt)}\"");
-                        if (scene == null) { shaped = true; break; }
-                        laid.Add((alt, Values(scene)));
-                    }
-                    if (shaped) { t.Expand.Add(h.Index); continue; }
-                    // Everything that differs is carried, the element's neighbours included: a padding
-                    // that pushes the rows below it down is what the state is for.
-                    var varies = Varies(laid.ConvertAll(l => l.Values));
-                    if (varies.Count == 0) continue;                                    // draws the same whatever it is
-                    var states = new List<CompiledPage.StateValues>();
-                    foreach (var (name, values) in laid)
-                    {
-                        var state = new CompiledPage.StateValues { Name = name };
-                        Carry(state, varies, values);
-                        states.Add(state);
-                    }
-                    t.Holes[h.Index] = new HoleSlots { Kind = Kind.Variant, States = states };
-                }
-        }
-
         // ---- text and colour, found by what comes back -------------------------------------------
 
         /// <summary>
         /// Text and colour holes: the union built again with a distinctive value in each, emitted
         /// with everything shown, and each value found where it landed.
         /// </summary>
-        private void Discover()
+        /// <param name="colourSetsOnly">
+        /// Only which colours from a set reach no slot, for markup that is about to change: nothing
+        /// else has been measured, so any other value not found says nothing yet.
+        /// </param>
+        private void Discover(bool colourSetsOnly = false)
         {
             var sought = new Dictionary<Target, HashSet<int>>();
             foreach (var t in _result.Targets)
@@ -1585,12 +2296,13 @@ internal static class MarkupSlots
                     if (t.Holes.ContainsKey(h)) continue;
                     // A colour drawn from a fixed set that reached no slot is inside something the
                     // scene reads once - a gradient's stops, a shadow - and so is a shape per value.
-                    if (t.Union.Holes[h].Attribute == "style" && t.Markup.Enumerate(t.Markup.Holes[h].Value) is { Count: > 1 })
+                    if (t.Union.Holes[h].Attribute == "style" && t.Markup.Enumerate(t.Markup.Holes[h].Value) is { Count: > 1 } alts
+                        && (!colourSetsOnly || IsColourProperty(t.Union.Holes[h].Property) || alts.TrueForAll(IsColour)))
                     {
                         t.Expand.Add(h);
                         continue;
                     }
-                    Problem(t, $"hole {h} ({t.Markup.Text(t.Markup.Holes[h].Value)}) reaches no slot, so it would never be drawn");
+                    if (!colourSetsOnly) Problem(t, $"hole {h} ({t.Markup.Text(t.Markup.Holes[h].Value)}) reaches no slot, so it would never be drawn");
                 }
 
             void Land(int hole, string slot, Kind kind)
@@ -1704,11 +2416,6 @@ internal static class MarkupSlots
         /// </summary>
         private void Structure()
         {
-            // The real union again: discovery left the sentinel one in place.
-            foreach (var t in _result.Targets) Build(t, t.Union.Html);
-            Name();
-            _emitted.Clear();
-
             // What each slot opens with: the page's first layout, then - for what that layout does not
             // draw - the first layout that does. Never the union's own positions: the union is laid
             // out with every alternative on top of the others, and a slot no state writes (it is the

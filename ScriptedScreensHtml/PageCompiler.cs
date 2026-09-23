@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Runtime.CompilerServices;
+using System.Threading;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -23,17 +25,164 @@ namespace ScriptedScreensHtml;
 /// </remarks>
 internal static class PageCompiler
 {
+    // ---- compiled once ------------------------------------------------------------------------
+
+    /// <summary>
+    /// The lock a page's cascade and layout take: the style and layout state they share is one page
+    /// at a time. The surface's gate is this object. A compile takes it around each cascade and each
+    /// layout it makes rather than for its whole length, so a compile on a page's own thread holds
+    /// up another page, or the game thread, for one of those at most.
+    /// </summary>
+    internal static readonly object Gate = new();
+
+    /// <summary>What each page was built from, so a page built again finds its compile.</summary>
+    private static readonly ConditionalWeakTable<HtmlRenderer.Result, string> Sources = new();
+
+    /// <summary>
+    /// Every page compiled, by what it was built from and the size it was laid out at, with its
+    /// chunk's target left open (<see cref="Retarget"/>): fifteen consoles showing one page compile it
+    /// once, and a console that builds its page again - a capture, a push of the same page - compiles
+    /// nothing. Refusals are kept too: the same page is refused the same way.
+    /// </summary>
+    private static readonly Dictionary<(string Source, float W, float H), CompiledPage.Result> Done = new();
+    private static readonly Queue<(string, float, float)> DoneOrder = new();
+    private const int Kept = 16;
+    /// <summary>Compiles running, so a second page thread asking for the same one waits for it rather than compiling it again.</summary>
+    private static readonly Dictionary<(string, float, float), ManualResetEventSlim> Running = new();
+
+    /// <summary>The chunk's target as it is compiled, for <see cref="Retarget"/> to fill in per console.</summary>
+    private static readonly (string Surface, string Element, string Scene) Open = ("\u0002surface", "\u0002element", "\u0002scene");
+
+    /// <summary>What a page was built from, for finding its compile when it is built again.</summary>
+    internal static void Remember(HtmlRenderer.Result built, string source) => Sources.AddOrUpdate(built, source);
+
+    /// <summary>Whether this page, at this size, is compiled already: installing it then costs nothing but the chunk's load.</summary>
+    internal static bool IsCompiled(HtmlRenderer.Result built, Vector2 size)
+    {
+        if (!Sources.TryGetValue(built, out var source)) return false;
+        lock (Done) return Done.ContainsKey((source, size.x, size.y));
+    }
+
+    /// <summary>Lets a compile go, so the page compiles again: an answer it was laid out with has changed since.</summary>
+    internal static void Forget(HtmlRenderer.Result built, Vector2 size)
+    {
+        if (!Sources.TryGetValue(built, out var source)) return;
+        lock (Done) Done.Remove((source, size.x, size.y));
+    }
+
+    /// <summary>Set while a compile runs on a page's thread; true when the page no longer wants it.</summary>
+    [ThreadStatic] internal static Func<bool>? Cancelled;
+
     /// <summary>Compiles the page, using the layout it currently has.</summary>
     internal static CompiledPage.Result Compile(HtmlRenderer.Result built, Panel panel, Vector2 size,
                                                 IReadOnlyDictionary<string, SceneSlots.Value> slots,
                                                 (string Surface, string Element, string Scene)? target = null)
         => Compile(built, panel, size, slots, target, out _);
 
-    /// <param name="markup">What compiling the page's markup made of it, for a probe to show.</param>
+    /// <summary>
+    /// A page compiled once for every console showing it: what it compiled to, for this console's chip.
+    /// </summary>
+    /// <param name="markup">What compiling the page's markup made of it, for a probe to show; null when it was compiled before.</param>
     internal static CompiledPage.Result Compile(HtmlRenderer.Result built, Panel panel, Vector2 size,
                                                 IReadOnlyDictionary<string, SceneSlots.Value> slots,
                                                 (string Surface, string Element, string Scene)? target,
                                                 out MarkupSlots.Result? markup)
+    {
+        markup = null;
+        if (!Sources.TryGetValue(built, out var source)) return CompileNow(built, panel, size, slots, target, out markup);
+        var key = (source, size.x, size.y);
+        ManualResetEventSlim running;
+        while (true)
+        {
+            CompiledPage.Result? done;
+            ManualResetEventSlim? other = null;
+            lock (Done)
+            {
+                if (!Done.TryGetValue(key, out done) && !Running.TryGetValue(key, out other))
+                {
+                    Running[key] = running = new ManualResetEventSlim(false);
+                    break;
+                }
+            }
+            if (done != null) return Retarget(done, target) ?? CompileNow(built, panel, size, slots, target, out markup);
+            // Another console is compiling this page: its answer is this one's. Waited on in steps,
+            // so a page its surface wants back stops waiting as a compile stops compiling.
+            while (!other!.Wait(50))
+                if (Cancelled?.Invoke() == true) return Stopped();
+        }
+        try
+        {
+            var open = CompileNow(built, panel, size, slots, Open, out markup);
+            if (Cancelled?.Invoke() == true) return open;
+            // Only a chunk that can be handed to another console is kept for one.
+            if (Retarget(open, target) is not { } mine) return CompileNow(built, panel, size, slots, target, out markup);
+            lock (Done)
+            {
+                Done[key] = open;
+                DoneOrder.Enqueue(key);
+                while (DoneOrder.Count > Kept) Done.Remove(DoneOrder.Dequeue());
+            }
+            return mine;
+        }
+        finally
+        {
+            lock (Done) Running.Remove(key);
+            running.Set();
+        }
+    }
+
+    /// <summary>
+    /// The compile with its chunk pointed at one console's element, or null when the chunk does not
+    /// carry the open target once, as it was written (then it is compiled for that console alone).
+    /// </summary>
+    /// <remarks>
+    /// The target is the one thing a chunk carries per console: a line of constants the flush reads.
+    /// Everything else - the translation, the bindings, the structure - is the page's, so it is shared.
+    /// ponytail: copies Result field by field; a field added to it has to be added here (or Result
+    /// could carry this itself).
+    /// </remarks>
+    private static CompiledPage.Result? Retarget(CompiledPage.Result open, (string Surface, string Element, string Scene)? target)
+    {
+        if (open.Lua == null) return open;
+        var line = TargetLine(Open);
+        var at = open.Lua.IndexOf(line, StringComparison.Ordinal);
+        if (at < 0 || open.Lua.IndexOf(line, at + line.Length, StringComparison.Ordinal) >= 0) return null;
+        var r = new CompiledPage.Result
+        {
+            Lua = open.Lua.Substring(0, at) + (target is { } to ? TargetLine(to) : string.Empty) + open.Lua.Substring(at + line.Length),
+            Structure = open.Structure,
+            // Its own: the surface fills what the chunk opens with in place.
+            StructureValues = open.StructureValues == null ? null : new Dictionary<string, SceneSlots.Value>(open.StructureValues, StringComparer.Ordinal),
+            // Placed with the structure it came with: placing again would find no `$slot` text left.
+            Placed = open.Placed,
+        };
+        r.Bindings.AddRange(open.Bindings);
+        r.Unmapped.AddRange(open.Unmapped);
+        r.Problems.AddRange(open.Problems);
+        r.Warnings.AddRange(open.Warnings);
+        r.Placements.AddRange(open.Placements);
+        foreach (var pair in open.Expressions) r.Expressions[pair.Key] = pair.Value;
+        return r;
+
+        // As the chunk writes it (CompiledPage.Assemble): a quoted string escapes `"` and `\`.
+        static string TargetLine((string Surface, string Element, string Scene) to)
+            => "SURFACE, ELEMENT, SCENE = " + Quote(to.Surface) + ", " + Quote(to.Element) + ", " + Quote(to.Scene) + "\n\n";
+
+        static string Quote(string v) => "\"" + v.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+    }
+
+    /// <summary>A compile the page stopped wanting, which nothing keeps.</summary>
+    private static CompiledPage.Result Stopped()
+    {
+        var stopped = new CompiledPage.Result();
+        stopped.Problems.Add("the page stopped wanting its compile");
+        return stopped;
+    }
+
+    private static CompiledPage.Result CompileNow(HtmlRenderer.Result built, Panel panel, Vector2 size,
+                                                  IReadOnlyDictionary<string, SceneSlots.Value> slots,
+                                                  (string Surface, string Element, string Scene)? target,
+                                                  out MarkupSlots.Result? markup)
     {
         // Every innerHTML write first, because the translation depends on it: a write whose markup
         // is structure becomes a handful of slot writes instead of a document - and the structure it
@@ -44,6 +193,7 @@ internal static class PageCompiler
         if (built.Script is { } script && script.Contains(".innerHTML", StringComparison.Ordinal))
         {
             markup = CompileMarkup(built, panel).Result;
+            if (Cancelled?.Invoke() == true) return Stopped();
             if (markup.Template != null)
             {
                 slots = markup.Values;
@@ -88,6 +238,10 @@ internal static class PageCompiler
             result.Structure = markup.Template;
             result.StructureValues = new Dictionary<string, SceneSlots.Value>(markup.Values, StringComparer.Ordinal);
             foreach (var p in markup.Problems) result.Warnings.Add("markup: " + p);
+            // Labels the scene prints itself, placed here so every consumer of a compile sees the
+            // scene the chip will write into - not only the run that installs it (which places too;
+            // placing twice does nothing).
+            CompiledPage.Place(result);
         }
         return result;
     }
@@ -193,9 +347,7 @@ internal static class PageCompiler
 
 
     /// <summary>Every markup write in the page's script, reduced, with the element it targets.</summary>
-    /// <param name="expand">Per element, the rounds of holes whose element is written once per value (MarkupSlots.Target.Expand).</param>
-    internal static List<(string Id, ScriptedScreensHtml.Markup Markup)> MarkupOf(HtmlRenderer.Result built,
-        IReadOnlyDictionary<string, List<ICollection<int>>>? expand = null)
+    internal static List<(string Id, ScriptedScreensHtml.Markup Markup)> MarkupOf(HtmlRenderer.Result built)
     {
         var list = new List<(string, ScriptedScreensHtml.Markup)>();
         if (string.IsNullOrWhiteSpace(built.Script)) return list;
@@ -203,8 +355,7 @@ internal static class PageCompiler
         try { ast = new Acornima.Parser().ParseScript(built.Script); }
         catch (Exception) { return list; }
         foreach (var (id, write) in InnerHtmlWrites(ast))
-            list.Add((id, ScriptedScreensHtml.Markup.Of(write, ast, built.Script,
-                                                        expand != null && expand.TryGetValue(id, out var holes) ? holes : null)));
+            list.Add((id, ScriptedScreensHtml.Markup.Of(write, ast, built.Script)));
         return list;
     }
 
@@ -212,11 +363,17 @@ internal static class PageCompiler
     /// Every markup write compiled, and compiled again with each element whose values draw different
     /// shapes written once per value - which only laying the values out can tell.
     /// </summary>
+    /// <remarks>
+    /// The script is reduced once; an element found to need writing once per value is expanded in
+    /// that reduction, not by reducing the script again. And a compile that finds one stops as soon
+    /// as it has (<see cref="MarkupSlots"/>): what else it would have measured is of markup about to change.
+    /// </remarks>
     internal static (MarkupSlots.Result Result, Dictionary<string, List<ICollection<int>>> Expand) CompileMarkup(
         HtmlRenderer.Result built, Panel panel, Func<string, int, string?>? probed = null)
     {
         var expand = new Dictionary<string, List<ICollection<int>>>(StringComparer.Ordinal);
-        var result = MarkupSlots.Compile(built, panel, MarkupOf(built), probed);
+        var writes = MarkupOf(built);
+        var result = MarkupSlots.Compile(built, panel, writes, probed, scout: true);
         // Until nothing more needs it: a copy of an element carries its holes with it, and one of
         // those can turn out shaped only where the copy is drawn. Bounded, as a page is.
         for (var round = 0; round < 4; round++)
@@ -227,10 +384,11 @@ internal static class PageCompiler
                 {
                     if (!expand.TryGetValue(t.Id, out var rounds)) expand[t.Id] = rounds = new List<ICollection<int>>();
                     rounds.Add(new HashSet<int>(t.Expand));
+                    t.Markup.Expand(t.Expand, t.Inherit);
                     again = true;
                 }
             if (!again) break;
-            result = MarkupSlots.Compile(built, panel, MarkupOf(built, expand), probed);
+            result = MarkupSlots.Compile(built, panel, writes, probed);
         }
         foreach (var t in result.Targets)
             if (t.Expand.Count > 0)
@@ -470,6 +628,7 @@ internal static class PageCompiler
         var shown = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
         var hidden = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
         string[] ts, th;
+        lock (Gate)
         try
         {
             ve.style.display = DisplayStyle.Flex;
@@ -632,6 +791,7 @@ internal static class PageCompiler
         var was = node?.Attr("class") ?? string.Empty;
         var style = node?.Attr("style");
         if (declaration != null && node == null) return null;
+        lock (Gate)
         try
         {
             panel.Layout(size.x, size.y);
