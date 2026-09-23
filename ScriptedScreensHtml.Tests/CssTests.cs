@@ -18,12 +18,15 @@ internal static class CssTests
         Console.WriteLine("CssParser: selectors, @media, @supports");
         var w = CssParser.ViewportWidth;
         var h = CssParser.ViewportHeight;
+        // Scene() builds pages, and a build installs the applier's @supports oracle for good
+        var oracle = CssParser.SupportsOracle;
         try
         {
             AttributeFlags(check);
             NthOf(check);
             Media(check);
             Supports(check);
+            SupportsAnsweredByTheApplier(check);
             ColumnCombinator(check);
             StatePseudos(check);
             PseudoElements(check);
@@ -33,11 +36,14 @@ internal static class CssTests
             TextProperties(check);
             LayoutProperties(check);
             Leftovers(check);
+            PicturePosition(check);
+            EmptyDrivenText(check);
         }
         finally
         {
             CssParser.ViewportWidth = w;
             CssParser.ViewportHeight = h;
+            CssParser.SupportsOracle = oracle;
             CssParser.ForgetReported();
         }
     }
@@ -158,6 +164,55 @@ internal static class CssTests
         check(N("selector(:has(a))") == 1, "selector() is answered by parsing the selector");
         check(N("selector(:no-such-pseudo)") == 0, "and is false for one this parser cannot read");
         check(N("font-tech(color-COLRv1)") == 0, "no font here is chosen by technology");
+    }
+
+    /// <summary>
+    /// The same grammar with the applier answering, which is how every page in game runs: a build
+    /// installs it. Without it every declaration is true, and that is precisely what let a parser that
+    /// read `((display: flex))` as the declaration "(display" pass the checks above.
+    /// </summary>
+    private static void SupportsAnsweredByTheApplier(Action<bool, string> check)
+    {
+        var oracle = CssParser.SupportsOracle;
+        try
+        {
+            StyleApplier.InstallSupportsOracle();
+            CssParser.ForgetReported();
+            var warn = new List<string>();
+            int N(string cond) => Applied("@supports " + cond + " { .z { color: red } }", warn);
+
+            check(N("(display: flex)") == 1 && N("(display: nonsense)") == 0, "with the applier answering, a real declaration is true and a bad one false");
+            // these are read by the grid, the emitter and the layout rather than the applier's switch,
+            // and the probe answered no for every one of them - so each fallback beside them was applied
+            check(N("(gap: 1px)") == 1 && N("(box-shadow: 0 0 4px #000)") == 1 && N("not (clip-path: circle(50%))") == 0,
+                "a property another stage draws is supported: gap, box-shadow, clip-path");
+            check(N("((display: flex))") == 1 && N("(((display: flex)))") == 1, "a redundant parenthesis is a condition, at any depth, not the declaration \"(display\"");
+            check(N("(display: flex) and (not (gap: 1px))") == 0 && N("(display: flex) and (not (display: nonsense))") == 1,
+                "`not` inside a parenthesis under `and`");
+            check(N("((display: nonsense) or (display: flex)) and (gap: 1px)") == 1 && N("not ((display: nonsense) or (color: nonsense))") == 1,
+                "an `or` group nested in an `and`, and a negated group");
+            check(N("(selector(a:hover))") == 1, "the colon inside selector() is not a declaration's");
+            check(N("(content: \"a) and (display: nonsense\")") == 1, "a parenthesis inside a string closes nothing");
+            check(N("(foo bar)") == 0 && N("not (foo bar)") == 1, "anything else in parentheses is CSS's general-enclosed, which is false");
+            check(N("not(display: nonsense)") == 0, "`not(` is a function, not the keyword, and is false as in a browser");
+
+            warn.Clear();
+            check(N("(display: flex) and (gap: 1px) or (color: red)") == 0, "`and` and `or` mixed without parentheses is not a condition");
+            check(warn.Count == 1 && warn[0].Contains("not a valid condition", StringComparison.Ordinal),
+                $"and the skipped block says so ({string.Join(" | ", warn)})");
+
+            // the stale half of StyleApplier.Dropped: each of these is drawn, so @supports must say yes
+            check(N("(accent-color: red)") == 1 && N("(object-position: right 10% top)") == 1 && N("(backface-visibility: hidden)") == 1
+                  && N("(text-emphasis-style: dot)") == 1 && N("(mask-position: 5px 5px)") == 1,
+                "a property the emitter draws is supported, not answered from a stale refusal list");
+            check(N("(transform: translateZ(0))") == 1, "translateZ is the identity in a flat scene, as in a browser without perspective");
+            check(N("(backdrop-filter: blur(4px))") == 0, "and one nothing draws is still unsupported, so its fallback is kept");
+        }
+        finally
+        {
+            CssParser.SupportsOracle = oracle;
+            CssParser.ForgetReported();
+        }
     }
 
     // ---- the column combinator ----------------------------------------------------------
@@ -305,6 +360,30 @@ internal static class CssTests
         check(Kids(dl) == 4, "<dt> and <dd> close each other");
     }
 
+    /// <summary>
+    /// An inline element a value is written into later but with no text yet still gets its T line,
+    /// empty: the scene is compiled once, and a text sent afterwards otherwise had no slot ("draws no
+    /// text"). Not an empty BOX: a second line under a bar's id makes its width unwritable (DomSlots).
+    /// </summary>
+    private static void EmptyDrivenText(Action<bool, string> check)
+    {
+        static string? Line(string scene, string id)
+        {
+            foreach (var line in scene.Split('\n'))
+                if (line.TrimStart().StartsWith("T ", StringComparison.Ordinal) && line.EndsWith(" id=" + id, StringComparison.Ordinal)) return line;
+            return null;
+        }
+        const string Readout = "<p id=p>Pressure: <span id=v style=\"color:#ff0000;font-size:20px;text-decoration:underline\"></span> kPa</p>";
+        var span = Scene(Readout, string.Empty, data: true);
+        check(Line(span, "v") is { } s && s.Contains(" text=\"\" size=20 f=#FF0000", StringComparison.Ordinal) && s.Contains(" missing=\"\"", StringComparison.Ordinal),
+            "an empty span a data key names draws an empty T line in its own font and colour, placeholder off - " + Line(span, "v"));
+        var values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+        SceneSlots.Split(span, values);
+        check(values.TryGetValue("v", out var slot) && !slot.IsNumber && slot.Text == string.Empty,
+            "the empty T line is a text slot named after the element, holding \"\"");
+        check(Line(Scene(Readout, string.Empty), "v") == null, "an empty span nothing writes to still draws no text");
+    }
+
     // ---- text properties that only exist in the emitted scene ----------------------------
 
     /// <summary>
@@ -312,7 +391,7 @@ internal static class CssTests
     /// the record carries and the emitter ignores draws exactly what its absence draws. The scene
     /// string is the only witness, so these compile the Unity half like CssLanguage does.
     /// </summary>
-    private static string Scene(string body, string css, bool animate = false, List<string>? warnings = null)
+    private static string Scene(string body, string css, bool animate = false, List<string>? warnings = null, bool data = false)
     {
         ResolvedStyle.DefaultFace = FontLibrary.Default();
         HtmlRenderer.SurfaceAspect = 1f;
@@ -323,6 +402,10 @@ internal static class CssTests
                    + "#p{color:#eeeeee;font-size:14px}" + css + "</style></head><body>" + body + "</body></html>";
         var built = HtmlRenderer.Build(html, FontLibrary.Default());
         HtmlRenderer.NameDrivenGroups(built);
+        // a page with no script is driven by data: every id may be a key (as HtmlSurface.BuildInner)
+        if (data)
+            foreach (var id in built.ById.Keys)
+                if (!id.StartsWith("__", StringComparison.Ordinal)) built.Driven.Add(id);
         var panel = new Panel(built.Root);
         foreach (var grid in built.Grids)
             if (built.LayoutAttached.Add(grid)) GridLayout.Attach(grid, built);
@@ -402,6 +485,22 @@ internal static class CssTests
         check(clipped.Contains("G clip=", StringComparison.Ordinal) && clipped.Contains("Y p=[0,0,40,0,40,20", StringComparison.Ordinal),
             "clip-path: path() clips to the outline, offset to the box");
 
+        // clip-path reference boxes: alone the box is the clip, beside a shape it is what the shape is measured in.
+        // 60x20 content, 3px padding, 5px border: padding box 66x26, border box 76x36.
+        const string Bordered = "<div id=p style=\"width:60px;height:20px;background:#22aa44;border:5px solid #ff8800;padding:3px\">x</div>";
+        string ClipDef(string css, List<string>? warned = null)
+        {
+            foreach (var line in Scene(Bordered, "#p{clip-path:" + css + "}", warnings: warned).Split('\n'))
+                if (line.Contains("CP id=", StringComparison.Ordinal)) return line.Trim();
+            return string.Empty;
+        }
+        check(Num(ClipDef("padding-box"), " w=") == 66f && Num(ClipDef("padding-box"), " h=") == 26f
+              && Num(ClipDef("content-box"), " w=") == 60f && Num(ClipDef("border-box"), " w=") == 76f,
+            $"a box alone clips to that edge ({ClipDef("padding-box")})");
+        var boxWarned = new List<string>();
+        check(ClipDef("circle(50%) content-box", boxWarned).Contains("rx=22.36", StringComparison.Ordinal) && !boxWarned.Exists(m => m.Contains("clip-path", StringComparison.Ordinal)),
+            $"and beside a shape it is the box the shape is measured in, with nothing refused ({ClipDef("circle(50%) content-box")})");
+
         // line-height in em is a factor of the font size, not the em size squared
         check(Scene("<div id=p style=\"width:200px;height:40px\">Agy</div>", "#p{line-height:1.5em}").Contains(" lh=1.5", StringComparison.Ordinal),
             "line-height: 1.5em reaches the label as the factor 1.5");
@@ -413,12 +512,57 @@ internal static class CssTests
             $"rows/cols size a textarea's box ({Below("<textarea></textarea>")} -> {Below("<textarea rows=4 cols=30></textarea>")})");
         check(Below("<input type=text>") == 26f && Below("<input type=range>") == 20f,
             $"type picks the control's box ({Below("<input type=text>")} -> {Below("<input type=range>")})");
+    }
 
-        // object-position is reported, not silently accepted: the picture node has no alignment to carry it
+    // ---- where a picture sits in its box: the IMG node's `at` -----------------------------
+
+    /// <summary>
+    /// object-position, a picture background's background-position and an SVG image's
+    /// preserveAspectRatio all say where the picture sits in the room its fit leaves, and the IMG
+    /// node's `at` is exactly that, as fractions of the room - which a CSS percentage already is.
+    /// </summary>
+    private static void PicturePosition(Action<bool, string> check)
+    {
+        string Img(string css, List<string>? warned = null) => Scene("<img id=p src=\"a.png\" width=80 height=50>", "#p{" + css + "}", warnings: warned);
+        static string? At(string scene)
+        {
+            var i = scene.IndexOf(" at=[", StringComparison.Ordinal);
+            return i < 0 ? null : scene.Substring(i + 4, scene.IndexOf(']', i) - i - 3);
+        }
+
+        check(At(Img("object-fit:cover;object-position:left top")) == "[0,0]", "keywords: left top is [0,0]");
+        check(At(Img("object-fit:contain;object-position:25% 75%")) == "[0.25,0.75]", "a percentage is the fraction of the free room");
+        check(At(Img("object-fit:contain;object-position:bottom")) == "[0.5,1]" && At(Img("object-fit:contain;object-position:center left")) == "[0,0.5]",
+            "one value, and `center` giving way to the keyword for its own axis");
+        check(At(Img("object-fit:cover;object-position:right 10% bottom 20%")) == "[0.9,0.8]", "the edge-offset form counts in from the far edges");
+        check(At(Img("object-fit:cover;object-position:calc(100% - 25%) 0%")) == "[0.75,0]", "calc() of percentages");
+        check(At(Img("object-position:left top")) == null, "under fill nothing is free, so no position is written");
+
         var warned = new List<string>();
-        Scene("<img id=p src=\"a.png\" width=80 height=50>", "#p{object-fit:cover;object-position:10px 5px}", warnings: warned);
-        check(warned.Exists(w => w.Contains("object-position", StringComparison.Ordinal) && w.Contains("not drawn", StringComparison.Ordinal)),
-            "object-position says it is not drawn");
+        var lengths = Img("object-fit:cover;object-position:10px 5px", warned);
+        check(At(lengths) == "[0,0]" && warned.Exists(w => w.Contains("object-position", StringComparison.Ordinal) && w.Contains("length", StringComparison.Ordinal)),
+            "a length needs the picture's own size: placed from its edge, and said");
+        warned.Clear();
+        Img("object-fit:cover;object-position:left 0 top 0", warned);
+        check(!warned.Exists(w => w.Contains("object-position", StringComparison.Ordinal)), "a zero length is exact and says nothing");
+
+        // a background picture: CSS starts it at the top left, not in the middle
+        string Bg(string css) => Scene("<div id=p style=\"width:80px;height:50px\"></div>", "#p{" + css + "}");
+        check(At(Bg("background-image:url(a.png);background-size:cover")) == "[0,0]", "background-position's initial value is the top-left corner");
+        check(At(Bg("background:url(a.png) right bottom / cover no-repeat")) == "[1,1]", "the shorthand's position words");
+        check(At(Bg("background:url(a.png) center / contain no-repeat")) == null, "centred is the node's default and needs no key");
+        check(Bg("background:url(https://example.test/img/a.png) no-repeat").Contains(" fit=contain", StringComparison.Ordinal),
+            "the slashes inside a url() are not the shorthand's size separator");
+
+        // an SVG image: preserveAspectRatio's alignment half
+        check(At(Scene("<svg id=p width=80 height=50><image href=\"a.png\" width=80 height=50 preserveAspectRatio=\"xMinYMax meet\"/></svg>", string.Empty)) == "[0,1]",
+            "preserveAspectRatio xMinYMax is [0,1]");
+
+        // a video is ScriptedScreens' own element: no fit or position reaches it, and that is said
+        warned.Clear();
+        Scene("<video id=p src=\"a.mp4\" width=80 height=50></video>", "#p{object-fit:cover;object-position:left}", warnings: warned);
+        check(warned.Exists(w => w.Contains("<video>", StringComparison.Ordinal) && w.Contains("object-position", StringComparison.Ordinal)),
+            "object-position on a video says it is not drawn");
     }
 
     /// <summary>The y of the first decoration stroke in the scene, or NaN when none was drawn.</summary>

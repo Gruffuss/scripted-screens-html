@@ -433,7 +433,7 @@ internal static class CssLanguage
         ["text-size-adjust"] = "this inflates text against a mobile browser's own zoom, and a console has none",
         ["text-rendering"] = "a hinting hint with no equivalent in a signed-distance-field atlas",
         ["-webkit-font-smoothing"] = "the atlas has one rasterisation and no smoothing mode to pick",
-        ["image-rendering"] = "a picture is ScriptedScreens' own image element, which exposes no sampling mode",
+        ["image-rendering"] = "the scene's IMG node samples its texture one way and has no key to ask for another",
         ["font-feature-settings"] = "TextMeshPro exposes no OpenType feature table; the one that mattered, tabular figures, is faked with monospaced digit runs",
         ["font-kerning"] = "kerning is a flag on the font asset, not something a single label can turn off",
         ["font-optical-sizing"] = "this Unity's font engine has no variation-axis API at all, so there is no optical-size axis to set",
@@ -842,7 +842,7 @@ internal static class CssLanguage
         // ---- replaced content and images
         P("object-fit", "object-fit:contain", Fix.Img);
         // Under object-fit: fill there is nothing to position, in a browser either; cover gives it a crop to move.
-        P("object-position", "object-position:10px 5px", Fix.Img, "#p{object-fit:cover}");
+        P("object-position", "object-position:25% 75%", Fix.Img, "#p{object-fit:cover}");
         P("image-rendering", "image-rendering:pixelated");
 
         // ---- interaction, scrolling, fragmentation

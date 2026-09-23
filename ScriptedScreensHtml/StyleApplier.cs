@@ -515,6 +515,9 @@ internal static class StyleApplier
                     else if (Same(name, "scale")) s.scale = new Scale(new Vector2(Num(fn.Arg(0)), Num(fn.Arg(fn.Count > 1 ? 1 : 0))));
                     else if (Same(name, "scalex")) s.scale = new Scale(new Vector2(Num(fn.Arg(0)), 1));
                     else if (Same(name, "scaley")) s.scale = new Scale(new Vector2(1, Num(fn.Arg(0))));
+                    // depth with no perspective to see it by is the identity in a browser too - and
+                    // `translateZ(0)` is the old layer-promotion idiom, so it is on a lot of pages
+                    else if (Same(name, "translatez") || Same(name, "scalez")) { }
                     else warn?.Invoke($"css: transform {name.ToString()}() not supported");
                 }
                 break;
@@ -658,7 +661,7 @@ internal static class StyleApplier
         "box-shadow", "text-shadow", "border-style", "text-decoration",
         "outline", "outline-width", "outline-color", "outline-style", "outline-offset",
         "pointer-events", "cursor", "user-select", "content", "appearance", "-webkit-appearance", "-moz-appearance", "accent-color",
-        "filter", "clip-path", "mask-image", "-webkit-mask-image", "mask", "writing-mode", "text-orientation", "vertical-align", "object-fit",
+        "filter", "clip-path", "mask-image", "-webkit-mask-image", "mask", "writing-mode", "text-orientation", "vertical-align", "object-fit", "object-position",
         "font-variant-numeric", "fill", "stroke", "stroke-width", "stroke-opacity", "fill-opacity", "fill-rule", "stroke-dasharray", "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "text-anchor", "dominant-baseline", "stroke-miterlimit",
         "background-size", "background-position", "background-repeat", "float", "clear", "column-count", "columns", "column-gap", "aspect-ratio", "mix-blend-mode", "backdrop-filter",
         "list-style", "list-style-type", "list-style-position", "border-collapse", "border-spacing",
@@ -690,40 +693,27 @@ internal static class StyleApplier
     /// </remarks>
     private static readonly Dictionary<string, string> Dropped = new(StringComparer.Ordinal)
     {
-        ["appearance"] = "the controls are drawn, not native, so there is no native look to remove",
-        ["accent-color"] = "the drawn controls carry their own colour",
         ["backdrop-filter"] = "nothing is composited behind a shape to filter",
         ["background-attachment"] = "the page does not scroll under its background",
         ["background-blend-mode"] = "layers are drawn one over another, never blended",
         ["mix-blend-mode"] = "shapes are drawn one over another, never blended",
-        ["backface-visibility"] = "the scene is 2D",
         ["perspective"] = "the scene is 2D",
         ["perspective-origin"] = "the scene is 2D",
         ["transform-style"] = "the scene is 2D",
-        ["caption-side"] = "a caption stays where it is written",
-        ["empty-cells"] = "an empty cell is drawn like any other",
         ["table-layout"] = "columns are always sized from their content",
-        ["column-span"] = "a column-spanning element is laid out in its column",
         ["direction"] = "the page is laid out left to right",
         ["tab-size"] = "a tab is drawn at the face's own width",
         ["list-style-position"] = "a marker always sits outside the item",
-        ["text-emphasis-style"] = "there are no emphasis marks",
-        ["text-emphasis-color"] = "there are no emphasis marks",
-        ["text-emphasis-position"] = "there are no emphasis marks",
-        ["offset-rotate"] = "an element on an offset-path keeps its own rotation",
-        ["marker"] = "line markers are not drawn",
         ["zoom"] = "set the design size with <meta name=\"viewport\" content=\"width=N\">",
         // Each of these was parsed, put in the record, and read by nothing - the worst outcome.
         ["column-fill"] = "columns are filled in order, never balanced",
-        ["border-image-slice"] = "a border image is stretched over the border box; it is not sliced",
         ["border-image-repeat"] = "a border image is stretched over the border box; it is not tiled",
-        ["border-image-outset"] = "a border image stays inside the border box",
-        ["mask-position"] = "a mask is drawn over the whole box",
         ["mask-repeat"] = "a mask is drawn over the whole box, never tiled",
-        ["content-visibility"] = "nothing here skips a subtree, so a hidden one is still drawn",
-        // The picture node is placed by the vector layer, which loads the file after the scene is sent and is
-        // the only side that ever knows the picture's own size - and its fit has no alignment to set yet.
-        ["object-position"] = "the picture is centred in its box under object-fit: contain or cover",
+        // Not here, though they once were: accent-color, appearance, backface-visibility, caption-side,
+        // column-span, content-visibility, empty-cells, marker, mask-position, object-position,
+        // offset-rotate, text-emphasis-*, border-image-slice and -outset. Each is drawn now, and an entry
+        // left behind says "is not drawn" about something that is AND makes @supports answer no for it,
+        // which throws away the author's enhancement. A name belongs here only while nothing reads it.
     };
 
     private static void Unknown(CssDeclaration d, Action<string>? warn)
@@ -732,7 +722,9 @@ internal static class StyleApplier
         // alone. Going through the de-duplicating path would make the SECOND query about the same
         // declaration answer "supported", since the report is swallowed and the probe sees no
         // warning - the process-global failure shape this file has now produced three times.
-        if (_probing) { warn?.Invoke(string.Empty); return; }
+        // A name another stage reads (gap, grid-*, box-shadow, clip-path...) IS supported: answering
+        // no for all of Elsewhere made `@supports not (gap: 1px)` apply its fallback on every page.
+        if (_probing) { if (Dropped.ContainsKey(d.Name) || !Elsewhere.Contains(d.Name)) warn?.Invoke(string.Empty); return; }
         if (Dropped.TryGetValue(d.Name, out var why))
         {
             if (Reported.Add(d.Name)) warn?.Invoke($"css: \"{d.Name}: {d.Value}\" is not drawn - {why}");
@@ -961,7 +953,7 @@ internal static class StyleApplier
     }
 
     /// <summary>calc(): + - * / and parentheses over lengths; px and % accumulate separately.</summary>
-    private static void Calc(string v, out float px, out float pct)
+    internal static void Calc(string v, out float px, out float pct)
     {
         var inner = v.Substring(5, v.Length - 6);
         var pos = 0;

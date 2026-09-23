@@ -393,6 +393,10 @@ internal static class VectorEmitter
         ctx.Built.Externals.TryGetValue(ve, out var external);
         if (external != null)
             ctx.Out.Externals.Add(new External { Key = ve.name, Node = external, Ve = ve, X = x + rs.borderLeftWidth, Y = y + rs.borderTopWidth, W = Mathf.Max(1f, w - rs.borderLeftWidth - rs.borderRightWidth), H = Mathf.Max(1f, h - rs.borderTopWidth - rs.borderBottomWidth) });
+        // A video is ScriptedScreens' own media element, not an IMG node, and it takes no fit or
+        // position - so the picture an <img> would place is drawn however that element draws it.
+        if (external?.Tag == "video" && (css.ContainsKey("object-position") || (css.TryGetValue("object-fit", out var vfit) && vfit.Trim() != "fill")))
+            Warn(ctx, "html: object-fit / object-position on <video> are not drawn: a video is ScriptedScreens' own media element, which takes neither");
 
         // A positioned element with a z-index paints above its parent's later siblings: it is
         // emitted at the root after everything, in z order, unless we are already doing that.
@@ -495,7 +499,7 @@ internal static class VectorEmitter
         var clipXform = xform is { IsIdentity: false } ? xform : null;
         if (css.TryGetValue("clip-path", out var cpath) || css.TryGetValue("-webkit-clip-path", out cpath))
         {
-            if (ClipPath(ctx, cpath, x, y, w, h, clipXform, css.TryGetValue("clip-rule", out var clipRule) && clipRule.Trim() == "evenodd") is { } clipId)
+            if (ClipPath(ctx, cpath, x, y, w, h, clipXform, css.TryGetValue("clip-rule", out var clipRule) && clipRule.Trim() == "evenodd", rs) is { } clipId)
             {
                 ctx.Body.Append(indent).Append("G clip=").Append(clipId).Append(" {\n");
                 groups++;
@@ -503,7 +507,7 @@ internal static class VectorEmitter
             else if (cpath.Trim() is not ("none" or ""))
                 // Failing to read a clip means the element draws UNCLIPPED - everything, not
                 // nothing - so silence here looks like a layout bug rather than a missing feature.
-                Warn(ctx, $"html: clip-path: {cpath.Trim()} is not drawn; the element is not clipped. inset(), rect(), xywh(), circle(), ellipse(), polygon() and path() are.");
+                Warn(ctx, $"html: clip-path: {cpath.Trim()} is not drawn; the element is not clipped. inset(), rect(), xywh(), circle(), ellipse(), polygon(), path() and the reference boxes but margin-box are.");
         }
         if ((css.TryGetValue("mask-image", out var mcss) || css.TryGetValue("-webkit-mask-image", out mcss) || css.TryGetValue("mask", out mcss)) && MaskDef(ctx, mcss, x, y, w, h, css, rs) is { } maskId)
         {
@@ -619,7 +623,7 @@ internal static class VectorEmitter
                 var it = origin == "border-box" ? 0f : rs.borderTopWidth + (origin == "content-box" ? rs.paddingTop : 0f);
                 var ir = origin == "border-box" ? 0f : rs.borderRightWidth + (origin == "content-box" ? rs.paddingRight : 0f);
                 var ib = origin == "border-box" ? 0f : rs.borderBottomWidth + (origin == "content-box" ? rs.paddingBottom : 0f);
-                EmitImage(ctx, imageUrl, BackgroundFit(css), css, rs, x + il, y + it, Mathf.Max(1f, w - il - ir), Mathf.Max(1f, h - it - ib), indent, bg.a > 0.002f ? null : ve);
+                EmitImage(ctx, imageUrl, BackgroundFit(css), BackgroundPosition(css), "background-position", rs, x + il, y + it, Mathf.Max(1f, w - il - ir), Mathf.Max(1f, h - it - ib), indent, bg.a > 0.002f ? null : ve);
             }
             else if (ColourTimeline(ctx, ve) is { } ka)
             {
@@ -853,7 +857,8 @@ internal static class VectorEmitter
             {
                 var src = inode.Attr("src") ?? FirstOfSrcset(inode.Attr("srcset"));
                 if (src != null)
-                    EmitImage(ctx, src, css.TryGetValue("object-fit", out var of) ? of.Trim() : "fill", css, rs, x, y, w, h, indent, ve);
+                    EmitImage(ctx, src, css.TryGetValue("object-fit", out var of) ? of.Trim() : "fill",
+                        css.TryGetValue("object-position", out var opos) ? opos : null, "object-position", rs, x, y, w, h, indent, ve);
                 break;
             }
             case Label when ctx.Built.NodeOf.TryGetValue(ve, out var mnode) && mnode.Attr("data-marker") is { } markerShape:
@@ -2030,7 +2035,12 @@ internal static class VectorEmitter
     {
         var rs = OffThread.Of(label);
         var text = textOverride ?? label.text ?? string.Empty;
-        if (text.Length == 0)
+        // No text draws nothing - unless a value will be written into it later (a data key, a
+        // script's textContent). The scene is compiled once, so that text needs its T line NOW, or
+        // there is no slot for it to land in. Empty, with the text-level wrappers below left off:
+        // a value written later replaces the whole text, and `<u></u>` alone would draw a label.
+        var empty = text.Length == 0;
+        if (empty && !Keeps(ctx, label))
             return;
         var ownCss = css;
         css = WithInherited(ctx, label, css);
@@ -2039,7 +2049,7 @@ internal static class VectorEmitter
         // text-indent: TextMeshPro's line-indent is the first line of each paragraph, which
         // is the block's first line for a label. word-break: break-all lets a line break
         // between any two characters: a zero-width space after each one outside tags.
-        if (css.TryGetValue("text-indent", out var ti) && rs.fontSize > 0f)
+        if (!empty && css.TryGetValue("text-indent", out var ti) && rs.fontSize > 0f)
         {
             var px = ti.Trim().EndsWith("em", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(ti) * rs.fontSize : ti.Trim().EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(ti) / 100f * w : StyleApplier.Num(ti);
             if (px != 0f) text = "<line-indent=" + F(px) + "px>" + text;
@@ -2063,8 +2073,8 @@ internal static class VectorEmitter
         }
         var deco = Decoration(css);
         var ox = x; var ow = w;
-        var drawDeco = deco.line != 0 && !(rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && text.IndexOf(' ') >= 0) && (deco.colour != null || deco.style != "solid" || deco.thickness > 0f || !float.IsNaN(deco.offset) || deco.under || (deco.line & 4) != 0);
-        if (!drawDeco)
+        var drawDeco = !empty && deco.line != 0 && !(rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && text.IndexOf(' ') >= 0) && (deco.colour != null || deco.style != "solid" || deco.thickness > 0f || !float.IsNaN(deco.offset) || deco.under || (deco.line & 4) != 0);
+        if (!drawDeco && !empty)
         {
             // TextMeshPro draws the plain forms itself, wrapped lines included
             if ((deco.line & 1) != 0) text = "<u>" + text + "</u>";
@@ -2254,7 +2264,7 @@ internal static class VectorEmitter
         // ::first-line: on a wrapped label the vector mod restyles the first line (vector
         // requirement 15); on a single line the whole text is the first line.
         var fl = PseudoCss(ctx, label, "first-line");
-        if (fl.Count > 0)
+        if (fl.Count > 0 && !empty)
         {
             var attrs = new StringBuilder();
             if (fl.TryGetValue("color", out var flc) && StyleApplier.TryColor(flc, out var flcol)) attrs.Append(" f=").AppendHex(flcol);
@@ -2288,6 +2298,9 @@ internal static class VectorEmitter
             var mult = v.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(v) / rs.fontSize : LineHeightFactor(v, rs.fontSize);
             if (mult > 0f && v != "normal") sb.Append(" lh=").AppendNum(mult);
         }
+        // The renderer draws `--` for a bound text with no value, and it drops an empty string
+        // from a payload - so until a value arrives, the empty slot must draw nothing.
+        if (empty) sb.Append(" missing=\"\"");
         sb.AppendNodeId(ctx, label).Append('\n');
         // glyphs the face lacks (Barlow has no subscript digits, no gear) come from the game's own face, as a browser
         // falls back; an inner font tag's face counts for its span. Tabular digits take the face's widest digit as
@@ -2480,8 +2493,8 @@ internal static class VectorEmitter
         return sb.ToString();
     }
 
-    /// <summary>text-transform over the text outside rich-text tags.</summary>
-    private static string Transform(string text, string mode)
+    /// <summary>text-transform over the text outside rich-text tags. Also DataSlots', so a data value is cased as the emitter cased the proof.</summary>
+    internal static string Transform(string text, string mode)
     {
         if (mode != "uppercase" && mode != "lowercase" && mode != "capitalize")
             return text;
@@ -2722,6 +2735,10 @@ internal static class VectorEmitter
             var ifit = par.Contains("none") ? "fill" : par.Contains("slice") ? "cover" : "contain";
             sb.Append("IMG x=").Append(fit.X(shape.Attr("x"))).Append(" y=").Append(fit.Y(shape.Attr("y"))).Append(" w=").Append(fit.W(shape.Attr("width"))).Append(" h=").Append(fit.H(shape.Attr("height")))
               .Append(" src=\"").Append(href.Replace("\"", string.Empty)).Append("\" fit=").Append(ifit);
+            // the xMin/xMax/YMin/YMax half of preserveAspectRatio is where the picture sits in the room left
+            var pax = par.Contains("xmin") ? 0f : par.Contains("xmax") ? 1f : 0.5f;
+            var pay = par.Contains("ymin") ? 0f : par.Contains("ymax") ? 1f : 0.5f;
+            if (ifit != "fill" && (pax != 0.5f || pay != 0.5f)) sb.Append(" at=[").AppendNum(pax).Append(',').AppendNum(pay).Append(']');
             if (opacity != null) sb.Append(" o=").Append(Expr(opacity));
             for (var i = 0; i < wrappers; i++) sb.Append(" }");
             ctx.Body.Append(sb).Append('\n');
@@ -3591,18 +3608,102 @@ internal static class VectorEmitter
 
     // ---------------------------------------------------------------- Batch C helpers
 
-    /// <summary>IMG node (vector requirement 9): a picture in scene order with fit and the box's radii.</summary>
+    /// <summary>IMG node (vector requirement 9): a picture in scene order with fit, position and the box's radii.</summary>
+    /// <param name="position">A CSS position for the picture in the room its fit leaves, or null for centred.</param>
+    /// <param name="property">The property <paramref name="position"/> came from, for the warning.</param>
     /// <param name="idOf">The element whose id the image carries, or null for none.</param>
-    private static void EmitImage(Ctx ctx, string src, string fit, Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, float h, string indent, VisualElement? idOf)
+    private static void EmitImage(Ctx ctx, string src, string fit, string? position, string property, OffThread.Box rs, float x, float y, float w, float h, string indent, VisualElement? idOf)
     {
         var f = fit switch { "cover" => "cover", "contain" or "scale-down" => "contain", _ => "fill" };
         src = HtmlRenderer.ResolveUrl(src, ctx.Built);
         ctx.Body.Append(indent).Append("IMG x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
             .Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=").Append(f).AppendRadius(rs, w, h, 0f, false);
+        // under fill nothing is left free, so a position places nothing (and the node ignores it)
+        if (f != "fill" && position != null && PictureAt(ctx, position, property) is var (ax, ay) && (ax != 0.5f || ay != 0.5f))
+            ctx.Body.Append(" at=[").AppendNum(ax).Append(',').AppendNum(ay).Append(']');
         if (rs.opacity < 0.999f) ctx.Body.Append(" o=").AppendNum(rs.opacity);
         if (idOf != null) ctx.Body.AppendNodeId(ctx, idOf);
         ctx.Body.Append('\n');
         ctx.Out.Nodes++;
+    }
+
+    /// <summary>
+    /// A CSS position (object-position, a picture's background-position) as the IMG node's `at`:
+    /// where the picture sits in the room its fit leaves, as fractions of that room. A CSS
+    /// percentage is already exactly that fraction, so keywords and percentages map one to one,
+    /// in the one-, two- and edge-offset (`right 10px bottom 20%`) forms and through calc().
+    /// </summary>
+    /// <remarks>
+    /// A LENGTH is an offset in px, and as a fraction it is the offset divided by the free space,
+    /// which depends on the picture's own size - and only the vector layer ever learns that, once it
+    /// has loaded the file after the scene was sent. So the length part is left out and said, once,
+    /// rather than divided by a guess; a zero length is exact and says nothing. Never a NaN: nothing
+    /// here divides, and a room of zero ignores whatever fraction it is given.
+    /// </remarks>
+    private static (float ax, float ay) PictureAt(Ctx ctx, string position, string property)
+    {
+        float fx = 0.5f, fy = 0.5f, lx = 0f, ly = 0f;
+        // per axis: 0 unset, 1 set, 2 set by `center` - which moves to the other axis if a keyword
+        // for its own arrives later, since `center left` centres the vertical
+        var sx = 0; var sy = 0;
+        var parts = CssParser.SplitTopLevel(position.Trim().ToLowerInvariant(), ' ');
+        parts.RemoveAll(p => p.Length == 0);
+        static bool Keyword(string t) => t is "left" or "right" or "top" or "bottom" or "center";
+        static bool Lp(string t, out float frac, out float len)
+        {
+            frac = 0f; len = 0f;
+            if (t.StartsWith("calc(", StringComparison.Ordinal)) { StyleApplier.Calc(t, out len, out var pct); frac = pct / 100f; return true; }
+            if (t.Length == 0 || !(char.IsDigit(t[0]) || t[0] is '.' or '-' or '+')) return false;   // initial, inherit, nonsense: centred
+            if (t.EndsWith("%", StringComparison.Ordinal)) frac = StyleApplier.Num(t) / 100f;
+            else len = StyleApplier.Num(t);
+            return true;
+        }
+        for (var i = 0; i < parts.Count; i++)
+        {
+            var t = parts[i];
+            if (t is "left" or "right" or "top" or "bottom")
+            {
+                // with three or four values an edge keyword may carry an offset from that edge; with two,
+                // `left 10px` is the horizontal and then the vertical
+                float of = 0f, ol = 0f;
+                if (parts.Count >= 3 && i + 1 < parts.Count && !Keyword(parts[i + 1])) Lp(parts[++i], out of, out ol);
+                var far = t is "right" or "bottom";
+                var frac = far ? 1f - of : of;
+                var len = far ? -ol : ol;
+                if (t is "left" or "right") { if (sx == 2) sy = 2; fx = frac; lx = len; sx = 1; }
+                else { if (sy == 2) sx = 2; fy = frac; ly = len; sy = 1; }
+            }
+            else if (t == "center") { if (sx == 0) sx = 2; else sy = 2; }
+            else if (sx == 0) { if (Lp(t, out fx, out lx)) sx = 1; else fx = 0.5f; }
+            else { if (Lp(t, out fy, out ly)) sy = 1; else fy = 0.5f; }
+        }
+        if (Mathf.Abs(lx) > 0.001f || Mathf.Abs(ly) > 0.001f)
+            Warn(ctx, $"html: {property}: {position.Trim()} - the length part is not applied: as a fraction of the free room it needs the picture's own size, which only the vector layer learns; percentages and keywords are exact");
+        return (fx, fy);
+    }
+
+    /// <summary>
+    /// A picture background's position: the longhands, else the position words of the
+    /// `background` shorthand. CSS's initial value is `0% 0%` - top left, not centred - so a
+    /// covering background with no position shows its top-left corner, as a browser does.
+    /// </summary>
+    private static string BackgroundPosition(Dictionary<string, string> css)
+    {
+        if (css.TryGetValue("background-position", out var bp)) return bp;
+        var hasX = css.TryGetValue("background-position-x", out var bx);
+        var hasY = css.TryGetValue("background-position-y", out var by);
+        if (hasX || hasY) return (hasX ? bx : "left") + " " + (hasY ? by : "top");
+        if (!css.TryGetValue("background", out var shorthand)) return "0% 0%";
+        // the words before any `/ size` that are positions: not the image, colour or repeat
+        var words = new StringBuilder();
+        foreach (var word in CssParser.SplitTopLevel(CssParser.SplitTopLevel(shorthand, '/')[0], ' '))
+        {
+            var t = word.Trim();
+            if (t is "left" or "right" or "top" or "bottom" or "center" || (t.Length > 0 && t.IndexOf('(') < 0 && (char.IsDigit(t[0]) || t[0] is '.' or '-' or '+'))
+                || t.StartsWith("calc(", StringComparison.OrdinalIgnoreCase))
+                words.Append(t).Append(' ');
+        }
+        return words.Length > 0 ? words.ToString() : "0% 0%";
     }
 
     /// <summary>
@@ -3665,8 +3766,9 @@ internal static class VectorEmitter
     {
         string? bs = null;
         if (css.TryGetValue("background-size", out var explicitSize)) bs = explicitSize;
-        else if (css.TryGetValue("background", out var shorthand) && shorthand.IndexOf('/') is var slash && slash >= 0)
-            bs = shorthand.Substring(slash + 1).Trim().Split(' ')[0]; // "center / contain no-repeat"
+        // "center / contain no-repeat" - the slash outside the url(), whose https:// has two of its own
+        else if (css.TryGetValue("background", out var shorthand) && CssParser.SplitTopLevel(shorthand, '/') is { Count: > 1 } halves)
+            bs = halves[1].Trim().Split(' ')[0];
         if (bs == null) return "contain";
         var v = bs.Trim().ToLowerInvariant();
         if (v == "cover") return "cover";
@@ -4535,10 +4637,39 @@ internal static class VectorEmitter
     }
 
     /// <summary>clip-path basic shapes to a CP def in page coordinates: inset(), circle(), ellipse(), polygon(). A concave polygon is passed as is (vector requirement 8).</summary>
-    private static string? ClipPath(Ctx ctx, string css, float x, float y, float w, float h, Xform? xform = null, bool evenOdd = false)
+    /// <remarks>
+    /// A reference box - `padding-box`, `content-box` and the rest, beside a shape or alone - is the
+    /// box the shape is measured in, and alone it is the clip itself: that edge's rounded rectangle.
+    /// Both were refused as "not drawn" and left the element unclipped. `fill-box` is the content box
+    /// and `stroke-box`/`view-box` the border box, as CSS maps them for an element with no SVG box.
+    /// margin-box is not here: the captured box carries no side margins to grow it by.
+    /// </remarks>
+    private static string? ClipPath(Ctx ctx, string css, float x, float y, float w, float h, Xform? xform = null, bool evenOdd = false, OffThread.Box? rs = null)
     {
         var rule = evenOdd ? " fr=evenodd" : string.Empty;
         var v = css.Trim();
+        string? box = null;
+        foreach (var b in new[] { "border-box", "padding-box", "content-box", "fill-box", "stroke-box", "view-box" })
+        {
+            if (v.EndsWith(b, StringComparison.OrdinalIgnoreCase)) v = v.Substring(0, v.Length - b.Length).Trim();
+            else if (v.StartsWith(b, StringComparison.OrdinalIgnoreCase)) v = v.Substring(b.Length).Trim();
+            else continue;
+            box = b;
+            break;
+        }
+        // alone, the box is inset(0) of itself with the element's own corners
+        var boxOnly = box != null && rs != null && v.Length == 0;
+        var (ow, oh, cornerInset) = (w, h, 0f);
+        if (box != null && rs != null)
+        {
+            float l = 0f, t = 0f, r = 0f, b = 0f;
+            if (box is "padding-box" or "content-box" or "fill-box") { l = rs.borderLeftWidth; t = rs.borderTopWidth; r = rs.borderRightWidth; b = rs.borderBottomWidth; }
+            if (box is "content-box" or "fill-box") { l += rs.paddingLeft; t += rs.paddingTop; r += rs.paddingRight; b += rs.paddingBottom; }
+            x += l; y += t; w = Mathf.Max(0f, w - l - r); h = Mathf.Max(0f, h - t - b);
+            // ponytail: an inner edge's radii shrink by the widest inset, exact when the insets are even
+            cornerInset = -Mathf.Max(Mathf.Max(l, r), Mathf.Max(t, b));
+            if (boxOnly) v = "inset(0)";
+        }
         var open = v.IndexOf('(');
         if (open < 0 || !v.EndsWith(")", StringComparison.Ordinal)) return null;
         var name = v.Substring(0, open).Trim().ToLowerInvariant();
@@ -4596,6 +4727,7 @@ internal static class VectorEmitter
                 if (xform != null) return Through(new List<Vector2> { new(x + l, y + t), new(x + w - r, y + t), new(x + w - r, y + h - b), new(x + l, y + h - b) });
                 ctx.Defs.Append("  CP id=").Append(id).Append(" { R x=").AppendNum(x + l).Append(" y=").AppendNum(y + t).Append(" w=").AppendNum(Mathf.Max(0f, w - l - r)).Append(" h=").AppendNum(Mathf.Max(0f, h - t - b));
                 if (radius > 0f) ctx.Defs.Append(" rx=").AppendNum(radius);
+                else if (boxOnly) ctx.Defs.AppendRadius(rs!, ow, oh, cornerInset);
                 ctx.Defs.Append(" }\n");
                 return id;
             }

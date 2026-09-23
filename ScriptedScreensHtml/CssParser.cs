@@ -1078,53 +1078,122 @@ internal static class CssParser
     }
 
     /// <summary>
-    /// An @supports condition: `not`, `and`, `or`, parentheses, and `selector(...)` answered
-    /// by actually parsing the selector. `font-tech()`/`font-format()` are false - no font
-    /// here is loaded by technology. A plain `(property: value)` leaf is TRUE, because this
-    /// parser does accept every declaration; whether the value then DRAWS is a different
-    /// question, and COVERAGE.md's rather than this one's.
+    /// An @supports condition, read by the grammar a browser uses: `not`, `and`, `or`,
+    /// parenthesised conditions nested to any depth, `(property: value)` declarations and
+    /// `selector(...)` answered by actually parsing the selector. `font-tech()`/`font-format()`
+    /// are false - no font here is loaded by technology - and anything else in parentheses is
+    /// CSS's general-enclosed, which is false. A condition the grammar cannot read skips the
+    /// block, as a browser drops the rule, and says so once.
     /// </summary>
     /// <remarks>
     /// `not` is the half that mattered. Taken unconditionally - which is what happened before
     /// this existed - a page's `@supports not (...)` fallback was applied on top of the rules
     /// it was the fallback FOR, and being later in the sheet it won.
+    ///
+    /// It used to be read by splitting on " and "/" or " and then deciding a parenthesis held a
+    /// declaration if it had a colon ANYWHERE in it. `((display: flex))` was therefore the
+    /// declaration "(display" with the value "flex)", and `(selector(a:hover))` the property
+    /// "selector(a". With no oracle installed every declaration answered yes, so the headless
+    /// tests passed; in game, where the applier answers, both were false and the block vanished.
+    /// Now a parenthesis is tried as a condition first and a declaration second, in the spec's
+    /// order, and a declaration's name has to be an identifier.
     /// </remarks>
     internal static bool SupportsMatches(string condition, Action<string>? warn)
     {
-        var cond = condition.Trim();
-        if (cond.Length == 0) return true;
+        var at = 0;
+        var result = SupportsCondition(condition, ref at);
+        SkipSpace(condition, ref at);
+        if (result != null && at == condition.Length) return result.Value;
+        var message = $"css: @supports {condition.Trim()} is not a valid condition; the block is skipped, as a browser skips it";
+        if (ReportedMedia.Add(message)) warn?.Invoke(message);
+        return false;
+    }
 
-        var any = SplitKeyword(cond, " or ");
-        if (any.Count > 1)
+    /// <summary>`not` X | X [and X]* | X [or X]*, or null when it does not parse. Mixing and/or needs parentheses.</summary>
+    private static bool? SupportsCondition(string s, ref int i)
+    {
+        SkipSpace(s, ref i);
+        if (Keyword(s, ref i, "not")) return !SupportsInParens(s, ref i);
+        var result = SupportsInParens(s, ref i);
+        string? joined = null;
+        while (result != null)
         {
-            foreach (var part in any)
-                if (SupportsMatches(part, warn)) return true;
-            return false;
+            var before = i;
+            SkipSpace(s, ref i);
+            var op = Keyword(s, ref i, "and") ? "and" : Keyword(s, ref i, "or") ? "or" : null;
+            if (op == null) { i = before; break; }
+            if (joined != null && joined != op) return null;
+            joined = op;
+            var next = SupportsInParens(s, ref i);
+            if (next == null) return null;
+            result = op == "and" ? result.Value && next.Value : result.Value || next.Value;
         }
-        var all = SplitKeyword(cond, " and ");
-        if (all.Count > 1)
-        {
-            foreach (var part in all)
-                if (!SupportsMatches(part, warn)) return false;
-            return true;
-        }
-        if (cond.StartsWith("not ", StringComparison.OrdinalIgnoreCase)) return !SupportsMatches(cond.Substring(4), warn);
-        if (cond.StartsWith("not(", StringComparison.OrdinalIgnoreCase)) return !SupportsMatches(cond.Substring(3), warn);
-        if (cond.StartsWith("selector(", StringComparison.OrdinalIgnoreCase))
-            return ParseSelector(Inside(cond, 8).Trim(), null) != null;
-        if (cond.StartsWith("font-tech(", StringComparison.OrdinalIgnoreCase) || cond.StartsWith("font-format(", StringComparison.OrdinalIgnoreCase))
-            return false;
-        if (cond[0] != '(') return true;
+        return result;
+    }
 
-        var inner = Inside(cond, 0);
-        // `(a: b)` is a declaration; anything else in parentheses is a condition of its own
-        if (inner.IndexOf(':') > 0 && SplitKeyword(inner, " and ").Count == 1 && SplitKeyword(inner, " or ").Count == 1
-            && !inner.TrimStart().StartsWith("not", StringComparison.OrdinalIgnoreCase))
+    /// <summary>`( condition )`, `( declaration )`, a function, or anything else in parentheses (false).</summary>
+    private static bool? SupportsInParens(string s, ref int i)
+    {
+        SkipSpace(s, ref i);
+        var start = i;
+        while (i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '-' || s[i] == '_')) i++;
+        if (i >= s.Length || s[i] != '(') return null;
+        var name = s.Substring(start, i - start);
+        var close = Closing(s, i);
+        if (close < 0) return null;
+        var inner = s.Substring(i + 1, close - i - 1);
+        i = close + 1;
+        if (name.Length > 0)
+            return name.Equals("selector", StringComparison.OrdinalIgnoreCase) && ParseSelector(inner.Trim(), null) != null;
+
+        var j = 0;
+        if (SupportsCondition(inner, ref j) is { } nested)
         {
-            var colon = inner.IndexOf(':');
-            return Declares(inner.Substring(0, colon).Trim(), inner.Substring(colon + 1).Trim());
+            SkipSpace(inner, ref j);
+            if (j == inner.Length) return nested;
         }
-        return SupportsMatches(inner, warn);
+        // the first colon before any function or string: one inside `url(a:b)` is not the declaration's
+        var colon = -1;
+        for (var k = 0; k < inner.Length && colon < 0; k++)
+        {
+            if (inner[k] == ':') colon = k;
+            else if (inner[k] is '(' or '"' or '\'') break;
+        }
+        var property = colon > 0 ? inner.Substring(0, colon).Trim() : string.Empty;
+        if (property.Length == 0 || char.IsDigit(property[0])) return false;
+        foreach (var c in property)
+            if (!char.IsLetterOrDigit(c) && c != '-' && c != '_') return false;
+        return Declares(property, inner.Substring(colon + 1).Trim());
+    }
+
+    /// <summary>A keyword at <paramref name="i"/>, which in CSS is one only when whitespace follows (`not(` is a function).</summary>
+    private static bool Keyword(string s, ref int i, string word)
+    {
+        if (i + word.Length >= s.Length || string.Compare(s, i, word, 0, word.Length, StringComparison.OrdinalIgnoreCase) != 0
+            || !char.IsWhiteSpace(s[i + word.Length])) return false;
+        i += word.Length;
+        return true;
+    }
+
+    private static void SkipSpace(string s, ref int i)
+    {
+        while (i < s.Length && char.IsWhiteSpace(s[i])) i++;
+    }
+
+    /// <summary>The index of the parenthesis closing the one at <paramref name="open"/>, strings skipped; -1 if none.</summary>
+    private static int Closing(string s, int open)
+    {
+        var depth = 0;
+        var quote = '\0';
+        for (var i = open; i < s.Length; i++)
+        {
+            var c = s[i];
+            if (quote != '\0') { if (c == '\\') i++; else if (c == quote) quote = '\0'; }
+            else if (c is '"' or '\'') quote = c;
+            else if (c == '(') depth++;
+            else if (c == ')' && --depth == 0) return i;
+        }
+        return -1;
     }
 
     /// <summary>
@@ -1151,42 +1220,6 @@ internal static class CssParser
     {
         if (name.StartsWith("--", StringComparison.Ordinal)) return true;   // any custom property
         return SupportsOracle?.Invoke(name, value) ?? true;
-    }
-
-    /// <summary>The text between the parenthesis at or after <paramref name="from"/> and its match.</summary>
-    private static string Inside(string s, int from)
-    {
-        var open = s.IndexOf('(', from);
-        if (open < 0) return string.Empty;
-        var depth = 0;
-        for (var i = open; i < s.Length; i++)
-        {
-            if (s[i] == '(') depth++;
-            else if (s[i] == ')' && --depth == 0) return s.Substring(open + 1, i - open - 1);
-        }
-        return s.Substring(open + 1);
-    }
-
-    /// <summary>Split on a keyword outside parentheses.</summary>
-    private static List<string> SplitKeyword(string s, string keyword)
-    {
-        var parts = new List<string>();
-        var depth = 0;
-        var start = 0;
-        for (var i = 0; i < s.Length; i++)
-        {
-            if (s[i] == '(') depth++;
-            else if (s[i] == ')') depth--;
-            else if (depth == 0 && i + keyword.Length <= s.Length
-                     && string.Compare(s, i, keyword, 0, keyword.Length, StringComparison.OrdinalIgnoreCase) == 0)
-            {
-                parts.Add(s.Substring(start, i - start));
-                start = i + keyword.Length;
-                i += keyword.Length - 1;
-            }
-        }
-        parts.Add(s.Substring(start));
-        return parts;
     }
 
     /// <summary>Body of a @keyframes block: "from { } 50% { } to { }". Frames sorted by percent.</summary>
