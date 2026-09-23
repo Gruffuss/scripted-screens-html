@@ -13,8 +13,18 @@ Newest first. The workshop page is a short overview; this file has the full hist
 - `attr()` outside `content`, the `lh` and `rlh` units, `clip-path: path()`.
 - `line-height: 1.5em` was applied twice over.
 - `@container` queries re-cascade when the container's size changes.
-- `object-position` warns instead of being dropped silently; the renderer has no picture
-  alignment yet.
+- `object-position` places the picture (vector mod 0.11.33's IMG `at`); a url() background honours
+  `background-position`, from the top-left corner as CSS starts it.
+- `@supports` reads nested conditions, selector() and strings as a browser does, and answers yes for
+  gap, grid and the other properties drawn outside the cascade.
+- `clip-path` reference boxes.
+- A `background` shorthand whose url has a slash in it is no longer stretched.
+- No "not drawn" warning for sixteen properties that are drawn.
+- A data page compiles in the emit that draws its first payload; a key it cannot place is dropped
+  alone and named once; keys first sent later map on arrival.
+- The three Atmo mockups compile: a panel rebuilt through `innerHTML` is laid out once with every
+  alternative and row, and the chip writes values into it.
+- `@font-face` with an `https` link (a Google Fonts stylesheet included) loads through the Fonts mod.
 - Pages are laid out by a layout engine inside the mod instead of Unity's UI Toolkit, and each
   page runs its script, animations and layout on a thread of its own. The game thread only
   hands finished scenes to the vector mod. The layout engine is Yoga (MIT); THIRD-PARTY-NOTICES.md

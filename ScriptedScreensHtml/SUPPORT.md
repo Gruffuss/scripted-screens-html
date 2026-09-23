@@ -64,7 +64,7 @@ vector node.
 | Transforms | `transform` attribute with `translate rotate(a[,cx,cy]) scale skewX skewY matrix`, composed through nested groups |
 | Gradients | `linearGradient`, `radialGradient` with stops (`offset`, `stop-color`, `stop-opacity`, inline style), `gradientUnits`; ids scoped per svg |
 | Text | `text` and `tspan` (own x/y start a line; tspan `fill`/`font-weight`/`font-style` as rich text), `font-size` in viewBox units, `text-anchor`, `dominant-baseline`, `font-family`, `letter-spacing` |
-| Image | `<image href>` with `preserveAspectRatio` (fill/contain/cover) |
+| Image | `<image href>` with `preserveAspectRatio` (fill/contain/cover, and its xMin/xMid/xMax Y alignment) |
 | Fit | `viewBox`, `preserveAspectRatio="none"` (non-uniform scale baked into coordinates so strokes keep one width) |
 | Expressions | any attribute may be `="expression"` for the vector mod (`t`, `i`, `$data`, `hash`); `n="36"` on polygon/polyline is a sampled band/line, on other shapes a repeat; `fo2 fea fea_edge lod dash dofs ml sh sd sdo fr` pass through |
 | Data binding | a shape with an id takes `data` from Lua: a string sets `points`, a map sets attributes, a number array becomes evenly spaced y values |
@@ -111,7 +111,7 @@ vector node.
 | Masks | `mask-image` gradients with `mask-size`, `mask-position`, `mask-origin`, `mask-clip` (`mask-repeat` accepted) |
 | Borders | `border` and every per-side longhand (`width`, `color`, `style` incl. per side), `solid dashed dotted double inset outset groove ridge none hidden`, `border-radius` per corner incl. elliptical, `corner-shape: bevel/scoop/notch`, `border-image` (gradient source as a gradient frame, image source as nine slices in percent), `outline` (`width style color offset`) |
 | Shadows | `box-shadow` (offset, blur, spread, colour, `inset`, several), `text-shadow` (several), `filter: drop-shadow()` |
-| Effects | `opacity`, `filter: brightness contrast saturate hue-rotate grayscale sepia invert drop-shadow` (on the subtree), `clip-path: inset() rect() xywh() circle() ellipse() polygon() path()` (also concave; a path is flattened to its outline), `mask-image: linear-gradient(...)`, `mix-blend-mode` and `backdrop-filter` accepted without effect (per-pixel) |
+| Effects | `opacity`, `filter: brightness contrast saturate hue-rotate grayscale sepia invert drop-shadow` (on the subtree), `clip-path: inset() rect() xywh() circle() ellipse() polygon() path()` (also concave; a path is flattened to its outline) and the reference boxes border-box / padding-box / content-box / fill-box / stroke-box / view-box, alone or beside a shape, `mask-image: linear-gradient(...)`, `mix-blend-mode` and `backdrop-filter` accepted without effect (per-pixel) |
 | Transforms | `transform` with `translate scale rotate skew matrix` (and the X/Y/3d spellings; `rotateX/Y` as their flat foreshortening, `perspective` ignored), `transform-origin`, `backface-visibility: hidden` |
 
 ### Text
@@ -189,8 +189,10 @@ Approximations in this layer, listed to be replaced, not kept:
   not see increments by descendants.
 - `ruby`: the annotation is small and raised after its base, not stacked above it.
 - `border-image` with `px`/number slices reads them as thirds (percent slices are exact).
-- `object-position` is reported and not drawn: the picture is placed by the vector layer, which is the
-  only side that learns the picture's size, and its `IMG` has no alignment to carry it yet.
+- `object-position` keywords, percentages and calc() of percentages place the picture exactly, in
+  every syntax including `right 10% bottom 20%`. A length offset needs the picture's own size, so the
+  picture is placed from that edge and the page is told. On `<video>`, object-fit and object-position
+  are not drawn: a video is ScriptedScreens' own media element.
 - `text-decoration` colour, thickness, offset and style are drawn on single-line labels;
   a wrapped label keeps the plain underline.
 - `rotateX`/`rotateY` are the flat foreshortening, no perspective.
