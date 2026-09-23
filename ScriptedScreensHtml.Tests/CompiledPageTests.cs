@@ -378,6 +378,7 @@ internal static class CompiledPageTests
         if (root == null) { check(false, "compiled: cannot find the source folder"); return; }
 
         Markup(root, check);
+        MarkupGauges(check);
         MarkupRuntime(root, check);
         MarkupValues(root, check);
         StateText(root, check);
@@ -645,6 +646,67 @@ internal static class CompiledPageTests
     }
 
     // ---- markup written with innerHTML, compiled -----------------------------------------------
+
+    /// <summary>
+    /// The two ways a dashboard draws a level, compiled: a gauge whose height is a mixed calc(), and a
+    /// hard-stop gradient bar. Each is one straight line from the value to a slot.
+    /// </summary>
+    /// <remarks>
+    /// The gauge was reported three contradictory ways - out of proportion, and changing nothing - because
+    /// a mixed calc() is written after layout from its parent's new size, and a rebuilt bar's parent had no
+    /// new size: some probes read the percent alone and some the percent less 12px. The bar was a ramp over
+    /// the whole box, because `C 0 37%` was read as one stop at 0.
+    /// </remarks>
+    private static void MarkupGauges(Action<bool, string> check)
+    {
+        const string page = @"<meta name=""viewport"" content=""width=300"">
+<style>body{margin:0;background:#000}</style>
+<body><div id=""frame"" style=""width:300px;height:300px""></div>
+<script>
+const st = { n: 40 };
+function render() {
+  const pct = Math.min(100, Math.max(4, st.n)).toFixed(1);
+  document.getElementById('frame').innerHTML =
+    '<div style=""position:relative;height:200px;background:#222222""><div style=""position:absolute;left:6px;right:6px;bottom:6px;height:calc(' + pct + '% - 12px);background:#33cc66""></div></div>'
+    + '<div style=""height:20px;background:linear-gradient(90deg,#33cc66 0 ' + pct + '%,transparent 0) left bottom/100% 3px no-repeat,#000000""></div>';
+}
+function step() { st.n = (st.n + 7) % 100; render(); }
+render();
+setInterval(step, 500);
+</script></body>";
+        MarkupSlots.Result? markup;
+        try { (_, markup) = Probe4.Headless(page); }
+        catch (Exception ex) { check(false, "gauges: compiling threw - " + ex.Message.Split('\n')[0]); return; }
+        if (markup == null || markup.Targets.Count == 0) { check(false, "gauges: nothing compiled"); return; }
+
+        var lines = markup.Targets[0].Holes.Values.Where(h => h.Kind == MarkupSlots.Kind.Number).SelectMany(h => h.To).ToList();
+        var gauge = lines.FirstOrDefault(l => l.Slot.EndsWith("_h", StringComparison.Ordinal));
+        check(gauge.Slot != null && Math.Abs(gauge.Scale - 2) < 0.05 && Math.Abs(gauge.Bias + 12) < 1.5,
+            gauge.Slot != null ? $"gauges: calc(X% - 12px) of 200px is h = {gauge.Scale:0.###}x + {gauge.Bias:0.#}" : "gauges: the gauge's height reaches no slot");
+        var bar = lines.FirstOrDefault(l => l.Slot.StartsWith("cut", StringComparison.Ordinal) && l.Slot.EndsWith("_w", StringComparison.Ordinal));
+        check(bar.Slot != null && Math.Abs(bar.Scale - 3) < 0.05,
+            bar.Slot != null ? $"gauges: a hard-stop bar's band is {bar.Scale:0.###}x wide on a 300px bar" : "gauges: the hard-stop bar reaches no slot");
+        var said = markup.Problems.Where(p => p.Contains("proportion", StringComparison.Ordinal) || p.Contains("changes nothing", StringComparison.Ordinal)).ToList();
+        check(said.Count == 0, said.Count == 0 ? "gauges: neither is reported" : "gauges: " + said[0]);
+
+        // A colour named through a custom property that is itself a var(): the chunk writes CSS and the
+        // scene reads hex, and a name missing from the table reached the console as the text `var(--live)`.
+        const string tones = @"<meta name=""viewport"" content=""width=300"">
+<style>:root{--steel:#8899aa;--live:var(--steel)} body{margin:0;background:#000}</style>
+<body><div id=""frame"" style=""width:300px;height:100px""></div>
+<script>
+const st = { hot: false };
+function render() { document.getElementById('frame').innerHTML = '<div style=""height:20px;color:' + (st.hot ? '#ff0000' : 'var(--live)') + '"">x</div>'; }
+function step() { st.hot = !st.hot; render(); }
+render();
+setInterval(step, 500);
+</script></body>";
+        CompiledPage.Result toned;
+        try { (toned, _) = Probe4.Headless(tones); }
+        catch (Exception ex) { check(false, "gauges: compiling the tone page threw - " + ex.Message.Split('\n')[0]); return; }
+        check(toned.Lua != null && toned.Lua.Contains("[\"var(--live)\"] = \"#8899AA\"", StringComparison.Ordinal),
+            "gauges: a var() naming another var() is in the colour table as the hex it ends at");
+    }
 
     /// <summary>
     /// A page that draws with <c>innerHTML</c>, compiled once: its markup becomes the scene, and the

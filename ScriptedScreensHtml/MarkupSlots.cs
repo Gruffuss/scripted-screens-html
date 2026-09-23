@@ -134,6 +134,10 @@ internal static class MarkupSlots
         // was changed read as a bar that had not changed at all.
         var wasNoCache = VectorEmitter.NoCache;
         VectorEmitter.NoCache = true;
+        // A number and its unit side by side are one label while markup compiles: laid out once, the
+        // unit would stay where the stand-in number ended. The gated alternatives are added as found.
+        var wasJoin = VectorEmitter.JoinRows;
+        VectorEmitter.JoinRows = new HashSet<string>(StringComparer.Ordinal);
         try
         {
             foreach (var (id, markup) in writes)
@@ -159,6 +163,7 @@ internal static class MarkupSlots
         finally
         {
             VectorEmitter.NoCache = wasNoCache;
+            VectorEmitter.JoinRows = wasJoin;
             // Put back, always, and checked: compiling mutates the live page, and a console drawing
             // sentinels where its readings belong is the failure this must never leave behind.
             foreach (var (ve, node, html) in pristine)
@@ -289,7 +294,7 @@ internal static class MarkupSlots
                     _built.TimeAnimations[element] = (spec, OffThread.Now);
                     continue;
                 }
-                Problem(t, $"the animation `{spec.Name}` is not one the scene can run by itself (it ends, or animates more than opacity and transform), so it stays at its first frame");
+                Problem(t, $"the animation `{spec.Name}` is not one the scene can run by itself (it ends, or animates something other than opacity, transform, a colour filter, a flat background colour or the position of a striped background), so it stays at its first frame");
             }
         }
 
@@ -316,6 +321,7 @@ internal static class MarkupSlots
                 if (_rootOf.ContainsKey(n)) continue;
                 _rootOf[n] = t;
                 t.Roots.Add(n);
+                VectorEmitter.JoinRows?.Add(n);   // gated on its own, so never folded into a neighbour's label
                 // Named, so the emitter wraps it in a group carrying its id: that group is what the
                 // gate goes on, and what marks where its lines begin and end.
                 _built.NamedGroups.Add(n);
@@ -570,7 +576,15 @@ internal static class MarkupSlots
         {
             Emits++;
             TimeLayout.Start();
-            _panel.Layout(_panel.Width, _panel.Height);
+            // Settled, as the surface settles a frame before it paints: a mixed calc() - a gauge's
+            // `height: calc(62% - 12px)` - is written after layout from the parent's new size, and
+            // one pass left it a layout behind, so the same value read differently in each probe.
+            for (var pass = 0; pass < 4; pass++)
+            {
+                var writes = PostLayout.LayoutWrites;
+                _panel.Layout(_panel.Width, _panel.Height);
+                if (PostLayout.LayoutWrites == writes) break;
+            }
             TimeLayout.Stop();
             TimeEmit.Start();
             try { return EmittedInner(); } finally { TimeEmit.Stop(); }
@@ -1323,6 +1337,12 @@ internal static class MarkupSlots
                     }
                 }
                 Attach(_built);
+                // A mixed calc() is applied when its parent's size changes, and the parent of a rebuilt
+                // bar has not changed: without this the copy kept the percent alone, without its `- 12px`.
+                if (made != null)
+                    foreach (var (owner, act) in _built.AfterRecascade.ToArray())
+                        for (var e = owner; e != null; e = e.parent)
+                            if (e == made) { act(); break; }
                 Animate(t);
                 Rename(parent);
             }
@@ -1666,7 +1686,11 @@ internal static class MarkupSlots
             var table = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var v in t.Markup.Enumerate(t.Markup.Holes[hole].Value) ?? t.Markup.Literals())
             {
-                var resolved = scope != null ? HtmlRenderer.ResolveVars(v, scope) : v;
+                var resolved = v;
+                // Until no var() is left: `--live: var(--steel-300)` resolves to another var(), and a
+                // colour left unread here reached the console as the text `var(--live)`.
+                for (var depth = 0; scope != null && depth < 8 && resolved.IndexOf("var(", StringComparison.Ordinal) >= 0; depth++)
+                    resolved = HtmlRenderer.ResolveVars(resolved, scope);
                 if (StyleApplier.TryColor(resolved.Trim(), out var colour)) table[v] = Hex(colour);
             }
             return table;

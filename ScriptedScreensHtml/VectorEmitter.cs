@@ -201,6 +201,160 @@ internal static class VectorEmitter
     /// </summary>
     [ThreadStatic] internal static bool NoCache;
 
+    /// <summary>
+    /// While a page's markup compiles: a baseline row of text - a number and its unit - is drawn as ONE
+    /// label, except for the elements named here (the alternatives the compiler gates on their own).
+    /// Null otherwise, and then nothing changes.
+    /// </summary>
+    /// <remarks>
+    /// In a browser the unit follows the number. A compiled page lays out once, so two labels placed
+    /// side by side keep the unit where the stand-in number ended, and a real value runs into it. One
+    /// label carries both, and the text engine puts the unit after whatever the number turns out to be.
+    /// </remarks>
+    [ThreadStatic] internal static HashSet<string>? JoinRows;
+
+    /// <summary>
+    /// What a piece of a joined row may not carry: anything that draws a box, sizes or moves one, or
+    /// styles text in a way one label's tags cannot. Named by prefix; text styling passes, and so do
+    /// rules a page sets on everything (`* { scrollbar-width: none }`).
+    /// </summary>
+    private static readonly string[] RowPieceBoxCss =
+    {
+        "background", "border", "padding", "margin", "width", "height", "min-", "max-", "position", "top", "left",
+        "right", "bottom", "inset", "transform", "translate", "rotate", "scale", "animation", "transition",
+        "text-decoration", "text-shadow", "text-transform", "text-overflow", "opacity", "outline", "box-shadow",
+        "overflow", "clip", "filter", "visibility", "z-index", "order", "align-self", "display", "writing-mode",
+        "mask", "flex-grow",
+    };
+
+    private static bool RowPieceBoxy(string key, string value)
+    {
+        if (key == "flex") return !(value.Trim() is "none" or "0" || value.TrimStart().StartsWith("0 ", StringComparison.Ordinal));
+        foreach (var p in RowPieceBoxCss)
+            if (key.StartsWith(p, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// A flex row of text on one baseline (`display:flex;align-items:baseline;gap:4px` round a value
+    /// span and a unit span) as one T: the first piece's style is the label's, each other piece carries
+    /// its size, colour, face and spacing as tags, and the gap is a space. False, with nothing written,
+    /// for anything else.
+    /// </summary>
+    private static bool JoinedRow(Ctx ctx, VisualElement ve, Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, string indent)
+    {
+        if (ve.childCount < 2 || ve[0] is not Label first) return false;
+        if (!(css.TryGetValue("display", out var display) && display.Trim() is "flex" or "inline-flex")) return false;
+        if (css.TryGetValue("flex-direction", out var fd) && fd.Trim() != "row") return false;
+        if (css.TryGetValue("flex-wrap", out var fw) && fw.Trim() != "nowrap") return false;
+        if (!(css.TryGetValue("align-items", out var ai) && ai.Trim() is "baseline" or "first baseline")) return false;
+        var align = (css.TryGetValue("justify-content", out var jc) ? jc.Trim() : "normal") switch
+        {
+            "normal" or "flex-start" or "start" or "left" => string.Empty,
+            "flex-end" or "end" or "right" => "right",
+            "center" => "center",
+            _ => null,
+        };
+        if (align == null) return false;
+        var gap = css.TryGetValue("column-gap", out var cg) ? StyleApplier.Num(cg)
+            : css.TryGetValue("gap", out var g) && g.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries) is { Length: > 0 } gp ? StyleApplier.Num(gp[gp.Length - 1]) : 0f;
+
+        var firstCss = WithInherited(ctx, first, ctx.Built.CssOf(first));
+        var firstRs = OffThread.Of(first);
+        var firstFace = PieceFace(firstCss, firstRs, out var firstBold);
+        var firstSpace = LetterSpacing(firstCss, firstRs.fontSize);
+        var text = new StringBuilder();
+        var ok = true;
+        for (var i = 0; ok && i < ve.childCount; i++)
+        {
+            if (ve[i] is not Label piece || !ctx.Built.NodeOf.TryGetValue(piece, out var node)
+                || JoinRows!.Contains(piece.name) || node.Attr("id") is { } nid && !nid.StartsWith("__", StringComparison.Ordinal) || node.Attr("data-click") != null || IsButton(ctx, piece)
+                || ctx.Built.TimeAnimations.ContainsKey(piece) || OffThread.Of(piece).display == DisplayStyle.None)
+            { ok = false; break; }
+            var own = ctx.Built.CssOf(piece);
+            foreach (var pair in own)
+                if (RowPieceBoxy(pair.Key, pair.Value)) { ok = false; break; }
+            if (!ok) break;
+            var pieceCss = i == 0 ? firstCss : WithInherited(ctx, piece, own);
+            var prs = OffThread.Of(piece);
+            var raw = piece.text ?? string.Empty;
+            if (pieceCss.TryGetValue("font-variant-numeric", out var fvn) && fvn.Contains("tabular"))
+                raw = System.Text.RegularExpressions.Regex.Replace(raw, "[0-9]+", m => "<mspace=0.6em>" + m.Value + "</mspace>");
+            // A synthetic bold is a tag on the first piece rather than the label's weight, which no tag
+            // could take away from the pieces after it.
+            if (i == 0) { text.Append(firstBold ? "<b>" + raw + "</b>" : raw); continue; }
+            var face = PieceFace(pieceCss, prs, out var bold);
+            var open = new StringBuilder();
+            var close = new StringBuilder();
+            if (!Mathf.Approximately(prs.fontSize, firstRs.fontSize)) { open.Append("<size=").AppendNum(prs.fontSize).Append('>'); close.Insert(0, "</size>"); }
+            if (prs.color != firstRs.color) { open.Append("<color=").AppendHex(prs.color).Append('>'); close.Insert(0, "</color>"); }
+            if (face != null && face != firstFace) { open.Append("<font=\"").Append(face).Append("\">"); close.Insert(0, "</font>"); }
+            if (bold) { open.Append("<b>"); close.Insert(0, "</b>"); }
+            var space = LetterSpacing(pieceCss, prs.fontSize);
+            if (!Mathf.Approximately(space, firstSpace)) { open.Append("<cspace=").AppendNum(space).Append("em>"); close.Insert(0, "</cspace>"); }
+            // the gap, in this piece's own ems so it scales with the label
+            if (gap > 0.01f && prs.fontSize > 0f) open.Append("<space=").AppendNum(gap / prs.fontSize).Append("em>");
+            text.Append(open).Append(raw).Append(close);
+            if (!ReferenceEquals(pieceCss, own)) ctx.Return(pieceCss);
+        }
+        if (!ok) { if (!ReferenceEquals(firstCss, ctx.Built.CssOf(first))) ctx.Return(firstCss); return false; }
+
+        // Tabular digits are already in their cells, and the label would put its own tags round the
+        // digits in these: its record without the property.
+        var labelCss = ctx.RentRecord();
+        foreach (var pair in ctx.Built.CssOf(first))
+            if (pair.Key != "font-variant-numeric") labelCss[pair.Key] = pair.Value;
+        if (firstBold) labelCss["font-synthesis"] = "style";
+        if (!ReferenceEquals(firstCss, ctx.Built.CssOf(first))) ctx.Return(firstCss);
+        var cx = x + rs.borderLeftWidth + rs.paddingLeft;
+        var cw = Mathf.Max(1f, w - rs.borderLeftWidth - rs.paddingLeft - rs.paddingRight - rs.borderRightWidth);
+        // the line: from the highest piece's top to the lowest one's bottom, as the row's own boxes sit
+        float top = float.MaxValue, bottom = float.MinValue;
+        for (var i = 0; i < ve.childCount; i++)
+        {
+            var box = OffThread.Of(ve[i]).layout;
+            top = Mathf.Min(top, y + box.y);
+            bottom = Mathf.Max(bottom, y + box.y + box.height);
+        }
+        // EmitText widens a left-aligned label to the right; placed so the widening lands on the side
+        // this row grows from.
+        var slack = cw * 0.35f + 8f;
+        var lx = align == "right" ? cx - slack : align == "center" ? cx - slack * 0.5f : cx;
+        var from = ctx.Body.Length;
+        EmitText(ctx, first, labelCss, lx, top, cw, bottom - top, indent, text.ToString());
+        ctx.Return(labelCss);
+        if (align.Length > 0)
+        {
+            var at = ctx.Body.ToString(from, ctx.Body.Length - from).IndexOf(" valign=", StringComparison.Ordinal);
+            if (at >= 0) ctx.Body.Insert(from + at, " align=" + align);
+        }
+        return true;
+    }
+
+    /// <summary>The face a piece of text is drawn in, as a label picks it: a real weight face before a synthetic bold.</summary>
+    private static string? PieceFace(Dictionary<string, string> css, OffThread.Box rs, out bool syntheticBold)
+    {
+        var bold = rs.unityFontStyleAndWeight is FontStyle.Bold or FontStyle.BoldAndItalic;
+        var first = css.TryGetValue("font-family", out var family) ? FirstFamily(family) : string.Empty;
+        if (first.Length > 0 && !NamedWeight(first) && WeightFace(css, bold) is { } weight && OffThread.Library(Join(first, weight)))
+        {
+            first = Join(first, weight);
+            bold = false;
+        }
+        syntheticBold = bold && !NamedWeight(first);
+        return first.Length > 0 ? FontLibrary.ResolveFace(first) : null;
+    }
+
+    /// <summary>letter-spacing in ems of the piece's own size, 0 when it has none.</summary>
+    private static float LetterSpacing(Dictionary<string, string> css, float fontSize)
+    {
+        if (!css.TryGetValue("letter-spacing", out var ls) || fontSize <= 0f) return 0f;
+        var v = ls.Trim();
+        if (v == "normal") return 0f;
+        return v.EndsWith("em", StringComparison.OrdinalIgnoreCase) && float.TryParse(v.Substring(0, v.Length - 2), NumberStyles.Float, CultureInfo.InvariantCulture, out var em)
+            ? em : StyleApplier.Num(v) / fontSize;
+    }
+
     /// <summary>Subtrees written from the last frame's characters, and elements rebuilt (diagnostics).</summary>
     internal static int LastReused, LastRebuilt;
     /// <summary>Why elements were rebuilt (diagnostics): changed, no cache yet, moved, deeper, another epoch, tweening.</summary>
@@ -898,6 +1052,7 @@ internal static class VectorEmitter
                 break;
             default:
             {
+                if (JoinRows != null && JoinedRow(ctx, ve, css, rs, x, y, w, indent)) break;
                 var outer = (ctx.ScrollTop, ctx.ScrollH, ctx.ScrollRange);
                 if (!float.IsNaN(scrollTop)) { ctx.ScrollTop = scrollTop; ctx.ScrollH = h; ctx.ScrollRange = Mathf.Max(0f, scrollCh - h); }
                 var children = ByZIndex(ctx, ve);
@@ -1872,7 +2027,9 @@ internal static class VectorEmitter
                 GradientDefLine(ctx, gid, dx, dy, p0, p1, local);
                 fill = "@" + gid;
             }
-            ctx.Body.Append(indent).Append("G clip=").Append(cid).Append(" { R").Append(rect).Append(" f=").Append(fill).Append(" }\n");
+            // Named after its element like the flat and ramped paths: a bar's colour is written by the
+            // chip, and a positional name holds only while every layout emits the same lines.
+            ctx.Body.Append(indent).Append("G clip=").Append(cid).Append(" { R").Append(rect).Append(" f=").Append(fill).AppendNodeId(ctx, ve).Append(" }\n");
             ctx.Out.Nodes++;
         }
     }
@@ -1973,17 +2130,37 @@ internal static class VectorEmitter
             angle = AngleDeg(first);
             args.RemoveAt(0);
         }
+        // Every position a stop names, as CSS reads them: `C 0 62%` is TWO stops of C, which is how a
+        // bar is written - `C 0 62%, transparent 0` - and reading only the first drew it as a ramp
+        // over the whole box that no value moved. A length the line is not known here for is left
+        // to be spread like a missing one.
         var stops = new List<(float at, Color c)>();
         for (var i = 0; i < args.Count; i++)
         {
             var parts = args[i].Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length == 0 || !StyleApplier.TryColor(parts[0], out var c)) continue;
-            var at = parts.Length > 1 && parts[1].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[1]) / 100f : (args.Count == 1 ? 0f : (float)i / (args.Count - 1));
-            // CSS: a stop position never goes below the previous one.
-            if (stops.Count > 0 && at < stops[stops.Count - 1].at) at = stops[stops.Count - 1].at;
-            stops.Add((at, c));
+            if (parts.Length == 1) stops.Add((float.NaN, c));
+            for (var p = 1; p < parts.Length; p++)
+                stops.Add((parts[p].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[p]) / 100f : parts[p] == "0" ? 0f : float.NaN, c));
         }
-        return stops.Count < 2 ? null : (angle, stops);
+        if (stops.Count < 2) return null;
+        // The first defaults to 0 and the last to 100%; a position never goes below one before it;
+        // a run with none is spread evenly between its neighbours.
+        if (float.IsNaN(stops[0].at)) stops[0] = (0f, stops[0].c);
+        if (float.IsNaN(stops[stops.Count - 1].at)) stops[stops.Count - 1] = (1f, stops[stops.Count - 1].c);
+        var most = 0f;
+        for (var i = 0; i < stops.Count; i++)
+            if (!float.IsNaN(stops[i].at)) { most = Mathf.Max(most, stops[i].at); stops[i] = (most, stops[i].c); }
+        for (var i = 1; i < stops.Count - 1; i++)
+        {
+            if (!float.IsNaN(stops[i].at)) continue;
+            var next = i;
+            while (float.IsNaN(stops[next].at)) next++;
+            var step = (stops[next].at - stops[i - 1].at) / (next - i + 1);
+            for (var k = i; k < next; k++) stops[k] = (stops[i - 1].at + step * (k - i + 1), stops[k].c);
+            i = next - 1;
+        }
+        return (angle, stops);
     }
 
     private static float AngleDeg(string v)
@@ -3847,12 +4024,13 @@ internal static class VectorEmitter
     }
 
     /// <summary>
-    /// A repeating-linear-gradient along an axis whose stops are all hard edges (`a 0 6px, b 6px 12px`:
-    /// the stripe idiom), drawn as one repeat of rects per colour inside the box's clip. When a
-    /// keyframe animation moves `background-position`, the stripes march: an expression over t.
+    /// The stripes a repeating-linear-gradient draws, when it is the stripe idiom: along an axis,
+    /// every stop placed, every edge hard. Asked by <see cref="Compilable"/> too, so the animation
+    /// that marches them is only called runnable where they will actually be drawn as stripes.
     /// </summary>
-    private static bool Stripes(Ctx ctx, Dictionary<string, string> css, string bgCss, VisualElement ve, OffThread.Box rs, float x, float y, float w, float h, string indent)
+    private static bool StripeShape(string bgCss, float w, float h, out bool horizontal, out float period, List<(float s0, float s1, Color c)> segments)
     {
+        horizontal = false; period = 0f;
         var open = bgCss.IndexOf('(');
         var close = bgCss.LastIndexOf(')');
         if (open < 0 || close < open) return false;
@@ -3861,7 +4039,7 @@ internal static class VectorEmitter
         var first = 0;
         if (args.Count > 0 && !StyleApplier.TryColor(args[0].Trim().Split(' ')[0], out _)) { angle = GradientAngle(args[0]); first = 1; }
         angle = Mathf.Repeat(angle, 360f);
-        var horizontal = Mathf.Abs(angle - 90f) < 0.5f || Mathf.Abs(angle - 270f) < 0.5f;
+        horizontal = Mathf.Abs(angle - 90f) < 0.5f || Mathf.Abs(angle - 270f) < 0.5f;
         var vertical = Mathf.Abs(angle) < 0.5f || Mathf.Abs(angle - 180f) < 0.5f;
         if (!horizontal && !vertical) return false;
         var span = horizontal ? w : h;
@@ -3876,16 +4054,27 @@ internal static class VectorEmitter
                 stops.Add((parts[p].EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(parts[p]) / 100f * span : StyleApplier.Num(parts[p]), col));
         }
         if (stops.Count < 2) return false;
-        var period = stops[stops.Count - 1].at - stops[0].at;
+        period = stops[stops.Count - 1].at - stops[0].at;
         if (period < 0.5f) return false;
         // every segment must be hard-edged: consecutive stops of different colours share a position
-        var segments = new List<(float s0, float s1, Color c)>();
         for (var i = 1; i < stops.Count; i++)
         {
             if (stops[i].c == stops[i - 1].c) { segments.Add((stops[i - 1].at, stops[i].at, stops[i].c)); continue; }
             if (Mathf.Abs(stops[i].at - stops[i - 1].at) > 0.01f) return false; // a ramp between colours: not stripes
         }
-        if (segments.Count == 0) return false;
+        return segments.Count > 0;
+    }
+
+    /// <summary>
+    /// A repeating-linear-gradient along an axis whose stops are all hard edges (`a 0 6px, b 6px 12px`:
+    /// the stripe idiom), drawn as one repeat of rects per colour inside the box's clip. When a
+    /// keyframe animation moves `background-position`, the stripes march: an expression over t.
+    /// </summary>
+    private static bool Stripes(Ctx ctx, Dictionary<string, string> css, string bgCss, VisualElement ve, OffThread.Box rs, float x, float y, float w, float h, string indent)
+    {
+        var segments = new List<(float s0, float s1, Color c)>();
+        if (!StripeShape(bgCss, w, h, out var horizontal, out var period, segments)) return false;
+        var span = horizontal ? w : h;
         // marching: a keyframe animation on background-position, its 100% frame's offset over the duration
         var shift = string.Empty;
         foreach (var (element, spec) in ctx.Built.Animations)
@@ -4298,15 +4487,44 @@ internal static class VectorEmitter
     {
         if (frames.Frames.Count == 0) return false;
         var colour = false;
+        var march = false;
         foreach (var f in frames.Frames)
             foreach (var d in f.Declarations)
             {
                 if (d.Name == "opacity" || d.Name == "transform") continue;
                 if (d.Name == "background-color") { colour = true; continue; }
+                // a colour filter is a group attribute the scene evaluates (`bri="=..."`): a trip flash
+                if (d.Name == "filter" && ColourFilters(d.Value)) continue;
+                // background-position on stripes is the march Stripes already writes as an expression of t
+                if (d.Name is "background-position" or "background-position-x" or "background-position-y") { march = true; continue; }
                 return false;
             }
         if (colour && (css == null || Layered(css))) return false;
+        if (march && (css == null || !Marching(css))) return false;
         return true;
+    }
+
+    /// <summary>The CSS filter functions a group carries as attributes, and what each rests at.</summary>
+    private static readonly string[] FilterFunctions = { "brightness", "contrast", "saturate", "grayscale", "sepia", "invert", "hue-rotate" };
+    private static readonly string[] FilterAttributes = { "bri", "con", "sat", "gray", "sep", "inv", "hue" };
+    private static readonly float[] FilterRest = { 1f, 1f, 1f, 0f, 0f, 0f, 0f };
+
+    /// <summary>A filter value made only of functions the scene has as group attributes (`none` is all of them at rest).</summary>
+    private static bool ColourFilters(string value)
+    {
+        foreach (var (name, _) in StyleApplier.Functions(value))
+            if (Array.IndexOf(FilterFunctions, name) < 0) return false;
+        return true;
+    }
+
+    /// <summary>Whether this element's background is drawn as stripes, which is what a background-position animation marches.</summary>
+    private static bool Marching(Dictionary<string, string> css)
+    {
+        var bg = css.TryGetValue("background-image", out var bi) && bi.TrimStart().StartsWith("repeating-linear-gradient", StringComparison.OrdinalIgnoreCase) ? bi
+            : css.TryGetValue("background", out var b) ? b : null;
+        // the box is not known here; a size only turns a percentage stop into pixels, not a stripe into a ramp
+        return bg != null && bg.TrimStart().StartsWith("repeating-linear-gradient", StringComparison.OrdinalIgnoreCase)
+               && StripeShape(bg.Trim(), 100f, 100f, out _, out _, new List<(float s0, float s1, Color c)>());
     }
 
     /// <summary>Does this element paint its background as anything other than one flat colour?</summary>
@@ -4439,13 +4657,28 @@ internal static class VectorEmitter
         float Fade(float frame) => bo < 0.001f ? frame : spec.Composition == 0 ? frame / bo : Mathf.Clamp01(bo + frame) / bo;
 
         var keys = new List<(float at, float o, float tx, float ty, float sx, float sy, float r)>();
+        // A colour filter per key, beside the rest: one amount per FilterFunctions entry.
+        var filters = new List<float[]>();
+        var filtered = false;
         foreach (var f in frames.Frames)
         {
             var o = 1f; var tx = 0f; var ty = 0f; var sx = 1f; var sy = 1f; var r = 0f;
             var seen = false; var sawO = false; var sawT = false;
+            var fl = (float[])FilterRest.Clone();
+            var sawF = false;
             foreach (var d in f.Declarations)
             {
                 if (d.Name == "opacity") { o = StyleApplier.Num(d.Value); seen = true; sawO = true; }
+                else if (d.Name == "filter" && ColourFilters(d.Value))
+                {
+                    sawF = true; filtered = true;
+                    foreach (var (name, args) in StyleApplier.Functions(d.Value))
+                    {
+                        var a = args.Length > 0 ? args[0].Trim() : string.Empty;
+                        var at = Array.IndexOf(FilterFunctions, name);
+                        fl[at] = name == "hue-rotate" ? StyleApplier.Num(a) : a.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(a) / 100f : StyleApplier.Num(a);
+                    }
+                }
                 else if (d.Name == "transform")
                 {
                     seen = true; sawT = true;
@@ -4466,41 +4699,50 @@ internal static class VectorEmitter
                 }
             }
             if (!seen && keys.Count > 0) { var prev = keys[keys.Count - 1]; o = prev.o; tx = prev.tx; ty = prev.ty; sx = prev.sx; sy = prev.sy; r = prev.r; }
+            // a frame naming no filter holds the one before it, as the other properties do
+            if (!sawF && filters.Count > 0) fl = filters[filters.Count - 1];
+            filters.Add(fl);
             // only what the frame declares composes: a frame naming no transform means the base, which the
             // outer wrapper already is, so the inner value stays identity
             if (sawO) o = Fade(o);
             if (sawT) { var acc = spec.Composition == 2; tx = Add(tx, btx); ty = Add(ty, bty); r = Add(r, br); sx = Mul(sx, bsx, acc); sy = Mul(sy, bsy, acc); }
             keys.Add((f.Percent / 100f, o, tx, ty, sx, sy, r));
         }
-        if (keys.Count == 1) keys.Insert(0, (0f, 1f, 0f, 0f, 1f, 1f, 0f));
+        if (keys.Count == 1) { keys.Insert(0, (0f, 1f, 0f, 0f, 1f, 1f, 0f)); filters.Insert(0, FilterRest); }
 
         // piecewise: nested if() over the segments, each eased on its own progress
-        string Piece(Func<(float at, float o, float tx, float ty, float sx, float sy, float r), float> pick)
+        string Piece(Func<int, float> pick)
         {
             var all = true;
-            for (var i = 1; i < keys.Count; i++) if (Mathf.Abs(pick(keys[i]) - pick(keys[0])) > 0.0001f) all = false;
-            if (all) return F(pick(keys[0]));
-            var expr = F(pick(keys[keys.Count - 1]));
+            for (var i = 1; i < keys.Count; i++) if (Mathf.Abs(pick(i) - pick(0)) > 0.0001f) all = false;
+            if (all) return F(pick(0));
+            var expr = F(pick(keys.Count - 1));
             for (var i = keys.Count - 2; i >= 0; i--)
             {
                 var a = keys[i]; var b = keys[i + 1];
                 var span = Mathf.Max(0.0001f, b.at - a.at);
                 var local = spec.Easing.Expr("clamp((" + p + "-" + F(a.at) + ")/" + F(span) + ",0,1)");
-                var seg = F(pick(a)) + "+(" + F(pick(b) - pick(a)) + ")*" + local;
+                var seg = F(pick(i)) + "+(" + F(pick(i + 1) - pick(i)) + ")*" + local;
                 expr = "if(lt(" + p + "," + F(b.at) + ")," + seg + "," + expr + ")";
             }
             return "=" + expr;
         }
         var sb = new StringBuilder("G a=[").AppendNum(x + w * 0.5f).Append(',').AppendNum(y + h * 0.5f).Append(']');
         var moved = false;
-        var op = Piece(k => k.o);
+        var op = Piece(i => keys[i].o);
         if (op != "1") { sb.Append(" o=").Append(Quote(op)); moved = true; }
-        var txe = Piece(k => k.tx); var tye = Piece(k => k.ty);
+        var txe = Piece(i => keys[i].tx); var tye = Piece(i => keys[i].ty);
         if (txe != "0" || tye != "0") { sb.Append(" t=[").Append(Quote(txe)).Append(',').Append(Quote(tye)).Append(']'); moved = true; }
-        var re = Piece(k => k.r);
+        var re = Piece(i => keys[i].r);
         if (re != "0") { sb.Append(" r=").Append(Quote(re)); moved = true; }
-        var sxe = Piece(k => k.sx); var sye = Piece(k => k.sy);
+        var sxe = Piece(i => keys[i].sx); var sye = Piece(i => keys[i].sy);
         if (sxe != "1" || sye != "1") { sb.Append(" s=[").Append(Quote(sxe)).Append(',').Append(Quote(sye)).Append(']'); moved = true; }
+        // A colour filter over the frames: the whole element's paint, text included, as CSS filters it.
+        for (var n = 0; filtered && n < FilterFunctions.Length; n++)
+        {
+            var fe = Piece(i => filters[i][n]);
+            if (fe != F(FilterRest[n])) { sb.Append(' ').Append(FilterAttributes[n]).Append('=').Append(Quote(fe)); moved = true; }
+        }
         // A colour-only animation has nothing to say to a transform group, and an empty one would
         // cost a node and a nesting level per animated element for no effect.
         return moved ? sb.ToString() : null;

@@ -2797,6 +2797,8 @@ internal static class HtmlRenderer
         return unresolved ? null : r;
     }
 
+    [ThreadStatic] private static int _varDepth;
+
     private static string ResolveVarsCore(string value, HtmlNode node, out bool unresolved, bool attr = true)
     {
         unresolved = false;
@@ -2823,7 +2825,20 @@ internal static class HtmlRenderer
             var fallback = comma >= 0 ? inner.Substring(comma + 1).Trim() : null;
             string? found = null;
             for (var n = node; n != null && found == null; n = n.Parent)
-                if (n.Vars != null && n.Vars.TryGetValue(name, out var v)) found = v;
+                if (n.Vars != null && n.Vars.TryGetValue(name, out var v))
+                {
+                    found = v;
+                    // A custom property holding var() is substituted where it is declared, as CSS
+                    // computes it: appended raw, `--live: var(--steel-300)` left
+                    // `background: var(--steel-300)` for the colour parser, and the box was not drawn
+                    // at all. Capped, since `--a: var(--a)` is a cycle.
+                    if (v.IndexOf("var(", StringComparison.Ordinal) >= 0 && _varDepth < 8)
+                    {
+                        _varDepth++;
+                        try { found = ResolveVarsCore(v, n, out var nested, attr); if (nested) unresolved = true; }
+                        finally { _varDepth--; }
+                    }
+                }
             if (found == null && fallback != null) { found = ResolveVarsCore(fallback, node, out var fbBad); if (fbBad) unresolved = true; }
             // @property --name { initial-value } IS a value, so a var() naming it resolves.
             // Marking it unresolved dropped the whole declaration, which is what an undefined

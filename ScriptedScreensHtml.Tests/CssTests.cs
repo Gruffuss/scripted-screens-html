@@ -38,6 +38,7 @@ internal static class CssTests
             Leftovers(check);
             PicturePosition(check);
             EmptyDrivenText(check);
+            BarsAndLoops(check);
         }
         finally
         {
@@ -444,6 +445,62 @@ internal static class CssTests
             return new string(output.Chars, 0, output.Length);
         }
         finally { OffThread.Active = false; }
+    }
+
+    // ---- a fill bar and the loops a status panel runs --------------------------------------------
+
+    private static void BarsAndLoops(Action<bool, string> check)
+    {
+        // `C 0 37%` is two stops of C: the bar is a hard edge at 37% of the box, and moves with the value.
+        // Read as one stop, the bar was a ramp over the whole box that no value moved.
+        string Bar(string at) => Scene("<div id=p style=\"width:200px;height:20px\"></div>",
+            "#p{background:linear-gradient(90deg,#33cc66 0 " + at + "%,transparent 0) left bottom/100% 3px no-repeat,#000}");
+        var bar = Bar("37");
+        check(bar.Contains("CP id=cut", StringComparison.Ordinal) && bar.Contains(",74,", StringComparison.Ordinal),
+            "a hard stop written with two positions is cut at 37% of a 200px bar (x 74)");
+        check(bar != Bar("55.5"), "moving the stop moves the bar");
+        check(bar.Contains("f=#33CC66 id=p }", StringComparison.Ordinal),
+            "the bar's band is named after its element, so its colour is a slot the chip can reach in every layout");
+
+        // A trip flash: filter over the frames is a group attribute the scene evaluates, not a runner.
+        var flash = Scene("<div id=p style=\"width:50px;height:20px;background:#333333;animation:trip 1s linear infinite\">x</div>",
+            "@keyframes trip{0%,100%{filter:brightness(1)}50%{filter:brightness(1.3)}}", animate: true);
+        check(flash.Contains(" bri=\"=", StringComparison.Ordinal), "a looping brightness() keyframe is a bri expression of t");
+
+        // A marching dashed line: background-position on stripes is what the stripes path already writes
+        // as an expression, so it is runnable - and a gradient that cannot be drawn as stripes is not.
+        bool Marches(string background)
+        {
+            var built = HtmlRenderer.Build("<html><head><style>@keyframes m{to{background-position:12px 0}}"
+                + "#p{height:4px;animation:m 1s linear infinite;background:" + background + "}</style></head><body><div id=p></div></body></html>",
+                FontLibrary.Default());
+            foreach (var (element, spec) in built.Animations)
+                if (built.Keyframes.TryGetValue(spec.Name, out var frames)) return VectorEmitter.Compilable(frames, built.CssOf(element));
+            return false;
+        }
+        check(Marches("repeating-linear-gradient(90deg,#33cc66 0 6px,#000000 6px 12px)"), "background-position on hard-edged stripes is runnable in the scene");
+        check(!Marches("repeating-linear-gradient(45deg,#33cc66 0 6px,#000000 6px 12px)"), "on diagonal stripes it is not, and so is still said");
+
+        // A number and its unit on one baseline: while markup compiles, one label, so the unit follows
+        // whatever the number turns out to be instead of sitting where the stand-in ended.
+        const string Row = "<div style=\"display:flex;align-items:baseline;gap:4px{0}\"><span style=\"font-size:26px;font-weight:600\">97.7</span>"
+                           + "<span style=\"font-size:13px;color:#888888\">kPa</span></div>";
+        static int Labels(string scene) => System.Text.RegularExpressions.Regex.Matches(scene, @"^\s*T x=", System.Text.RegularExpressions.RegexOptions.Multiline).Count;
+        check(Labels(Scene(string.Format(Row, string.Empty), string.Empty)) == 2, "a number and its unit outside a compile are still two labels");
+        var joinWas = VectorEmitter.JoinRows;
+        VectorEmitter.JoinRows = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            var joined = Scene(string.Format(Row, string.Empty), string.Empty);
+            check(Labels(joined) == 1 && joined.Contains("97.7", StringComparison.Ordinal) && joined.Contains("<size=13><color=#888888><space=", StringComparison.Ordinal)
+                  && joined.Contains(">kPa<", StringComparison.Ordinal),
+                "compiled, a number and its unit are one label: the unit carries its own size, colour and the gap");
+            check(Scene(string.Format(Row, ";justify-content:flex-end"), string.Empty).Contains(" align=right", StringComparison.Ordinal),
+                "a row packed to the end is one right-aligned label, growing to the left as the browser's does");
+            check(Labels(Scene(string.Format(Row, string.Empty).Replace("color:#888888", "color:#888888;background:#222222"), string.Empty)) == 2,
+                "a piece that paints a box of its own stays its own element");
+        }
+        finally { VectorEmitter.JoinRows = joinWas; }
     }
 
     // ---- the CSS leftovers: each of these rows read as a gap until the thing under it was built --
