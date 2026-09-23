@@ -41,3 +41,5 @@ graphify-out/
 # bench scene dumps written by --holes
 ScriptedScreensHtml.Bench/holes-scene*.txt
 ScriptedScreensHtml.Bench/scene.txt
+obj-*/
+bin-*/
