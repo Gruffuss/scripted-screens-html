@@ -175,6 +175,10 @@ internal sealed class JsToLua
         public readonly Dictionary<int, bool> Holes = new();
         /// <summary>Text built from several holes, written whole: its key and its holes in order.</summary>
         public readonly List<(string Key, List<int> Holes)> Labels = new();
+        /// <summary>Labels the scene prints itself from a placeholder per hole; set by the caller before translation.</summary>
+        public readonly HashSet<string> Placed = new(StringComparer.Ordinal);
+        /// <summary>Holes of placed labels that are `x.toFixed(n)`, written as the number: hole to n.</summary>
+        public readonly Dictionary<int, int> Fixed = new();
         /// <summary>The states the chunk picks: `drive`, `choice#i`, `rows#i`.</summary>
         public readonly HashSet<string> States = new(StringComparer.Ordinal);
         /// <summary>What the drive reads, as JavaScript, when the markup has one.</summary>
@@ -930,6 +934,8 @@ internal sealed class JsToLua
             }
             return holder;
         }
+        // Registered once, after the render below says which of them it can mark as drawn.
+        var handlers = new List<(string Element, Markup.Push Push, string Fn)>();
         foreach (var (element, push) in plan.Clicks)
         {
             if (m.Handler(push.Handler, Keep) is not { } body)
@@ -940,13 +946,20 @@ internal sealed class JsToLua
             if (Parsed("(function () {\n" + body + "\n})", a) is not FunctionExpression fn) continue;
             var depth = _depth;
             _depth = 0;
-            _handlers.Add("DOM.on(" + Quote(element) + ", \"click\", " + Expr(fn) + ")");
+            handlers.Add((element, push, Expr(fn)));
             _depth = depth;
         }
+        var clickOf = new Dictionary<Markup.Push, string>();
+        foreach (var (element, push, _) in handlers) clickOf[push] = element;
+        var drawn = new HashSet<string>(StringComparer.Ordinal);
+        var render = "DOM.renders[" + Quote(id) + "]";
 
         Line("-- #" + id + ": its markup is structure in the scene; only what fills it is written here");
         Line("do");
         _depth++;
+        // Which render this is. An element this render writes is marked with it (the Push case
+        // below), so its handler can tell whether the element exists now.
+        Line(render + " = (" + render + " or 0) + 1");
         // The write replaces every element the markup names, and a listener dies with its element. A
         // compiled page keeps one element per id for ever, so a render that adds a listener after
         // this - `list.addEventListener('scroll', ...)` - added one more every render instead: a
@@ -967,6 +980,14 @@ internal sealed class JsToLua
         MarkupParts(m.Parts);
         _depth--;
         Line("end");
+        // A handler runs only while the last render drew its element. A browser's element - and its
+        // listener - is gone when a render leaves it out, but a compiled page registers every handler
+        // once, so a row past the list's current length, or a side the render did not take, kept a
+        // live handler reading an item that no longer exists: "attempt to index a nil value".
+        foreach (var (element, _, fn) in handlers)
+            _handlers.Add(drawn.Contains(element)
+                ? "DOM.on(" + Quote(element) + ", \"click\", DOM.drawn(" + Quote(element) + ", " + Quote(id) + ", " + fn + "))"
+                : "DOM.on(" + Quote(element) + ", \"click\", " + fn + ")");
         return true;
 
         void MarkupParts(List<Markup.Part> parts)
@@ -975,6 +996,10 @@ internal sealed class JsToLua
             {
                 switch (part)
                 {
+                    case Markup.Push p when clickOf.TryGetValue(p, out var drawnHere):
+                        Line("DOM.live[" + Quote(drawnHere) + "] = " + render);
+                        drawn.Add(drawnHere);
+                        break;
                     case Markup.Hole h:
                         {
                             var hole = h.Index.ToString(CultureInfo.InvariantCulture);
@@ -983,7 +1008,13 @@ internal sealed class JsToLua
                             if (!labels.TryGetValue(h.Index, out var of)) break;
                             // A piece of a label goes into a local, and each label is written once,
                             // after the last of its pieces: one text slot is the whole label.
-                            if (HoleValue(m.Js(h.Value), false, h) is not { } piece) break;
+                            // A label the scene prints itself takes `x.toFixed(n)` as the number,
+                            // rounded as toFixed rounds, and formats it with the same n: the string
+                            // was built each render only to be copied into the label.
+                            var js = m.Js(h.Value);
+                            var digits = of.TrueForAll(l => plan.Placed.Contains(l.Key)) ? FixedDigits(js) : null;
+                            if (HoleValue(js, digits != null, h) is not { } piece) break;
+                            if (digits is { } d) plan.Fixed[h.Index] = d;
                             Line("local mkh" + hole + " = " + piece);
                             foreach (var (key, holes) in of)
                             {
@@ -1071,6 +1102,21 @@ internal sealed class JsToLua
 
     /// <summary>A value the markup compiler wrote as JavaScript, translated where the markup is written.</summary>
     private string? Value(string js, Node at) => Parsed("(" + js + ")", at) is Expression e ? Expr(e) : null;
+
+    /// <summary>n for markup JavaScript that is `x.toFixed(n)` with n a literal the scene can format with, else null.</summary>
+    private static int? FixedDigits(string? js)
+    {
+        if (js == null) return null;
+        try
+        {
+            if (new Parser().ParseScript("(" + js + ");").Body is { Count: 1 } body
+                && body[0] is ExpressionStatement { Expression: CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "toFixed" } }, Arguments: { Count: 1 } args } }
+                && args[0] is NumericLiteral { Value: var n } && n >= 0 && n <= 9 && n == Math.Floor(n))
+                return (int)n;
+        }
+        catch (ParseErrorException) { }
+        return null;
+    }
 
     /// <summary>JavaScript the markup compiler wrote, parsed: an expression, or null with the failure reported.</summary>
     private Expression? Parsed(string js, Node at)

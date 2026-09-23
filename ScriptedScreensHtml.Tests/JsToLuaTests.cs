@@ -95,6 +95,153 @@ internal static class JsToLuaTests
         Ternaries(check);
         ReadThrough(check);
         DataEvent(root, check);
+        Resync(root, check);
+        Placed(check);
+        Drawn(check);
+    }
+
+    /// <summary>
+    /// A click region of compiled markup acts only while the last render drew it. The union draws every
+    /// row a list can have, so a row past the list's current length has a region and a handler; in a
+    /// browser that element and its listener are gone. Before, pressing one ran its handler against a
+    /// row that no longer existed - AtmoDark's device rows failed on "attempt to index a nil value".
+    /// </summary>
+    private static void Drawn(Action<bool, string> check)
+    {
+        const string page = @"<meta name=""viewport"" content=""width=300"">
+<style>body{margin:0;background:#000;font-family:sans-serif}</style>
+<body><div id=""frame"" style=""width:300px;height:300px;display:flex;flex-direction:column""></div>
+<script>
+const st = { k: 'a', hits: 0 };
+const L = { a: ['x', 'y', 'z'], b: ['q'] };
+let acts = [];
+const act = (fn) => { acts.push(fn); return ' data-act=""' + (acts.length - 1) + '""'; };
+function render() {
+  acts = [];
+  document.getElementById('frame').innerHTML = L[st.k].map((it) => '<div' + act(() => { st.k = st.k === 'a' ? 'b' : 'a'; st.hits = st.hits + 1; render(); })
+    + ' style=""height:20px;color:#ffffff"">' + it + '</div>').join('');
+}
+render();
+</script></body>";
+        CompiledPage.Result compiled;
+        try { compiled = Probe4.Headless(page).Compiled; }
+        catch (Exception ex) { check(false, "drawn regions: compiling the page threw - " + First(ex.Message)); return; }
+        if (!compiled.Ok) { check(false, "drawn regions: the page does not compile - " + string.Join("; ", compiled.Problems.Concat(compiled.Unmapped).Take(2))); return; }
+        var rows = Regex.Matches(compiled.Lua!, "DOM\\.on\\(\"([^\"]+)\", \"click\"").Select(m => m.Groups[1].Value).ToList();
+        if (rows.Count != 3) { check(false, $"drawn regions: {rows.Count} click region(s), expected one per row of the longest list (3)"); return; }
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        string Hits() => Text(state.Environment["PAGE"].Read<LuaTable>()["st"].Read<LuaTable>()["hits"]);
+        string? error = null;
+        try
+        {
+            Chunk(state, compiled.Lua!, "page");
+            Chunk(state, $"event(\"{rows[0]}\", \"click\", 0, 0)", "first");   // list 'a' -> 'b': one row left
+            Chunk(state, $"event(\"{rows[2]}\", \"click\", 0, 0)", "gone");    // the third row is not drawn now
+        }
+        catch (Exception ex) { error = First(ex.Message); }
+        var afterGone = error == null ? Hits() : "?";
+        try { if (error == null) Chunk(state, $"event(\"{rows[0]}\", \"click\", 0, 0)", "again"); }
+        catch (Exception ex) { error = First(ex.Message); }
+        var ok = error == null && afterGone == "1" && Hits() == "2";
+        check(ok, ok ? "drawn regions: a row the last render left out does nothing when pressed, and a drawn one still acts"
+                     : $"drawn regions: {error ?? $"hits {afterGone} after pressing the row that is gone, {Hits()} after pressing a drawn one"}");
+    }
+
+    /// <summary>
+    /// A label built round values is printed by the scene from one `T` with a placeholder per value,
+    /// and the chunk sends the values: a toFixed piece as the number with its format in the scene, any
+    /// other piece as its text. Unplaced, the same chunk still builds the label whole, the toFixed
+    /// piece formatted back with the same decimals.
+    /// </summary>
+    private static void Placed(Action<bool, string> check)
+    {
+        const string page = @"<meta name=""viewport"" content=""width=300"">
+<style>body{margin:0;background:#000;font-family:sans-serif}</style>
+<body><div id=""frame"" style=""width:300px;height:300px;display:flex;flex-direction:column""></div>
+<script>
+const st = { n: 3, p: 101 };
+function render() {
+  document.getElementById('frame').innerHTML = '<div style=""height:40px;color:#ffffff"">Count ' + st.n + ' units</div>'
+    + '<div style=""height:40px;color:#ffffff"">set ' + st.p.toFixed(1) + ' kPa</div>';
+}
+function step() { st.n += 1; render(); }
+render();
+setInterval(step, 500);
+</script></body>";
+        Dictionary<string, string> Run(CompiledPage.Result compiled)
+        {
+            var state = LuaState.Create();
+            state.OpenStandardLibraries();
+            Chunk(state, compiled.Lua!, "page");
+            var sent = new Dictionary<string, string>(StringComparer.Ordinal);
+            var table = state.Environment["PAYLOAD"].Read<LuaTable>();
+            for (var key = LuaValue.Nil; table.TryGetNext(key, out var pair);)
+            {
+                key = pair.Key;
+                sent[key.Read<string>()] = pair.Value.Type == LuaValueType.Number ? "#" + Num(pair.Value.Read<double>()) : Text(pair.Value);
+            }
+            return sent;
+        }
+
+        CompiledPage.Result whole, placed;
+        try { whole = Probe4.Headless(page).Compiled; placed = Probe4.Headless(page).Compiled; }
+        catch (Exception ex) { check(false, "placed labels: compiling the page threw - " + First(ex.Message)); return; }
+        if (!whole.Ok || whole.Structure == null) { check(false, "placed labels: the page does not compile - " + string.Join("; ", whole.Problems.Take(2))); return; }
+
+        // the compiler places labels itself now, so the unplaced chunk is the same chunk told so
+        whole.Lua = whole.Lua!.Replace("LABELS_PLACED = true -- placed: yes", "LABELS_PLACED = false -- placed: no", StringComparison.Ordinal);
+        var built = Run(whole);
+        var ok = built.Values.Contains("Count 3 units") && built.Values.Contains("set 101.0 kPa");
+        check(ok, ok ? "placed labels: unplaced, a label is built whole on the chip, a toFixed piece keeping its decimals"
+                     : "placed labels: unplaced, the chunk wrote " + string.Join(", ", built.Values.Take(6)));
+
+        CompiledPage.Place(placed);
+        var scene = placed.Structure ?? "";
+        var count = Regex.Match(scene, "text=\"Count \\{\\$([A-Za-z0-9_]+)\\} units\"");
+        var set = Regex.Match(scene, "text=\"set \\{\\$([A-Za-z0-9_]+):%\\.1f\\} kPa\"");
+        var sent = Run(placed);
+        ok = count.Success && set.Success
+             && sent.TryGetValue(count.Groups[1].Value, out var n) && n == "3"
+             && sent.TryGetValue(set.Groups[1].Value, out var p) && p == "#101"
+             && !sent.Values.Any(v => v.Contains("units", StringComparison.Ordinal) || v.Contains("kPa", StringComparison.Ordinal));
+        check(ok, ok ? "placed labels: the scene prints the label round its placeholders and the chunk sends only the values, a toFixed one as the number"
+                     : $"placed labels: scene {(count.Success ? "has" : "lacks")} the count placeholder, {(set.Success ? "has" : "lacks")} the formatted one; the chunk wrote "
+                       + string.Join(", ", sent.Select(kv => kv.Key + "=" + kv.Value).Take(6)));
+    }
+
+    /// <summary>
+    /// A structure sent again - a capture - carries the scene's resting values, so the chunk has to
+    /// send everything it has sent once more. Before, it sent a slot only when the value differed from
+    /// what it last sent, and a target written once at load read 0 for ever after the first capture.
+    /// </summary>
+    private static void Resync(string root, Action<bool, string> check)
+    {
+        var bindings = new List<CompiledPage.Binding>
+        {
+            new("t.textContent", new[] { "t" }, new double[1], CompiledPage.Kind.Text),
+            new("frame.label#0", new[] { "lab" }, new double[1], CompiledPage.Kind.Label, pieces: new List<object> { "set ", 1, " kPa" }),
+        };
+        var compiled = CompiledPage.Compile("const x = 1;", new HashSet<string>(StringComparer.Ordinal), _ => null,
+                                            prelude: File.ReadAllText(Path.Combine(root, "JsPrelude.lua")),
+                                            markupBindings: bindings);
+        if (compiled.Lua == null) { check(false, "resync: the chunk does not compile - " + string.Join("; ", compiled.Problems)); return; }
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        Chunk(state, compiled.Lua, "page");
+        // Written once, sent (the stand-in for a send empties PAYLOAD), then the host sends the
+        // structure again and raises the flag, as CompiledRun.Resync does.
+        Chunk(state, "DOM.bind('t', 'textContent', 42) DOM.label('frame', 'label#0', 101.3) "
+                     + "for k in pairs(PAYLOAD) do PAYLOAD[k] = nil end DIRTY = false "
+                     + "DOM.bind('t', 'textContent', 42) DOM.label('frame', 'label#0', 101.3)", "written");
+        var quiet = state.Environment["PAYLOAD"].Read<LuaTable>()["t"].Type == LuaValueType.Nil;
+        Chunk(state, "RESYNC = true frame(0)", "resync");
+        var payload = state.Environment["PAYLOAD"].Read<LuaTable>();
+        var t = Text(payload["t"]);
+        var lab = Text(payload["lab"]);
+        var ok = quiet && t == "42" && lab == "set 101.3 kPa";
+        check(ok, ok ? "resync: after the structure is sent again, every value the page sent goes again"
+                     : $"resync: re-sent t = {t}, lab = {lab}{(quiet ? "" : " (and the unchanged write was sent anyway)")}");
     }
 
     /// <summary>

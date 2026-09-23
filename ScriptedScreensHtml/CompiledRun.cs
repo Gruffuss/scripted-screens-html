@@ -115,6 +115,13 @@ internal sealed class CompiledRun
         return true;
     }
 
+    /// <summary>
+    /// The structure has just gone out again with the scene's resting values - a capture, a rebuilt
+    /// host - so the chunk's record of what is on screen is wrong: its next frame sends everything
+    /// it has ever sent. Call it after every structure or value send for a page running compiled.
+    /// </summary>
+    internal void Resync() => ChipHost.Resync(_env);
+
     private static double Ms(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
     /// <summary>The chip's Lua state, so the caller can notice when it is replaced.</summary>
@@ -189,6 +196,9 @@ internal sealed class CompiledRun
         }
 
         var compiled = PageCompiler.Compile(built, panel, size, slots, target);
+        // The chunk writes a placed label's values, never its text slot, so its scene has to carry
+        // the placeholders before it goes out. Does nothing when the compiler already placed them.
+        CompiledPage.Place(compiled);
         if (!compiled.Ok)
         {
             // Both lists, not whichever one a `Lua == null` test guesses at. A page that translated

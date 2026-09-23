@@ -379,6 +379,16 @@ internal static class ChipHost
         return lines;
     }
 
+    /// <summary>
+    /// Tells a compiled page that the structure was just sent again, so its next frame re-sends every
+    /// value it has sent. A flag rather than a call: this runs from the host's send, which may be inside
+    /// a capture, and a flag is safe to set whether or not the chip is mid-call.
+    /// </summary>
+    internal static void Resync(object? environment)
+    {
+        if (environment is Lua.LuaTable env) env["RESYNC"] = true;
+    }
+
     /// <summary>A named function in a loaded chunk's environment, or null when it declared none.</summary>
     internal static object? FunctionIn(object? environment, string name)
         => environment is Lua.LuaTable env && env[name].TryRead<Lua.LuaFunction>(out var fn) ? fn : null;

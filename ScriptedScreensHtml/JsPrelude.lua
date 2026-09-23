@@ -2616,7 +2616,9 @@ function js_tabular(s)
   return (s:gsub('%d+', function(run) return '<mspace=0.6em>' .. run .. '</mspace>' end))
 end
 
-DOM = { writes = {}, order = {}, missing = {}, notes = {}, listeners = {}, captures = 0 }
+-- `renders`: per element whose markup is compiled, how many times it has been rendered; `live`: per click
+-- region of that markup, the render that last drew it (see JsToLua.InnerHtml and DOM.drawn).
+DOM = { writes = {}, order = {}, missing = {}, notes = {}, listeners = {}, captures = 0, renders = {}, live = {} }
 
 function DOM.reset()
   DOM.writes, DOM.order, DOM.missing, DOM.notes = {}, {}, {}, {}
@@ -3788,6 +3790,16 @@ function DOM.on(id, kind, fn, options)
     if capture then DOM.captures = DOM.captures + 1 end
   else
     list[#list + 1] = fn
+  end
+end
+
+-- A click handler of compiled markup. A browser drops an element's listener with the element when a
+-- render leaves it out; a compiled page registers every handler once, so the one this returns runs
+-- only while the last render of `markup` drew `el`. One closure, made at registration.
+function DOM.drawn(el, markup, fn)
+  return function(...)
+    if DOM.live[el] ~= DOM.renders[markup] then return end
+    return fn(...)
   end
 end
 

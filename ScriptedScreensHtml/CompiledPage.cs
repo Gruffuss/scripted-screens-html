@@ -53,15 +53,23 @@ internal static class CompiledPage
         public readonly IReadOnlyList<object>? Pieces;
         /// <summary>`upper` or `lower`: a label's text-transform, which the values in it follow too.</summary>
         public readonly string? Transform;
+        /// <summary>
+        /// A label the scene can print itself (see <see cref="Place"/>): per argument, the slot its
+        /// placeholder reads, and the printf format of an argument that arrives as a number (null for text).
+        /// </summary>
+        public readonly string[]? Placed;
+        public readonly string?[]? Formats;
 
         public Binding(string key, string[] slots, double[] bias, Kind read, IReadOnlyList<StateValues>? states = null, double[]? scale = null,
                        string? other = null, IReadOnlyDictionary<string, string>? colours = null,
-                       IReadOnlyList<object>? pieces = null, string? transform = null)
+                       IReadOnlyList<object>? pieces = null, string? transform = null,
+                       string[]? placed = null, string?[]? formats = null)
         {
             Key = key; Slots = slots; Bias = bias; Read = read; States = states;
             if (scale == null) { scale = new double[slots.Length]; for (var i = 0; i < scale.Length; i++) scale[i] = 1; }
             Scale = scale;
             Other = other; Colours = colours; Pieces = pieces; Transform = transform;
+            Placed = placed; Formats = formats;
         }
     }
 
@@ -232,6 +240,10 @@ internal static class CompiledPage
         /// </summary>
         public string? Structure;
         public Dictionary<string, SceneSlots.Value>? StructureValues;
+        /// <summary>Labels the chunk writes as placeholders: the label's slot, and the text its `T` gets instead.</summary>
+        public readonly List<(string Slot, string Text)> Placements = new();
+        /// <summary>Whether <see cref="Place"/> has rewritten <see cref="Structure"/>, so a second call does nothing.</summary>
+        public bool Placed;
         public bool Ok => Lua != null && Problems.Count == 0;
     }
 
@@ -279,6 +291,8 @@ internal static class CompiledPage
     {
         var result = new Result();
 
+        // Before the translation, which writes a placed label's toFixed pieces as numbers.
+        var placeable = Placeable(markup, markupBindings, available);
         var lua = JsToLua.Compile(script, out var problems, markup);
         foreach (var p in problems) result.Problems.Add(p);
         if (lua == null) return result;
@@ -383,10 +397,121 @@ internal static class CompiledPage
 
         // Compiled markup's values and states, keyed `innerHTML#3`, `label#2`, `drive`, `choice#4` and
         // `rows#1` under the element whose markup it is, so they sit beside its other writes.
-        if (markupBindings != null) result.Bindings.AddRange(markupBindings);
+        if (markupBindings != null)
+            foreach (var b in markupBindings)
+                result.Bindings.Add(placeable.TryGetValue(b.Key, out var p) ? Placeholders(b, p.Plan, p.Holes, result) : b);
 
         result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), prelude, viewport, parents, tree, target, element);
         return result;
+    }
+
+    /// <summary>
+    /// The compiled labels the scene can print itself: one `T` whose text is the label's literal
+    /// pieces around a `{$slot:%.1f}` per value, so the chip sends the values and never builds the
+    /// string. Marked in the plan before translation, because it changes what the pieces are passed as.
+    /// </summary>
+    /// <remarks>
+    /// Skipped for a label whose literal text the scene source cannot carry: a double quote ends the
+    /// value, a `{$` would read as a placeholder, a leading `=` as an expression - and for one whose
+    /// placeholder names are already taken. Those stay one text slot, built on the chip, as before.
+    /// </remarks>
+    private static Dictionary<string, (JsToLua.MarkupPlan Plan, List<int> Holes)> Placeable(
+        IReadOnlyDictionary<string, JsToLua.MarkupPlan>? markup, IReadOnlyList<Binding>? bindings, ICollection<string> available)
+    {
+        var found = new Dictionary<string, (JsToLua.MarkupPlan, List<int>)>(StringComparer.Ordinal);
+        if (markup == null || bindings == null) return found;
+        // A text slot a state also writes stays one slot: the state's text would land on a `T` that
+        // no longer reads it.
+        var stated = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var b in bindings)
+            if (b.States != null)
+                foreach (var s in b.States)
+                    foreach (var (slot, _) in s.Text) stated.Add(slot);
+        foreach (var b in bindings)
+        {
+            if (b.Read != Kind.Label || b.Pieces == null || b.Slots.Length != 1 || stated.Contains(b.Slots[0])) continue;
+            var dot = b.Key.IndexOf('.');
+            if (dot <= 0) continue;
+            var id = b.Key.Substring(0, dot);
+            var key = b.Key.Substring(dot + 1);
+            var text = new StringBuilder();
+            foreach (var piece in b.Pieces) if (piece is string lit) text.Append(lit);
+            var literal = text.ToString();
+            if (literal.IndexOf('"') >= 0 || literal.IndexOf('\n') >= 0 || literal.Contains("{$", StringComparison.Ordinal)
+                || b.Pieces[0] is string first && first.StartsWith("=", StringComparison.Ordinal))
+                continue;
+            foreach (var plan in markup.Values)
+            {
+                if (plan.Id != id) continue;
+                var at = plan.Labels.FindIndex(l => l.Key == key);
+                if (at < 0) continue;
+                var holes = plan.Labels[at].Holes;
+                var free = true;
+                for (var k = 1; k <= holes.Count; k++) free &= !available.Contains(PieceSlot(b.Slots[0], k));
+                if (free)
+                {
+                    plan.Placed.Add(key);
+                    found[b.Key] = (plan, holes);
+                }
+                break;
+            }
+        }
+        return found;
+    }
+
+    /// <summary>The slot a placed label's k-th value is written to.</summary>
+    private static string PieceSlot(string label, int k) => label + "_p" + k.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>A placeable label as the chunk writes it, with the text its `T` gets recorded for <see cref="Place"/>.</summary>
+    private static Binding Placeholders(Binding b, JsToLua.MarkupPlan plan, List<int> holes, Result result)
+    {
+        var slots = new string[holes.Count];
+        var formats = new string?[holes.Count];
+        for (var k = 0; k < holes.Count; k++)
+        {
+            slots[k] = PieceSlot(b.Slots[0], k + 1);
+            if (plan.Fixed.TryGetValue(holes[k], out var digits)) formats[k] = "%." + digits.ToString(CultureInfo.InvariantCulture) + "f";
+        }
+        var text = new StringBuilder();
+        foreach (var piece in b.Pieces!)
+        {
+            var arg = piece switch { int a => a, ValueTuple<int, IReadOnlyDictionary<string, string>> c => c.Item1, _ => 0 };
+            if (arg == 0) { text.Append((string)piece); continue; }
+            text.Append("{$").Append(slots[arg - 1]);
+            if (formats[arg - 1] is { } format) text.Append(':').Append(format);
+            text.Append('}');
+        }
+        result.Placements.Add((b.Slots[0], text.ToString()));
+        return new Binding(b.Key, b.Slots, b.Bias, Kind.Label, pieces: b.Pieces, transform: b.Transform, placed: slots, formats: formats);
+    }
+
+    /// <summary>
+    /// Gives every placeable label's `T` its placeholder text, in place of the one text slot it had,
+    /// and switches the chunk to writing the values instead of the text.
+    /// </summary>
+    /// <remarks>
+    /// Run by whoever set <see cref="Result.Structure"/>, before it is sent; a chunk whose scene was
+    /// never placed keeps building its labels whole, so skipping this is slower but never wrong. It
+    /// does nothing a second time. When any label's `T` cannot be found nothing is placed, and that
+    /// is said: the chunk switches every label at once, and a placed label with no `T` would be
+    /// written and drawn nowhere.
+    /// </remarks>
+    internal static void Place(Result r)
+    {
+        if (r.Placed || r.Structure == null || r.Placements.Count == 0) return;
+        r.Placed = true;
+        foreach (var (slot, _) in r.Placements)
+            if (!r.Structure.Contains(" text=\"$" + slot + "\"", StringComparison.Ordinal))
+            {
+                r.Warnings.Add($"the label \"{slot}\" has no text in the scene to print into, so every label is built on the chip");
+                return;
+            }
+        var sb = new StringBuilder(r.Structure);
+        foreach (var (slot, text) in r.Placements)
+            sb.Replace(" text=\"$" + slot + "\"", " text=\"" + text + "\"");
+        r.Structure = sb.ToString();
+        // And the chunk prints no label itself from now on: the two change together or not at all.
+        if (r.Lua != null) r.Lua = r.Lua.Replace("LABELS_PLACED = false -- placed: no", "LABELS_PLACED = true -- placed: yes");
     }
 
     /// <summary>
@@ -550,6 +675,24 @@ internal static class CompiledPage
                 }
                 sb.Append('}');
             }
+            // A placeable label: the slot each value goes to, the format of each that goes as a
+            // number, and the colour table of a value that is a colour.
+            if (b.Placed != null && b.Formats != null && b.Pieces != null)
+            {
+                sb.Append(", ph = { ");
+                foreach (var slot in b.Placed) sb.Append(Quote(slot)).Append(", ");
+                sb.Append("}, fmt = { ");
+                for (var k = 0; k < b.Formats.Length; k++)
+                    if (b.Formats[k] is { } format) sb.Append('[').Append((k + 1).ToString(CultureInfo.InvariantCulture)).Append("] = ").Append(Quote(format)).Append(", ");
+                sb.Append('}');
+                var colours = b.Pieces.OfType<ValueTuple<int, IReadOnlyDictionary<string, string>>>().ToList();
+                if (colours.Count > 0)
+                {
+                    sb.Append(", cmap = { ");
+                    foreach (var (arg, map) in colours) sb.Append('[').Append(arg.ToString(CultureInfo.InvariantCulture)).Append("] = ").Append(Map(map)).Append(", ");
+                    sb.Append('}');
+                }
+            }
             if (b.Read == Kind.State && b.States != null)
             {
                 sb.Append(", states = {");
@@ -695,6 +838,11 @@ internal static class CompiledPage
 -- console - the chunk ran, computed every value, and dropped them all.
 PAYLOAD, DIRTY = {}, false
 
+-- Whether this chunk's labels are printed by the scene (DOM.label's `ph` arm). CompiledPage.Place
+-- turns it on in the same step as it puts the placeholders into the scene, so a chunk whose scene
+-- was never placed keeps building its labels whole and draws right either way.
+LABELS_PLACED = false -- placed: no
+
 -- What each slot last went out as. A page re-renders whole - every value of every visible panel,
 -- 2.4 times a second on the Atmo pages - and nearly all of it is what the scene already shows.
 -- Sending it anyway put ~140 values a render through set_props, commit and the renderer's parse
@@ -826,14 +974,37 @@ end
 -- A label of compiled markup: literal text and values, written whole once its last value is known.
 -- A label whose values are the ones it was last built from is not built again (see same()); one
 -- whose values moved costs exactly one string, its new text. That string is the floor while a
--- label is one text slot: Lua strings are immutable and the renderer's `T` formats at most one
--- number, so a label of several values has to arrive as one piece of text. `b.args` is filled once,
--- at the label's first render.
+-- label is one text slot, which once the scene carries its placeholders is only a label whose
+-- literal text the scene source cannot carry; every other label is placed (the `ph` arm below).
+-- `b.args` is filled once, at the label's first render.
 local LABEL = {}
 function DOM.label(id, key, ...)
   local e = BOUND[id]
   local b = e and e[key]
   if b == nil then return end
+  -- A placed label: the scene prints it from its own text, `{$slot:%.1f}` per value, so each value
+  -- goes to its own slot and no label string is ever built. A number the scene formats goes as the
+  -- number; a value that is text is made a string only when it changes.
+  local ph = LABELS_PLACED and b.ph
+  if ph then
+    local fmt, cmap, pv, ps = b.fmt, b.cmap, b.pv, b.ps
+    if pv == nil then pv, ps = {}, {} b.pv, b.ps = pv, ps end
+    for i = 1, #ph do
+      local v = (select(i, ...))
+      if fmt[i] and type(v) == 'number' then set(ph[i], v)
+      else
+        if ps[i] == nil or pv[i] ~= v or type(v) == 'table' then
+          local s = js_str(v)
+          local map = cmap and cmap[i]
+          if map then s = map[s] or s
+          elseif b.case == 'upper' then s = s:upper() elseif b.case == 'lower' then s = s:lower() end
+          pv[i], ps[i] = v, s
+        end
+        set(ph[i], ps[i])
+      end
+    end
+    return
+  end
   local args, n = b.args, select('#', ...)
   if args == nil then args = {} b.args = args end
   local moved = b.shown == nil
@@ -849,7 +1020,10 @@ function DOM.label(id, key, ...)
     if kind == 'string' then LABEL[i] = piece
     elseif kind == 'number' then
       -- Data, not scene source (see the text arm): no escapes, or a quote draws its backslash.
-      local s = js_str((select(piece, ...)))
+      -- A value the page wrote with toFixed arrives as the number (for a placed label), so it is
+      -- formatted back with the same decimals when the label is built here instead.
+      local v, f = (select(piece, ...)), b.fmt and b.fmt[piece]
+      local s = f and type(v) == 'number' and string.format(f, v) or js_str(v)
       if b.case == 'upper' then s = s:upper() elseif b.case == 'lower' then s = s:lower() end
       LABEL[i] = s
     else
@@ -934,6 +1108,16 @@ local SURF, VEC
 local PROPS = { data = PAYLOAD, snap = 1 }
 local function send() VEC:set_props(PROPS) SURF:commit() end
 function DOM.flush()
+  -- Raised by the host when it has sent the structure again - a capture, a rebuilt host - with the
+  -- scene's resting values. SENT no longer describes the screen, and a value written once (a target,
+  -- a label set at load) would read its resting 0 until it next changed, which for those is never.
+  -- So everything this page has sent goes again, once. SENT's keys are every slot ever written, so
+  -- this is also the complete list, and it allocates only while PAYLOAD grows to that size.
+  if RESYNC then
+    RESYNC = false
+    for k, v in pairs(SENT) do PAYLOAD[k] = v end
+    DIRTY = true
+  end
   if not DIRTY then return end
   DIRTY = false
   if VEC == nil then
