@@ -571,6 +571,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     private float _lastCompiledTick;
     /// <summary>Reused per send; only the slots whose value actually moved go in it.</summary>
     private readonly List<SS.UiProp> _propScratch = new(32);
+    private readonly List<SS.UiProp> _easedScratch = new(8);
 
     /// <summary>
     /// Puts the page back when something needs it: a capture, a rebuild, or the compiled run giving up.
@@ -1328,6 +1329,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         // know which numbers changed - so a patch carried all twenty-six every time. The emit path
         // has always diffed against _sentValues; the compiled path never did.
         _propScratch.Clear();
+        _easedScratch.Clear();
         foreach (var pair in values)
         {
             var now = pair.Value is double d
@@ -1335,11 +1337,23 @@ internal sealed class HtmlSurface : MonoBehaviour
                 : new SceneSlots.Value((string)pair.Value);
             if (_sentValues.TryGetValue(pair.Key, out var was) && was.Equals(now)) continue;
             _sentValues[pair.Key] = now;
-            _propScratch.Add(new SS.UiProp
+            // A slot under a CSS transition goes in its own payload without snap: the renderer
+            // records snap per name from the latest payload that carries it, so the two payloads
+            // leave each name with the behaviour its CSS asked for.
+            var eased = _dataSlots != null && _dataSlots.IsEased(pair.Key);
+            (eased ? _easedScratch : _propScratch).Add(new SS.UiProp
             {
                 Key = pair.Key,
                 Value = now.IsNumber ? SS.UiValue.FromNumber(now.Number) : SS.UiValue.FromString(now.Text ?? string.Empty),
             });
+        }
+        if (_easedScratch.Count > 0)
+        {
+            var glide = _easedScratch.ToArray();
+            VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
+                new SS.UiValue { Type = SS.UiValueType.Map, Map = glide }, null, snap: false);
+            _patchSends++;
+            _patchSlots += glide.Length;
         }
         if (_propScratch.Count == 0) return;
         var props = _propScratch.ToArray();
@@ -2431,6 +2445,13 @@ internal sealed class HtmlSurface : MonoBehaviour
             SendData(flat);
     }
 
+    /// <summary>The shorthand or either longhand a page is as likely to write (Tailwind emits the longhands).</summary>
+    private bool HasTransition(VisualElement ve)
+    {
+        var css = _built!.CssOf(ve);
+        return css.ContainsKey("transition") || css.ContainsKey("transition-property") || css.ContainsKey("transition-duration");
+    }
+
     private void SendData(List<SS.UiProp> props)
     {
         if (string.IsNullOrEmpty(DataElementId) || State is not SS.BoardState state || !IsCurrent)
@@ -2488,8 +2509,15 @@ internal sealed class HtmlSurface : MonoBehaviour
             _dataNamed = true;
             var named = 0;
             foreach (var entry in entries)
-                if (!string.IsNullOrEmpty(entry.Key) && _byId.ContainsKey(entry.Key) && _built.Driven.Add(entry.Key))
-                    named++;
+            {
+                if (string.IsNullOrEmpty(entry.Key) || !_byId.TryGetValue(entry.Key, out var ve) || !_built.Driven.Add(entry.Key)) continue;
+                named++;
+                // Its transition, if any, is the renderer's to run (DataSlots._eased). The emitter's
+                // tween would write an expression into the slot instead of the number the fast path
+                // writes, the proof would disagree, and the page would stay on the full path - for
+                // the sake of a glide the renderer does anyway.
+                if (HasTransition(ve)) lock (Tweens.Shared) Tweens.Override[ve] = (0f, Easing.Default);
+            }
             if (named > 0)
             {
                 _dirty = true; _dOther++;
@@ -2503,7 +2531,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             _dataSlots = DataSlots.Build(
                 entries,
                 id => PageCompiler.BoxFor(_built, id, _slotScratch.Keys),
-                id => _byId.TryGetValue(id, out var ve) && _built.CssOf(ve).ContainsKey("transition"),
+                id => _byId.TryGetValue(id, out var ve) && HasTransition(ve),
                 id => _shapes.ContainsKey(id),
                 _slotScratch.Keys);
             if (_dataSlots.Problem == null) _dataToProve = new List<KeyValuePair<string, SS.UiValue>>(entries);

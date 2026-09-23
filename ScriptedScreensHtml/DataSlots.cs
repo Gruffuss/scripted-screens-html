@@ -47,6 +47,24 @@ internal sealed class DataSlots
     private readonly Dictionary<string, List<Target>> _byKey = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// Slots whose element has a CSS transition. They are sent without <c>snap</c>, so the renderer
+    /// glides them from what is on screen over the gap to the next payload; every other slot snaps,
+    /// as a browser does.
+    /// </summary>
+    /// <remarks>
+    /// This used to be a refusal: a transition is compiled into the scene as an expression, only the
+    /// emitter can write one, so any transitioned key kept the whole page on the full path - a
+    /// layout, translate and emit per tick, for ever, for one gliding bar. The renderer's own easing
+    /// is the same glide without the emit. What it cannot do yet is the CSS duration and curve: it
+    /// eases over the payload gap, linearly. Per-name timing on the payload is asked of the renderer;
+    /// until it lands, a data-driven transition runs at the tick rate rather than its declared
+    /// duration, and that is recorded as a known gap rather than hidden.
+    /// </remarks>
+    private readonly HashSet<string> _eased = new(StringComparer.Ordinal);
+
+    internal bool IsEased(string slot) => _eased.Contains(slot);
+
+    /// <summary>
     /// Per text slot, the em width its digit runs are monospaced at, or absent for plain text.
     /// </summary>
     /// <remarks>
@@ -103,11 +121,10 @@ internal sealed class DataSlots
             var box = boxOf(key);
             if (box == null) { map.Problem = $"\"{key}\" names no element in the page"; return map; }
 
-            // A transition is compiled INTO the scene as an expression, and only the emitter can
-            // write it. Taking the fast path on a transitioned element would land the end value
-            // immediately and the bars would jump instead of gliding - the one thing a page author
-            // notices at once.
-            if (transitioned(key)) { map.Problem = $"\"{key}\" has a css transition, which only a re-emit can start"; return map; }
+            // A transitioned element's slots glide on the renderer instead of jumping (see _eased);
+            // the surface has muted the emitter's own tween for it, so the emitted scene carries the
+            // plain number this would write and the proof below still holds.
+            var eased = transitioned(key);
 
             var targets = new List<Target>();
             switch (entry.Value.Type)
@@ -146,6 +163,7 @@ internal sealed class DataSlots
             }
 
             if (targets.Count > 0) map._byKey[key] = targets;
+            if (eased) foreach (var t in targets) map._eased.Add(t.Slot);
         }
 
         if (map._byKey.Count == 0) map.Problem = "the payload placed nothing";
