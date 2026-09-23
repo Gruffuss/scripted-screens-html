@@ -4,6 +4,17 @@ Newest first. The workshop page is a short overview; this file has the full hist
 
 ## 0.2.0
 
+- A page without a script, driven by Lua data, sends its values straight to the scene once the
+  mapping has proved itself against what the page drew - no layout, translate or emit per tick.
+  A CSS transition on such a value glides on the renderer with the declared duration, curve and
+  delay (vector mod 0.11.33 or later); everything else snaps, as a browser does.
+- `animation-composition: add` and `accumulate`; a keyframe loop on an element with its own
+  transform no longer runs offset by it.
+- `attr()` outside `content`, the `lh` and `rlh` units, `clip-path: path()`.
+- `line-height: 1.5em` was applied twice over.
+- `@container` queries re-cascade when the container's size changes.
+- `object-position` warns instead of being dropped silently; the renderer has no picture
+  alignment yet.
 - Pages are laid out by a layout engine inside the mod instead of Unity's UI Toolkit, and each
   page runs its script, animations and layout on a thread of its own. The game thread only
   hands finished scenes to the vector mod. The layout engine is Yoga (MIT); THIRD-PARTY-NOTICES.md
