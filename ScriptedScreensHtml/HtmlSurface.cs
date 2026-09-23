@@ -44,6 +44,12 @@ internal sealed class HtmlSurface : MonoBehaviour
     private List<KeyValuePair<string, SS.UiValue>>? _dataToProve;
     /// <summary>Data ticks that skipped layout, translate and emit entirely (diagnostics).</summary>
     private int _dataFastTicks;
+    /// <summary>Payloads dropped after the page's data compile was refused, for the diagnostics line.</summary>
+    private int _dataDropped;
+    /// <summary>Why the data compile was refused, or null. Set once; a later payload does no work.</summary>
+    private string? _dataRefused;
+    /// <summary>The element ids the data drives, so a page rebuilt for a capture names the same slots.</summary>
+    private readonly HashSet<string> _dataDriven = new(StringComparer.Ordinal);
     /// <summary>Whether the elements this page's data drives have been named for the emitter.</summary>
     private bool _dataNamed;
     internal object? Visor;
@@ -88,6 +94,11 @@ internal sealed class HtmlSurface : MonoBehaviour
             Current[PageKey] = this;
         Hold();
         _source = source;
+        // New source, new compile: the data mapping, its refusal and the names it drove belong to
+        // the page that was, and the released working set must not stand in for the new one.
+        _dataSlots = null; _dataToProve = null; _dataNamed = false;
+        _dataRefused = null; _dataDriven.Clear();
+        _released = false;
         if (!Surfaces.Contains(this))
             Surfaces.Add(this);
         Build();
@@ -136,6 +147,13 @@ internal sealed class HtmlSurface : MonoBehaviour
         // compiled console silently stopped ticking the moment it was released. The page did not
         // error and did not go blank; it just stopped moving, and only "sent 1 patches" in the
         // diagnostics said so.
+        // A data page is released the same way once its table has proved itself or been refused,
+        // and only once the emit that proved it has gone out (no job in flight).
+        if (_compiled == null && _releasePending && IsCurrent && _pageState == PageIdle)
+        {
+            _releasePending = false;
+            ReleaseWorkingSet();
+        }
         if (_compiled != null && IsCurrent)
         {
             // One Update after compiling, so the structure the chip writes into has gone out.
@@ -552,7 +570,8 @@ internal sealed class HtmlSurface : MonoBehaviour
         _animations.Clear();
         _boxes.Clear();
         _boxScratch.Clear();
-        _dataSlots = null;
+        // The proven slot table is what serves every later payload; it references nothing released.
+        if (_dataSlots is not { Proven: true }) _dataSlots = null;
         _dataToProve = null;
         _dataNamed = false;
         if (_muted.Count > 0)
@@ -593,6 +612,9 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{ElementId}\": rebuilding the page - something asked for it after it was released");
         _released = false;
         Build();
+        // The rebuilt page must emit the same slots the proven table writes, or the values the
+        // console keeps receiving would name nothing in the new structure.
+        if (_built != null) foreach (var id in _dataDriven) _built.Driven.Add(id);
         return _built != null;
     }
 
@@ -1057,7 +1079,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             ScriptedScreensHtmlPlugin.Log?.LogInfo(
                 $"html \"{page.ElementId}\": {emits / ReportIntervalSeconds:0.0} emits/s, {(page._hiddenNow ? "hidden, " : string.Empty)}last {page._lastLayoutMs + page._lastTranslateMs:0.0} ms "
                 + $"(layout {page._lastLayoutMs:0.00} + copy {page._lastCopyMs:0.00}, translate {page._lastTranslateMs:0.0}; page thread {page._workerMsTotal / ReportIntervalSeconds:0.0} ms/s; game thread waited {page._heldMs:0.00} ms), {page._lastNodes} nodes / {page._lastChars / 1024f:0.0} KB, "
-                + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}, gate: {page._gateSkips} skipped, data-direct: {page._dataFastTicks}, {page.GateWhy()}"
+                + $"{page._tweens.Count} tweens, main {page._updateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / ReportIntervalSeconds / Mathf.Max(1f, Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 60f):0.00} ms/frame, awake {page._awakeCount} frames, sent: {page._structureSends} structures {page._patchSends} patches ({page._patchSlots} values), {page._morphs} in-place, script {(page._script != null ? page._script.LastFrameMs : 0f):0.0} ms/frame, {page._externals.Count} externals, {page._animations.Count} runners, kept: {(page._built != null ? page._built.NodeOf.Count : 0)} nodes {(page._built != null ? page._built.CssCount : 0)} records made {page._tweens.Shown} snaps {(page._script != null ? page._script.CacheSizes : 0)} cached, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, dirty: script {page._dScript} anim {page._dAnim} tween {page._dTween} dom {page._dDom} other {page._dOther}, gate: {page._gateSkips} skipped, data-direct: {page._dataFastTicks}, data-refused: {(page._dataRefused ?? "-")}, data-dropped: {page._dataDropped}, {page.GateWhy()}"
                 + (_perThreadAlloc ? $", allocated per emit: step {page._allocStep / 1024f / Mathf.Max(1, emits):0} KB, layout {page._allocLayout / 1024f / Mathf.Max(1, emits):0} KB, copy {page._allocCopy / 1024f / Mathf.Max(1, emits):0} KB, translate {page._allocTranslate / 1024f / Mathf.Max(1, emits):0} KB, send {page._allocSend / 1024f / Mathf.Max(1, emits):0} KB (of translate: emit {page._allocEmit / 1024f / Mathf.Max(1, emits):0} KB, split {page._allocSplit / 1024f / Mathf.Max(1, emits):0} KB)"
                     // Mono has no per-thread counter, so there is nothing to divide between phases.
                     // Printing the heap delta per phase looked like attribution and was noise.
@@ -1252,6 +1274,10 @@ internal sealed class HtmlSurface : MonoBehaviour
                 if (_dataSlots.Proven && HtmlConfig.Diagnostics)
                     ScriptedScreensHtmlPlugin.Log?.LogInfo(
                         $"html \"{ElementId}\": data writes {_dataSlots.Count} slot(s) directly - no layout, translate or emit per tick");
+                // Either way the page is done: proven, its values go from ApplyPairs and nothing
+                // needs the dom, cascade, layout or engine again; disproven, it is refused for good.
+                if (!_dataSlots.Proven) _dataRefused = _dataSlots.Problem;
+                _releasePending = true;
             }
             if (template == _lastTemplate)
             {
@@ -2421,6 +2447,23 @@ internal sealed class HtmlSurface : MonoBehaviour
         {
             // the vector scene's copy goes now (the vector mod is the game thread's); the page's on its thread
             ForwardData(entries);
+            // A data page whose slot table has proved itself is compiled: the values go to the scene
+            // from here, on the game thread the renderer expects, and the page - released by then -
+            // is not touched. This ran on the page thread before, which would have handed the
+            // renderer a payload from a worker; it never showed because no page ever proved.
+            if (_script == null && _dataSlots is { Proven: true } fast)
+            {
+                if (fast.Apply(entries) is { } direct) SendCompiled(direct);
+                else if (_dataDropped++ == 0)
+                    ScriptedScreensHtmlPlugin.Log?.LogWarning(
+                        $"html \"{ElementId}\": a payload carried a key the compiled page has no slot for; it is dropped, "
+                        + "as is any later one like it. A data page's keys are fixed by its first payload.");
+                _dataFastTicks++;
+                return;
+            }
+            // Refused at compile: the page keeps what it showed. It is not laid out again for a
+            // value it cannot place - that was a layout, translate and emit per tick, for ever.
+            if (_script == null && _dataRefused != null) { _dataDropped++; return; }
             // A compiled page's values come from its own Lua, and its DOM has been let go. Binding
             // into a rebuilt copy would cost a rebuild per tick and draw nothing, since the copy is
             // not what the console shows.
@@ -2511,16 +2554,10 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     private void BindById(List<KeyValuePair<string, SS.UiValue>> entries, bool quiet = false)
     {
-        // A page with no script never compiles - there is nothing to translate - so it stayed on the
-        // full path for ever: layout, translate, emit and split on every data tick, twice a second.
-        // When every key in the payload has a proven slot, the value goes straight there and none of
-        // that runs. Proven is the operative word: see DataSlots.Prove.
-        if (_script == null && _dataSlots is { Proven: true } fast && fast.Apply(entries) is { } direct)
-        {
-            SendCompiled(direct);   // records what it sent in _sentValues itself
-            _dataFastTicks++;
-            return;
-        }
+        // A page with no script compiles too: its first payload names the elements the data drives
+        // (one re-emit, so the scene carries their slots), the second builds the slot table and the
+        // emit after it proves the table against what was drawn (DataSlots.Prove). From then on
+        // ApplyPairs writes values straight to the scene and this is never reached again.
         // The emitter names what a SCRIPT drives, and a page with no script told it nothing - so the
         // scene carried no slot for any of these keys and the fast path could never engage. Naming
         // them costs one extra emit, once, and the map is built on the tick after that, when the
@@ -2533,6 +2570,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             {
                 if (string.IsNullOrEmpty(entry.Key) || !_byId.TryGetValue(entry.Key, out var ve) || !_built.Driven.Add(entry.Key)) continue;
                 named++;
+                _dataDriven.Add(entry.Key);
                 // Its transition, if any, is the renderer's to run (DataSlots._eased). The emitter's
                 // tween would write an expression into the slot instead of the number the fast path
                 // writes, the proof would disagree, and the page would stay on the full path - for
@@ -2556,8 +2594,18 @@ internal sealed class HtmlSurface : MonoBehaviour
                 id => _shapes.ContainsKey(id),
                 _slotScratch.Keys);
             if (_dataSlots.Problem == null) _dataToProve = new List<KeyValuePair<string, SS.UiValue>>(entries);
-            else if (HtmlConfig.Diagnostics)
-                ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{ElementId}\": data stays on the full path - {_dataSlots.Problem}");
+            else
+            {
+                // The contract: a page is compiled once and not touched again until its source
+                // changes. A key the compiler cannot place is therefore a compile refusal, said once
+                // where the author looks, and the page keeps what it showed - not a slower path that
+                // lays it out on every tick for ever, which is what this was.
+                _dataRefused = _dataSlots.Problem;
+                _releasePending = true;
+                ScriptedScreensHtmlPlugin.Log?.LogWarning(
+                    $"html \"{ElementId}\": data compile refused - {_dataSlots.Problem}. The page keeps its first values; later payloads are dropped.");
+                return;
+            }
         }
 
         _dirty = true;
