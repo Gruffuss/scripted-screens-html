@@ -189,9 +189,11 @@ internal static class PageCompiler
         // is structure becomes a handful of slot writes instead of a document - and the structure it
         // compiles to, with every alternative in it, is the scene the rest of the page is bound to.
         markup = null;
-        // A script whose every write resolves at compile time becomes a scene and plain Lua on the
-        // chip's own tick, with nothing of this mod behind it (THE SPEC). Anything else keeps the path below.
-        if (PlainPage.Compile(built, panel, size, target) is { } plain) return plain;
+        // A script whose every DOM use is a translated feature becomes a scene and plain Lua on the
+        // chip's own tick, with nothing of this mod behind it (THE SPEC). Anything else keeps the path
+        // below, and says which feature kept it there.
+        var refused = new List<string>();
+        if (PlainTranslator.Compile(built, panel, size, target, refused) is { } plain) return plain;
         var plans = new Dictionary<string, JsToLua.MarkupPlan>(StringComparer.Ordinal);
         var bindings = new List<CompiledPage.Binding>();
         if (built.Script is { } script && script.Contains(".innerHTML", StringComparison.Ordinal))
@@ -237,6 +239,9 @@ internal static class PageCompiler
             // A style property with no slot, drawn as the few values the script assigns it.
             styleOf: (id, css, value) => StateOf(id, string.Empty, built, panel, size, table, css + ":" + value));
 
+        if (refused.Count > 0)
+            result.Warnings.Add("not translated to plain Lua: " + string.Join("; ", refused.GetRange(0, Math.Min(3, refused.Count)))
+                                + (refused.Count > 3 ? $" (+{refused.Count - 3} more)" : string.Empty));
         if (markup?.Template != null)
         {
             result.Structure = markup.Template;
@@ -507,7 +512,7 @@ internal static class PageCompiler
     }
 
     /// <summary>Where an element sits and how it is laid out, for the safety question.</summary>
-    private static DomSlots.Box? BoxOf(string id, HtmlRenderer.Result built,
+    internal static DomSlots.Box? BoxOf(string id, HtmlRenderer.Result built,
                                        Dictionary<VisualElement, Vector2> absolute, HashSet<string> available)
     {
         if (!built.ById.TryGetValue(id, out var ve) || ve == null) return null;

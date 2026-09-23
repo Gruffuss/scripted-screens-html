@@ -8,10 +8,10 @@ Rules and columns: see INSTRUCTION-SET.md.
 
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
-| Window.setTimeout() | | | | |
-| Window.clearTimeout() | | | | |
-| Window.setInterval() | | | | |
-| Window.clearInterval() | | | | |
+| Window.setTimeout() | ✅ | scheduler on the chip's tick (`v_timer`); due timers fire at the next 0.5 s game tick | PlainTranslatorTests: a function shared by two timers; 09-transition in game 2026-09-24 | |
+| Window.clearTimeout() | ✅ | `v_clear` | PlainTranslatorTests: an element held in a variable ... clearTimeout | |
+| Window.setInterval() | ✅ | `v_timer(fn, ms, true)` on the chip's tick | PlainTranslatorTests: setInterval + clearInterval; plain-counter in game 2026-09-24 | |
+| Window.clearInterval() | ✅ | `v_clear` | PlainTranslatorTests: setInterval + clearInterval; plain-counter in game | |
 | Window.requestAnimationFrame() | | | | |
 | Window.cancelAnimationFrame() | | | | |
 | Window.requestIdleCallback() | | | | |
@@ -379,7 +379,7 @@ Rules and columns: see INSTRUCTION-SET.md.
 | Document.exitPictureInPicture() | | | | |
 | Document.exitPointerLock() | | | | |
 | Document.getAnimations() | | | | |
-| Document.getElementById() | | | | |
+| Document.getElementById() | ✅ | resolved at compile time (a literal id, or a name bound to one); the Lua holds no element. An id computed at run time is refused | PlainTranslatorTests: every case | |
 | Document.getElementsByClassName() | | | | |
 | Document.getElementsByName() | | | | |
 | Document.getElementsByTagName() | | | | |
@@ -425,7 +425,7 @@ Rules and columns: see INSTRUCTION-SET.md.
 | Node.parentElement | | | | |
 | Node.parentNode | | | | |
 | Node.previousSibling | | | | |
-| Node.textContent | | | | |
+| Node.textContent | ✅ | writes: a text placeholder `{$id_pN:%...}` (numbers) or a constant-string slot. Reads are refused for now | PlainTranslatorTests: toFixed and a template literal; text written in two shapes; plain-counter in game | |
 | Node.ELEMENT_NODE (constant = 1) | | | | |
 | Node.ATTRIBUTE_NODE (constant = 2) | | | | |
 | Node.TEXT_NODE (constant = 3) | | | | |
@@ -539,8 +539,8 @@ Note: same orphaned-page caveat as ParentNode above.
 | Element.attributes | | | | |
 | Element.childElementCount | | | | |
 | Element.children | | | | |
-| Element.classList | | | | |
-| Element.className | | | | |
+| Element.classList | ✅ | class states, every combination laid out at compile time (up to 6 classes), `v_class`. `contains` (a read) is refused for now | PlainTranslatorTests: addEventListener('click') ...; 09-transition in game | |
+| Element.className | ✅ | writes from a fixed set: class states (`v_classname`). A value computed at run time is refused | PlainTranslatorTests: a colour picked by a condition ... className | |
 | Element.clientHeight | | | | |
 | Element.clientLeft | | | | |
 | Element.clientTop | | | | |
@@ -661,7 +661,7 @@ Note: same orphaned-page caveat as ParentNode above.
 | HTMLElement.outerText | | | | |
 | HTMLElement.popover | | | | |
 | HTMLElement.spellcheck | | | | |
-| HTMLElement.style | | | | |
+| HTMLElement.style | ✅ | numbers (px, %, opacity): a slot through scale+offset from the layout; values from a fixed set (colours, words): laid-out states. Writes that move other boxes or use other units are refused | PlainTranslatorTests: setInterval + clearInterval; style.left in px and style.opacity; a colour picked by a condition; plain-counter in game | |
 | HTMLElement.tabIndex | | | | |
 | HTMLElement.title | | | | |
 | HTMLElement.translate | | | | |
@@ -1392,11 +1392,11 @@ Note: this table covers the interface's own generic members only (indexed access
 | DOMTokenList.value | | | | |
 | DOMTokenList.item() | | | | |
 | DOMTokenList.contains() | | | | |
-| DOMTokenList.add() | | | | |
-| DOMTokenList.remove() | | | | |
+| DOMTokenList.add() | ✅ | as `Element.classList` | PlainTranslatorTests: 09-transition; the script's own logic ... | |
+| DOMTokenList.remove() | ✅ | as `Element.classList` | PlainTranslatorTests: the script's own logic ... | |
 | DOMTokenList.replace() | | | | |
 | DOMTokenList.supports() | | | | |
-| DOMTokenList.toggle() | | | | |
+| DOMTokenList.toggle() | ✅ | as `Element.classList` | PlainTranslatorTests: addEventListener('click') ... | |
 | DOMTokenList.entries() | | | | |
 | DOMTokenList.forEach() | | | | |
 | DOMTokenList.keys() | | | | |
@@ -1440,7 +1440,7 @@ Note: this table covers the interface's own generic members only (indexed access
 
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
-| EventTarget.addEventListener() | | | | |
+| EventTarget.addEventListener() | ✅ | 'click' only: `v_listen`, the element becomes a hit region on the scene's `on_click`. Other event types are refused (the vector mod delivers clicks only) | PlainTranslatorTests: addEventListener('click') ... | |
 | EventTarget.removeEventListener() | | | | |
 | EventTarget.dispatchEvent() | | | | |
 
@@ -1628,7 +1628,7 @@ Note: this table covers the interface's own generic members only (indexed access
 
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
-| "click" | | | | |
+| "click" | ✅ | the scene element's `on_click(nodeId)`; bubbling resolved at compile time (`V_CHAIN`) | PlainTranslatorTests: onclick and bubbling | |
 | "dblclick" | | | | |
 | "mousedown" | | | | |
 | "mouseup" | | | | |

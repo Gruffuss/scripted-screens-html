@@ -196,12 +196,34 @@ internal sealed class JsToLua
     /// <summary>Click handlers of compiled markup, registered once at the end of the chunk.</summary>
     private readonly List<string> _handlers = new();
 
-    internal static string? Compile(string source, out IReadOnlyList<string> problems,
-                                    IReadOnlyDictionary<string, MarkupPlan>? markup = null)
+    /// <summary>
+    /// What a plain translation (<see cref="PlainTranslator"/>) takes over: the page's DOM, which it
+    /// resolves at compile time, while the language stays this file's. Given hooks, the output is
+    /// plain Lua for a hand-written console - no view models, no PAGE table, no DOM helpers.
+    /// </summary>
+    internal sealed class Hooks
     {
-        var c = new JsToLua();
-        c._markup = markup;
-        problems = c._problems;
+        /// <summary>An expression the caller writes itself, or null for the usual translation.</summary>
+        public Func<JsToLua, Node, string?>? Expression;
+        /// <summary>
+        /// True when the caller emitted this itself: a statement, or an expression evaluated for its
+        /// effect (an expression statement, a loop's update, a concise arrow's body).
+        /// </summary>
+        public Func<JsToLua, Node, bool>? Statement;
+    }
+
+    private Hooks? _hooks;
+
+    /// <summary>For a hook: an expression translated as usual.</summary>
+    internal string Translate(Node e) => Expr(e);
+    /// <summary>For a hook: one line of output at the current depth.</summary>
+    internal void Emit(string line) => Line(line);
+    /// <summary>For a hook: something it cannot translate, reported with its line.</summary>
+    internal void Refuse(Node n, string what) => Unsupported(n, what);
+
+    internal static string? Compile(string source, out IReadOnlyList<string> problems,
+                                    IReadOnlyDictionary<string, MarkupPlan>? markup = null, Hooks? hooks = null)
+    {
         Script ast;
         try
         {
@@ -209,9 +231,19 @@ internal sealed class JsToLua
         }
         catch (Exception ex)
         {
-            c._problems.Add("parse: " + ex.Message);
+            problems = new[] { "parse: " + ex.Message };
             return null;
         }
+        return Compile(ast, out problems, markup, hooks);
+    }
+
+    internal static string? Compile(Script ast, out IReadOnlyList<string> problems,
+                                    IReadOnlyDictionary<string, MarkupPlan>? markup = null, Hooks? hooks = null)
+    {
+        var c = new JsToLua();
+        c._markup = markup;
+        c._hooks = hooks;
+        problems = c._problems;
 
         // Every name the page declares anywhere, collected before a line is emitted. Emission order
         // is not declaration order in JavaScript - a function written early may use a `const`
@@ -235,7 +267,8 @@ internal sealed class JsToLua
             }
         foreach (var name in ambiguous) c._elements.Remove(name);
         c.ConstTables(ast);
-        c.Views(ast);
+        // A view model is the old runtime's optimisation; plain Lua has none.
+        if (hooks == null) c.Views(ast);
 
         // Everything the script's own scope binds is forward-declared and then assigned where it
         // stood. Two reasons, and the second is the one that bites: JavaScript hoists a function
@@ -250,14 +283,29 @@ internal sealed class JsToLua
                 c._problems.Add("the page declares `" + n + "`, which the compiled chunk needs for itself");
         // `||`, `&&` and `??` whose right side is evaluated as it stands (Eager). No page name can
         // collide: Safe() spells every `_` of a page's own name as `_5f`.
-        c.Line("local function or_v(a, b) if js_truthy(a) then return a end return b end");
-        c.Line("local function and_v(a, b) if js_truthy(a) then return b end return a end");
-        c.Line("local function nc_v(a, b) if a == nil then return b end return a end");
+        string[] valueOps =
+        {
+            "local function or_v(a, b) if js_truthy(a) then return a end return b end",
+            "local function and_v(a, b) if js_truthy(a) then return b end return a end",
+            "local function nc_v(a, b) if a == nil then return b end return a end",
+        };
+        if (hooks == null) foreach (var op in valueOps) c.Line(op);
         c.OpenScope(names);
 
         foreach (var s in ast.Body)
         {
             if (s is Statement st) c.Statement(st);
+        }
+
+        if (hooks != null)
+        {
+            // Plain Lua carries only the helpers it calls, and no PAGE table: nothing inspects it.
+            if (c._problems.Count > 0) return null;
+            var body = c._sb.ToString();
+            var head = new StringBuilder();
+            foreach (var op in valueOps)
+                if (body.Contains(op.Substring(15, op.IndexOf('(') - 14), StringComparison.Ordinal)) head.Append(op).Append('\n');
+            return head.Append(body).ToString();
         }
 
         // Compiled markup's click handlers, each registered once on the element it belongs to. They
@@ -540,6 +588,7 @@ internal sealed class JsToLua
 
     private void Statement(Statement s)
     {
+        if (_hooks?.Statement?.Invoke(this, s) == true) return;
         switch (s)
         {
             case VariableDeclaration v:
@@ -876,6 +925,7 @@ internal sealed class JsToLua
     /// <summary>An expression used for its effect. Lua allows only a call as a statement, so everything else is shaped into one.</summary>
     private void ExprStatement(Expression e)
     {
+        if (_hooks?.Statement?.Invoke(this, e) == true) return;
         switch (e)
         {
             case AssignmentExpression a:
@@ -1177,7 +1227,7 @@ internal sealed class JsToLua
             return;
         }
         // A CSS write the page builds as a string, emitted as the numbers it is made of.
-        if (a.Operator == Operator.Assignment && NumericStyle(a)) return;
+        if (a.Operator == Operator.Assignment && _hooks == null && NumericStyle(a)) return;
 
         var target = Expr(a.Left);
         var value = Expr(a.Right);
@@ -1603,7 +1653,8 @@ internal sealed class JsToLua
             // A concise arrow body is one expression, so anything a parameter needs has to be said
             // before it - which means the body stops being a single `return`.
             if (bind is { Count: > 0 }) BindParams(bind);
-            Line("do return " + Expr(e) + " end");
+            // A DOM write the caller emits as statements has no value to return, and a callback's is unread.
+            if (_hooks?.Statement?.Invoke(this, e) != true) Line("do return " + Expr(e) + " end");
         }
         _depth--;
         _enclosing = outer;
@@ -2231,6 +2282,7 @@ internal sealed class JsToLua
 
     private string Expr(Node? e)
     {
+        if (e != null && _hooks?.Expression?.Invoke(this, e) is { } hooked) return hooked;
         switch (e)
         {
             case null:

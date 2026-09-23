@@ -39,6 +39,8 @@ internal static class HtmlRenderer
         public readonly Dictionary<string, SvgShape> Shapes = new(StringComparer.Ordinal);
         public readonly List<(VisualElement element, AnimationSpec spec)> Animations = new();
         public string Script = string.Empty;
+        /// <summary>The page's own source, as it was built: what the compiler reads the page as it was written from.</summary>
+        public string Source = string.Empty;
         /// <summary>&lt;script src&gt; urls in document order and &lt;link rel=stylesheet href&gt; urls; the surface fetches them.</summary>
         public readonly List<string> ExternalScripts = new();
         public readonly List<string> ExternalStyles = new();
@@ -297,6 +299,7 @@ internal static class HtmlRenderer
 
         var doc = HtmlParser.Parse(source, Warn);
         result.Document = doc;
+        result.Source = source;
 
         var rules = new List<CssRule>();
         var script = new StringBuilder();
@@ -2455,7 +2458,7 @@ internal static class HtmlRenderer
         return false;
     }
 
-    private static string RichText(HtmlNode node, List<CssRule>? rules = null)
+    internal static string RichText(HtmlNode node, List<CssRule>? rules = null)
     {
         var sb = new StringBuilder();
         foreach (var c in node.Children)

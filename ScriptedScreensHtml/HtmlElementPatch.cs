@@ -110,6 +110,8 @@ internal static class HtmlElementPatch
             surfaceComponent.Cartridge = cartridge;
             surfaceComponent.Visor = visor;
             surfaceComponent.ElementId = element.Id;
+            if (element.Rect.Unit == SS.UiRectUnit.Pixels && element.Rect.W >= 1f && element.Rect.H >= 1f)
+                surfaceComponent.PushedSize = new Vector2(element.Rect.W, element.Rect.H);
             if (DataIds.TryGetValue(key, out var dataId))
                 surfaceComponent.DataElementId = dataId;
             surfaceComponent.SetSource(src);

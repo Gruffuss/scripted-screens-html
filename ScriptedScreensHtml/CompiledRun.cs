@@ -137,15 +137,51 @@ internal sealed class CompiledRun
     internal object State => _state;
 
     /// <summary>
-    /// A plain page (<see cref="PlainPage"/>): its chunk made the page's own vector elements and runs on
+    /// A plain page (<see cref="PlainTranslator"/>): its chunk made the page's own vector elements and runs on
     /// the chip's tick, so nothing calls into this run - no Tick, Data, Click or Resync - ever again.
     /// </summary>
     internal bool Plain { get; private set; }
 
-    /// <summary>Pages handed to their chip, by page key: the source they were compiled from and the chip state they run in.</summary>
-    private static readonly Dictionary<string, (string Source, object State)> Handed = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Pages handed to their chip, by page key: the source they were compiled from, the chip state they
+    /// run in, and what retiring them needs - the chunk's environment, its chip, and where its two
+    /// vector elements are.
+    /// </summary>
+    private static readonly Dictionary<string, (string Source, object State, object? Env, object? Chip, string Surface, string Element)> Handed = new(StringComparer.Ordinal);
 
-    internal static void HandedOver(string key, string source, object state) => Handed[key] = (source, state);
+    internal static void HandedOver(string key, string source, CompiledRun run, string surface, string element)
+        => Handed[key] = (source, run._state, run._env, run._chip, surface, element);
+
+    /// <summary>
+    /// The page this key named before is being replaced - a new source, a chip that recompiled, its
+    /// elements cleared by the author: its program stops (ChipHost.Retire: it does nothing from its next
+    /// tick, and its tick leaves the chip's chain when it is on top) and its two vector elements leave the
+    /// surface and its model, so neither they nor a capture's replay of them can feed the page that
+    /// replaces it, which shares its scene. Whatever the new page compiles to. Game thread.
+    /// </summary>
+    internal static void Retire(string key, SS.BoardState? board)
+    {
+        if (!Handed.TryGetValue(key, out var h)) return;
+        Handed.Remove(key);
+        ChipHost.Retire(h.Chip, h.Env);
+        if (board == null) return;
+        foreach (var id in new[] { h.Element + PlainTranslator.SceneSuffix, h.Element + PlainTranslator.DataSuffix })
+        {
+            if (board.Surfaces.TryGetValue(h.Surface, out var model) && model != null)
+                lock (model.PendingOpsLock) model.Elements.Remove(id);
+            SS.RemoveElement(board, h.Surface, id);
+        }
+        ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: \"{key}\" replaced - the page handed to its chip before stops, and its vector elements are gone");
+    }
+
+    /// <summary>
+    /// Whether the last <see cref="Start"/> failed only because the chip is not ready yet - its program
+    /// still in its first run, or not compiled - so the same compile can be installed a moment later.
+    /// </summary>
+    internal static bool NotYet;
+
+    /// <summary>The chip a plain page was handed to.</summary>
+    private object? _chip;
 
     /// <summary>
     /// Whether an html element ScriptedScreens applies again - a capture's rebuild, the author declaring
@@ -158,7 +194,7 @@ internal sealed class CompiledRun
         if (!Handed.TryGetValue(key, out var handed) || !string.Equals(handed.Source, source, StringComparison.Ordinal)) return false;
         if (!ReferenceEquals(ChipHost.StateOf(ChipHost.ChipOf(holder)), handed.State)) return false;
         if (!board.Surfaces.TryGetValue(surface, out var model) || model == null) return false;
-        lock (model.PendingOpsLock) return model.Elements.ContainsKey(element + PlainPage.SceneSuffix);
+        lock (model.PendingOpsLock) return model.Elements.ContainsKey(element + PlainTranslator.SceneSuffix);
     }
 
     /// <summary>
@@ -211,6 +247,7 @@ internal sealed class CompiledRun
                                        System.Collections.Generic.IReadOnlyDictionary<string, SceneSlots.Value> slots,
                                        (string Surface, string Element, string Scene) target)
     {
+        NotYet = false;
         if (!ChipHost.Available) return null;           // reported once at startup
         if (string.IsNullOrWhiteSpace(built.Script)) return null;
 
@@ -226,6 +263,7 @@ internal sealed class CompiledRun
             // Ordinary the first time - a page is built before its chip has compiled - so this is
             // said once per page rather than every frame, and the caller retries on the next build.
             ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: \"{page}\" - its chip has not compiled yet; will try again");
+            NotYet = true;
             return null;
         }
 
@@ -288,11 +326,13 @@ internal sealed class CompiledRun
         // runtime would replace a tick chained in before that ends); it hands over on its next build.
         if (!ChipHost.Started(chip))
         {
-            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: \"{page}\" - its chip's program is still starting, so the page stays as it is drawn");
+            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: \"{page}\" - its chip's program is still starting; it is handed over when that ends");
+            NotYet = true;
             return null;
         }
         var (env, _) = ChipHost.LoadInto(state, compiled.Lua!, "@html:" + page);
-        if (env == null || !ChipHost.ChainTick(chip, env))
+        // A page with no timers has no tick: its clicks come through its own scene element.
+        if (env == null || env is Lua.LuaTable table && table["tick"].TryRead<Lua.LuaFunction>(out _) && !ChipHost.ChainTick(chip, env))
         {
             ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: \"{page}\" compiled, but could not be handed to its chip");
             return null;
@@ -304,6 +344,7 @@ internal sealed class CompiledRun
             ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: \"{page}\" compiled, but {warning}");
         return new CompiledRun(state, env, null, page)
         {
+            _chip = chip,
             Plain = true,
             Structure = compiled.Structure,
             StructureValues = compiled.StructureValues,

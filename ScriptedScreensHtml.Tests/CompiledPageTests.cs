@@ -1068,7 +1068,7 @@ setInterval(() => set(Math.random() > 0.5), 100);";
               && again.Lua?.Contains("local SURFACE, ELEMENT, SCENE = \"main\", \"tb\", \"html:tb\"\n", StringComparison.Ordinal) == true,
               "plain: one compile serves every console, each chunk pointed at its own element");
         var names = Regex.Matches(compiled.Structure ?? string.Empty, @"\$(\w+)").Select(m => m.Groups[1].Value).OrderBy(n => n, StringComparer.Ordinal);
-        check(string.Join(",", names) == "bar_f,bar_w,note",
+        check(string.Join(",", names) == "bar_f,bar_w,note_p0",
               $"plain: the scene reads only what the script moves (got {string.Join(",", names)})");
 
         var log = Probe4.DrivePlain(compiled.Lua, 8, 0.5);
@@ -1078,11 +1078,11 @@ setInterval(() => set(Math.random() > 0.5), 100);";
         var ok = !log.Any(l => l.StartsWith("FAILED", StringComparison.Ordinal))
                  && log.Count(l => l.StartsWith("element ", StringComparison.Ordinal)) == 2
                  && at("element page_s vector rect={h=460,unit=\"px\",w=460,x=0,y=0}") >= 0
-                 && opening.Contains("data={bar_f=\"#2B6CB0\",bar_w=120,note=\"waiting\"}", StringComparison.Ordinal)
+                 && opening.Contains("data={bar_f=\"#2B6CB0\",bar_w=120,note_p0=\"waiting\"},keep=1", StringComparison.Ordinal)
                  && sets.Count == 2
-                 && sets[0] == "set_props page_d {data={bar_f=\"#2F855A\",bar_w=620,note=\"transition started\"},ease={bar_w={1=1.2,2=\"ease-in-out\"}}}"
+                 && sets[0] == "set_props page_d {data={bar_f=\"#2F855A\",bar_w=620,note_p0=\"transition started\"},ease={bar_w={1=1.2,2=\"ease-in-out\"},note_p0=0}}"
                  && at(sets[0]) > at("tick 1") && at(sets[0]) < at("tick 2")
-                 && sets[1].Contains("note=\"finished - the page is now static\"", StringComparison.Ordinal)
+                 && sets[1] == "set_props page_d {data={note_p0=\"finished - the page is now static\"},ease={note_p0=0}}"
                  && at(sets[1]) > at("tick 5") && at(sets[1]) < at("tick 6")
                  && log.Count(l => l == "commit") == 3
                  && log[^1] == "author ticks 8, its tick untouched";

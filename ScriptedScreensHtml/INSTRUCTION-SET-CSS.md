@@ -639,7 +639,7 @@ Sourced from the W3C canonical machine-readable list (`https://www.w3.org/Style/
 #### CSS Transitions
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
-| transition (WD) | | | | |
+| transition (WD) | ✅ | the vector mod's `ease` entry per slot for numbers; colours snap (the vector mod glides numbers only) | PlainTranslatorTests: 09-transition; in game 2026-09-24 | |
 | transition-delay (WD) | | | | |
 | transition-duration (WD) | | | | |
 | transition-property (WD) | | | | |

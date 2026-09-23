@@ -227,7 +227,7 @@ internal static class Probe4
     }
 
     /// <summary>
-    /// A plain chunk (PlainPage) run as its chip runs it: loaded once in an environment of its own that
+    /// A plain chunk (PlainTranslator) run as its chip runs it: loaded once in an environment of its own that
     /// falls through to the chip's globals (ChipHost.LoadInto), with a stand-in `ss` that records every
     /// element it makes and every payload it sends; then its `tick` called as the chip's runtime calls
     /// the stored one (ChipHost.ChainTick), `ticks` times. The author's program has a `tick` of its own
@@ -235,6 +235,20 @@ internal static class Probe4
     /// </summary>
     internal static List<string> DrivePlain(string lua, int ticks, double dt)
     {
+        var steps = new List<(double, string?)>();
+        for (var i = 0; i < ticks; i++) steps.Add((dt, null));
+        return DrivePlain(lua, steps, out _);
+    }
+
+    /// <summary>
+    /// A plain chunk driven by steps: a tick of <c>Dt</c> seconds, or a click on the node <c>Click</c>
+    /// delivered to the scene element's on_click as the vector mod delivers it. <paramref name="data"/>
+    /// is what the data element holds at the end: its opening values with every patch merged in, as
+    /// the vector mod keeps them for a `keep = 1` element.
+    /// </summary>
+    internal static List<string> DrivePlain(string lua, IEnumerable<(double Dt, string? Click)> steps, out Dictionary<string, Lua.LuaValue> data)
+    {
+        data = new Dictionary<string, Lua.LuaValue>(StringComparer.Ordinal);
         var state = Lua.LuaState.Create();
         Lua.Standard.OpenLibsExtensions.OpenStandardLibraries(state);
         var log = new List<string>();
@@ -258,11 +272,15 @@ local function show(v)
   end
   return '{' .. table.concat(parts, ',') .. '}'
 end
+DATA = {}
+local function merge(d) if type(d) == 'table' then for k, v in pairs(d) do DATA[k] = v end end end
 local surface = {}
 function surface:element(def)
   put('element ' .. def.id .. ' ' .. def.type .. ' rect=' .. show(def.rect) .. ' props=' .. show(def.props))
+  if def.on_click then CLICK = def.on_click end
+  merge(def.props and def.props.data)
   local handle = {}
-  function handle:set_props(p) put('set_props ' .. def.id .. ' ' .. show(p)) end
+  function handle:set_props(p) put('set_props ' .. def.id .. ' ' .. show(p)) merge(p.data) end
   return handle
 end
 function surface:get(id) return { id = id, type = 'html', rect = { unit = 'px', x = 0, y = 0, w = 460, h = 460 } } end
@@ -278,11 +296,31 @@ AUTHOR = tick
         env.Metatable["__index"] = state.Environment;
         if (Do(lua, "page", env) is { } load) return new List<string> { "FAILED load: " + load };
         state.Environment["PAGE_TICK"] = env["tick"];
-        var run = Do($"for i = 1, {ticks} do PAGE_TICK({dt.ToString(System.Globalization.CultureInfo.InvariantCulture)}) LOG[#LOG + 1] = 'tick ' .. i end"
-                     + " LOG[#LOG + 1] = 'author ticks ' .. AUTHOR_TICKS .. (tick == AUTHOR and ', its tick untouched' or ', its tick REPLACED')", "ticks");
+        state.Environment["PAGE_ENV"] = env;
+        var script = new System.Text.StringBuilder();
+        var n = 0;
+        foreach (var (dt, click) in steps)
+        {
+            // "!retire" is the host retiring the page (ChipHost.Retire): the chunk's V_LIVE goes false
+            if (click == "!retire") script.Append("PAGE_ENV.V_LIVE = false LOG[#LOG + 1] = 'retired'\n");
+            else if (click != null) script.Append("CLICK(").Append(JsToLua.Quote(click)).Append(") LOG[#LOG + 1] = 'click ").Append(click).Append("'\n");
+            else script.Append("if PAGE_TICK then PAGE_TICK(").Append(dt.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
+                       .Append(") else AUTHOR(").Append(dt.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append(") end LOG[#LOG + 1] = 'tick ").Append(++n).Append("'\n");
+        }
+        script.Append("LOG[#LOG + 1] = 'author ticks ' .. AUTHOR_TICKS .. (tick == AUTHOR and ', its tick untouched' or ', its tick REPLACED')");
+        var run = Do(script.ToString(), "ticks");
         if (state.Environment["LOG"].TryRead<Lua.LuaTable>(out var lines))
             for (var i = 1; lines[(double)i].TryRead<string>(out var line); i++) log.Add(line);
         if (run != null) log.Add("FAILED ticks: " + run);
+        if (state.Environment["DATA"].TryRead<Lua.LuaTable>(out var held))
+        {
+            var key = Lua.LuaValue.Nil;
+            while (held.TryGetNext(key, out var pair))
+            {
+                key = pair.Key;
+                if (key.TryRead<string>(out var k)) data[k] = pair.Value;
+            }
+        }
         return log;
     }
 
@@ -346,26 +384,41 @@ AUTHOR = tick
     /// <param name="source">What the page was built from, as a surface remembers it (PageCompiler's cache); null compiles it afresh.</param>
     internal static (CompiledPage.Result Compiled, MarkupSlots.Result? Markup) Headless(string page, string? source = null,
         (string Surface, string Element, string Scene)? target = null)
+        => Headless(page, out _, out _, out _, source, target);
+
+    /// <summary>
+    /// As <see cref="Headless(string, string?, ValueTuple{string, string, string}?)"/>, with the page it built and
+    /// laid out, on a console of <paramref name="console"/> canvas units (460x460 when not given): laid out as
+    /// HtmlSurface.LayoutSize lays it out there - the page's viewport width, else the console's, and a height
+    /// in the console's own proportions.
+    /// </summary>
+    internal static (CompiledPage.Result Compiled, MarkupSlots.Result? Markup) Headless(string page, out HtmlRenderer.Result built, out Panel panel,
+        out Vector2 size, string? source = null, (string Surface, string Element, string Scene)? target = null, (float W, float H)? console = null,
+        Action<HtmlRenderer.Result>? beforeCompile = null)
     {
+        var (cw, ch) = console ?? (460f, 460f);
         var oracle = CssParser.SupportsOracle;
         var (vw, vh) = (CssParser.ViewportWidth, CssParser.ViewportHeight);
         try
         {
             ResolvedStyle.DefaultFace = FontLibrary.Default();
-            HtmlRenderer.SurfaceAspect = 1f;
+            HtmlRenderer.SurfaceAspect = ch / cw;
             OffThread.MainThreadId = Environment.CurrentManagedThreadId;
             OffThread.Job = OffThread.Globals.Take();
-            var built = HtmlRenderer.Build(page, FontLibrary.Default());
+            built = HtmlRenderer.Build(page, FontLibrary.Default());
             if (source != null) PageCompiler.Remember(built, source);
             HtmlRenderer.NameDrivenGroups(built);
-            var panel = new Panel(built.Root);
+            panel = new Panel(built.Root);
             foreach (var grid in built.Grids)
                 if (built.LayoutAttached.Add(grid)) GridLayout.Attach(grid, built);
             PostLayout.Attach(built);
             var boxes = new Dictionary<VisualElement, OffThread.Box>();
             OffThread.Boxes = boxes;
-            var size = new Vector2(built.ViewportWidth, built.ViewportWidth);
+            var width = Mathf.Max(64f, built.ViewportWidth > 0f ? built.ViewportWidth : cw);
+            size = new Vector2(width, Mathf.Max(64f, width * ch / cw));
             panel.Layout(size.x, size.y);
+            // What a running page did before its compile (the interpreter's script, in game).
+            if (beforeCompile != null) { beforeCompile(built); panel.Layout(size.x, size.y); }
             OffThread.Capture(built.Root, built, boxes, new List<VisualElement>());
 
             // The page as the surface first draws it: the slots a page without markup is bound to.
@@ -382,6 +435,7 @@ AUTHOR = tick
         {
             OffThread.Active = false;
             OffThread.Boxes = null;
+            HtmlRenderer.SurfaceAspect = 1f;
             CssParser.SupportsOracle = oracle;
             CssParser.ViewportWidth = vw;
             CssParser.ViewportHeight = vh;
@@ -402,6 +456,7 @@ AUTHOR = tick
                               + $"{MarkupSlots.Emits - layouts0} layouts, {MarkupSlots.Builds - builds0} builds");
             Console.WriteLine($"  compile: {(compiled.Ok ? "COMPILED" : "REFUSED")} in {ms:0} ms - lua {compiled.Lua?.Length ?? 0} chars, "
                               + $"{compiled.Bindings.Count} binding(s), {compiled.Problems.Count} problem(s), {compiled.Unmapped.Count} unmapped, {compiled.Warnings.Count} warning(s)");
+            foreach (var w in compiled.Warnings.Where(w => w.StartsWith("not translated to plain Lua", StringComparison.Ordinal))) Console.WriteLine("    " + w);
             foreach (var p in compiled.Problems.Take(verbose ? 200 : 25)) Console.WriteLine("    problem: " + p);
             foreach (var u in compiled.Unmapped.Take(verbose ? 200 : 25)) Console.WriteLine("    unmapped: " + u);
             if (Environment.GetEnvironmentVariable("WHY_LUA") is { Length: > 0 } luaPath && compiled.Lua != null) File.WriteAllText(luaPath, compiled.Lua);

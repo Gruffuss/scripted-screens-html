@@ -81,6 +81,8 @@ public sealed class ScriptedScreensHtmlPlugin : ModBehaviour
         // frame, paid by everyone, to feed a number nobody was looking at.
         if (HtmlConfig.Diagnostics) FrameAlloc.SampleHeap();
         HtmlSurface.ReportIfDue();
+        // Pages being compiled on consoles no one is in the room with get no Update of their own.
+        HtmlSurface.DriveUnseen();
     }
 
     private static void ReportGC()

@@ -98,6 +98,9 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         if (!string.IsNullOrEmpty(PageKey))
             Current[PageKey] = this;
+        // The page this element showed before, if it was handed to its chip, stops now - whatever the
+        // new source compiles to - and its vector elements go, so nothing of it feeds the new page.
+        CompiledRun.Retire(PageKey, State as SS.BoardState);
         Hold();
         // A handed-over page's chunk runs in its chip until another page's replaces it: this host
         // draws and compiles the new source as any page does (HtmlElementPatch switched it back on).
@@ -210,7 +213,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             // a surface with no page (a capture's clone before its build): its script still runs here
             if (_script != null)
             {
-                if (_scriptPending) { _scriptPending = false; _script.Run(_built?.Script ?? string.Empty); }
+                if (_scriptPending && !HoldingScript()) { _scriptPending = false; _script.Run(_built?.Script ?? string.Empty); }
                 if (_script.Frame(Time.time, _byId)) { _dirty = true; _dScript++; Wake(); }
             }
             return;
@@ -224,6 +227,15 @@ internal sealed class HtmlSurface : MonoBehaviour
             FinishJob();
         // FinishJob may just have handed the page to its chip, and let it go.
         if (_handedOver) return;
+        // A compile its chip was not ready for, installed again once it is.
+        if (_installAgain is { } again && _pageState == PageIdle && Time.time >= _installAgainAt && State is SS.BoardState ready)
+        {
+            _installAgain = null;
+            if (Install(again, ready)) return;
+            if (CompiledRun.NotYet && ++_installTries < 60) { _installAgain = again; _installAgainAt = Time.time + 0.5f; }
+        }
+        // While the script waits for the compile, the page keeps offering frames until one compiles it.
+        if (_holdScript && _pageState == PageIdle && _compileTried != _built && HoldingScript()) _dirty = true;
         // A face arriving re-lays out EVERY page showing it, not only the one whose Update drained
         // the queue. Not a released page (compiled, or a data page after its table): it returned at
         // the _panel guard above, on purpose. Its scene already names the face, and the vector mod
@@ -231,7 +243,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         // move boxes under a slot table compiled against the old ones. Its metrics stay the
         // fallback's, which the emitter's label slack absorbs.
         if (FontLibrary.ResolvePending() | _fontGeneration != FontLibrary.Generation) { _fontGeneration = FontLibrary.Generation; _dirty = true; _dOther++; }
-        if (_scriptPending && _script != null)
+        if (_scriptPending && _script != null && !HoldingScript())
         {
             // the page script starts once the page exists; its engine thread runs it
             _scriptPending = false;
@@ -526,16 +538,11 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         var rt = (RectTransform)transform;
         var rect = rt.rect;
-        var width = Mathf.Max(64f, _designWidth > 0f ? _designWidth : rect.width);
-
         var bl = rt.TransformPoint(new Vector3(rect.xMin, rect.yMin, 0f));
         var br = rt.TransformPoint(new Vector3(rect.xMax, rect.yMin, 0f));
         var tl = rt.TransformPoint(new Vector3(rect.xMin, rect.yMax, 0f));
-        var worldW = Vector3.Distance(bl, br);
-        var worldH = Vector3.Distance(bl, tl);
-        var aspect = worldW > 1e-5f && worldH > 1e-5f ? worldH / worldW : rect.height / width;
-
-        return new Vector2(width, Mathf.Max(64f, width * aspect));
+        return PlainTranslator.ConsoleLayout(_designWidth, new Vector2(rect.width, rect.height),
+                                             new Vector2(Vector3.Distance(bl, br), Vector3.Distance(bl, tl)), PushedSize);
     }
 
     /// <summary>Marks the page busy for a few frames (the diagnostics line counts them).</summary>
@@ -789,9 +796,62 @@ internal sealed class HtmlSurface : MonoBehaviour
         // data that arrives right after build (remembered data on a rebuilt host) reaches a
         // page whose handler is already registered. Sizes are snapshotted per frame, so a
         // script that reads clientWidth before layout sees 0 and tries again next frame.
-        _scriptPending = false;
-        _script?.Run(built.Script);
+        // A page the plain translator can take is compiled BEFORE its script runs: the compile lays the
+        // page out as its source wrote it, and a hand-over starts the script on the chip from its first
+        // line, as a browser loading the page does. Any other page runs its script now, as it did.
+        _holdScript = HtmlConfig.RunCompiled && ChipHost.Available && (Cartridge ?? Board) != null
+                      && _compiled == null && PlainTranslator.Eligible(built);
+        _holdSince = Time.time;
+        _installAgain = null;
+        _installTries = 0;
+        _scriptPending = _holdScript;
+        if (!_holdScript) _script?.Run(built.Script);
 
+    }
+
+    /// <summary>Whether this build's script waits for its plain compile; see BuildInner.</summary>
+    private bool _holdScript;
+    private float _holdSince;
+
+    /// <summary>A compile the chip was not ready for (still starting): installed again shortly.</summary>
+    private (HtmlRenderer.Result Built, Vector2 Size, string Template, Dictionary<string, SceneSlots.Value> Values)? _installAgain;
+    private float _installAgainAt;
+    private int _installTries;
+
+    /// <summary>
+    /// The size the element was pushed with (its px rect), for laying the page out while the game has
+    /// the console's screen switched off and its rect may never have been laid out.
+    /// </summary>
+    internal Vector2 PushedSize;
+
+    /// <summary>
+    /// Whether the script still waits for the plain compile: until that compile was tried on this build
+    /// and has nothing left to install. A hand-over never lets it run here at all.
+    /// </summary>
+    private bool HoldingScript()
+    {
+        if (!_holdScript) return false;
+        // ponytail: a compile that never resolves lets the page run as it would have, after 30 s
+        if (_pageState == PageIdle && _compileTried == _built && _compileReady == null && _installAgain == null
+            || Time.time - _holdSince > 30f)
+            _holdScript = false;
+        return _holdScript;
+    }
+
+    /// <summary>
+    /// Pages whose compile and hand-over are under way on a console whose screen the game has switched
+    /// off (no one in the room), which gets no Update: driven from the plugin's own, every frame, until
+    /// handed over or given up - so a page runs whether anyone looks or not, as a hand-written console
+    /// does. Game thread.
+    /// </summary>
+    internal static void DriveUnseen()
+    {
+        for (var i = Surfaces.Count - 1; i >= 0; i--)
+        {
+            var s = Surfaces[i];
+            if (s == null || s.isActiveAndEnabled || s._handedOver || !s._holdScript && s._installAgain == null) continue;
+            s.Update();
+        }
     }
 
     /// <summary>
@@ -820,7 +880,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         // As in a browser: the page script loads and draws, then the remembered Lua data
         // arrives, then the script's frames. A data event before the script has run finds no
         // handler; bound values applied while it still runs are drawn over by its first render.
-        if (_script != null && _scriptPending)
+        if (_script != null && _scriptPending && !HoldingScript())
         {
             _scriptPending = false;
             _script.Run(_built?.Script ?? string.Empty);
@@ -1107,9 +1167,9 @@ internal sealed class HtmlSurface : MonoBehaviour
             // "not loaded" rather than as "costing nothing", which is the wrong way round.
             if (page._built == null)
             {
-                if (page._handedOver)
-                    ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{page.ElementId}\": handed to its chip - its own vector elements and Lua on the chip's tick; nothing of this mod runs for it");
-                else if (page._released)
+                // A handed-over page says so once, at the hand-over (CompiledRun.HandOver), not every report.
+                if (page._handedOver) continue;
+                if (page._released)
                     ScriptedScreensHtmlPlugin.Log?.LogInfo(
                         $"html \"{page.ElementId}\": compiled and released - no layout, script, translate or emit; "
                         + $"sent {page._patchSends} patches ({page._patchSlots} values), heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}");
@@ -1551,6 +1611,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     {
         // Only a compile the cache holds. CompiledRun.Start compiles whatever the cache lacks, and
         // here that would be the game thread's frame again.
+        CompiledRun.NotYet = false;
         var holder = Cartridge ?? Board;
         if (_compiled != null || holder == null || ready.Built != _built || _panel == null
             || !PageCompiler.IsCompiled(ready.Built, ready.Size))
@@ -1570,7 +1631,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             // Handed over: the chunk made the page's own vector elements and runs on the chip's tick.
             // This surface lets the page go and switches its host off - the interpreter's scene is on
             // that host and must not draw beside the chunk's - so it gets no Update again.
-            CompiledRun.HandedOver(PageKey, _source, _compiled.State);
+            CompiledRun.HandedOver(PageKey, _source, _compiled, Surface, ElementId);
             _handedOver = true;
             ReleaseWorkingSet();
             // and its thread ends: this page runs no frame again
@@ -1583,7 +1644,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             // again after an earlier hand-over (a new source) switched the chunk's host off that way,
             // and the vector mod never switches a host back on.
             if (state.SurfaceElementRoots.TryGetValue(Surface, out var roots) && roots != null
-                && roots.TryGetValue(ElementId + PlainPage.SceneSuffix, out var sceneHost) && sceneHost != null)
+                && roots.TryGetValue(ElementId + PlainTranslator.SceneSuffix, out var sceneHost) && sceneHost != null)
                 sceneHost.SetActive(true);
             return true;
         }
@@ -1703,6 +1764,7 @@ internal sealed class HtmlSurface : MonoBehaviour
             _compileReady = null;
             // Installed, its structure went out in place of this job's scene.
             if (Install(ready, state)) return;
+            if (CompiledRun.NotYet) { _installAgain = ready; _installAgainAt = Time.time + 0.5f; }
         }
         if (r.Structure == null)
         {

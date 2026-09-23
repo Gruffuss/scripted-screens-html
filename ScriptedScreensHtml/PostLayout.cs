@@ -211,6 +211,12 @@ internal static class PostLayout
             void Apply()
             {
                 if (el.panel == null || el.parent == null) return;
+                // What the cascade says NOW: a class or an inline style may have replaced the percentage
+                // this was attached for, and re-applying that one overwrote it on every re-cascade.
+                var now = built.CssOf(el);
+                wpct = now.TryGetValue("width", out var wn) ? Percent(wn) : float.NaN;
+                hpct = now.TryGetValue("height", out var hn) ? Percent(hn) : float.NaN;
+                if (now.TryGetValue("box-sizing", out var bs) && bs.Trim() == "border-box") return;
                 var prs = el.parent.resolvedStyle;
                 if (!float.IsNaN(wpct))
                 {

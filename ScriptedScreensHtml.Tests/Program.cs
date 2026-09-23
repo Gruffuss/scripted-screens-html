@@ -458,6 +458,8 @@ ScriptedScreensHtml.Tests.SyntaxTests.Run(Check);
 ScriptedScreensHtml.Tests.PreludeRuntime.Run(Check);
 ScriptedScreensHtml.Tests.CompiledPageTests.Run(Check);
 ScriptedScreensHtml.Tests.SpecTests.Run(Check);
+Console.WriteLine("PlainTranslator");
+ScriptedScreensHtml.Tests.PlainTranslatorTests.Run(Check);
 ScriptedScreensHtml.Tests.CssTransitionTests.Run(Check);
 ScriptedScreensHtml.Tests.CssTests.Run(Check);
 

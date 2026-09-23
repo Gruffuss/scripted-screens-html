@@ -145,13 +145,39 @@ internal static class ChipHost
         try
         {
             if (!Started(chip) || RuntimeOf(chip) is not { } runtime) return false;
-            _tickField!.SetValue(runtime, tick);
+            // After whatever the chip runs now - the author's tick, or another page's chained before
+            // this one - so two pages on one chip both keep running rather than the second replacing
+            // the first.
+            env["V_AUTHOR"] = _tickField!.GetValue(runtime) is Lua.LuaFunction before ? before : Lua.LuaValue.Nil;
+            _tickField.SetValue(runtime, tick);
             return true;
         }
         catch (Exception ex)
         {
             ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: cannot chain a page's tick into its chip: {ex.Message}");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Stops a plain page's program: from its next tick it does nothing but call the tick it chained
+    /// after, and a click on its scene does nothing. When its tick is the one the chip calls, the chip
+    /// calls the one before it again instead, so a page replaced leaves nothing behind in the chain.
+    /// </summary>
+    internal static void Retire(object? chip, object? environment)
+    {
+        if (environment is not Lua.LuaTable env) return;
+        env["V_LIVE"] = false;
+        try
+        {
+            if (RuntimeOf(chip) is not { } runtime || !env["tick"].TryRead<Lua.LuaFunction>(out var tick)) return;
+            _tickField ??= runtime.GetType().GetField("_tickFunction", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (_tickField != null && ReferenceEquals(_tickField.GetValue(runtime), tick))
+                _tickField.SetValue(runtime, env["V_AUTHOR"].TryRead<Lua.LuaFunction>(out var before) ? before : null);
+        }
+        catch (Exception ex)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: cannot take a replaced page's tick out of its chip: {ex.Message}");
         }
     }
 

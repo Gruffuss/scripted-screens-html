@@ -46,7 +46,7 @@
         <!-- The half of the compiler that needs the layout engine: a data-driven page's boxes and
              its bool states are read from the laid-out, emitted page, as a surface does it. -->
         <Compile Include="..\ScriptedScreensHtml\PageCompiler.cs" />
-        <Compile Include="..\ScriptedScreensHtml\PlainPage.cs" />
+        <Compile Include="..\ScriptedScreensHtml\PlainTranslator.cs" />
         <Compile Include="..\ScriptedScreensHtml\MarkupSlots.cs" />
         <!-- The data fast path: its own file stands in for the three ScriptedScreens value types it reads. -->
         <Compile Include="..\ScriptedScreensHtml\DataSlots.cs" />
@@ -54,6 +54,7 @@
         <Compile Include="CssLanguage.cs" />
         <Compile Include="CssTransitionTests.cs" />
         <Compile Include="SpecTests.cs" />
+        <Compile Include="PlainTranslatorTests.cs" />
         <Compile Include="DomLanguage.cs" />
         <Compile Include="Program.cs" />
         <Compile Include="Probe.cs" />

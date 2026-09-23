@@ -245,7 +245,7 @@ internal static class CompiledPage
         /// <summary>Whether <see cref="Place"/> has rewritten <see cref="Structure"/>, so a second call does nothing.</summary>
         public bool Placed;
         /// <summary>
-        /// The Lua is a plain program (<see cref="PlainPage"/>): it makes the page's own vector elements
+        /// The Lua is a plain program (<see cref="PlainTranslator"/>): it makes the page's own vector elements
         /// and runs on the chip's <c>tick</c>, so once installed nothing of this mod drives it.
         /// </summary>
         public bool Plain;

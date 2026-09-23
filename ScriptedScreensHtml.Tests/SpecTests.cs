@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 
 namespace ScriptedScreensHtml.Tests;
 
@@ -34,6 +35,25 @@ internal static class SpecTests
                         $"({(dom ? "it does: " + lua.Length + " chars of chunk built on the prelude's DOM" : "ok")})");
         }
     }
+
+    /// <summary>
+    /// A compiled page's Lua as a hand-written vector console has it: data values, the chip's tick and
+    /// clicks, and no DOM - neither the prelude's emulation nor any browser name surviving into code.
+    /// String literals and comments are not code, so a label reading "document" is no failure.
+    /// </summary>
+    internal static void PlainLua(string name, string lua, Action<bool, string> check)
+    {
+        var code = System.Text.RegularExpressions.Regex.Replace(lua, @"--[^\n]*|""(?:\\.|[^""\\])*""|\[(=*)\[[\s\S]*?\]\1\]", " ");
+        var found = DomNames.Where(n => code.Contains(n, StringComparison.Ordinal)).ToList();
+        check(found.Count == 0, $"SPEC: [{name}] compiles to a vector scene and plain Lua with no DOM "
+                                + (found.Count == 0 ? $"({lua.Length} chars)" : "(it names " + string.Join(", ", found) + ")"));
+    }
+
+    private static readonly string[] DomNames =
+    {
+        "DOM.", "document", "getElementById", "querySelector", "textContent", "classList", "className",
+        "addEventListener", "innerHTML", "style.", "PAGE_SYNC", "Pending", "requestAnimationFrame",
+    };
 
     private static string ModFolder()
     {

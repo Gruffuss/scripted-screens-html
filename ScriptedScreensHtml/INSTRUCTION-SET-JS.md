@@ -326,7 +326,7 @@ Each subtype's `.prototype` fully inherits `Error.prototype` (name/message/cause
 | Number.parseInt | | | | |
 | Number.prototype.constructor | | | | |
 | Number.prototype.toExponential | | | | |
-| Number.prototype.toFixed | | | | |
+| Number.prototype.toFixed | ✅ | `%.nf` in a text placeholder, or `v_fixed` (rounds as JS does) | PlainTranslatorTests: toFixed and a template literal; plain-counter in game | |
 | Number.prototype.toLocaleString | | | | |
 | Number.prototype.toPrecision | | | | |
 | Number.prototype.toString | | | | |
