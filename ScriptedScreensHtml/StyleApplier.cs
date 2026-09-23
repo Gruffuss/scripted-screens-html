@@ -693,6 +693,7 @@ internal static class StyleApplier
         "column-width", "column-span", "column-fill", "transform-box", "transition-behavior", "grid",
         "text-emphasis-style", "text-emphasis-color", "text-emphasis-position", "baseline-shift", "alignment-baseline",
         "mask-position", "mask-size", "mask-origin", "mask-clip", "mask-repeat", "paint-order", "vector-effect", "shape-rendering", "marker-start", "marker-mid", "marker-end", "marker",
+        "-webkit-text-stroke", "-webkit-text-stroke-width", "-webkit-text-stroke-color", "-webkit-mask-repeat",
         "cx", "cy", "r", "rx", "ry", "x", "y", "d", "path-length", // svg geometry as CSS: every declaration on a shape becomes its attribute in the collector
     };
 
@@ -729,8 +730,8 @@ internal static class StyleApplier
         ["zoom"] = "set the design size with <meta name=\"viewport\" content=\"width=N\">",
         // Each of these was parsed, put in the record, and read by nothing - the worst outcome.
         ["column-fill"] = "columns are filled in order, never balanced",
-        ["border-image-repeat"] = "a border image is stretched over the border box; it is not tiled",
-        ["mask-repeat"] = "a mask is drawn over the whole box, never tiled",
+        // border-image-repeat and mask-repeat left this list when their scene keys arrived: the emitter
+        // draws what is exact (an axis-aligned mask repeated) and says, naming the value, what is not.
         // Not here, though they once were: accent-color, appearance, backface-visibility, caption-side,
         // column-span, content-visibility, empty-cells, marker, mask-position, object-position,
         // offset-rotate, text-emphasis-*, border-image-slice and -outset. Each is drawn now, and an entry

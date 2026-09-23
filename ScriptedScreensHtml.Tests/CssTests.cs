@@ -37,6 +37,7 @@ internal static class CssTests
             LayoutProperties(check);
             Leftovers(check);
             PicturePosition(check);
+            VectorKeys(check);
             EmptyDrivenText(check);
             BarsAndLoops(check);
         }
@@ -581,11 +582,7 @@ internal static class CssTests
     private static void PicturePosition(Action<bool, string> check)
     {
         string Img(string css, List<string>? warned = null) => Scene("<img id=p src=\"a.png\" width=80 height=50>", "#p{" + css + "}", warnings: warned);
-        static string? At(string scene)
-        {
-            var i = scene.IndexOf(" at=[", StringComparison.Ordinal);
-            return i < 0 ? null : scene.Substring(i + 4, scene.IndexOf(']', i) - i - 3);
-        }
+        static string? At(string scene) => Key(scene, "at");
 
         check(At(Img("object-fit:cover;object-position:left top")) == "[0,0]", "keywords: left top is [0,0]");
         check(At(Img("object-fit:contain;object-position:25% 75%")) == "[0.25,0.75]", "a percentage is the fraction of the free room");
@@ -597,18 +594,24 @@ internal static class CssTests
 
         var warned = new List<string>();
         var lengths = Img("object-fit:cover;object-position:10px 5px", warned);
-        check(At(lengths) == "[0,0]" && warned.Exists(w => w.Contains("object-position", StringComparison.Ordinal) && w.Contains("length", StringComparison.Ordinal)),
-            "a length needs the picture's own size: placed from its edge, and said");
+        check(At(lengths) == "[0,0]" && Key(lengths, "off") == "[10,5]" && !warned.Exists(w => w.Contains("object-position", StringComparison.Ordinal)),
+            "a length is the node's off, after at: exact, and nothing said - " + Key(lengths, "off"));
+        check(At(Img("object-fit:none;object-position:right 10px bottom 4px")) == "[1,1]" && Key(Img("object-fit:none;object-position:right 10px bottom 4px"), "off") == "[-10,-4]",
+            "the edge-offset form with lengths: at the far edges, off back in from them");
+        check(At(Img("object-fit:contain;object-position:calc(100% - 10px) 50%")) == "[1,0.5]" && Key(Img("object-fit:contain;object-position:calc(100% - 10px) 50%"), "off") == "[-10,0]",
+            "calc() mixing a percentage and a length splits into at and off");
+        check(At(Img("object-position:10px 0")) == null && Key(Img("object-position:10px 0"), "off") == "[10,0]",
+            "under fill a length still moves the picture, as it does in a browser");
         warned.Clear();
-        Img("object-fit:cover;object-position:left 0 top 0", warned);
-        check(!warned.Exists(w => w.Contains("object-position", StringComparison.Ordinal)), "a zero length is exact and says nothing");
+        var zero = Img("object-fit:cover;object-position:left 0 top 0", warned);
+        check(!warned.Exists(w => w.Contains("object-position", StringComparison.Ordinal)) && Key(zero, "off") == null, "a zero length is exact and writes nothing");
 
         // a background picture: CSS starts it at the top left, not in the middle
         string Bg(string css) => Scene("<div id=p style=\"width:80px;height:50px\"></div>", "#p{" + css + "}");
         check(At(Bg("background-image:url(a.png);background-size:cover")) == "[0,0]", "background-position's initial value is the top-left corner");
         check(At(Bg("background:url(a.png) right bottom / cover no-repeat")) == "[1,1]", "the shorthand's position words");
         check(At(Bg("background:url(a.png) center / contain no-repeat")) == null, "centred is the node's default and needs no key");
-        check(Bg("background:url(https://example.test/img/a.png) no-repeat").Contains(" fit=contain", StringComparison.Ordinal),
+        check(Bg("background:url(https://example.test/img/a.png) 0 0 / cover no-repeat").Contains(" fit=cover", StringComparison.Ordinal),
             "the slashes inside a url() are not the shorthand's size separator");
 
         // an SVG image: preserveAspectRatio's alignment half
@@ -620,6 +623,152 @@ internal static class CssTests
         Scene("<video id=p src=\"a.mp4\" width=80 height=50></video>", "#p{object-fit:cover;object-position:left}", warnings: warned);
         check(warned.Exists(w => w.Contains("<video>", StringComparison.Ordinal) && w.Contains("object-position", StringComparison.Ordinal)),
             "object-position on a video says it is not drawn");
+    }
+
+    /// <summary>The value of a key (`at`, `off`, `tile`, `slice`...) on the first node carrying it, or null; the SCENE header is skipped.</summary>
+    private static string? Key(string scene, string key)
+    {
+        var i = scene.IndexOf(" " + key + "=", Math.Max(0, scene.IndexOf('\n')), StringComparison.Ordinal);
+        if (i < 0) return null;
+        i += key.Length + 2;
+        var end = scene[i] == '[' ? scene.IndexOf(']', i) + 1 : scene.IndexOfAny(new[] { ' ', '\n' }, i);
+        return scene.Substring(i, (end < 0 ? scene.Length : end) - i);
+    }
+
+    /// <summary>The scene's first line for a node or def (`IMG`, `GL`...), trimmed, for a check's message.</summary>
+    private static string Op(string scene, string op)
+    {
+        foreach (var line in scene.Split('\n'))
+            if (line.TrimStart().StartsWith(op + " ", StringComparison.Ordinal)) return line.Trim();
+        return "(no " + op + ")";
+    }
+
+    /// <summary>The first IMG node's box, or null.</summary>
+    private static (float x, float y, float w, float h)? ImgBox(string scene)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(scene, @"IMG x=([-\d.]+) y=([-\d.]+) w=([-\d.]+) h=([-\d.]+)");
+        if (!m.Success) return null;
+        float N(int g) => float.Parse(m.Groups[g].Value, System.Globalization.CultureInfo.InvariantCulture);
+        return (N(1), N(2), N(3), N(4));
+    }
+
+    // ---- the vector layer's picture, text-outline and gradient-spread keys ----------------------
+
+    /// <summary>
+    /// background-size / -repeat, image-rendering, border-image, -webkit-text-stroke, repeating
+    /// gradients, SVG spreadMethod and mask-repeat onto IMG `fit`/`tile`/`off`/`smp`/`slice`, T
+    /// `ow`/`oc` and GL/GR `spread`. Each check reads the emitted scene text.
+    /// </summary>
+    private static void VectorKeys(Action<bool, string> check)
+    {
+        string Bg(string css, List<string>? warned = null) => Scene("<div id=p style=\"width:80px;height:50px\"></div>", "#p{" + css + "}", warnings: warned);
+        string Img(string css) => Scene("<img id=p src=\"a.png\" width=80 height=50>", "#p{" + css + "}");
+        bool Said(List<string> warned, string what) => warned.Exists(w => w.Contains(what, StringComparison.Ordinal));
+
+        // object-fit none and scale-down are the node's own fits
+        check(Img("object-fit:none").Contains(" fit=none", StringComparison.Ordinal), "object-fit: none is fit=none");
+        check(Img("object-fit:scale-down").Contains(" fit=scale-down", StringComparison.Ordinal), "object-fit: scale-down is fit=scale-down");
+
+        // background-size auto (the initial value) is the picture's own size, repeated both ways by default
+        var natural = Bg("background-image:url(a.png)");
+        check(Key(natural, "tile") == "[0,0]" && Key(natural, "fit") == null && Key(natural, "at") == "[0,0]",
+            "an unsized picture background tiles at its own size from the top-left corner - " + Op(natural, "IMG"));
+        check(Key(Bg("background:url(a.png) no-repeat"), "fit") == "none" && Key(Bg("background:url(a.png) no-repeat"), "tile") == null,
+            "no-repeat at its own size is fit=none, once");
+        var warned = new List<string>();
+        var repeatX = Bg("background-image:url(a.png);background-repeat:repeat-x", warned);
+        check(Key(repeatX, "fit") == "none" && Said(warned, "repeat-x"), "repeat-x at the picture's own size needs that size: once, and said");
+
+        // a size in lengths is exact under every repeat but space
+        var sized = Bg("background-image:url(a.png);background-size:16px 8px");
+        check(Key(sized, "tile") == "[16,8]" && ImgBox(sized) is { w: 80f, h: 50f }, "background-size in px is the tile size over the whole area - " + Op(sized, "IMG"));
+        var row = Bg("background-image:url(a.png);background-size:16px 8px;background-repeat:repeat-x;background-position:4px 10px");
+        check(Key(row, "tile") == "[16,8]" && ImgBox(row) is { } rb && rb.w == 80f && rb.h == 8f && Key(row, "off") == "[4,0]",
+            "repeat-x with a known size is a box one tile deep at the position - " + Op(row, "IMG"));
+        var col = Bg("background-image:url(a.png);background-size:16px 8px;background-repeat:repeat-y;background-position:right 6px top 0");
+        check(ImgBox(col) is { } cb && cb.w == 16f && cb.h == 50f && Mathf.Approximately(cb.x - ImgBox(sized)!.Value.x, 58f),
+            "repeat-y with a known size is a column one tile wide, placed from the right edge - " + Op(col, "IMG"));
+        var round = Bg("background-image:url(a.png);background-size:30px 30px;background-repeat:round");
+        check(Key(round, "tile") == "[26.67,25]",
+            "round rescales the tile so a whole number of copies fills the area (80/3, 50/2) - " + Key(round, "tile"));
+        var once = Bg("background-image:url(a.png);background-size:20px 10px;background-repeat:no-repeat;background-position:right 5px bottom 5px");
+        check(ImgBox(once) is { } ob && ob.w == 20f && ob.h == 10f && Mathf.Approximately(ob.x - ImgBox(sized)!.Value.x, 55f) && Mathf.Approximately(ob.y - ImgBox(sized)!.Value.y, 35f),
+            "no-repeat with a known size is one copy's box at its position - " + Op(once, "IMG"));
+        check(Key(Bg("background-image:url(a.png);background-size:100% 100%"), "fit") == "fill", "100% 100% is the area itself: fit=fill");
+        check(Key(Bg("background-image:url(a.png);background-size:calc(50% - 8px) 10px"), "tile") == "[32,10]", "a calc() size keeps its spaces: half of 80 less 8");
+        warned.Clear();
+        Bg("background-image:url(a.png);background-size:30px 30px;background-repeat:space", warned);
+        check(Said(warned, "space"), "space with room for several copies needs gaps the node has no key for: said");
+        warned.Clear();
+        check(Key(Bg("background-image:url(a.png);background-size:50px auto", warned), "fit") == "contain" && Said(warned, "proportions"),
+            "a size with one auto keeps the picture's proportions, which needs its size: drawn as contain, and said");
+        warned.Clear();
+        Bg("background-image:url(a.png);background-size:contain", warned);
+        check(Said(warned, "contain"), "contain with the initial repeat tiles copies a browser would draw: said");
+        var cut = Bg("background-image:url(a.png);background-size:20px 10px;background-repeat:no-repeat;border-radius:8px");
+        check(cut.Contains("CP id=bgclip", StringComparison.Ordinal) && cut.Contains("G clip=bgclip", StringComparison.Ordinal),
+            "a box smaller than a rounded area is cut by the area's corners, not rounded itself - " + Op(cut, "CP"));
+
+        // image-rendering: pixelated / crisp-edges are hard-edged texels, and inherit
+        check(Img("image-rendering:pixelated").Contains(" smp=point", StringComparison.Ordinal), "image-rendering: pixelated is smp=point");
+        check(Img("image-rendering:crisp-edges").Contains(" smp=point", StringComparison.Ordinal), "image-rendering: crisp-edges is smp=point");
+        check(!Img("image-rendering:auto").Contains(" smp=", StringComparison.Ordinal), "image-rendering: auto samples smoothly");
+        check(Scene("<div id=w><img id=p src=\"a.png\" width=80 height=50></div>", "#w{image-rendering:pixelated}").Contains(" smp=point", StringComparison.Ordinal),
+            "image-rendering is inherited");
+        check(Bg("background-image:url(a.png);image-rendering:pixelated").Contains(" smp=point", StringComparison.Ordinal), "a pixelated background picture");
+        check(Scene("<svg id=p width=80 height=50><image href=\"a.png\" width=80 height=50 image-rendering=\"pixelated\"/></svg>", string.Empty).Contains(" smp=point", StringComparison.Ordinal),
+            "an SVG image's image-rendering");
+
+        // border-image: number slices are texels, which the node's nine-slice cuts by
+        var frame = Bg("border:10px solid #000;border-image:url(b.png) 30 fill");
+        check(Key(frame, "slice") == "[30,30,30,30]" && Key(frame, "bw") == "[10,10,10,10]" && !frame.Contains(" mid=0", StringComparison.Ordinal),
+            "border-image with number slices is one nine-slice IMG, its middle drawn with fill - " + Op(frame, "IMG"));
+        check(Bg("border:10px solid #000;border-image:url(b.png) 30").Contains(" mid=0", StringComparison.Ordinal), "without fill the middle is not drawn, as CSS");
+        check(Key(Bg("border:10px solid #000;border-image:url(b.png) 24 12;border-image-width:auto"), "bw") == "[24,12,24,12]",
+            "border-image-width: auto is the slices' own size");
+        check(Bg("border:10px solid #000;border-image:url(b.png) 25% fill").Contains(" uv=[0.25,0.25,0.75,0.75]", StringComparison.Ordinal),
+            "percentage slices stay exact as nine uv crops");
+        warned.Clear();
+        var rounded = Bg("border:10px solid #000;border-image:url(b.png) 30 round", warned);
+        check(Key(rounded, "slice") == "[30,30,30,30]" && Said(warned, "border-image-repeat: round"), "a tiled border image needs the picture's size: stretched, and said");
+
+        // -webkit-text-stroke is the label's outline
+        const string Label = "<div id=p style=\"width:120px;height:20px\">Ag</div>";
+        check(Scene(Label, "#p{-webkit-text-stroke:2px #ff0000}").Contains(" ow=2 oc=#FF0000", StringComparison.Ordinal), "-webkit-text-stroke: 2px red is ow=2 oc=#FF0000");
+        check(Scene(Label, "#p{-webkit-text-stroke-width:1.5px;-webkit-text-stroke-color:#00ff00}").Contains(" ow=1.5 oc=#00FF00", StringComparison.Ordinal), "the two longhands");
+        check(Scene(Label, "#p{-webkit-text-stroke:thin}").Contains(" ow=1 oc=#EEEEEE", StringComparison.Ordinal), "the colour defaults to the text's own");
+        check(Scene(Label, "#p{color:#123456;-webkit-text-fill-color:transparent;-webkit-text-stroke:1px}").Contains(" oc=#123456", StringComparison.Ordinal),
+            "hollow lettering: a transparent fill still outlines in `color`");
+        check(Scene("<div id=w><div id=p style=\"width:120px;height:20px\">Ag</div></div>", "#w{-webkit-text-stroke:1px #ff0000}").Contains(" ow=1 oc=#FF0000", StringComparison.Ordinal),
+            "-webkit-text-stroke is inherited");
+        check(!Scene(Label, string.Empty).Contains(" ow=", StringComparison.Ordinal), "no stroke, no outline");
+        check(Scene("<svg id=p width=80 height=50><text x=\"4\" y=\"20\" font-size=\"12\" fill=\"#ffffff\" stroke=\"#ff0000\" stroke-width=\"2\">Ag</text></svg>", string.Empty)
+                .Contains(" ow=2 oc=#FF0000", StringComparison.Ordinal),
+            "a stroke on SVG text is the same outline");
+
+        // repeating gradients are one period the scene repeats
+        var diagonal = Bg("background:repeating-linear-gradient(45deg,#ff0000 0 6px,#0000ff 6px 12px)");
+        check(diagonal.Contains(" spread=repeat", StringComparison.Ordinal) && !diagonal.Contains("CP id=cut", StringComparison.Ordinal)
+              && diagonal.Contains("stops=[[0,#FF0000],[0.5,#FF0000],[0.5,#0000FF],[1,#0000FF]]", StringComparison.Ordinal),
+            "diagonal hard-edged stripes are one period with spread=repeat, no clip per stripe - " + Op(diagonal, "GL"));
+        var ramp = Bg("background:repeating-linear-gradient(to right,#ff0000 0,#0000ff 16px)");
+        check(ramp.Contains(" spread=repeat", StringComparison.Ordinal) && ramp.Contains(" x1=0 y1=0.5 x2=0.2 y2=0.5", StringComparison.Ordinal),
+            "a repeating ramp's line is one 16px period of an 80px box - " + Op(ramp, "GL"));
+        var rings = Bg("background:repeating-radial-gradient(circle,#ff0000 0 6px,#0000ff 6px 12px)");
+        check(rings.Contains(" spread=repeat", StringComparison.Ordinal) && Key(rings, "r") == "0.15",
+            "repeating-radial rings: the ray cut to one 12px period (12 / 80) - " + Op(rings, "GR"));
+        var reflect = Scene("<svg id=p width=80 height=50><defs><linearGradient id=g spreadMethod=\"reflect\" x2=\"0.25\"><stop offset=\"0\" stop-color=\"#ff0000\"/><stop offset=\"1\" stop-color=\"#0000ff\"/></linearGradient></defs>"
+                            + "<rect width=\"80\" height=\"50\" fill=\"url(#g)\"/></svg>", string.Empty);
+        check(reflect.Contains(" spread=reflect", StringComparison.Ordinal), "SVG spreadMethod=reflect is spread=reflect");
+
+        // mask-repeat: an axis-aligned mask tile repeats as its own ramp
+        var tiled = Bg("background:#22aa44;mask-image:linear-gradient(#000,transparent);mask-size:100% 10px");
+        check(tiled.Contains(" spread=repeat", StringComparison.Ordinal), "a 10px mask tile along its gradient repeats (mask-repeat's initial value) - " + Op(tiled, "GL"));
+        check(!Bg("background:#22aa44;mask-image:linear-gradient(#000,transparent);mask-size:100% 10px;mask-repeat:no-repeat").Contains(" spread=", StringComparison.Ordinal),
+            "mask-repeat: no-repeat does not");
+        warned.Clear();
+        Bg("background:#22aa44;mask-image:linear-gradient(45deg,#000,transparent);mask-size:20px 20px", warned);
+        check(Said(warned, "mask-repeat"), "a diagonal mask tiled on a lattice is not one repeated ramp: said");
     }
 
     /// <summary>The y of the first decoration stroke in the scene, or NaN when none was drawn.</summary>

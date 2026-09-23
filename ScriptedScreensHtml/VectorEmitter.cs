@@ -222,7 +222,7 @@ internal static class VectorEmitter
     {
         "background", "border", "padding", "margin", "width", "height", "min-", "max-", "position", "top", "left",
         "right", "bottom", "inset", "transform", "translate", "rotate", "scale", "animation", "transition",
-        "text-decoration", "text-shadow", "text-transform", "text-overflow", "opacity", "outline", "box-shadow",
+        "text-decoration", "text-shadow", "text-transform", "text-overflow", "opacity", "outline", "box-shadow", "-webkit-text-stroke",
         "overflow", "clip", "filter", "visibility", "z-index", "order", "align-self", "display", "writing-mode",
         "mask", "flex-grow",
     };
@@ -719,7 +719,8 @@ internal static class VectorEmitter
             {
                 bg = Color.clear; bgCss = null; // drawn as a repeat of stripes (marching when animated)
             }
-            if (bgCss != null && bgCss.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) bgCss = ExpandRepeating(bgCss, w, h);
+            string? spread = null;
+            if (bgCss != null && bgCss.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) { bgCss = ExpandRepeating(bgCss, w, h, out var once); spread = once ? "repeat" : null; }
             var shadow = (css.TryGetValue("box-shadow", out var shCss) ? Shadows(shCss) : string.Empty) + filterShadow;
             var imageUrl = bgCss != null ? UrlOf(bgCss) : null;
             var layered = bgCss != null && imageUrl == null && bgCss.IndexOf("gradient(", StringComparison.OrdinalIgnoreCase) >= 0 && TopLevelCommas(bgCss) > 0;
@@ -751,10 +752,11 @@ internal static class VectorEmitter
                     var gradient = layer.Substring(0, close + 1).Trim();
                     LayerBox(layer.Substring(close + 1), w, h, out var lx, out var ly, out var lw, out var lh);
                     if (lw <= 0.01f || lh <= 0.01f) continue;
-                    if (gradient.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) gradient = ExpandRepeating(gradient, lw, lh);
+                    string? layerSpread = null;
+                    if (gradient.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) { gradient = ExpandRepeating(gradient, lw, lh, out var once); layerSpread = once ? "repeat" : null; }
                     if (gradient.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase))
-                        GradientBox(ctx, gradient, x + lx, y + ly, lw, lh, F(lw), F(lh), rs, indent, ve, xform, string.Empty);
-                    else if (gradient.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) && RadialDef(ctx, gradient) is { } lrid)
+                        GradientBox(ctx, gradient, x + lx, y + ly, lw, lh, F(lw), F(lh), rs, indent, ve, xform, string.Empty, layerSpread);
+                    else if (gradient.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) && RadialDef(ctx, gradient, layerSpread) is { } lrid)
                     {
                         ctx.Body.Append(indent).Append("R x=").AppendNum(x + lx).Append(" y=").AppendNum(y + ly).Append(" w=").AppendNum(lw).Append(" h=").AppendNum(lh)
                             .Append(" f=@").Append(lrid).Append('\n');
@@ -777,7 +779,7 @@ internal static class VectorEmitter
                 var it = origin == "border-box" ? 0f : rs.borderTopWidth + (origin == "content-box" ? rs.paddingTop : 0f);
                 var ir = origin == "border-box" ? 0f : rs.borderRightWidth + (origin == "content-box" ? rs.paddingRight : 0f);
                 var ib = origin == "border-box" ? 0f : rs.borderBottomWidth + (origin == "content-box" ? rs.paddingBottom : 0f);
-                EmitImage(ctx, imageUrl, BackgroundFit(css), BackgroundPosition(css), "background-position", rs, x + il, y + it, Mathf.Max(1f, w - il - ir), Mathf.Max(1f, h - it - ib), indent, bg.a > 0.002f ? null : ve);
+                BackgroundPicture(ctx, css, rs, imageUrl, x + il, y + it, Mathf.Max(1f, w - il - ir), Mathf.Max(1f, h - it - ib), indent, bg.a > 0.002f ? null : ve, Pixelated(ctx, ve, css));
             }
             else if (ColourTimeline(ctx, ve) is { } ka)
             {
@@ -807,7 +809,7 @@ internal static class VectorEmitter
                         .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=").AppendHex(bg.a > 0.002f ? bg : new Color(0f, 0f, 0f, 1f / 255f)).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                     ctx.Out.Nodes++;
                 }
-                var tileDef = bgCss.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) ? RadialDef(ctx, bgCss)
+                var tileDef = bgCss.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) ? RadialDef(ctx, bgCss, spread)
                     : bgCss.StartsWith("conic-gradient", StringComparison.OrdinalIgnoreCase) ? ConicDef(ctx, bgCss)
                     : null;
                 for (var ty = 0; ty < bny; ty++)
@@ -822,12 +824,12 @@ internal static class VectorEmitter
                             ctx.Out.Nodes++;
                         }
                         else if (bgCss.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase))
-                            GradientBox(ctx, bgCss, gx, gy, blw, blh, F(blw), F(blh), rs, indent, ve, xform, string.Empty);
+                            GradientBox(ctx, bgCss, gx, gy, blw, blh, F(blw), F(blh), rs, indent, ve, xform, string.Empty, spread);
                     }
             }
             else if (bgCss != null && bgCss.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase))
             {
-                GradientBox(ctx, bgCss, x, y, w, h, ws ?? F(w), hs ?? F(h), rs, indent, ve, xform, shadow);
+                GradientBox(ctx, bgCss, x, y, w, h, ws ?? F(w), hs ?? F(h), rs, indent, ve, xform, shadow, spread);
             }
             else if (bgCss != null && bgCss.StartsWith("conic-gradient", StringComparison.OrdinalIgnoreCase) && ConicDef(ctx, bgCss) is { } cid)
             {
@@ -835,7 +837,7 @@ internal static class VectorEmitter
                     .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=@").Append(cid).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
                 ctx.Out.Nodes++;
             }
-            else if (bgCss != null && bgCss.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) && RadialDef(ctx, bgCss) is { } rid)
+            else if (bgCss != null && bgCss.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase) && RadialDef(ctx, bgCss, spread) is { } rid)
             {
                 ctx.Body.Append(indent).Append("R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendVal(ws, w).Append(" h=").AppendVal(hs, h)
                     .AppendRadius(rs, w, h, 0f, Keeps(ctx, ve)).Append(" f=@").Append(rid).Append(shadow).AppendNodeId(ctx, ve).Append('\n');
@@ -881,7 +883,7 @@ internal static class VectorEmitter
             var styles = SideStyles(css);
             var bstyle = styles[0];
             var mixed = styles[0] != styles[1] || styles[0] != styles[2] || styles[0] != styles[3];
-            if (BorderImage(ctx, css, rs, x, y, w, h, indent))
+            if (BorderImage(ctx, css, rs, x, y, w, h, indent, ve))
             {
                 // border-image replaces the border: a gradient stroke, or nine image slices
             }
@@ -1012,7 +1014,7 @@ internal static class VectorEmitter
                 var src = inode.Attr("src") ?? FirstOfSrcset(inode.Attr("srcset"));
                 if (src != null)
                     EmitImage(ctx, src, css.TryGetValue("object-fit", out var of) ? of.Trim() : "fill",
-                        css.TryGetValue("object-position", out var opos) ? opos : null, "object-position", rs, x, y, w, h, indent, ve);
+                        css.TryGetValue("object-position", out var opos) ? PictureAt(opos) : null, rs, x, y, w, h, indent, ve, point: Pixelated(ctx, ve, css));
                 break;
             }
             case Label when ctx.Built.NodeOf.TryGetValue(ve, out var mnode) && mnode.Attr("data-marker") is { } markerShape:
@@ -1896,7 +1898,8 @@ internal static class VectorEmitter
     /// units. The size keywords are approximated by a radius: farthest-corner (the CSS
     /// default) reaches the box corner, closest-side stops at the nearer edge.
     /// </summary>
-    private static string? RadialDef(Ctx ctx, string css)
+    /// <param name="spread">`repeat` for one period of a repeating gradient that starts at the centre: the ray is cut to the period so the scene repeats it.</param>
+    private static string? RadialDef(Ctx ctx, string css, string? spread = null)
     {
         var open = css.IndexOf('(');
         var close = css.LastIndexOf(')');
@@ -1928,18 +1931,23 @@ internal static class VectorEmitter
             stops.Add((pos, c));
         }
         if (stops.Count < 2) return null;
+        var period = spread != null ? stops[stops.Count - 1].at : 1f;
+        if (period < 0.0005f) { period = 1f; spread = null; }
         var id = ctx.NextId("rad");
-        ctx.Defs.Append("  GR id=").Append(id).Append(" units=bbox cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" r=").AppendNum(r).Append(" stops=[");
+        ctx.Defs.Append("  GR id=").Append(id).Append(" units=bbox cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" r=").AppendNum(r * period);
+        if (spread != null) ctx.Defs.Append(" spread=").Append(spread);
+        ctx.Defs.Append(" stops=[");
         for (var i = 0; i < stops.Count; i++)
         {
             if (i > 0) ctx.Defs.Append(',');
-            ctx.Defs.Append('[').AppendNum(stops[i].at).Append(',').AppendHex(stops[i].c).Append(']');
+            ctx.Defs.Append('[').AppendNum(stops[i].at / period).Append(',').AppendHex(stops[i].c).Append(']');
         }
         ctx.Defs.Append("]\n");
         return id;
     }
 
-    private static void GradientBox(Ctx ctx, string css, float x, float y, float w, float h, string ws, string hs, OffThread.Box rs, string indent, VisualElement ve, Xform? xf, string shadow = "")
+    /// <param name="spread">`repeat` for one period of a repeating gradient: one def the scene repeats, which cuts its own hard edges.</param>
+    private static void GradientBox(Ctx ctx, string css, float x, float y, float w, float h, string ws, string hs, OffThread.Box rs, string indent, VisualElement ve, Xform? xf, string shadow = "", string? spread = null)
     {
         var parsed = ParseGradient(css);
         if (parsed == null) return;
@@ -1960,7 +1968,7 @@ internal static class VectorEmitter
         var dy = -Mathf.Cos(rad) * len * 0.5f / h;
         var rect = " x=" + F(x) + " y=" + F(y) + " w=" + ws + " h=" + hs + Radius(rs, w, h) + shadow;
 
-        if (cuts.Count == 0)
+        if (cuts.Count == 0 || spread != null)
         {
             // one colour at every stop is a flat fill: a multi-stop def is refined into many
             // triangles (a rounded box went from 30 vertices to ~21,000), for nothing
@@ -1973,7 +1981,7 @@ internal static class VectorEmitter
                 return;
             }
             var gid = ctx.NextId("grad");
-            GradientDefLine(ctx, gid, dx, dy, 0f, 1f, stops);
+            GradientDefLine(ctx, gid, dx, dy, 0f, 1f, stops, spread);
             ctx.Body.Append(indent).Append('R').Append(rect).Append(" f=@").Append(gid).AppendNodeId(ctx, ve).Append('\n');
             ctx.Out.Nodes++;
             return;
@@ -2058,7 +2066,7 @@ internal static class VectorEmitter
     }
 
     /// <summary>A GL def along the CSS gradient line (dx, dy from the centre), spanning parameters p0..p1.</summary>
-    private static void GradientDefLine(Ctx ctx, string id, float dx, float dy, float p0, float p1, List<(float at, Color c)> stops)
+    private static void GradientDefLine(Ctx ctx, string id, float dx, float dy, float p0, float p1, List<(float at, Color c)> stops, string? spread = null)
     {
         var ax = 0.5f - dx; var ay = 0.5f - dy;
         var bx = 0.5f + dx; var by = 0.5f + dy;
@@ -2080,7 +2088,10 @@ internal static class VectorEmitter
         var q1 = foldable ? p0 + (p1 - p0) * last : p1;
 
         ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").AppendNum(ax + (bx - ax) * q0).Append(" y1=").AppendNum(ay + (by - ay) * q0)
-            .Append(" x2=").AppendNum(ax + (bx - ax) * q1).Append(" y2=").AppendNum(ay + (by - ay) * q1).Append(" stops=[");
+            .Append(" x2=").AppendNum(ax + (bx - ax) * q1).Append(" y2=").AppendNum(ay + (by - ay) * q1);
+        // a repeating gradient's one period: the fold above made the ramp exactly that period
+        if (spread != null) ctx.Defs.Append(" spread=").Append(spread);
+        ctx.Defs.Append(" stops=[");
         for (var i = 0; i < stops.Count; i++)
         {
             if (i > 0) ctx.Defs.Append(',');
@@ -2184,7 +2195,39 @@ internal static class VectorEmitter
         return false;
     }
 
-    private static readonly string[] InheritedText = { "font-family", "font-weight", "font-style", "font-variant-numeric", "letter-spacing", "word-spacing", "line-height", "text-transform", "text-align", "text-align-last", "white-space", "text-shadow", "text-emphasis-style", "text-emphasis-color", "text-emphasis-position", "font-variant-caps", "text-indent", "font-synthesis", "font-variant", "overflow-wrap", "word-wrap", "text-underline-position" };
+    private static readonly string[] InheritedText = { "font-family", "font-weight", "font-style", "font-variant-numeric", "letter-spacing", "word-spacing", "line-height", "text-transform", "text-align", "text-align-last", "white-space", "text-shadow", "text-emphasis-style", "text-emphasis-color", "text-emphasis-position", "font-variant-caps", "text-indent", "font-synthesis", "font-variant", "overflow-wrap", "word-wrap", "text-underline-position", "-webkit-text-stroke", "-webkit-text-stroke-width", "-webkit-text-stroke-color" };
+
+    /// <summary>
+    /// -webkit-text-stroke and its two longhands as the T node's outline width and colour. The
+    /// colour defaults to currentcolor - the `color` property, not the glyphs' fill: with
+    /// `-webkit-text-fill-color: transparent` (hollow lettering) the fill is clear and the outline
+    /// still takes `color`, which the record then has to supply since the label's own colour is the fill.
+    /// </summary>
+    private static (float width, Color colour) TextStroke(Ctx ctx, VisualElement label, Dictionary<string, string> css, Color fill)
+    {
+        var width = 0f;
+        Color? colour = null;
+        static float Width(string t) => t.Trim() switch { "thin" => 1f, "medium" => 3f, "thick" => 5f, var v => StyleApplier.Num(v) };
+        if (css.TryGetValue("-webkit-text-stroke", out var shorthand))
+            foreach (var part in CssParser.SplitTopLevel(shorthand.Trim(), ' '))   // width and colour in either order; rgb() keeps its spaces
+            {
+                if (part.Trim().Length == 0) continue;
+                if (StyleApplier.TryColor(part.Trim(), out var c)) colour = c;
+                else width = Width(part);
+            }
+        if (css.TryGetValue("-webkit-text-stroke-width", out var sw)) width = Width(sw);
+        if (css.TryGetValue("-webkit-text-stroke-color", out var sc) && StyleApplier.TryColor(sc.Trim(), out var c2)) colour = c2;
+        if (width <= 0.001f) return (0f, fill);
+        if (colour != null) return (width, colour.Value);
+        for (VisualElement? e = label; e != null; e = e.parent)
+            if (ctx.Built.CssOf(e).TryGetValue("-webkit-text-fill-color", out _))
+            {
+                for (VisualElement? p = label; p != null; p = p.parent)
+                    if (ctx.Built.CssOf(p).TryGetValue("color", out var cc) && StyleApplier.TryColor(cc.Trim(), out var own)) return (width, own);
+                return (width, Color.black);   // CSS's initial colour
+            }
+        return (width, fill);
+    }
 
     /// <summary>The label's record with the inherited text properties filled in from its ancestors (a copy only when something is added).</summary>
     private static Dictionary<string, string> WithInherited(Ctx ctx, VisualElement ve, Dictionary<string, string> css)
@@ -2438,6 +2481,8 @@ internal static class VectorEmitter
             sb.Append(Shadows(tsh)); // every shadow: extra ones are extra labels on the vector side (requirement 4)
         else if (css.TryGetValue("filter", out var tfl) && Filters(ctx, tfl, out _, out var tShadow) && tShadow.Length > 0)
             sb.Append(tShadow);
+        if (TextStroke(ctx, label, css, rs.color) is var (strokeW, strokeC) && strokeW > 0.001f && strokeC.a > 0.002f)
+            sb.Append(" ow=").AppendNum(strokeW).Append(" oc=").AppendHex(strokeC);   // -webkit-text-stroke: the text engine's outline, centred on the glyph edge as a browser draws it
         // ::first-line: on a wrapped label the vector mod restyles the first line (vector
         // requirement 15); on a single line the whole text is the first line.
         var fl = PseudoCss(ctx, label, "first-line");
@@ -2916,6 +2961,7 @@ internal static class VectorEmitter
             var pax = par.Contains("xmin") ? 0f : par.Contains("xmax") ? 1f : 0.5f;
             var pay = par.Contains("ymin") ? 0f : par.Contains("ymax") ? 1f : 0.5f;
             if (ifit != "fill" && (pax != 0.5f || pay != 0.5f)) sb.Append(" at=[").AppendNum(pax).Append(',').AppendNum(pay).Append(']');
+            if (shape.Attr("image-rendering") is { } ir && Lower(ir) is "pixelated" or "crisp-edges" or "optimizespeed") sb.Append(" smp=point");
             if (opacity != null) sb.Append(" o=").Append(Expr(opacity));
             for (var i = 0; i < wrappers; i++) sb.Append(" }");
             ctx.Body.Append(sb).Append('\n');
@@ -3193,6 +3239,12 @@ internal static class VectorEmitter
         sb.Append(" f=").Append(Paint(fill, prefix));
         var fo = Mul(shape.Attr("fill-opacity"), opacity);
         if (fo != null) sb.Append(" fo=").Append(fo);
+        // a stroke on text is the text engine's outline, centred on the glyph edge as SVG strokes are
+        if (shape.Attr("stroke") is { } stroke && StyleApplier.TryColor(stroke.Trim(), out var sc) && sc.a > 0.002f)
+        {
+            if (shape.Attr("stroke-opacity") is { } so) sc.a *= StyleApplier.Num(so);
+            sb.Append(" ow=").AppendNum(StyleApplier.Num(shape.Attr("stroke-width") ?? "1") * (fit.Bake ? (fit.Sx + fit.Sy) * 0.5f : 1f)).Append(" oc=").AppendHex(sc);
+        }
         if (shape.Attr("font-family") is { } fam)
         {
             var first = fam.Split(',')[0].Trim().Trim('"', '\'');
@@ -3243,6 +3295,8 @@ internal static class VectorEmitter
                 .Append(" x1=").AppendNum(Fraction(g.Attr("x1") ?? "0")).Append(" y1=").AppendNum(Fraction(g.Attr("y1") ?? "0"))
                 .Append(" x2=").AppendNum(Fraction(g.Attr("x2") ?? "100%")).Append(" y2=").AppendNum(Fraction(g.Attr("y2") ?? "0"));
         }
+        // spreadMethod is the node's spread, word for word; pad is the default of both
+        if (g.Attr("spreadMethod") is { } spread && Lower(spread) is "repeat" or "reflect") ctx.Defs.Append(" spread=").Append(Lower(spread));
         ctx.Defs.Append(" stops=[").Append(stops).Append("]\n");
     }
 
@@ -3786,18 +3840,32 @@ internal static class VectorEmitter
     // ---------------------------------------------------------------- Batch C helpers
 
     /// <summary>IMG node (vector requirement 9): a picture in scene order with fit, position and the box's radii.</summary>
-    /// <param name="position">A CSS position for the picture in the room its fit leaves, or null for centred.</param>
-    /// <param name="property">The property <paramref name="position"/> came from, for the warning.</param>
+    /// <param name="place">Where the picture sits (<see cref="PictureAt"/>), or null for centred.</param>
     /// <param name="idOf">The element whose id the image carries, or null for none.</param>
-    private static void EmitImage(Ctx ctx, string src, string fit, string? position, string property, OffThread.Box rs, float x, float y, float w, float h, string indent, VisualElement? idOf)
+    /// <param name="tile">`tw,th` to repeat the picture at that size across the box (`0,0` its natural size), or null for once.</param>
+    /// <param name="point">image-rendering: pixelated / crisp-edges - hard-edged texels.</param>
+    /// <param name="radii">False when the box is not the element's, so its corners are not the element's either.</param>
+    private static void EmitImage(Ctx ctx, string src, string fit, (float ax, float ay, float ox, float oy)? place, OffThread.Box rs, float x, float y, float w, float h, string indent, VisualElement? idOf,
+                                  string? tile = null, bool point = false, bool radii = true)
     {
-        var f = fit switch { "cover" => "cover", "contain" or "scale-down" => "contain", _ => "fill" };
+        // object-fit maps one to one onto the node's fit; anything else is CSS's initial `fill`
+        var f = fit is "cover" or "contain" or "none" or "scale-down" ? fit : "fill";
         src = HtmlRenderer.ResolveUrl(src, ctx.Built);
         ctx.Body.Append(indent).Append("IMG x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
-            .Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append("\" fit=").Append(f).AppendRadius(rs, w, h, 0f, false);
-        // under fill nothing is left free, so a position places nothing (and the node ignores it)
-        if (f != "fill" && position != null && PictureAt(ctx, position, property) is var (ax, ay) && (ax != 0.5f || ay != 0.5f))
-            ctx.Body.Append(" at=[").AppendNum(ax).Append(',').AppendNum(ay).Append(']');
+            .Append(" src=\"").Append(src.Replace("\"", string.Empty)).Append('"');
+        if (tile != null) ctx.Body.Append(" tile=[").Append(tile).Append(']');   // fit does not apply to a tiled picture
+        else ctx.Body.Append(" fit=").Append(f);
+        if (radii) ctx.Body.AppendRadius(rs, w, h, 0f, false);
+        if (place is var (ax, ay, ox, oy))
+        {
+            // under fill the room is zero, so a fraction places nothing (and the node ignores it) -
+            // but a length still moves the picture, in a browser as here
+            if ((tile != null || f != "fill") && (ax != 0.5f || ay != 0.5f))
+                ctx.Body.Append(" at=[").AppendNum(ax).Append(',').AppendNum(ay).Append(']');
+            if (Mathf.Abs(ox) > 0.001f || Mathf.Abs(oy) > 0.001f)
+                ctx.Body.Append(" off=[").AppendNum(ox).Append(',').AppendNum(oy).Append(']');
+        }
+        if (point) ctx.Body.Append(" smp=point");
         if (rs.opacity < 0.999f) ctx.Body.Append(" o=").AppendNum(rs.opacity);
         if (idOf != null) ctx.Body.AppendNodeId(ctx, idOf);
         ctx.Body.Append('\n');
@@ -3805,19 +3873,13 @@ internal static class VectorEmitter
     }
 
     /// <summary>
-    /// A CSS position (object-position, a picture's background-position) as the IMG node's `at`:
-    /// where the picture sits in the room its fit leaves, as fractions of that room. A CSS
-    /// percentage is already exactly that fraction, so keywords and percentages map one to one,
-    /// in the one-, two- and edge-offset (`right 10px bottom 20%`) forms and through calc().
+    /// A CSS position (object-position, a picture's background-position) as the IMG node's `at`
+    /// and `off`. A percentage is the fraction of the room the fit leaves, which is what `at` is,
+    /// and a length is scene units added after it, which is what `off` is - so keywords,
+    /// percentages, lengths, the edge-offset form (`right 10px bottom 20%`) and calc() are all
+    /// exact: `calc(100% - 10px)` is at 1, off -10. Nothing here divides, so never a NaN.
     /// </summary>
-    /// <remarks>
-    /// A LENGTH is an offset in px, and as a fraction it is the offset divided by the free space,
-    /// which depends on the picture's own size - and only the vector layer ever learns that, once it
-    /// has loaded the file after the scene was sent. So the length part is left out and said, once,
-    /// rather than divided by a guess; a zero length is exact and says nothing. Never a NaN: nothing
-    /// here divides, and a room of zero ignores whatever fraction it is given.
-    /// </remarks>
-    private static (float ax, float ay) PictureAt(Ctx ctx, string position, string property)
+    private static (float ax, float ay, float ox, float oy) PictureAt(string position)
     {
         float fx = 0.5f, fy = 0.5f, lx = 0f, ly = 0f;
         // per axis: 0 unset, 1 set, 2 set by `center` - which moves to the other axis if a keyword
@@ -3854,9 +3916,7 @@ internal static class VectorEmitter
             else if (sx == 0) { if (Lp(t, out fx, out lx)) sx = 1; else fx = 0.5f; }
             else { if (Lp(t, out fy, out ly)) sy = 1; else fy = 0.5f; }
         }
-        if (Mathf.Abs(lx) > 0.001f || Mathf.Abs(ly) > 0.001f)
-            Warn(ctx, $"html: {property}: {position.Trim()} - the length part is not applied: as a fraction of the free room it needs the picture's own size, which only the vector layer learns; percentages and keywords are exact");
-        return (fx, fy);
+        return (fx, fy, lx, ly);
     }
 
     /// <summary>
@@ -3938,19 +3998,138 @@ internal static class VectorEmitter
         return url.Length > 0 ? url : null;
     }
 
-    /// <summary>background-size to an IMG fit: cover, contain, "100% 100%" fills, anything else keeps the picture's proportions.</summary>
-    private static string BackgroundFit(Dictionary<string, string> css)
+    /// <summary>
+    /// A picture background: background-size, -repeat and -position onto one IMG node's fit, `tile`,
+    /// `at` and `off`, in the positioning area (x, y, w, h).
+    /// </summary>
+    /// <remarks>
+    /// Exact: `cover`; `contain` once; the picture's own size (`auto`, CSS's initial value) once or
+    /// repeated both ways; and a size in lengths or percentages under repeat, repeat-x, repeat-y,
+    /// round and no-repeat - round is the tile size a browser rounds to, and a repeat on one axis is
+    /// a box one tile deep on the other. Not exact, and said once: a size with one `auto` (it keeps
+    /// the picture's proportions), `contain` or the own size repeated on one axis only, rounded or
+    /// spaced, and `space` with room for more than one copy. The first three need the picture's own
+    /// size, which only the vector layer learns once it has loaded the file; the last needs gaps
+    /// between copies, which `tile` has no key for.
+    /// </remarks>
+    private static void BackgroundPicture(Ctx ctx, Dictionary<string, string> css, OffThread.Box rs, string url, float x, float y, float w, float h,
+                                          string indent, VisualElement? idOf, bool point)
     {
-        string? bs = null;
-        if (css.TryGetValue("background-size", out var explicitSize)) bs = explicitSize;
-        // "center / contain no-repeat" - the slash outside the url(), whose https:// has two of its own
-        else if (css.TryGetValue("background", out var shorthand) && CssParser.SplitTopLevel(shorthand, '/') is { Count: > 1 } halves)
-            bs = halves[1].Trim().Split(' ')[0];
-        if (bs == null) return "contain";
-        var v = bs.Trim().ToLowerInvariant();
-        if (v == "cover") return "cover";
-        if (v == "contain" || v == "auto") return "contain";
-        return "fill";
+        BackgroundSizeRepeat(css, out var size, out var repeat);
+        var place = PictureAt(BackgroundPosition(css));
+        // one keyword is both axes, repeat-x and repeat-y are one each, two keywords are x then y
+        var rp = repeat.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var rx = rp.Length == 0 ? "repeat" : rp[0] == "repeat-x" ? "repeat" : rp[0] == "repeat-y" ? "no-repeat" : rp[0];
+        var ry = rp.Length == 0 ? "repeat" : rp[0] == "repeat-x" ? "no-repeat" : rp[0] == "repeat-y" ? "repeat" : rp.Length > 1 ? rp[1] : rp[0];
+        var once = rx == "no-repeat" && ry == "no-repeat";
+        var sp = CssParser.SplitTopLevel(size, ' ');   // calc() keeps its spaces
+        sp.RemoveAll(p => p.Length == 0);
+        var keyword = sp.Count > 0 && sp[0] is "cover" or "contain" ? sp[0] : null;
+        static float Dim(string t, float full)
+        {
+            if (t == "auto") return float.NaN;
+            if (t.StartsWith("calc(", StringComparison.Ordinal)) { StyleApplier.Calc(t, out var px, out var pct); return px + pct / 100f * full; }
+            return t.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(t) / 100f * full : StyleApplier.Num(t);
+        }
+        var tw = keyword == null && sp.Count > 0 ? Dim(sp[0], w) : float.NaN;
+        var th = keyword == null && sp.Count > 1 ? Dim(sp[1], h) : float.NaN;
+
+        // cover leaves no room for a second copy, so its repeat changes nothing
+        if (keyword == "cover" || (keyword == "contain" && once))
+        {
+            EmitImage(ctx, url, keyword, place, rs, x, y, w, h, indent, idOf, null, point);
+            return;
+        }
+        if (keyword == null && float.IsNaN(tw) && float.IsNaN(th))
+        {
+            // the picture's own size, one scene unit per texel as CSS draws one px per image pixel
+            var both = rx != "no-repeat" && ry != "no-repeat";
+            if (!once && !(rx == "repeat" && ry == "repeat"))
+                Warn(ctx, $"html: background-repeat: {repeat} at the picture's own size needs that size, which only the vector layer learns; drawn {(both ? "repeated edge to edge" : "once")}");
+            EmitImage(ctx, url, "none", place, rs, x, y, w, h, indent, idOf, both ? "0,0" : null, point);
+            return;
+        }
+        if (keyword == "contain" || float.IsNaN(tw) || float.IsNaN(th))
+        {
+            Warn(ctx, keyword == "contain"
+                ? "html: background-size: contain with a repeat tiles copies across the room it leaves, which needs the picture's size - only the vector layer learns it; drawn once (no-repeat says so)"
+                : $"html: background-size: {size} keeps the picture's proportions on its auto side, which needs its size - only the vector layer learns it; drawn as contain");
+            EmitImage(ctx, url, "contain", place, rs, x, y, w, h, indent, idOf, null, point);
+            return;
+        }
+        if (tw <= 0.01f || th <= 0.01f) return;   // a zero size draws nothing, in a browser too
+
+        // round: the size a browser rescales the tile to so a whole number of copies fills the area
+        if (rx == "round") tw = w / Mathf.Max(1f, Mathf.Round(w / tw));
+        if (ry == "round") th = h / Mathf.Max(1f, Mathf.Round(h / th));
+        // the anchor copy, as CSS places it: the percentage of the room left, then the length
+        var px = (w - tw) * place.ax + place.ox;
+        var py = (h - th) * place.ay + place.oy;
+        // space: with room for one copy it is placed like no-repeat; with more, the first touches the
+        // start edge and the rest are spread out with gaps the node cannot draw
+        if (rx == "space") { if (Mathf.Floor(w / tw) < 2f) rx = "no-repeat"; else { px = 0f; rx = "repeat"; if (w - Mathf.Floor(w / tw) * tw > 0.01f) Warn(ctx, "html: background-repeat: space spreads copies apart with gaps, which the scene has no key for; drawn edge to edge from the start"); } }
+        if (ry == "space") { if (Mathf.Floor(h / th) < 2f) ry = "no-repeat"; else { py = 0f; ry = "repeat"; if (h - Mathf.Floor(h / th) * th > 0.01f) Warn(ctx, "html: background-repeat: space spreads copies apart with gaps, which the scene has no key for; drawn edge to edge from the start"); } }
+        if (Mathf.Abs(tw - w) < 0.01f && Mathf.Abs(th - h) < 0.01f && Mathf.Abs(px) < 0.01f && Mathf.Abs(py) < 0.01f)
+        {
+            EmitImage(ctx, url, "fill", null, rs, x, y, w, h, indent, idOf, null, point);   // 100% 100%: one copy is the area
+            return;
+        }
+        // An axis that repeats spans the area; one that does not is one copy deep, cut by the area,
+        // since `tile` lays copies in every direction and only the box stops them.
+        float x0 = 0f, x1 = w, y0 = 0f, y1 = h;
+        if (rx == "no-repeat") { x0 = Mathf.Max(0f, px); x1 = Mathf.Min(w, px + tw); }
+        if (ry == "no-repeat") { y0 = Mathf.Max(0f, py); y1 = Mathf.Min(h, py + th); }
+        if (x1 - x0 < 0.01f || y1 - y0 < 0.01f) return;   // placed wholly outside the area
+        var sub = x0 > 0.01f || y0 > 0.01f || x1 < w - 0.01f || y1 < h - 0.01f;
+        var tile = F(tw) + "," + F(th);
+        (float ax, float ay, float ox, float oy) at = (0f, 0f, px - x0, py - y0);   // the anchor copy, from the box's corner
+        if (sub && Radii(rs, w, h, 0f, out _, out _, out _, out _))
+        {
+            // a box smaller than the area does not have the area's rounded corners: cut by them instead
+            var cid = ctx.NextId("bgclip");
+            ctx.Defs.Append("  CP id=").Append(cid).Append(" { R x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h).AppendRadius(rs, w, h).Append(" }\n");
+            ctx.Body.Append(indent).Append("G clip=").Append(cid).Append(" {\n");
+            EmitImage(ctx, url, "fill", at, rs, x + x0, y + y0, x1 - x0, y1 - y0, indent + "  ", idOf, tile, point, radii: false);
+            ctx.Body.Append(indent).Append("}\n");
+            return;
+        }
+        EmitImage(ctx, url, "fill", at, rs, x + x0, y + y0, x1 - x0, y1 - y0, indent, idOf, tile, point, radii: !sub);
+    }
+
+    /// <summary>background-size and background-repeat: the longhands, else the words of the `background` shorthand.</summary>
+    private static void BackgroundSizeRepeat(Dictionary<string, string> css, out string size, out string repeat)
+    {
+        size = css.TryGetValue("background-size", out var s) ? s.Trim().ToLowerInvariant() : string.Empty;
+        repeat = css.TryGetValue("background-repeat", out var r) ? r.Trim().ToLowerInvariant() : string.Empty;
+        if ((size.Length > 0 && repeat.Length > 0) || !css.TryGetValue("background", out var shorthand)) return;
+        // "center / contain no-repeat" - the slash outside the url(), whose https:// has two of its own;
+        // the size is the words straight after the one slash, the repeat keywords can be anywhere
+        var sizes = new StringBuilder();
+        var repeats = new StringBuilder();
+        var halves = CssParser.SplitTopLevel(shorthand, '/');
+        for (var half = 0; half < halves.Count; half++)
+        {
+            var leading = half == 1;
+            foreach (var word in CssParser.SplitTopLevel(halves[half], ' '))
+            {
+                var t = word.Trim().ToLowerInvariant();
+                if (t.Length == 0) continue;
+                if (t is "repeat" or "repeat-x" or "repeat-y" or "no-repeat" or "space" or "round") { repeats.Append(t).Append(' '); leading = false; }
+                else if (leading && (t is "auto" or "cover" or "contain" || char.IsDigit(t[0]) || t[0] == '.' || t.StartsWith("calc(", StringComparison.Ordinal))) sizes.Append(t).Append(' ');
+                else leading = false;
+            }
+        }
+        if (size.Length == 0) size = sizes.ToString().Trim();
+        if (repeat.Length == 0) repeat = repeats.ToString().Trim();
+    }
+
+    /// <summary>image-rendering: pixelated or crisp-edges, on the element or an ancestor - CSS inherits it.</summary>
+    private static bool Pixelated(Ctx ctx, VisualElement ve, Dictionary<string, string> css)
+    {
+        var v = css.TryGetValue("image-rendering", out var own) ? own : null;
+        for (var p = ve.parent; v == null && p != null; p = p.parent)
+            if (ctx.Built.CssOf(p).TryGetValue("image-rendering", out var inherited)) v = inherited;
+        return v != null && Lower(v) is "pixelated" or "crisp-edges" or "-moz-crisp-edges" or "optimizespeed";
     }
 
     private static string? FirstOfSrcset(string? srcset)
@@ -4113,9 +4292,18 @@ internal static class VectorEmitter
         return true;
     }
 
-    /// <summary>repeating-linear/radial-gradient(...) rewritten as the plain gradient with its stop list repeated to 100%; px stops are read against the gradient line.</summary>
-    private static string ExpandRepeating(string css, float w = 0f, float h = 0f)
+    /// <summary>
+    /// repeating-linear/radial-gradient(...) as the plain gradient, px stops read against the
+    /// gradient line (a radial one's ray, along x as RadialDef draws it). When <paramref name="spread"/>
+    /// comes back true it is ONE period, for the scene's `spread=repeat` to repeat: exact, seams
+    /// included, since the vector layer cuts the shape at every stop of every period, and one ramp
+    /// however many periods fit, where the list below made a stop - and on a hard edge a clip - per
+    /// period. A radial period that starts past its centre cannot be one ramp out from it, so that
+    /// alone is still the stop list repeated to 100%.
+    /// </summary>
+    private static string ExpandRepeating(string css, float w, float h, out bool spread)
     {
+        spread = false;
         var open = css.IndexOf('(');
         var close = css.LastIndexOf(')');
         if (open < 0 || close < open) return css;
@@ -4123,8 +4311,12 @@ internal static class VectorEmitter
         var args = SplitTopLevelCommas(css.Substring(open + 1, close - open - 1));
         var head = new List<string>();
         var stops = new List<(float at, string colour)>();
-        var rad = (args.Count > 0 && !StyleApplier.TryColor(args[0].Trim().Split(' ')[0], out _) ? GradientAngle(args[0]) : 180f) * Mathf.Deg2Rad;
-        var lineLen = Mathf.Max(1f, w * Mathf.Abs(Mathf.Sin(rad)) + h * Mathf.Abs(Mathf.Cos(rad)));
+        var shaped = args.Count > 0 && !StyleApplier.TryColor(args[0].Trim().Split(' ')[0], out _);
+        var radial = name.StartsWith("radial", StringComparison.OrdinalIgnoreCase);
+        var rad = (shaped && !radial ? GradientAngle(args[0]) : 180f) * Mathf.Deg2Rad;
+        var lineLen = Mathf.Max(1f, radial
+            ? (shaped && (args[0].Contains("closest-side") || args[0].Contains("farthest-side")) ? 0.5f : 0.7071f) * w
+            : w * Mathf.Abs(Mathf.Sin(rad)) + h * Mathf.Abs(Mathf.Cos(rad)));
         foreach (var raw in args)
         {
             var parts = raw.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -4154,8 +4346,9 @@ internal static class VectorEmitter
         }
         var period = stops[stops.Count - 1].at - stops[0].at;
         if (period <= 0.0001f) return name + css.Substring(open);
+        spread = !radial || stops[0].at < 0.0005f;
         var outStops = new List<string>();
-        for (var k = 0; stops[0].at + k * period < 1f && k < 64; k++)
+        for (var k = 0; stops[0].at + k * period < 1f && k < (spread ? 1 : 64); k++)
             foreach (var (at, colour) in stops)
                 outStops.Add(colour + " " + F(Mathf.Min(1f, at + k * period) * 100f) + "%");
         head.AddRange(outStops);
@@ -4224,11 +4417,11 @@ internal static class VectorEmitter
 
     /// <summary>
     /// border-image: a gradient source becomes a gradient stroke over the border box; an
-    /// image source becomes nine IMG slices with source crops (vector requirement 16).
-    /// Slices in percent are exact; a number/px slice needs the image size, which is not
-    /// known here, so it is read as thirds (the common nine-slice layout) and reported.
+    /// image source becomes one nine-slice IMG when its slices are numbers (texels, which is
+    /// what the node cuts by), or nine IMG crops when they are percentages (fractions, which is
+    /// what `uv` crops by). Both are exact; only a slice mixing the two is not, and is reported.
     /// </summary>
-    private static bool BorderImage(Ctx ctx, Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, float h, string indent)
+    private static bool BorderImage(Ctx ctx, Dictionary<string, string> css, OffThread.Box rs, float x, float y, float w, float h, string indent, VisualElement ve)
     {
         string? source = null;
         var sliceText = "100%";
@@ -4285,6 +4478,7 @@ internal static class VectorEmitter
                 w += o[1] + o[3]; h += o[0] + o[2];
             }
         }
+        var autoWidth = new bool[4];
         if (widthText != null)
         {
             var wp = widthText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -4292,7 +4486,7 @@ internal static class VectorEmitter
                 for (var i = 0; i < 4; i++)
                 {
                     var t = StyleApplier.SideOf(wp, i);
-                    if (t == "auto") continue;
+                    if (t == "auto") { autoWidth[i] = true; continue; }   // the slice's own size, where that is known
                     bw[i] = t.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(t) / 100f * (i % 2 == 0 ? h : w) : StyleApplier.IsNumber(t) ? StyleApplier.Num(t) * bw[i] : StyleApplier.Num(t);
                 }
         }
@@ -4334,23 +4528,59 @@ internal static class VectorEmitter
 
         var url = UrlOf(source);
         if (url == null) return false;
-        // slices as fractions of the image: top right bottom left
+        // border-image-repeat: round, repeat and space tile each edge at the slice's own proportions
+        // scaled to the border width, and a slice's proportions are the picture's - which only the
+        // vector layer learns, once it has loaded the file. Stretched, and said.
+        var repeatText = css.TryGetValue("border-image-repeat", out var bir) ? bir : shorthand ?? string.Empty;
+        foreach (var word in repeatText.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            if (word.Trim() is "round" or "repeat" or "space")
+            {
+                Warn(ctx, $"html: border-image-repeat: {word.Trim()} tiles each edge at a size that follows the picture's own, which only the vector layer learns; stretched");
+                break;
+            }
+        // slices, top right bottom left: a number is texels of the picture, a percentage a fraction of it
         var sl = new float[4];
         var sp2 = sliceText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        var thirds = false;
+        var numbers = 0;
         for (var i = 0; i < 4; i++)
         {
             var t = sp2.Length > 0 ? StyleApplier.SideOf(sp2, i) : "100%";
             if (t.EndsWith("%", StringComparison.Ordinal)) sl[i] = Mathf.Clamp01(StyleApplier.Num(t) / 100f);
-            else { sl[i] = 1f / 3f; thirds = true; }
+            else { sl[i] = Mathf.Max(0f, StyleApplier.Num(t)); numbers++; }
         }
-        if (thirds && ctx.Reported.Add("border-image px slices")) ctx.Out.Warnings.Add("html: border-image slice in px needs the image size; read as thirds (use % for an exact cut)");
+        var point = Pixelated(ctx, ve, css);
+        var src = HtmlRenderer.ResolveUrl(url, ctx.Built).Replace("\"", string.Empty);
+        if (numbers == 4)
+        {
+            // Texels are what the node's nine-slice cuts by, so this is exact: one node, the corners
+            // `bw` wide, the edges and middle stretched, and borders too wide for the box scaled down
+            // together as CSS does. `auto` widths are the slices' own size, one unit per texel.
+            for (var i = 0; i < 4; i++) if (autoWidth[i]) bw[i] = sl[i];
+            ctx.Body.Append(indent).Append("IMG x=").AppendNum(x).Append(" y=").AppendNum(y).Append(" w=").AppendNum(w).Append(" h=").AppendNum(h)
+                .Append(" src=\"").Append(src)
+                .Append("\" slice=[").AppendNum(sl[0]).Append(',').AppendNum(sl[1]).Append(',').AppendNum(sl[2]).Append(',').AppendNum(sl[3])
+                .Append("] bw=[").AppendNum(bw[0]).Append(',').AppendNum(bw[1]).Append(',').AppendNum(bw[2]).Append(',').AppendNum(bw[3]).Append(']');
+            if (!fill) ctx.Body.Append(" mid=0");   // CSS draws the middle only with `fill`; the node draws it unless told
+            if (point) ctx.Body.Append(" smp=point");
+            ctx.Body.Append('\n');
+            ctx.Out.Nodes++;
+            return true;
+        }
+        // Percentages are fractions of the picture, which is what `uv` crops by, so nine crops are
+        // exact too. A slice mixing the two cannot be either: its numbers are read as thirds.
+        if (numbers > 0)
+        {
+            for (var i = 0; i < 4; i++) if (!StyleApplier.SideOf(sp2, i).EndsWith("%", StringComparison.Ordinal)) sl[i] = 1f / 3f;
+            Warn(ctx, "html: border-image-slice mixing numbers and percentages cuts the picture two ways at once; its numbers are read as thirds (write all four as one or the other)");
+        }
         var u0 = sl[3]; var u1 = 1f - sl[1]; var v0 = sl[0]; var v1 = 1f - sl[2];
         void Img(float ix, float iy, float iw, float ih, float ua, float va, float ub, float vb)
         {
             if (iw <= 0.01f || ih <= 0.01f || ub <= ua || vb <= va) return;
             ctx.Body.Append(indent).Append("IMG x=").AppendNum(ix).Append(" y=").AppendNum(iy).Append(" w=").AppendNum(iw).Append(" h=").AppendNum(ih)
-                .Append(" src=\"").Append(url.Replace("\"", string.Empty)).Append("\" fit=fill uv=[").AppendNum(ua).Append(',').AppendNum(va).Append(',').AppendNum(ub).Append(',').AppendNum(vb).Append("]\n");
+                .Append(" src=\"").Append(src).Append("\" fit=fill uv=[").AppendNum(ua).Append(',').AppendNum(va).Append(',').AppendNum(ub).Append(',').AppendNum(vb).Append(']');
+            if (point) ctx.Body.Append(" smp=point");
+            ctx.Body.Append('\n');
             ctx.Out.Nodes++;
         }
         var t0 = bw[0]; var r0 = bw[1]; var b0 = bw[2]; var l0 = bw[3];
@@ -5039,12 +5269,14 @@ internal static class VectorEmitter
     private static string? MaskDef(Ctx ctx, string css, float x, float y, float w, float h, Dictionary<string, string>? all = null, OffThread.Box? rs = null)
     {
         var v = css.Trim();
-        if (v.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase)) return RadialDef(ctx, v);
+        // a repeating gradient is one period the scene repeats (spread), as a background's is
+        string? spread = null;
+        if (v.StartsWith("repeating-", StringComparison.OrdinalIgnoreCase)) { v = ExpandRepeating(v, w, h, out var once); spread = once ? "repeat" : null; }
+        if (v.StartsWith("radial-gradient", StringComparison.OrdinalIgnoreCase)) return RadialDef(ctx, v, spread);
         if (!v.StartsWith("linear-gradient", StringComparison.OrdinalIgnoreCase)) return null;
         if (ParseGradient(v) is not { } g) return null;
         // mask-origin / mask-clip: the box the gradient spans (border box by default here, the
         // bbox); mask-size and mask-position: a sub-box of it. All in bbox fractions.
-        // ponytail: mask-repeat is accepted; a gradient does not tile, it clamps to its ends
         var bx = 0f; var by = 0f; var bw = 1f; var bh = 1f;
         if (all != null && rs != null && w > 0f && h > 0f)
         {
@@ -5070,6 +5302,20 @@ internal static class VectorEmitter
                     py = pp.Length > 1 ? Pos(pp[1], bh - shh * bh) : pp.Length == 1 && pp[0] == "center" ? 0.5f * (bh - shh * bh) : 0f;
                 }
                 bx += px; by += py; bw *= sw; bh *= shh;
+                // mask-repeat tiles that sub-box, initially both ways. Along an axis-aligned
+                // gradient's own axis a tile is one period of the ramp, so repeating the ramp IS
+                // the tiling, exactly; across it every tile is the same, so there is nothing to
+                // tile. A diagonal ramp tiled on a lattice is not one repeated ramp, and keeps its ends.
+                var mr = (all.TryGetValue("mask-repeat", out var mrv) ? mrv : all.TryGetValue("-webkit-mask-repeat", out mrv) ? mrv : "repeat").Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var ang = Mathf.Repeat(g.angle, 180f);
+                var alongX = Mathf.Abs(ang - 90f) < 0.01f;
+                var alongY = ang < 0.01f || ang > 179.99f;
+                // one keyword is both axes, repeat-x and repeat-y are one each, two keywords are x then y
+                var repeatX = mr.Length == 0 || mr[0] is "repeat" or "repeat-x";
+                var repeatY = mr.Length == 0 || mr[0] == "repeat-y" || (mr[0] == "repeat" && (mr.Length == 1 || mr[1] == "repeat")) || (mr.Length > 1 && mr[0] != "repeat-x" && mr[1] == "repeat");
+                if (spread == null && ((alongX && repeatX) || (alongY && repeatY))) spread = "repeat";
+                else if (!alongX && !alongY && (repeatX || repeatY) && (sw < 0.999f || shh < 0.999f))
+                    Warn(ctx, "html: mask-repeat tiles a diagonal gradient on a lattice, which is not one repeated ramp; drawn once, its ends held");
             }
         }
         var rad = g.angle * Mathf.Deg2Rad;
@@ -5077,6 +5323,9 @@ internal static class VectorEmitter
         var dx = Mathf.Sin(rad) * len * 0.5f / w;
         var dy = -Mathf.Cos(rad) * len * 0.5f / h;
         var cx = bx + bw * 0.5f; var cy = by + bh * 0.5f;
+        // a repeating ramp has to BE one period: the line cut to the stops' span, the stops spread over it
+        var first = spread != null ? g.stops[0].at : 0f;
+        var span = spread != null ? Mathf.Max(0.0005f, g.stops[g.stops.Count - 1].at - first) : 1f;
         var id = ctx.NextId("mask");
         // mask-mode / mask-type: luminance. A stop's ALPHA is the mask here, so a luminance mask -
         // the SVG default, and how a black-to-white gradient is written - masked nothing at all,
@@ -5086,13 +5335,16 @@ internal static class VectorEmitter
             && ((all.TryGetValue("mask-mode", out var mm) && mm.Trim().Equals("luminance", StringComparison.OrdinalIgnoreCase))
                 || (all.TryGetValue("mask-type", out var mt) && mt.Trim().Equals("luminance", StringComparison.OrdinalIgnoreCase)));
 
-        ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").AppendNum(cx - dx).Append(" y1=").AppendNum(cy - dy).Append(" x2=").AppendNum(cx + dx).Append(" y2=").AppendNum(cy + dy).Append(" stops=[");
+        ctx.Defs.Append("  GL id=").Append(id).Append(" units=bbox x1=").AppendNum(cx - dx + 2f * dx * first).Append(" y1=").AppendNum(cy - dy + 2f * dy * first)
+            .Append(" x2=").AppendNum(cx - dx + 2f * dx * (first + span)).Append(" y2=").AppendNum(cy - dy + 2f * dy * (first + span));
+        if (spread != null) ctx.Defs.Append(" spread=").Append(spread);
+        ctx.Defs.Append(" stops=[");
         for (var i = 0; i < g.stops.Count; i++)
         {
             if (i > 0) ctx.Defs.Append(',');
             var sc = g.stops[i].c;
             if (luminance) sc = new Color(1f, 1f, 1f, sc.a * (0.2126f * sc.r + 0.7152f * sc.g + 0.0722f * sc.b));
-            ctx.Defs.Append('[').AppendNum(g.stops[i].at).Append(',').AppendHex(sc).Append(']');
+            ctx.Defs.Append('[').AppendNum((g.stops[i].at - first) / span).Append(',').AppendHex(sc).Append(']');
         }
         ctx.Defs.Append("]\n");
         return id;

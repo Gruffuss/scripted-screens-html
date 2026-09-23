@@ -433,12 +433,10 @@ internal static class CssLanguage
         ["text-size-adjust"] = "this inflates text against a mobile browser's own zoom, and a console has none",
         ["text-rendering"] = "a hinting hint with no equivalent in a signed-distance-field atlas",
         ["-webkit-font-smoothing"] = "the atlas has one rasterisation and no smoothing mode to pick",
-        ["image-rendering"] = "the scene's IMG node samples its texture one way and has no key to ask for another",
         ["font-feature-settings"] = "TextMeshPro exposes no OpenType feature table; the one that mattered, tabular figures, is faked with monospaced digit runs",
         ["font-kerning"] = "kerning is a flag on the font asset, not something a single label can turn off",
         ["font-optical-sizing"] = "this Unity's font engine has no variation-axis API at all, so there is no optical-size axis to set",
         ["font-variant-ligatures"] = "the face's ligature table is applied whole, with no tag to suppress it",
-        ["-webkit-text-stroke"] = "a label carries colour, weight, spacing and shadow; there is no outline to ask for",
         ["caret-color"] = "a field is ScriptedScreens' own control and its caret follows the field's text colour",
         ["hanging-punctuation"] = "a glyph can only hang outside a line box, and a label is one rect with no per-line geometry",
         ["hyphens"] = "`auto` needs a hyphenation dictionary there is none of, and `none` is already what happens",
@@ -454,9 +452,8 @@ internal static class CssLanguage
         ["perspective-origin"] = "the scene is flat",
         ["transform-style"] = "the scene is flat",
         ["background-attachment"] = "the page does not scroll under its own background",
-        ["mask-repeat"] = "a mask is a gradient, and a gradient clamps to its ends rather than tiling",
         ["mask-composite"] = "nesting masks gives an intersection; there is no alpha arithmetic between two of them",
-        ["border-image-repeat"] = "each slice is its own draw, so tiling an edge would cost a node per repetition",
+        ["border-image-repeat"] = "a tiled edge is sized from the picture's own proportions, which only the vector layer learns once the file has loaded; stretched, and said",
         ["overscroll-behavior"] = "each scrolling box handles its own wheel and nothing chains to a parent, so `contain` is already what happens",
         ["scroll-behavior"] = "smoothing a programmatic scroll means sending an offset every frame, which is the traffic a compiled page exists to remove",
         ["scroll-margin"] = "reachable only through snapping or scrollIntoView, and both compute an exact jump from the boxes themselves",
@@ -703,7 +700,8 @@ internal static class CssLanguage
         P("mask", "mask:linear-gradient(#000,transparent)");
         P("mask-size", "mask-size:20px", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
         P("mask-position", "mask-position:5px 5px", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent);mask-size:20px}");
-        P("mask-repeat", "mask-repeat:no-repeat", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
+        // a mask tile smaller than the box, so there is something for the repeat to repeat
+        P("mask-repeat", "mask-repeat:no-repeat", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent);mask-size:100% 20px}");
         P("mask-origin", "mask-origin:content-box", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
         P("mask-clip", "mask-clip:content-box", Fix.Box, "#p{mask-image:linear-gradient(#000,transparent)}");
         P("mask-mode", "mask-mode:luminance", Fix.Box, "#p{mask-image:linear-gradient(#ffffff,#000000)}");
@@ -843,7 +841,7 @@ internal static class CssLanguage
         P("object-fit", "object-fit:contain", Fix.Img);
         // Under object-fit: fill there is nothing to position, in a browser either; cover gives it a crop to move.
         P("object-position", "object-position:25% 75%", Fix.Img, "#p{object-fit:cover}");
-        P("image-rendering", "image-rendering:pixelated");
+        P("image-rendering", "image-rendering:pixelated", Fix.Img);
 
         // ---- interaction, scrolling, fragmentation
         P("cursor", "cursor:pointer");
