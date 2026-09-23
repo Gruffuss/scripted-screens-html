@@ -138,6 +138,13 @@ internal static class Probe4
             }
             return sent;
         }
+        // Exploration: `__mark(name)` in a hand-edited chunk (WHY_LUA_IN) charges what was allocated since
+        // the previous mark to `name`, for finding which lines of a page's Lua allocate; WHY_PROFILE prints them.
+        state.Environment["__alloc"] = new Lua.LuaFunction("__alloc", (ctx, _) =>
+            new System.Threading.Tasks.ValueTask<int>(ctx.Return((double)GC.GetAllocatedBytesForCurrentThread())));
+        Do("__PROF, __LAST = {}, 0 function __mark(n) local now = __alloc() __PROF[n] = (__PROF[n] or 0) + (now - __LAST) __LAST = __alloc() end", "marks");
+        // Exploration: a fixed seed, so two builds of a self-simulating page can be compared value for value.
+        if (Environment.GetEnvironmentVariable("WHY_SEED") is { Length: > 0 } seed) Do("math.randomseed(" + int.Parse(seed) + ")", "seed");
         // Nothing is sent from here: the flush has no surface, so what a frame wrote stays in PAYLOAD.
         var load = Do(compiled.Lua!, "page");
         var first = Payload();
@@ -154,6 +161,9 @@ internal static class Probe4
         // and cannot be pressed there, so a failure here on such a row is the probe's, not the page's.
         Console.WriteLine($"  run: {clicks.Count} click region(s) pressed, {failed.Count} failed");
         foreach (var f in failed.Take(8)) Console.WriteLine("    " + f);
+        // Exploration: every value the frames and presses wrote, for comparing two builds of a page.
+        if (Environment.GetEnvironmentVariable("WHY_PAYLOAD_AFTER") is { Length: > 0 } after)
+            File.WriteAllLines(after, Payload().OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Key + " = " + p.Value));
 
         // What one frame of the running page allocates in the chip, and whose it is. Lua-CSharp is
         // .NET, so its strings, tables and closures are .NET allocations and this is a measurement,
@@ -176,6 +186,18 @@ internal static class Probe4
         var noWrites = PerFrame("DOM.bind = function() end");
         Console.WriteLine($"  run: a frame allocates {whole} B in the chip: {whole - noLabel} B building labels, "
                           + $"{noLabel - noWrites} B in the other slot writes and the send, {noWrites} B the page's own code");
+        if (Environment.GetEnvironmentVariable("WHY_PROFILE") is { Length: > 0 } setup)
+        {
+            // WHY_PROFILE is Lua run first - `PAGE.st.tab = 'atmo'` - or just `1`.
+            Do((setup == "1" ? "" : setup) + " frame(1) __PROF = {} __LAST = __alloc() for i = 1, 40 do frame(1) end", "profile");
+            if (state.Environment["__PROF"].TryRead<Lua.LuaTable>(out var prof))
+            {
+                var rows = new List<(string, double)>();
+                var key = Lua.LuaValue.Nil;
+                while (prof.TryGetNext(key, out var pair)) { key = pair.Key; rows.Add((key.ToString(), pair.Value.Read<double>() / 40)); }
+                foreach (var (n, b) in rows.OrderByDescending(r => r.Item2)) Console.WriteLine($"    profile {n}: {b:0} B a frame");
+            }
+        }
         // Exploration: WHY_ALLOC="lua" prices one more ablation on top of the last, e.g. a stubbed function.
         if (Environment.GetEnvironmentVariable("WHY_ALLOC") is { Length: > 0 } extra)
             Console.WriteLine($"  run: with `{extra}`, {PerFrame(extra)} B a frame");
@@ -242,6 +264,9 @@ internal static class Probe4
             foreach (var p in compiled.Problems.Take(verbose ? 200 : 25)) Console.WriteLine("    problem: " + p);
             foreach (var u in compiled.Unmapped.Take(verbose ? 200 : 25)) Console.WriteLine("    unmapped: " + u);
             if (Environment.GetEnvironmentVariable("WHY_LUA") is { Length: > 0 } luaPath && compiled.Lua != null) File.WriteAllText(luaPath, compiled.Lua);
+            // Exploration: run a hand-edited chunk in place of the compiled one, to price a change
+            // to the generated Lua before the compiler is taught to make it.
+            if (Environment.GetEnvironmentVariable("WHY_LUA_IN") is { Length: > 0 } luaIn) compiled.Lua = File.ReadAllText(luaIn);
             if (compiled.Lua != null) Run(compiled);
             if (markupResult == null) return;
             var result = markupResult;

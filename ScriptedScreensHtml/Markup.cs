@@ -46,13 +46,22 @@ internal sealed class Markup
         /// helper's parameter, a helper's local) never runs and is substituted by what it stands for.
         /// </summary>
         public readonly HashSet<string> Live = new(StringComparer.Ordinal);
+        /// <summary>
+        /// For the frame of a lazily emitted view-model builder (<see cref="JsToLua.LazyViews"/>): the
+        /// name that holds its object at run time. A local of this frame is read from that object as
+        /// <c>v["@name"]</c>, computed once, rather than written out again in every hole that needs it.
+        /// </summary>
+        public string? ViewHolder;
         public Env(Env? outer) { Outer = outer; }
 
-        public Term? Find(string name, out bool live)
+        public Term? Find(string name, out bool live) => Find(name, out live, out _);
+
+        public Term? Find(string name, out bool live, out Env? frame)
         {
             for (var e = this; e != null; e = e.Outer)
-                if (e.Names.TryGetValue(name, out var t)) { live = e.Live.Contains(name); return t; }
+                if (e.Names.TryGetValue(name, out var t)) { live = e.Live.Contains(name); frame = e; return t; }
             live = true;
+            frame = null;
             return null;
         }
     }
@@ -213,6 +222,11 @@ internal sealed class Markup
     /// <summary>A list the page decides the length of and that nothing bounds is drawn this long, and says so.</summary>
     internal const int DefaultRows = 16;
 
+    /// <summary>The page's view-model builders the chunk computes field by field (<see cref="JsToLua.LazyViews"/>).</summary>
+    private readonly HashSet<string> _viewFns = new(StringComparer.Ordinal);
+    /// <summary>Calls of one, held by a live const of the writing function: the call, and the name holding it.</summary>
+    private readonly Dictionary<CallExpression, string> _viewCalls = new();
+
     internal IReadOnlyList<string> Problems => _problems;
     internal List<Part> Parts { get; private set; } = new();
     internal readonly List<Hole> Holes = new();
@@ -240,6 +254,7 @@ internal sealed class Markup
     internal static Markup Of(AssignmentExpression assignment, Script script, string? source = null, IReadOnlyList<ICollection<int>>? expand = null)
     {
         var m = new Markup(script) { _source = source, Start = assignment.Range.Start };
+        foreach (var fd in JsToLua.LazyViews(script).Keys) if (fd.Id != null) m._viewFns.Add(fd.Id.Name);
         m.Globals();
         m.Scope = m.Enclosing(assignment);
         m.Parts = new List<Part>();
@@ -359,7 +374,13 @@ internal sealed class Markup
                 {
                     if (Contains(st, target)) break;
                     if (st is VariableDeclaration { Kind: VariableDeclarationKind.Const } vd)
+                    {
                         Declare(vd, env, live: true);
+                        foreach (var d in vd.Declarations)
+                            if (d is { Id: Identifier holder, Init: CallExpression { Callee: Identifier callee, Arguments.Count: 0 } call }
+                                && _viewFns.Contains(callee.Name))
+                                _viewCalls[call] = holder.Name;
+                    }
                     else if (st is VariableDeclaration or FunctionDeclaration)
                         foreach (var n in Names(st)) { env.Names[n] = new Const(null); env.Live.Add(n); Dynamic(env, n); }
                 }
@@ -843,15 +864,15 @@ internal sealed class Markup
         }
 
         var callee = EvalExpr(c.Callee, env);
-        if (callee is SFn f) return InlineValue(f, c.Arguments, env);
+        if (callee is SFn f) return InlineValue(f, c.Arguments, env, _viewCalls.TryGetValue(c, out var holder) ? holder : null);
         return Dyn;
     }
 
-    private SVal InlineValue(SFn f, in NodeList<Expression> arguments, Env? env)
+    private SVal InlineValue(SFn f, in NodeList<Expression> arguments, Env? env, string? viewHolder = null)
     {
         var args = new Term[arguments.Count];
         for (var i = 0; i < args.Length; i++) args[i] = new Src(arguments[i], env);
-        var (result, _) = Inline(f, args);
+        var (result, _) = Inline(f, args, viewHolder);
         return result == null ? Dyn : Eval(result);
     }
 
@@ -953,11 +974,11 @@ internal sealed class Markup
     /// and not a procedure. <c>function row(x) { const cls = pick(x); return '&lt;div class="' + cls + '"&gt;'; }</c>
     /// is the shape every page's helpers take, and refusing it would refuse most real pages.
     /// </remarks>
-    internal (Term? Result, List<Term> Pushes) Inline(SFn f, Term[] args)
+    internal (Term? Result, List<Term> Pushes) Inline(SFn f, Term[] args, string? viewHolder = null)
     {
         var pushes = new List<Term>();
         if (_depth > MaxDepth) return (null, pushes);
-        var frame = new Env(f.Env);
+        var frame = new Env(f.Env) { ViewHolder = viewHolder };
         for (var i = 0; i < f.Fn.Params.Count; i++)
         {
             switch (f.Fn.Params[i])
@@ -2396,7 +2417,17 @@ internal sealed class Markup
                     if (shadow != null && shadow.Contains(id.Name)) return id.Name;
                     Term? bound = null;
                     var live = true;
-                    if (env != null) bound = env.Find(id.Name, out live);
+                    Env? frame = null;
+                    if (env != null) bound = env.Find(id.Name, out live, out frame);
+                    // A local of a lazily emitted view model is read from it, computed once: written
+                    // out here it would be computed again in every hole that needs it, a list or a
+                    // lookup closure each time. A plain path (`st.r`) or a constant is cheaper inline.
+                    if (bound != null && !live && frame?.ViewHolder is { } holder && !Plain(bound))
+                    {
+                        if (Eval(bound) is SLit fixedValue) return Literal(fixedValue.V);
+                        var at = _kept != null && IsLocal(holder) ? _kept(holder) : holder;
+                        return at + "[" + Literal("@" + id.Name) + "]";
+                    }
                     if (bound != null && !live) return Js(bound, null) is { } v ? "(" + v + ")" : null;
                     // A name that exists where the markup is written; one of the writing function's
                     // own is gone by the time a handler runs, so a handler reads what it was kept in.
@@ -2460,10 +2491,44 @@ internal sealed class Markup
                     return bound != null && !live && StaticTerm(bound);
                 }
             case ParenthesizedExpression p: return Static(p.Expression, env, shadow);
+            // A field of a view model the chunk computes lazily, when the field is a list or an object
+            // the builder writes as a literal: `v.gases[0].color` is read straight out of the builder,
+            // so no hole builds the whole list to read one colour from it. A plain field (`v.pressStr`)
+            // stays a read of the view model, which computes it once however many holes want it.
+            case MemberExpression { Object: Identifier } m when View(m.Object, env, shadow):
+                return EvalExpr(m, env) is SObj or SArr;
             case MemberExpression m: return Static(m.Object, env, shadow);
             case ObjectExpression or ArrayExpression: return true;
             case CallExpression c: return Inlinable(c, env, shadow) != null;
         }
+        return false;
+    }
+
+    /// <summary>Whether a name holds a lazily emitted view model: directly, or as a helper's parameter it was passed to.</summary>
+    private bool View(Expression e, Env? env, HashSet<string>? shadow)
+    {
+        for (var guard = 0; guard < 16 && e is Identifier id && env != null; guard++)
+        {
+            if (shadow != null && shadow.Contains(id.Name)) return false;
+            var bound = env.Find(id.Name, out var live);
+            if (bound is not Src s) return false;
+            if (live) return s.Expr is CallExpression call && _viewCalls.ContainsKey(call);
+            (e, env, shadow) = (s.Expr, s.Env, null);
+        }
+        return false;
+    }
+
+    /// <summary>A name or a path of plain field reads - `st.r` - which costs nothing to write out again.</summary>
+    private static bool Plain(Term t)
+    {
+        if (t is not Src { Expr: var e }) return false;
+        for (var guard = 0; guard < 16; guard++)
+            switch (e)
+            {
+                case Identifier: return true;
+                case MemberExpression { Computed: false } m: e = m.Object; break;
+                default: return false;
+            }
         return false;
     }
 

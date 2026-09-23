@@ -91,6 +91,187 @@ internal static class JsToLuaTests
         Refused(check);
         Semantics(check);
         Refusals(check);
+        LazyViews(root, check);
+        Ternaries(check);
+        ReadThrough(check);
+        DataEvent(root, check);
+    }
+
+    /// <summary>
+    /// A ternary picking between two named constants is Lua's `and`/`or`, not a closure per
+    /// evaluation - and one whose constant is shadowed somewhere still pays for the closure, since the
+    /// name might then be false.
+    /// </summary>
+    private static void Ternaries(Action<bool, string> check)
+    {
+        var plain = JsToLua.Compile("const RED = 'var(--red)', AMBER = '#fa0'; let s = 'trip'; const c = s === 'trip' ? RED : s === 'caution' ? AMBER : 'ok';", out _);
+        var shadowed = JsToLua.Compile("const RED = 'var(--red)'; let s = 'trip'; const c = s === 'trip' ? RED : 'ok'; function f(RED) { return RED; }", out _);
+        check(plain != null && !plain.Contains("(function() if", StringComparison.Ordinal)
+              && shadowed != null && shadowed.Contains("(function() if", StringComparison.Ordinal),
+              "js->lua: a ternary over named string constants builds no closure, and one over a shadowed name still does");
+
+        // `o.stats || []` reads its left side twice rather than wrapping the right in a closure.
+        const string Fallback = "let o = { s: 0, t: 'x', n: null }; out((o.s || [7]).length + '|' + (o.t || {}) + '|' + ((o.n || 5) + 1));";
+        var fallback = JsToLua.Compile("function out(v){ document.getElementById('r').textContent = String(v); }" + Fallback, out _);
+        var fallbackRoot = Root();
+        var fallbackSame = fallback != null && fallbackRoot != null
+                           && (RunLua(fallbackRoot, fallback, 0).TryGetValue("r.textContent", out var fb) ? fb : null) == "1|x|6";
+        check(fallback != null && !fallback.Contains("function() return", StringComparison.Ordinal) && fallbackSame,
+              "js->lua: `path || fallback` builds no closure and yields what JavaScript yields");
+
+        // A style assembled from flags is one of its finished strings, not a concatenation per render.
+        const string Styles = "let on = true, hot = false; const s = 'border:1px solid ' + (on ? '#94bce3' : '#232c37') + ';color:' + (hot ? 'red' : 'grey'); out(s);";
+        var folded = JsToLua.Compile("function out(v){ document.getElementById('r').textContent = String(v); }" + Styles, out _);
+        var root = Root();
+        var same = folded != null && root != null
+                   && (RunLua(root, folded, 0).TryGetValue("r.textContent", out var got) ? got : null) == "border:1px solid #94bce3;color:grey";
+        check(folded != null && folded.Contains("\"border:1px solid #232c37;color:red\"", StringComparison.Ordinal) && same,
+              "js->lua: literal strings joined around ternaries become the finished strings, chosen by the same tests");
+    }
+
+    /// <summary>
+    /// Compiled markup reads a hole straight out of a lazy view model's own expressions: a list the
+    /// builder writes as a literal is never built at run time just to read one colour out of it.
+    /// </summary>
+    private static void ReadThrough(Action<bool, string> check)
+    {
+        const string Page = @"<!doctype html><html><head><meta name=""viewport"" content=""width=200""></head><body>
+<div id=""frame""></div>
+<script>
+const st = { sel: 1, t: 20.5 };
+const ITEMS = [{ k: 0, name: 'A' }, { k: 1, name: 'B' }, { k: 2, name: 'C' }];
+function values() {
+  const hot = st.t > 30;
+  const picked = ITEMS.filter((it) => it.k === st.sel);
+  return {
+    rows: ITEMS.map((it) => ({ name: it.name, color: it.k === st.sel ? '#00ff00' : '#888888', edge: hot ? 'red' : 'grey' })),
+    temp: st.t.toFixed(1),
+    note: picked.length ? 'picked ' + picked[0].name : 'none',
+  };
+}
+function render() {
+  const v = values();
+  document.getElementById('frame').innerHTML = v.rows.map((r) => '<div style=""color:' + r.color + ';border:1px solid ' + r.edge + '"">' + r.name + '</div>').join('')
+    + '<span>' + v.temp + '</span><b>' + v.note + '</b>';
+}
+render();
+setInterval(() => { st.t += 1; st.sel = (st.sel + 1) % 3; render(); }, 100);
+</script></body></html>";
+        var (compiled, _) = Probe4.Headless(Page);
+        if (!compiled.Ok || compiled.Lua == null)
+        {
+            check(false, "read through: the page does not compile - " + string.Join("; ", compiled.Problems.Concat(compiled.Unmapped).Take(3)));
+            return;
+        }
+        var lua = compiled.Lua;
+        var render = lua.Substring(lua.IndexOf("render = function", StringComparison.Ordinal));
+        check(lua.Contains("computed field by field", StringComparison.Ordinal)
+              && !render.Contains("v.rows", StringComparison.Ordinal) && render.Contains("v[\"@hot\"]", StringComparison.Ordinal),
+              "read through: a hole reads a literal list's element straight out of the builder, and a local the builder computes from its memo");
+
+        // And it runs: the payload the first render writes is the page's, colour for colour.
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        string? failed = null;
+        try { Chunk(state, lua, "page"); } catch (Exception ex) { failed = First(ex.Message); }
+        var payload = state.Environment["PAYLOAD"].TryRead<LuaTable>(out var sent) ? sent : null;
+        var colours = new List<string>();
+        if (payload != null)
+        {
+            var key = LuaValue.Nil;
+            while (payload.TryGetNext(key, out var pair)) { key = pair.Key; if (Text(pair.Value) is "#00FF00" or "#00ff00") colours.Add(Text(key)); }
+        }
+        check(failed == null && colours.Count == 1, failed != null ? "read through: the chunk fails to load - " + failed
+            : $"read through: the first render colours exactly the selected row, {colours.Count} slot(s) green");
+    }
+
+    /// <summary>
+    /// A view-model builder whose object is only read field by field is emitted to compute each field
+    /// on first read: the page does the same thing, and a render that reads one field of a large view
+    /// model builds that field and nothing else.
+    /// </summary>
+    private static void LazyViews(string root, Action<bool, string> check)
+    {
+        const string Page = @"
+const st = { n: 1 };
+let acts = [];
+const act = (fn) => { acts.push(fn); return ' data-act=""' + (acts.length - 1) + '""'; };
+function fmt(x) { return 'reading ' + x.toFixed(2) + ' units, well past the width of any label that would hold it'; }
+function values() {
+  const rows = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((i) => fmt(st.n * i));
+  const all = rows.join(' | ');
+  return { head: fmt(st.n), body: all, count: rows.length, go: act(() => { st.n = 0; }) };
+}
+function render() { acts = []; const v = values(); document.getElementById('r').textContent = v.head + v.go; }
+setInterval(() => { st.n++; render(); }, 100);
+render();";
+        var lazy = JsToLua.Compile(Page, out var problems);
+        // The same page, its view model handed somewhere that might keep it: built eagerly, as written.
+        var eager = JsToLua.Compile(Page.Replace("const v = values();", "const v = values(); const kept = [v];"), out _);
+        if (lazy == null || eager == null) { check(false, "lazy view: the page does not compile - " + string.Join("; ", problems.Take(2))); return; }
+        check(lazy.Contains("computed field by field", StringComparison.Ordinal) && !eager.Contains("computed field by field", StringComparison.Ordinal),
+              "lazy view: a view model read field by field is emitted lazily, and one that escapes is not");
+        var failure = Diff(root, Page, lazy, 30, None);
+        check(failure == null, failure ?? "lazy view: the lazily built page writes what the original does, over 30 ticks");
+
+        long PerRender(string lua)
+        {
+            var state = LuaState.Create();
+            state.OpenStandardLibraries();
+            Chunk(state, File.ReadAllText(Path.Combine(root, "JsPrelude.lua")), "prelude");
+            Chunk(state, lua, "page");
+            Chunk(state, "function __tick(n) for i = 1, n do for _, t in ipairs(Pending.timers) do t.fn(0) end end end __tick(5)", "warm");
+            var a = GC.GetTotalAllocatedBytes(true);
+            Chunk(state, "__tick(0)", "base");
+            var b = GC.GetTotalAllocatedBytes(true);
+            Chunk(state, "__tick(100)", "ticks");
+            var c = GC.GetTotalAllocatedBytes(true);
+            return (c - b - (b - a)) / 100;
+        }
+        var lazyBytes = PerRender(lazy);
+        var eagerBytes = PerRender(eager);
+        check(lazyBytes * 3 < eagerBytes, $"lazy view: a render that reads one field builds only that field - {lazyBytes} B a render, against {eagerBytes} B building the whole view model");
+
+        // What must keep the eager builder: an effect a lazy build would skip, here one a helper has.
+        var effect = JsToLua.Compile(Page.Replace("const all = rows.join(' | ');", "const all = mark(rows);")
+                                         + " function mark(r) { st.seen = r.length; return r.join(' | '); }", out _);
+        check(effect != null && !effect.Contains("computed field by field", StringComparison.Ordinal),
+              "lazy view: a builder that writes page state is built eagerly, so the write still happens");
+    }
+
+    /// <summary>
+    /// A compiled page's data handler runs: the chip's Lua table reaches `window.ondata` and the
+    /// `data` listeners, and delivering it allocates nothing of the host's.
+    /// </summary>
+    private static void DataEvent(string root, Action<bool, string> check)
+    {
+        const string Page = @"
+let seen = 0, name = '', heard = 0;
+window.ondata = (d, e) => { seen = d.level * 2 + d.hist.length + (e.type === 'data' ? 1000 : 0); };
+addEventListener('data', (e) => { name = e.detail.gas.name; heard++; });";
+        var compiled = CompiledPage.Compile(Page, new HashSet<string>(StringComparer.Ordinal), _ => null,
+                                            prelude: File.ReadAllText(Path.Combine(root, "JsPrelude.lua")));
+        if (compiled.Lua == null) { check(false, "data event: the page does not compile - " + string.Join("; ", compiled.Problems.Take(2))); return; }
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        try
+        {
+            Chunk(state, compiled.Lua, "page");
+            Chunk(state, "D = { level = 21, hist = js_array({ [0] = 1, [1] = 2, [2] = 3 }, 3), gas = { name = 'O2' } } data_in(D) PAGE_SYNC()", "data");
+        }
+        catch (Exception ex) { check(false, "data event: delivering a payload fails - " + First(ex.Message)); return; }
+        var page = state.Environment["PAGE"].Read<LuaTable>();
+        var ok = page["seen"].TryRead<double>(out var seen) && seen == 1045 && Text(page["name"]) == "O2";
+        check(ok, ok ? "data event: a payload reaches window.ondata and the data listeners as a table"
+                     : $"data event: ondata saw {Text(page["seen"])}, the listener {Text(page["name"])}");
+
+        var a = GC.GetTotalAllocatedBytes(true);
+        Chunk(state, "function __data(n) for i = 1, n do data_in(D) end end __data(0)", "base");
+        var b = GC.GetTotalAllocatedBytes(true);
+        Chunk(state, "__data(200)", "data");
+        var c = GC.GetTotalAllocatedBytes(true);
+        var each = (c - b - (b - a)) / 200;
+        check(each < 64, $"data event: delivering a payload to handlers that keep numbers allocates {each} B in the chip");
     }
 
     /// <summary>

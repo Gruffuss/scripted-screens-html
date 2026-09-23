@@ -1030,6 +1030,24 @@ event = function(id, kind, x, y)
   js_microtasks()
   DOM.flush()
 end
+
+-- The third: what the chip's own Lua sent as data, as a table - the handler the page wrote gets it
+-- as `window.ondata(detail, event)` and as a `data` event, exactly as the interpreter gave it. Before
+-- this a compiled page's data handler never ran at all. One event object for the life of the chunk,
+-- refilled, since a payload arrives every tick and a new event per tick was allocation for nothing.
+DATA_EV = { type = 'data', bubbles = false, cancelable = false, defaultPrevented = false,
+            eventPhase = 2, isTrusted = true, timeStamp = 0,
+            preventDefault = function() end, stopPropagation = function() end,
+            stopImmediatePropagation = function() end }
+data_in = function(detail)
+  local ev = DATA_EV
+  ev.detail, ev.target, ev.currentTarget, ev.timeStamp = detail, window, window, js_now()
+  local on = rawget(window, 'ondata')
+  if type(on) == 'function' then on(detail, ev) end
+  DOM.emit('window', 'data', ev)
+  js_microtasks()
+  DOM.flush()
+end
 ";
 
     private static string Map(IReadOnlyDictionary<string, string> map)

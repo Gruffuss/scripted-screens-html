@@ -326,6 +326,15 @@ eq(document.getElementsByClassName('panel wide').length, 1, 'document.getElement
 eq(js_m(card, 'querySelectorAll', '*').length, 2, 'querySelectorAll below an element')
 eq(js_m(card, 'querySelectorAll', '*')[0], document.getElementById('title'), 'in document order')
 eq(js_m(document.getElementById('title'), 'querySelectorAll', '*').length, 0, 'a leaf has no descendants')
+eq(document.querySelectorAll('.nothing-has-this') == document.querySelectorAll('.nothing-has-this'), true,
+   'a search that finds nothing hands back one shared empty list, so a per-tick query allocates nothing')
+eq(document.querySelectorAll('p') ~= document.querySelectorAll('p'), true, 'a search that finds something gets a list of its own')
+eq(document.querySelectorAll('p')[0] ~= nil and document.querySelectorAll('p')[1] == nil, true, 'holding exactly what it found')
+eq(document.querySelectorAll('[data-act]'), document.querySelectorAll('.nothing-has-this'),
+   'a selector the matcher cannot answer is the shared empty list')
+eq(DOM.unanswerableSeen['[data-act]'], true, 'and is known to be one without walking the page')
+eq(DOM.unanswerableSeen['p'], false, 'while one it can answer is walked')
+eq(document.querySelectorAll('[data-act], p').length, 1, 'a list with one answerable part still finds that part')
 -- a class the SCRIPT writes wins over the markup's, as assigning className does in a browser
 card.className = 'panel'
 eq(card.classList.contains('wide'), false, 'a written className replaces the markup one')
@@ -745,6 +754,9 @@ eq(next(DOM.notes) ~= nil, true, 'and reading it is noted')
 DOM.notes = {}
 eq(card.scrollTop, nil, 'scrollTop stays undefined')
 eq(next(DOM.notes) ~= nil, true, 'and reading it is noted')
+DOM.notes = {}
+eq(card.scrollTop, nil, 'scrollTop read again')
+eq(next(DOM.notes), nil, 'and the same question is not noted again, so a per-frame read leaves nothing to drain')
 DOM.notes = {}
 card.scrollTop = 12
 eq(card.scrollTop, 12, 'a scroll offset the page wrote reads back')

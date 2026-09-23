@@ -2628,7 +2628,19 @@ end
 -- had looked like a page that did nothing. Keyed by the reason, which is a constant string, with
 -- the element as the value, so noting it from a per-frame read allocates nothing; the host drains
 -- and logs the table the way it drains DOM.missing.
-function DOM.note(why, what) DOM.notes[why] = what == nil and true or what end
+-- Noted ONCE per reason and element, not once per read. A page reading a scroll offset every frame
+-- refilled the table every frame, and the host's drain built its lists and lines every frame to
+-- log nothing new. `noted` is what has already been said; the host dedups by line as well. A field
+-- and not a local: the prelude and the page share one main function, and Lua allows it 200 locals.
+DOM.noted = {}
+function DOM.note(why, what)
+  local key = what == nil and true or what
+  local said = DOM.noted[why]
+  if said == nil then said = {} DOM.noted[why] = said end
+  if said[key] then return end
+  said[key] = true
+  DOM.notes[why] = key
+end
 
 -- A page assigning `undefined` has still written: `log.scrollTop = log.scrollHeight` does exactly
 -- that here, since nothing lays out and scrollHeight is not a thing a compiled page has. Storing
@@ -3174,7 +3186,29 @@ end
 -- Only the selector shapes a compiled page can be answered about: `#id`, `.class`, a tag name, `*`,
 -- and a comma list of those. Anything else - a descendant combinator, an attribute test, a
 -- pseudo-class - has no node list to run against and returns false rather than a guess.
-local function trimmed(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
+-- A selector with nothing to trim is returned as it is: two gsubs made two strings per call, and
+-- a search runs this once per node.
+local function trimmed(s)
+  if s:find("^%s") == nil and s:find("%s$") == nil then return s end
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- A selector no part of which this matcher can answer - `[data-act]`, the idiom every page that
+-- builds markup with click indices queries after each render - matches nothing, and is known to by
+-- looking once. Walking every node of the page to fail the same pattern on each cost more per
+-- render than anything else the query did. Remembered by the selector's own string.
+DOM.unanswerableSeen = {}
+function DOM.unanswerable(selector)
+  local known = DOM.unanswerableSeen[selector]
+  if known ~= nil then return known end
+  known = selector ~= ""
+  for part in selector:gmatch("[^,]+") do
+    part = trimmed(part)
+    if part == "" or part == "*" or part:find("[%s>+~%[:]") == nil then known = false break end
+  end
+  DOM.unanswerableSeen[selector] = known
+  return known
+end
 
 local function matchesOne(el, sel)
   if sel == "" or sel == "*" then return true end
@@ -3201,6 +3235,7 @@ end
 
 local function matchesAny(el, selector)
   selector = js_str(selector)
+  if DOM.unanswerable(selector) then return false end
   if selector:find(",", 1, true) == nil then return matchesOne(el, trimmed(selector)) end
   for part in selector:gmatch("[^,]+") do
     if matchesOne(el, trimmed(part)) then return true end
@@ -3281,13 +3316,28 @@ function ElementMethods.contains(el, node)
   return false
 end
 
+-- A search that found nothing - `render()` asking for `[data-act]` every tick of a compiled page,
+-- whose handlers are bound once - hands back one shared empty list rather than a new table each
+-- time. Safe because a NodeList has no push or splice to fill it with. Fields rather than locals,
+-- for the 200-local limit the prelude and the page share.
+DOM.FOUND = {}
+do
+  local none, found = js_array({}, 0), DOM.FOUND
+  function DOM.found(n)
+    if n == 0 then return none end
+    local out = {}
+    for i = 0, n - 1 do out[i] = found[i] found[i] = nil end
+    return js_array(out, n)
+  end
+end
+
 function ElementMethods.querySelectorAll(el, selector)
-  local out = {}
   selector = js_str(selector)
+  if DOM.unanswerable(selector) then return DOM.found(0) end
   -- The markup below this element first, in document order, then this element's own script-built
   -- children - which collectMarkup cannot have reached, since it starts one level down.
-  local n = collectMarkup(rawget(el, "__id"), selector, out, 0)
-  return js_array(out, collect(el, selector, out, n))
+  local n = collectMarkup(rawget(el, "__id"), selector, DOM.FOUND, 0)
+  return DOM.found(collect(el, selector, DOM.FOUND, n))
 end
 
 function ElementMethods.querySelector(el, selector)
@@ -3310,14 +3360,14 @@ end
 -- Document-wide: the page's own markup in document order, and - only while the compiler has given
 -- it no markup to walk - whatever the script built under the root, so nothing regresses off-console.
 document.querySelectorAll = function(selector)
-  local out = {}
   selector = js_str(selector)
-  local n = collectMarkup(nil, selector, out, 0)
+  if DOM.unanswerable(selector) then return DOM.found(0) end
+  local n = collectMarkup(nil, selector, DOM.FOUND, 0)
   if #NODES == 0 then
-    n = collect(document.documentElement, selector, out, n)
-    n = collect(document.body, selector, out, n)
+    n = collect(document.documentElement, selector, DOM.FOUND, n)
+    n = collect(document.body, selector, DOM.FOUND, n)
   end
-  return js_array(out, n)
+  return DOM.found(n)
 end
 
 document.getElementsByTagName = function(tag) return document.querySelectorAll(js_str(tag)) end
@@ -3853,6 +3903,30 @@ local function walk(ev, id, kind)
     if deliver(ev, at, kind, 3) or ev.__stop then return end
     at = PARENT[at]
   end
+end
+
+-- One event at one target, with an event object the caller keeps: a chip's data payload, which
+-- arrives every tick. No walk - a window has no parent - and no snapshot table unless a handler is
+-- already running one: the list is copied into a scratch kept for the purpose, so a handler that
+-- adds or removes a listener does not skip the next one.
+DOM.emitScratch = {}
+function DOM.emit(id, kind, ev)
+  local list = listeners(id, kind, false)
+  if list == nil or #list == 0 then return end
+  local snapshot, n, was = DOM.emitScratch, #list, DOM.emitting
+  if was then snapshot = {} end
+  DOM.emitting = true
+  for i = 1, n do snapshot[i] = list[i] end
+  for i = 1, n do
+    local h = snapshot[i]
+    snapshot[i] = nil
+    local fn = entryFn(h)
+    if fn ~= nil then
+      if type(h) == "table" and h.once then DOM.off(id, kind, fn, h) end
+      fn(ev)
+    end
+  end
+  DOM.emitting = was
 end
 
 --- Fires one event at `id`, down to it and back up, as a browser does. It does NOT drain the

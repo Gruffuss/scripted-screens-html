@@ -42,6 +42,8 @@ internal sealed class JsToLua
     /// <c>NAME.key</c> in the page reads that table: see <see cref="Eager"/>.
     /// </summary>
     private readonly HashSet<string> _constTables = new(StringComparer.Ordinal);
+    /// <summary>Top-level <c>const</c>s bound once to a literal Lua cannot read as false: see <see cref="NeverFalsy"/>.</summary>
+    private readonly HashSet<string> _constTruthy = new(StringComparer.Ordinal);
     private int _depth;
     /// <summary>Counts loops so each label is unique.</summary>
     private int _loop;
@@ -229,6 +231,7 @@ internal sealed class JsToLua
             }
         foreach (var name in ambiguous) c._elements.Remove(name);
         c.ConstTables(ast);
+        c.Views(ast);
 
         // Everything the script's own scope binds is forward-declared and then assigned where it
         // stood. Two reasons, and the second is the one that bites: JavaScript hoists a function
@@ -447,6 +450,61 @@ internal sealed class JsToLua
         static bool Is(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// `'border:1px solid ' + (on ? '#94bce3' : '#232c37') + ';padding:9px'`: a concatenation of
+    /// literal strings and ternaries between them, as the finished strings it can produce - a string
+    /// per outcome, chosen by the same tests in the same order, and none built at run time. Every
+    /// style a page assembles from a flag was a fresh string per render; each outcome here is a
+    /// constant. Null past sixteen outcomes, or when anything in it is not a literal string.
+    /// </summary>
+    /// <remarks>
+    /// An outcome is a string or a <c>(test, then, else)</c> triple of outcomes. The tests are the
+    /// page's own, evaluated once each on the path taken, left to right, as JavaScript evaluates them.
+    /// </remarks>
+    private static object? Fold(Expression e, out int outcomes)
+    {
+        outcomes = 0;
+        var folded = Of(e);
+        if (folded == null) return null;
+        outcomes = Count(folded);
+        return outcomes <= 16 ? folded : null;
+
+        static object? Of(Expression e) => e switch
+        {
+            StringLiteral s => s.Value,
+            ParenthesizedExpression p => Of(p.Expression),
+            ConditionalExpression c => Of(c.Consequent) is { } yes && Of(c.Alternate) is { } no ? (c.Test, yes, no) : null,
+            NonLogicalBinaryExpression { Operator: Operator.Addition } add
+                => Of(add.Left) is { } left && Of(add.Right) is { } right && Count(left) * Count(right) <= 16 ? Join(left, right) : null,
+            _ => null,
+        };
+
+        // Each outcome of the left, followed by each of the right: the left's tests run first.
+        static object Join(object left, object right) => left switch
+        {
+            string l => Prefix(l, right),
+            (Expression test, object yes, object no) => (test, Join(yes, right), Join(no, right)),
+            _ => throw new InvalidOperationException(),
+        };
+
+        static object Prefix(string l, object right) => right switch
+        {
+            string r => l + r,
+            (Expression test, object yes, object no) => (test, Prefix(l, yes), Prefix(l, no)),
+            _ => throw new InvalidOperationException(),
+        };
+
+        static int Count(object o) => o is (Expression, object yes, object no) ? Count(yes) + Count(no) : 1;
+    }
+
+    /// <summary>A folded concatenation as Lua: nested `and`/`or` over constant strings, which are never false.</summary>
+    private string Choose(object folded) => folded switch
+    {
+        string s => Quote(s),
+        (Expression test, object yes, object no) => "(" + Truthy(test) + " and " + Choose(yes) + " or " + Choose(no) + ")",
+        _ => throw new InvalidOperationException(),
+    };
+
     /// <summary>A `+` chain as its pieces, in order. False when any piece is not a literal or a value.</summary>
     private static bool Flatten(Expression e, List<object> into)
     {
@@ -496,6 +554,10 @@ internal sealed class JsToLua
                 }
                 break;
 
+            case FunctionDeclaration f when f.Id != null && _views.TryGetValue(f, out var view):
+                LazyView(f.Id.Name, view);
+                break;
+
             case FunctionDeclaration f when f.Id != null:
                 // At the top level this is forward-declared, so it assigns. Anywhere else it is a
                 // `local function`, or it would overwrite - and destroy - an outer function of the
@@ -503,7 +565,11 @@ internal sealed class JsToLua
                 // always an assignment: every scope declares its own function names up front, so a
                 // nested one shadows rather than overwriting an outer function of the same name
                 Line(Safe(f.Id.Name) + " = function(" + Params(f.Params, out var fnBind) + ")");
-                Body(f.Body, fnBind);
+                {
+                    var hidden = Shadow(f.Params, f.Body);
+                    Body(f.Body, fnBind);
+                    Unshadow(hidden);
+                }
                 Line("end");
                 break;
 
@@ -1599,9 +1665,12 @@ internal sealed class JsToLua
     /// "yes" here silently returns the other branch, so anything not obviously a number, a string,
     /// a table or a function answers no and pays for a closure instead.
     /// </summary>
-    private static bool NeverFalsy(Expression e) => e switch
+    private bool NeverFalsy(Expression e) => e switch
     {
         NumericLiteral or StringLiteral => true,
+        // `RED_INK` where the page wrote `const RED_INK = 'var(--red-ink)'` and bound it nowhere else:
+        // every `tone === 'trip' ? RED_INK : ...` a page writes was a closure per evaluation.
+        Identifier id => _constTruthy.Contains(id.Name) && (_rename == null || !_rename.ContainsKey(id.Name)),
         BooleanLiteral b => b.Value,
         ObjectExpression or ArrayExpression or FunctionExpression or ArrowFunctionExpression => true,
         // arithmetic yields a number, and `+` yields a number or a string; neither is false or nil
@@ -1640,9 +1709,14 @@ internal sealed class JsToLua
         foreach (var s in ast.Body)
             if (s is VariableDeclaration { Kind: VariableDeclarationKind.Const } vd)
                 foreach (var d in vd.Declarations)
+                {
                     if (d.Id is Identifier id && (d.Init is ArrayExpression || d.Init is ObjectExpression o && Plain(o)))
                         _constTables.Add(id.Name);
-        if (_constTables.Count == 0) return;
+                    if (d.Id is Identifier lit && d.Init is StringLiteral or NumericLiteral or TemplateLiteral
+                                                  or ObjectExpression or ArrayExpression or BooleanLiteral { Value: true })
+                        _constTruthy.Add(lit.Name);
+                }
+        if (_constTables.Count == 0 && _constTruthy.Count == 0) return;
 
         // Bound anywhere else - a parameter, an inner declaration, a catch - and `NAME.key` might read
         // that instead. Every identifier under a binding position counts, a destructuring key
@@ -1666,6 +1740,7 @@ internal sealed class JsToLua
                 case CatchClause k: Bind(k.Param); break;
             }
         _constTables.RemoveWhere(name => bound.TryGetValue(name, out var k) && k > 1);
+        _constTruthy.RemoveWhere(name => bound.TryGetValue(name, out var k) && k > 1);
 
         // No getter or setter: reading one of those runs page code.
         static bool Plain(ObjectExpression o)
@@ -1674,6 +1749,431 @@ internal sealed class JsToLua
                 if (p is Property { Kind: not PropertyKind.Init }) return false;
             return true;
         }
+    }
+
+    // ---- view models, read one field at a time -------------------------------------------------
+
+    /// <summary>A function that builds a view model: its locals in order, and the fields it returns.</summary>
+    internal sealed class View
+    {
+        public readonly List<(string Name, Expression Init)> Locals = new();
+        public readonly List<(string Key, Expression Value)> Fields = new();
+        /// <summary>
+        /// Locals (`@name`) and fields whose building registers something - `act(fn)` pushing onto the
+        /// page's handler list. They are computed when the builder is called, in source order, as the
+        /// page computed them: a handler's index is its place in that list, and building it on first
+        /// read would renumber every handler after it.
+        /// </summary>
+        public readonly HashSet<string> Eager = new(StringComparer.Ordinal);
+    }
+
+    private readonly Dictionary<FunctionDeclaration, View> _views = new();
+    /// <summary>While a view is emitted: its locals, as the Lua that reads each one.</summary>
+    private Dictionary<string, string>? _rename;
+
+    /// <summary>
+    /// Finds the page's view-model builders - <c>function values() { const a = ...; return { x: ..., y: ... }; }</c>
+    /// - whose result is only ever read field by field, so it can be computed field by field.
+    /// </summary>
+    /// <remarks>
+    /// A compiled page draws one tab, and its render reads only that tab's fields; the view model a
+    /// page builds for it computes every tab's strings, arrays and handlers regardless. On the Atmo
+    /// pages that was nine tenths of what the chip allocated per render. Reading a field computes it
+    /// (and what it depends on) once per call, so a field no drawn hole reads is never built.
+    ///
+    /// The call is the same, so only what it can NOT tell apart is checked: the object is never
+    /// enumerated, stored, written or handed to anything but a page function that itself only reads
+    /// it; and building it has no effect a lazy build would skip - the one allowed is a push onto a
+    /// top-level registry the page resets (`acts.push(fn)`), which compiled markup does not read.
+    /// Anything else keeps the eager builder, unchanged.
+    /// ponytail: a field read after a LATER call sees the later values. Every page renders after
+    /// each state change, so its handlers only ever read the latest; one that kept an old view
+    /// model and compared it with a new one would need a copy per call.
+    /// </remarks>
+    private void Views(Script ast)
+    {
+        foreach (var pair in LazyViews(ast)) _views[pair.Key] = pair.Value;
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Script, Dictionary<FunctionDeclaration, View>> Found = new();
+
+    /// <summary>
+    /// The builders <see cref="LazyView"/> emits lazily, by declaration. The markup compiler asks
+    /// the same question of the same script, since what it inlines through a view model must agree
+    /// with how the view model is emitted: see <see cref="Markup"/>'s view holders.
+    /// </summary>
+    internal static IReadOnlyDictionary<FunctionDeclaration, View> LazyViews(Script ast)
+    {
+        lock (Found)
+        {
+            if (Found.TryGetValue(ast, out var known)) return known;
+            var views = FindViews(ast);
+            Found.Add(ast, views);
+            return views;
+        }
+    }
+
+    private static Dictionary<FunctionDeclaration, View> FindViews(Script ast)
+    {
+        var found = new Dictionary<FunctionDeclaration, View>();
+        var parents = new Dictionary<Node, Node>();
+        void Link(Node n) { foreach (var k in n.ChildNodes) if (k != null) { parents[k] = n; Link(k); } }
+        Link(ast);
+
+        // Top-level functions by name, declared once: a call to one of them is the only thing a view
+        // model may be handed to.
+        var fns = new Dictionary<string, IFunction>(StringComparer.Ordinal);
+        var twice = new HashSet<string>(StringComparer.Ordinal);
+        void Top(string name, IFunction fn) { if (!fns.TryAdd(name, fn)) twice.Add(name); }
+        foreach (var s in ast.Body)
+        {
+            if (s is FunctionDeclaration { Id: { } fid } fd) Top(fid.Name, fd);
+            else if (s is VariableDeclaration vd)
+                foreach (var d in vd.Declarations)
+                    if (d.Id is Identifier vid && d.Init is ArrowFunctionExpression or FunctionExpression) Top(vid.Name, (IFunction)d.Init);
+        }
+        foreach (var n in twice) fns.Remove(n);
+
+        // What building does that a lazy build could skip or reorder: nothing, a push onto a handler
+        // registry (the order matters, so it is built eagerly), or anything else (no lazy view at all).
+        const int None = 0, Registers = 1, Other = 2;
+        var pure = new Dictionary<IFunction, int>();
+        var reads = new Dictionary<(IFunction, int), bool>();
+        foreach (var s in ast.Body)
+        {
+            if (s is not FunctionDeclaration { Id: { } id, Params.Count: 0, Body: { } body } fd || !fns.ContainsKey(id.Name)) continue;
+            if (Shape(body) is not { } view) continue;
+            if (!Calls(id.Name, fd) || Effect(fd) == Other) continue;
+            var inside = Inside(fd);
+            foreach (var (local, init) in view.Locals) if (Effects(init, inside) == Registers) view.Eager.Add("@" + local);
+            foreach (var (key, value) in view.Fields) if (Effects(value, inside) == Registers) view.Eager.Add(key);
+            found[fd] = view;
+        }
+        return found;
+
+        // The builder: declarations, then `return { ... }` of plain named fields. Nothing reads
+        // `this` or `arguments`, and no closure in it reassigns one of its locals.
+        View? Shape(BlockStatement body)
+        {
+            var view = new View();
+            var locals = new HashSet<string>(StringComparer.Ordinal);
+            for (var i = 0; i < body.Body.Count; i++)
+            {
+                var st = body.Body[i];
+                if (i < body.Body.Count - 1)
+                {
+                    if (st is not VariableDeclaration { Kind: VariableDeclarationKind.Const or VariableDeclarationKind.Let } vd) return null;
+                    foreach (var d in vd.Declarations)
+                    {
+                        if (d.Id is not Identifier lid || d.Init == null || !locals.Add(lid.Name)) return null;
+                        view.Locals.Add((lid.Name, d.Init));
+                    }
+                    continue;
+                }
+                if (st is not ReturnStatement { Argument: ObjectExpression obj }) return null;
+                foreach (var p in obj.Properties)
+                {
+                    if (p is not ObjectProperty { Computed: false, Kind: PropertyKind.Init } op || op.Value is not Expression value) return null;
+                    var key = op.Key switch { Identifier k => k.Name, StringLiteral k => k.Value, _ => null };
+                    // `@` is where the view model's locals are read from (LazyView), so no field may be one.
+                    if (key == null || key.StartsWith("@", StringComparison.Ordinal)) return null;
+                    view.Fields.RemoveAll(f => f.Key == key);
+                    view.Fields.Add((key, value));
+                }
+            }
+            if (view.Fields.Count == 0) return null;
+            foreach (var n in Markup.Everything(body))
+            {
+                if (n is ThisExpression || n is Identifier { Name: "arguments" }) return null;
+                if (n is AssignmentExpression { Left: Identifier a } && locals.Contains(a.Name)) return null;
+                if (n is UpdateExpression { Argument: Identifier u } && locals.Contains(u.Name)) return null;
+            }
+            return view;
+        }
+
+        // Every mention of the builder is `const v = values()`, and every `v` is only read.
+        bool Calls(string name, FunctionDeclaration decl)
+        {
+            var any = false;
+            foreach (var n in Markup.Everything(ast))
+            {
+                if (n is not Identifier ident || ident.Name != name || ReferenceEquals(ident, decl.Id)) continue;
+                if (!parents.TryGetValue(ident, out var call) || call is not CallExpression { Arguments.Count: 0 } c || !ReferenceEquals(c.Callee, ident)
+                    || !parents.TryGetValue(c, out var owner) || owner is not VariableDeclarator { Id: Identifier held } vd || !ReferenceEquals(vd.Init, c))
+                    return false;
+                if (!OnlyRead(held.Name, Scope(vd), vd.Id)) return false;
+                any = true;
+            }
+            return any;
+        }
+
+        Node Scope(Node n)
+        {
+            for (var at = n; parents.TryGetValue(at, out var up); at = up)
+                if (up is IFunction) return up;
+            return ast;
+        }
+
+        // Inside `scope`, the name is bound once (at `binding`) and each other mention is a field
+        // read or an argument to a page function that only reads it in turn.
+        bool OnlyRead(string name, Node scope, Node binding)
+        {
+            foreach (var n in Markup.Everything(scope))
+            {
+                if (n is not Identifier ident || ident.Name != name || ReferenceEquals(ident, binding)) continue;
+                if (!parents.TryGetValue(ident, out var p)) return false;
+                switch (p)
+                {
+                    case MemberExpression m when ReferenceEquals(m.Property, ident) && !m.Computed:
+                    case ObjectProperty op when ReferenceEquals(op.Key, ident) && !op.Computed && !op.Shorthand:
+                        continue;
+                    case MemberExpression m when ReferenceEquals(m.Object, ident):
+                        if (parents.TryGetValue(m, out var use)
+                            && (use is AssignmentExpression wa && ReferenceEquals(wa.Left, m)
+                                || use is UpdateExpression
+                                || use is NonUpdateUnaryExpression { Operator: Operator.Delete }))
+                            return false;
+                        continue;
+                    case CallExpression c when !ReferenceEquals(c.Callee, ident) && c.Callee is Identifier callee
+                                               && fns.TryGetValue(callee.Name, out var fn):
+                        {
+                            var at = -1;
+                            for (var i = 0; i < c.Arguments.Count; i++) if (ReferenceEquals(c.Arguments[i], ident)) at = i;
+                            if (at < 0 || at >= fn.Params.Count || fn.Params[at] is not Identifier param) return false;
+                            if (!reads.TryGetValue((fn, at), out var ok))
+                            {
+                                reads[(fn, at)] = true;   // a recursive call reads it the same way
+                                ok = OnlyRead(param.Name, (Node)fn, param);
+                                reads[(fn, at)] = ok;
+                            }
+                            if (!ok) return false;
+                            continue;
+                        }
+                    default:
+                        // A binding of the same name - a parameter or declaration below - or any other use.
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        // Nothing a lazy build would skip: no write to a name declared outside the builder, no DOM,
+        // and no call to a page function that does either. Closures stored as field values are
+        // handlers - they run later, on their own - and are not part of building.
+        HashSet<string> Inside(IFunction fn)
+        {
+            var inside = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var n in Markup.Everything((Node)fn))
+            {
+                if (n is VariableDeclarator { Id: var target }) foreach (var x in Markup.Everything(target)) if (x is Identifier b) inside.Add(b.Name);
+                if (n is IFunction f) foreach (var q in f.Params) foreach (var x in Markup.Everything(q)) if (x is Identifier b) inside.Add(b.Name);
+            }
+            return inside;
+        }
+
+        int Effect(IFunction fn)
+        {
+            if (pure.TryGetValue(fn, out var known)) return known;
+            pure[fn] = None;   // recursion: assume, and let the rest of the walk decide
+            var found = Effects((Node)fn, Inside(fn));
+            pure[fn] = found;
+            return found;
+        }
+
+        int Effects(Node n, HashSet<string> inside)
+        {
+            if (n is IFunction && parents.TryGetValue(n, out var up) && Stored(n, up)) return None;
+            var here = None;
+            switch (n)
+            {
+                case AssignmentExpression a when !Local(a.Left, inside):
+                case UpdateExpression u when !Local(u.Argument, inside):
+                case NonUpdateUnaryExpression { Operator: Operator.Delete } d when !Local(d.Argument, inside):
+                    return Other;
+                case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier method, Object: var owner } }
+                    when method.Name is "pop" or "shift" or "unshift" or "splice" or "sort" or "reverse" or "fill" or "copyWithin"
+                         && !Local(owner, inside):
+                    return Other;
+                case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "push" }, Object: var list } }
+                    when !Local(list, inside):
+                    if (!Registry(list)) return Other;
+                    here = Registers;
+                    break;
+                case CallExpression { Callee: MemberExpression { Object: Identifier { Name: "Object" }, Property: Identifier { Name: "assign" } } } oa
+                    when oa.Arguments.Count > 0 && !Local(oa.Arguments[0], inside):
+                    return Other;
+                case Identifier { Name: "document" or "window" or "console" or "localStorage" or "sessionStorage" or "history" or "location" } g
+                    when !(parents.TryGetValue(g, out var gp) && (gp is MemberExpression { Computed: false } gm && ReferenceEquals(gm.Property, g)
+                                                                  || gp is ObjectProperty { Computed: false, Shorthand: false } gk && ReferenceEquals(gk.Key, g))):
+                    return Other;
+                case CallExpression { Callee: Identifier callee } when fns.TryGetValue(callee.Name, out var called):
+                    here = Effect(called);
+                    if (here == Other) return Other;
+                    break;
+            }
+            foreach (var k in n.ChildNodes)
+            {
+                if (k == null) continue;
+                var below = Effects(k, inside);
+                if (below == Other) return Other;
+                if (below > here) here = below;
+            }
+            return here;
+        }
+
+        // A closure that is a field's value, possibly behind a condition - `pick: on ? () => ... : null`
+        // - or one handed to a page function that keeps it without calling it: `act(() => ...)`.
+        bool Stored(Node fn, Node up)
+        {
+            var at = fn;
+            while (up is ConditionalExpression or LogicalExpression or ParenthesizedExpression)
+            {
+                at = up;
+                if (!parents.TryGetValue(up, out up!)) return false;
+            }
+            if (up is ObjectProperty op && ReferenceEquals(op.Value, at)) return true;
+            if (up is not CallExpression { Callee: Identifier callee } c || !fns.TryGetValue(callee.Name, out var keeper)) return false;
+            for (var i = 0; i < c.Arguments.Count && i < keeper.Params.Count; i++)
+                if (ReferenceEquals(c.Arguments[i], at) && keeper.Params[i] is Identifier kept)
+                {
+                    foreach (var n in Markup.Everything((Node)keeper))
+                        if (n is CallExpression { Callee: Identifier run } && run.Name == kept.Name) return false;
+                    return true;
+                }
+            return false;
+        }
+
+        static bool Local(Node? target, HashSet<string> inside)
+        {
+            for (var guard = 0; target != null && guard < 32; guard++)
+                switch (target)
+                {
+                    case Identifier id: return inside.Contains(id.Name);
+                    case MemberExpression m: target = m.Object; break;
+                    case ParenthesizedExpression p: target = p.Expression; break;
+                    // `Object.assign({}, n, {...})`: a literal made right here is nobody else's.
+                    case ObjectExpression or ArrayExpression: return true;
+                    default: return false;
+                }
+            return false;
+        }
+
+        // `acts.push(fn)` onto a top-level `let` the page empties with `acts = []`.
+        bool Registry(Node list)
+        {
+            if (list is not Identifier { Name: var name }) return false;
+            foreach (var s in ast.Body)
+                if (s is VariableDeclaration { Kind: VariableDeclarationKind.Let } vd)
+                    foreach (var d in vd.Declarations)
+                        if (d.Id is Identifier { Name: var declared } && declared == name)
+                            foreach (var n in Markup.Everything(ast))
+                                if (n is AssignmentExpression { Left: Identifier target, Right: ArrayExpression { Elements.Count: 0 } } && target.Name == name)
+                                    return true;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// A view-model builder as a lazy object: each local and field is a function that computes it at
+    /// most once per call of the builder, and the object it returns computes a field when it is read.
+    /// </summary>
+    /// <remarks>
+    /// Every function here is made ONCE, when the chunk loads. A call of the builder is a counter
+    /// bump; a read of a field computed earlier in the same call is a table lookup. The fields'
+    /// values - their strings, their lists, their handlers - are built only when something reads
+    /// them, which on a compiled page is the drawn tab's holes and nothing else.
+    /// </remarks>
+    private void LazyView(string name, View view)
+    {
+        // A function of its own rather than a `do` block: a block's locals count against the main
+        // function's 200, which the prelude and a large page already come close to. Called inside a
+        // `do`, because a statement that opens with `(` after one that ends in a call - `X = f(...)` -
+        // is read by Lua as calling that result.
+        Line("-- " + name + "(): a view model computed field by field, as its fields are read");
+        Line("do (function()");
+        _depth++;
+        Line("local vm_gen, vm_done, vm_memo, vm_locals, vm_fields = 0, {}, {}, {}, {}");
+        var outer = _rename;
+        _rename = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (local, _) in view.Locals) _rename[local] = "vm_locals[" + Quote(local) + "]()";
+        foreach (var (local, init) in view.Locals) Memo("vm_locals[" + Quote(local) + "]", "@" + local, init);
+        foreach (var (key, value) in view.Fields) Memo("vm_fields[" + Quote(key) + "]", key, value);
+        // Its locals too, as `v["@name"]`: the markup compiler reads a hole straight out of the
+        // view model's own expressions, and one that needs a local reads the memo here rather than
+        // computing it again in every hole. `@` cannot begin a field a page wrote as a name.
+        foreach (var (local, _) in view.Locals) Line("vm_fields[" + Quote("@" + local) + "] = vm_locals[" + Quote(local) + "]");
+        _rename = outer;
+        Line("local vm_view = setmetatable({}, { __index = function(_, k) local f = vm_fields[k] if f ~= nil then return f() end end })");
+        var eager = new StringBuilder();
+        foreach (var (local, _) in view.Locals) if (view.Eager.Contains("@" + local)) eager.Append(" vm_locals[").Append(Quote(local)).Append("]()");
+        foreach (var (key, _) in view.Fields) if (view.Eager.Contains(key)) eager.Append(" vm_fields[").Append(Quote(key)).Append("]()");
+        Line(Safe(name) + " = function() vm_gen = vm_gen + 1" + eager + " return vm_view end");
+        _depth--;
+        Line("end)() end");
+
+        void Memo(string slot, string key, Expression init)
+        {
+            var k = Quote(key);
+            Line(slot + " = function()");
+            _depth++;
+            Line("if vm_done[" + k + "] == vm_gen then return vm_memo[" + k + "] end");
+            Line("local vm_x = " + Expr(init));
+            Line("vm_memo[" + k + "] = vm_x");
+            Line("vm_done[" + k + "] = vm_gen");
+            Line("return vm_x");
+            _depth--;
+            Line("end");
+        }
+    }
+
+    /// <summary>A function's own names hide a view's locals of the same name inside it.</summary>
+    private List<(string, string)>? Shadow(in NodeList<Node> ps, Node body)
+    {
+        if (_rename == null || _rename.Count == 0) return null;
+        List<(string, string)>? hidden = null;
+        void Hide(Node? n)
+        {
+            if (n == null) return;
+            foreach (var x in Markup.Everything(n))
+                if (x is Identifier id && _rename.TryGetValue(id.Name, out var was))
+                {
+                    (hidden ??= new List<(string, string)>()).Add((id.Name, was));
+                    _rename.Remove(id.Name);
+                }
+        }
+        foreach (var p in ps) Hide(p);
+        // The function's own scope, not a nested one's: each nested function hides its own names
+        // when it is translated in turn. A nested declaration's NAME is bound here, though.
+        foreach (var n in Walk(body))
+        {
+            if (n is VariableDeclarator d) Hide(d.Id);
+            if (n is CatchClause { Param: { } cp }) Hide(cp);
+            foreach (var kid in n.ChildNodes) if (kid is FunctionDeclaration { Id: { } fid }) Hide(fid);
+        }
+        return hidden;
+    }
+
+    private void Unshadow(List<(string, string)>? hidden)
+    {
+        if (hidden == null || _rename == null) return;
+        foreach (var (n, was) in hidden) _rename[n] = was;
+    }
+
+    /// <summary>
+    /// A name, or up to three field reads off one - `o.stats`, `st.lines.o2` - which reading twice
+    /// costs nothing and changes nothing. `this` and calls are not paths.
+    /// </summary>
+    private static bool Path(Expression e)
+    {
+        for (var depth = 0; depth <= 3; depth++)
+            switch (e)
+            {
+                case Identifier: return true;
+                case MemberExpression { Computed: false } m: e = m.Object; break;
+                case MemberExpression { Computed: true, Property: StringLiteral or NumericLiteral } m: e = m.Object; break;
+                default: return false;
+            }
+        return false;
     }
 
     /// <summary>`null`, or the `undefined` that is spelled as a bare name; Lua's nil is both.</summary>
@@ -1691,6 +2191,7 @@ internal sealed class JsToLua
                 return "nil";
 
             case Identifier id:
+                if (_rename != null && _rename.TryGetValue(id.Name, out var lazy)) return lazy;
                 if (!_known.Contains(id.Name) && !Provided.Contains(id.Name))
                     Unsupported(id, "`" + id.Name + "`, which neither the page nor the prelude defines,");
                 return Safe(id.Name);
@@ -1739,6 +2240,16 @@ internal sealed class JsToLua
             // and a view model re-rendered 2.4 times a second made hundreds of them a render.
             case LogicalExpression log when Eager(log.Right):
                 return (log.Operator == Operator.LogicalAnd ? "and_v(" : "or_v(") + Expr(log.Left) + ", " + Expr(log.Right) + ")";
+
+            // `o.stats || []`, `st.bound || {}`: a left side that is a name or a short path of field
+            // reads is read twice instead, and the right side is Lua's own short circuit - no closure.
+            // A value JavaScript calls truthy is never Lua's false or nil, so `and a` yields it whole.
+            // `&&` only when its right side can never be false or nil, for the same reason.
+            case LogicalExpression { Operator: Operator.LogicalOr } lor when Path(lor.Left):
+                return "(js_truthy(" + Expr(lor.Left) + ") and " + Expr(lor.Left) + " or " + Expr(lor.Right) + ")";
+
+            case LogicalExpression { Operator: Operator.LogicalAnd } land when Path(land.Left) && NeverFalsy(land.Right):
+                return "(js_truthy(" + Expr(land.Left) + ") and " + Expr(land.Right) + " or " + Expr(land.Left) + ")";
 
             case LogicalExpression log:
                 // Value position, so the operand itself is the result as in JS. The right side is a
@@ -1995,7 +2506,9 @@ internal sealed class JsToLua
         if (receiver != null) _receiver = receiver;
         // the body writes lines into the shared buffer, so it is taken back out and inlined here
         var saved = _sb.Length;
+        var hidden = Shadow(ps, body);
         Body(body, bind);
+        Unshadow(hidden);
         var inner = _sb.ToString(saved, _sb.Length - saved);
         _sb.Length = saved;
         _receiver = hadReceiver;
@@ -2090,6 +2603,7 @@ internal sealed class JsToLua
 
     private string Binary(NonLogicalBinaryExpression b)
     {
+        if (b.Operator == Operator.Addition && Fold(b, out var folded) is { } choice && folded > 1) return Choose(choice);
         var l = Expr(b.Left);
         var r = Expr(b.Right);
         return b.Operator switch

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UIElements;
+using SS = ScriptedScreens.ScriptableUi.ScriptedScreensScriptableUiSystem;
 
 namespace ScriptedScreensHtml;
 
@@ -55,12 +56,32 @@ internal sealed class CompiledRun
 
     private readonly object _env;
     private readonly object? _event;
+    private readonly object? _data;
+    /// <summary>The Lua tables a payload is delivered in, kept between payloads: see ChipHost.RunData.</summary>
+    private object? _dataTables;
     private int _events;
 
     private CompiledRun(object state, object env, object frame, string page)
     {
         _state = state; _env = env; _frame = frame; _page = page;
         _event = ChipHost.FunctionIn(env, "event");
+        _data = ChipHost.FunctionIn(env, "data_in");
+    }
+
+    /// <summary>
+    /// A payload the chip's own Lua sent as data, to the page's <c>window.ondata</c> and its
+    /// <c>data</c> listeners - the handler the page wrote, translated once, writing its slots.
+    /// </summary>
+    /// <remarks>
+    /// A compiled page's script is in the chip, so this is where its data has to go: the interpreter
+    /// that used to receive it has been let go. Called once per payload, on the game thread, as the
+    /// payload arrives.
+    /// </remarks>
+    internal bool Data(List<KeyValuePair<string, SS.UiValue>> entries)
+    {
+        if (_data == null || !ChipHost.RunData(_state, _data, ref _dataTables, entries)) return false;
+        _events++;
+        return true;   // the chunk's own flush sends whatever the handler changed
     }
 
     /// <summary>

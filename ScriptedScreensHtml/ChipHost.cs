@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using SS = ScriptedScreens.ScriptableUi.ScriptedScreensScriptableUiSystem;
 
 namespace ScriptedScreensHtml;
 
@@ -189,6 +190,129 @@ internal static class ChipHost
             ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: a compiled page's frame failed - {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Hands a payload the chip's own Lua sent as data to a compiled page's <c>data</c> event.
+    /// </summary>
+    /// <remarks>
+    /// As a Lua table, not JSON: the chunk lives in the same VM, so the values go straight in. The
+    /// tables are this page's own and are refilled in place each payload - a key the payload no
+    /// longer carries is removed - so a tick allocates nothing here once the shape has been seen.
+    /// The same guards as an event: a payload that lands while the chip is mid-call is dropped
+    /// rather than pushed onto a running state, and the next one carries the same keys.
+    /// ponytail: a handler that keeps the payload object between ticks sees it refilled. JSON gave
+    /// each tick a new object; keeping one is rare, and a copy per tick is the allocation this avoids.
+    /// </remarks>
+    internal static bool RunData(object? state, object? handler, ref object? tables,
+                                 List<KeyValuePair<string, SS.UiValue>> entries)
+    {
+        if (state is not Lua.LuaState chip || handler is not Lua.LuaFunction fn) return false;
+        if (chip.IsRunning) return false;
+        var data = tables as DataTables ?? (DataTables)(tables = new DataTables());
+        try
+        {
+            data.Fill(entries);
+            var stack = chip.Stack;
+            var baseline = stack.Count;
+            stack.Push(data.Detail);
+            var running = chip.RunAsync(fn, 1, default);
+            if (!running.IsCompleted)
+            {
+                if (stack.Count > baseline) stack.PopUntil(baseline);
+                return false;
+            }
+            running.GetAwaiter().GetResult();
+            if (stack.Count > baseline) stack.PopUntil(baseline);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: a compiled page's data handler failed - {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>One page's data payload as Lua tables, kept and refilled: see <see cref="RunData"/>.</summary>
+    private sealed class DataTables
+    {
+        internal readonly Lua.LuaTable Detail = new();
+        private readonly List<Lua.LuaValue> _stale = new();
+
+        internal void Fill(List<KeyValuePair<string, SS.UiValue>> entries)
+        {
+            foreach (var e in entries)
+                if (!string.IsNullOrEmpty(e.Key)) Detail[e.Key] = Value(Detail[e.Key], e.Value);
+            Stale(Detail);
+            for (var i = _stale.Count - 1; i >= 0; i--)
+                foreach (var e in entries)
+                    if (_stale[i].TryRead<string>(out var name) && e.Key == name) { _stale.RemoveAt(i); break; }
+            Prune(Detail);
+        }
+
+        /// <summary>A value as the page's script reads it: a list is 0-based with a `length`, as the prelude's arrays are.</summary>
+        private Lua.LuaValue Value(Lua.LuaValue was, in SS.UiValue v)
+        {
+            switch (v.Type)
+            {
+                case SS.UiValueType.Number: return Number(v.Number);
+                case SS.UiValueType.Bool: return v.Bool;
+                case SS.UiValueType.String: return v.String ?? string.Empty;
+                case SS.UiValueType.Array when v.Array != null:
+                    {
+                        // Reused only if it was a list last time: a map's keys would otherwise linger in it.
+                        Lua.LuaTable? list = null;
+                        var length = 0;
+                        if (was.TryRead<Lua.LuaTable>(out var old) && old["length"].TryRead<double>(out var had)) { list = old; length = (int)had; }
+                        list ??= new Lua.LuaTable();
+                        for (var i = 0; i < v.Array.Length; i++) list[(double)i] = Value(list[(double)i], v.Array[i]);
+                        for (var i = v.Array.Length; i < length; i++) list[(double)i] = Lua.LuaValue.Nil;
+                        list["length"] = (double)v.Array.Length;
+                        return list;
+                    }
+                case SS.UiValueType.Map when v.Map != null:
+                    {
+                        var map = was.TryRead<Lua.LuaTable>(out var old) && !old["length"].TryRead<double>(out _) ? old : new Lua.LuaTable();
+                        foreach (var p in v.Map)
+                            if (!string.IsNullOrEmpty(p.Key)) map[p.Key] = Value(map[p.Key], p.Value);
+                        Stale(map);
+                        for (var i = _stale.Count - 1; i >= 0; i--)
+                            foreach (var p in v.Map)
+                                if (_stale[i].TryRead<string>(out var name) && p.Key == name) { _stale.RemoveAt(i); break; }
+                        Prune(map);
+                        return map;
+                    }
+            }
+            return Lua.LuaValue.Nil;
+        }
+
+        // The keys this payload no longer carries: every key, then those it does carry struck off,
+        // then the rest cleared. Walked first and cleared after, as NotesIn does - `next` does not
+        // survive a nil mid-walk. Linear, because a payload is a handful of keys and a set per table
+        // would be the allocation this avoids.
+        private void Stale(Lua.LuaTable table)
+        {
+            _stale.Clear();
+            var key = Lua.LuaValue.Nil;
+            while (table.TryGetNext(key, out var pair))
+            {
+                key = pair.Key;
+                _stale.Add(key);
+            }
+        }
+
+        private void Prune(Lua.LuaTable table)
+        {
+            foreach (var k in _stale) table[k] = Lua.LuaValue.Nil;
+            _stale.Clear();
+        }
+
+        /// <summary>
+        /// A float as the double a page would have parsed from JSON: <c>21.3f</c> is 21.3, not
+        /// 21.299999237060547, or a page comparing against a threshold it wrote sees a different number.
+        /// </summary>
+        private static double Number(float f)
+            => !float.IsNaN(f) && !float.IsInfinity(f) && Math.Abs(f) < 7.9e27f ? (double)(decimal)f : f;
     }
 
     /// <summary>What the chunk's own send path had to say, once, or null while it has said nothing.</summary>
