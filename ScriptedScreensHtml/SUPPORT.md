@@ -1,4 +1,4 @@
-# Writing a page for a console: what works from HTML, CSS and JS
+﻿# Writing a page for a console: what works from HTML, CSS and JS
 
 State as of 2026-09-15 (vector mod 0.11.23.0). Everything in the
 "works" tables below was seen on a console that day, on the verification pages
@@ -80,8 +80,8 @@ vector node.
 | Simple selectors | tag, `.class`, `#id`, `*`, attribute selectors (`[a]`, `=`, `~=`, `|=`, `^=`, `$=`, `*=`, `i` flag) |
 | Pseudo-classes | `:root :first-child :last-child :only-child :nth-child() :nth-last-child() :nth-of-type() :nth-last-of-type() :first-of-type :last-of-type :only-of-type :empty :not() :is() :where() :has() :hover :active :focus :focus-visible :focus-within :checked :disabled :enabled :required :optional :read-only :read-write :placeholder-shown :default :indeterminate :valid :invalid :user-valid :user-invalid (after the field was changed) :popover-open :scope :in-range :out-of-range :open :modal :link :any-link :lang() :dir()`; `:visited`/`:target` never match |
 | Pseudo-elements | `::before`/`::after` with `content` (strings, `attr()`, `counter()`, `counters()`), `::marker`, `::placeholder` (colour), `::first-letter`, `::first-line` (colour, size, weight, face), `::backdrop` (background and opacity of the dim layer behind a modal dialog or a styled popover, on top of the page), `::details-content` (the body of a details as one box), `::-webkit-scrollbar`, `-thumb`, `-track` |
-| At-rules | `@media` (width/height/min/max/orientation/`not`/`and`/lists, decided against the design size), `@supports`, `@keyframes`, `@font-face` (a font file the Fonts mod has, by file name), `@import`, `@layer` (source order), `@scope (root)`, `@container` (size queries decided against the design size), `@property` (`initial-value`), `@counter-style`, `@starting-style` (top level and nested: the state a new element transitions from, on load and on insert) |
-| Values | custom properties with `var()` and fallbacks (a `var()` naming no property in scope and with no fallback makes its declaration invalid and dropped, as in a browser; re-resolved through the subtree when a script changes a class or an attribute a rule selects on, so a theme switch on the root restyles the page), `inherit`, `initial`, `unset`, `revert`, `currentColor`, `calc()` (nested, and mixed `%` with `px` resolved against the containing block after layout), `min()`, `max()`, `clamp()`, `sin() cos() tan() asin() acos() atan() atan2()`, `pow() sqrt() hypot() log() exp()`, `abs() sign() mod() rem() round()`, `attr()` in content, `env()` (safe-area insets are 0), `image-set()` (first candidate) |
+| At-rules | `@media` (width/height/min/max/orientation/`not`/`and`/lists, decided against the design size), `@supports`, `@keyframes`, `@font-face` (a font file the Fonts mod has, by file name), `@import`, `@layer` (source order), `@scope (root)`, `@container` (size queries, named or not, answered by the nearest container above the element from its own laid-out box, re-cascaded when that box changes), `@property` (`initial-value`), `@counter-style`, `@starting-style` (top level and nested: the state a new element transitions from, on load and on insert) |
+| Values | custom properties with `var()` and fallbacks (a `var()` naming no property in scope and with no fallback makes its declaration invalid and dropped, as in a browser; re-resolved through the subtree when a script changes a class or an attribute a rule selects on, so a theme switch on the root restyles the page), `inherit`, `initial`, `unset`, `revert`, `currentColor`, `calc()` (nested, and mixed `%` with `px` resolved against the containing block after layout), `min()`, `max()`, `clamp()`, `sin() cos() tan() asin() acos() atan() atan2()`, `pow() sqrt() hypot() log() exp()`, `abs() sign() mod() rem() round()`, `attr()` in content and, as `attr(name unit)` or `attr(name type(...))` with an optional fallback, in any other property (`width: attr(data-w px)`), `lh`/`rlh` (the element's and the root's line box: a declared `line-height`, else 1.2em), `env()` (safe-area insets are 0), `image-set()` (first candidate) |
 | Units | `px em rem % vw vh vmin vmax ch ex cap ic cm mm in pt pc Q fr deg rad turn grad s ms` (`cap` 0.7em, `ic` 1em) |
 | Colours | 148 named, `#rgb #rgba #rrggbb #rrggbbaa`, `rgb()/rgba()` (legacy and modern), `hsl()/hsla()`, `transparent`, `color-mix(in srgb, ...)`, `hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, the relative colour syntax (`rgb(from red r g b / 50%)`, `hsl(from x calc(h + 120) s l)`, any of the functions), `light-dark()` by the cascade's `color-scheme` |
 | Logical properties | `inline-size block-size min/max-*-size`, `margin/padding/border/inset-inline|block(-start|-end)`, `border-start-start-radius` and siblings, `overflow-inline/block`, `text-align: start/end`, `float: inline-start/end` (a horizontal, left-to-right page) |
@@ -111,7 +111,7 @@ vector node.
 | Masks | `mask-image` gradients with `mask-size`, `mask-position`, `mask-origin`, `mask-clip` (`mask-repeat` accepted) |
 | Borders | `border` and every per-side longhand (`width`, `color`, `style` incl. per side), `solid dashed dotted double inset outset groove ridge none hidden`, `border-radius` per corner incl. elliptical, `corner-shape: bevel/scoop/notch`, `border-image` (gradient source as a gradient frame, image source as nine slices in percent), `outline` (`width style color offset`) |
 | Shadows | `box-shadow` (offset, blur, spread, colour, `inset`, several), `text-shadow` (several), `filter: drop-shadow()` |
-| Effects | `opacity`, `filter: brightness contrast saturate hue-rotate grayscale sepia invert drop-shadow` (on the subtree), `clip-path: inset() circle() ellipse() polygon()` (also concave), `mask-image: linear-gradient(...)`, `mix-blend-mode` and `backdrop-filter` accepted without effect (per-pixel) |
+| Effects | `opacity`, `filter: brightness contrast saturate hue-rotate grayscale sepia invert drop-shadow` (on the subtree), `clip-path: inset() rect() xywh() circle() ellipse() polygon() path()` (also concave; a path is flattened to its outline), `mask-image: linear-gradient(...)`, `mix-blend-mode` and `backdrop-filter` accepted without effect (per-pixel) |
 | Transforms | `transform` with `translate scale rotate skew matrix` (and the X/Y/3d spellings; `rotateX/Y` as their flat foreshortening, `perspective` ignored), `transform-origin`, `backface-visibility: hidden` |
 
 ### Text
@@ -128,7 +128,7 @@ vector node.
 | Area | What works |
 |---|---|
 | Transitions | `transition` on size, position, opacity, transform, colours and `offset-distance`, a script's `style` writes reach the emitter for every property (gradients, masks, clips...), `transition-behavior: allow-discrete` (a `display: none` waits for the transition), `@starting-style` (`transition-property/duration/delay/timing-function`, `steps()`, `cubic-bezier()`); compiled to expressions, no per-frame work |
-| Keyframes | `@keyframes` with `animation-name/duration/delay/iteration-count/direction/fill-mode/play-state/timing-function`, `Element.animate()`, `style.animation` written by a script |
+| Keyframes | `@keyframes` with `animation-name/duration/delay/iteration-count/direction/fill-mode/play-state/timing-function/composition` (`add` and `accumulate` compose a frame's transform and opacity onto the element's own; a compiled loop composes the same way), `Element.animate()`, `style.animation` written by a script |
 | Scroll-driven | `animation-timeline: scroll()` and `view()` over opacity and 2D transforms, evaluated from the scroll offset |
 | Pointer | `:hover` (follows the cursor, or the crosshair), `:active` (while pressed), `:focus`/`:focus-within` (after a click), `pointer-events: none`, `cursor` accepted |
 
@@ -143,7 +143,7 @@ pointer physics, no font hinting and no snap physics: `scroll-snap-*`, `scroll-m
 `caret-color`, `tab-size`, `orphans`, `widows`, `page-break-*`, `break-*`,
 `unicode-bidi`, `direction`, `font-kerning`, `font-feature-settings`,
 `font-optical-sizing`, `font-synthesis`, `font-stretch`, `font-variant*`, `quotes`,
-`hanging-punctuation`, `background-attachment`, `container*`, `perspective*`,
+`hanging-punctuation`, `background-attachment`, `perspective*`,
 `transform-style`, `ruby-*`, `appearance`, `user-select`, `accent-color`.
 
 Coverage measured against the MDN list: 285 of 491 standard CSS properties handled
@@ -185,11 +185,12 @@ working from a page.
 
 Approximations in this layer, listed to be replaced, not kept:
 
-- `@container` size queries are decided against the design size, not the container's.
 - `::after` content is generated before the element's children, so a `counter()` in it does
   not see increments by descendants.
 - `ruby`: the annotation is small and raised after its base, not stacked above it.
 - `border-image` with `px`/number slices reads them as thirds (percent slices are exact).
+- `object-position` is reported and not drawn: the picture is placed by the vector layer, which is the
+  only side that learns the picture's size, and its `IMG` has no alignment to carry it yet.
 - `text-decoration` colour, thickness, offset and style are drawn on single-line labels;
   a wrapped label keeps the plain underline.
 - `rotateX`/`rotateY` are the flat foreshortening, no perspective.

@@ -19,6 +19,9 @@ internal sealed class AnimationSpec
     public bool FillBackwards;
     public bool FillForwards;
     public bool Paused;
+    /// <summary>animation-composition: 0 replace (a frame's value is the value), 1 add (the frame is composed onto the
+    /// element's own transform and opacity), 2 accumulate (as add, but a scale adds its excess over 1 rather than multiplying).</summary>
+    public int Composition;
 
     /// <summary>Parse one token of the shorthand into whichever slot it belongs to.</summary>
     public void ApplyToken(string t, ref int timesSeen)
@@ -103,10 +106,19 @@ internal sealed class KeyframeRunner
     /// <summary>Told when this runner writes into the record, so the emitter knows the element changed.</summary>
     private readonly Action<VisualElement>? _touch;
 
+    /// <summary>The element's own transform and opacity, for animation-composition: add. Copied here because the
+    /// record is the dictionary the frames write into - after the first frame it holds the frame, not the base.</summary>
+    private readonly string? _baseTransform, _baseOpacity;
+
     public KeyframeRunner(VisualElement ve, CssKeyframes frames, AnimationSpec spec, float now, Action<string>? warn, Dictionary<string, string>? record = null, Action<VisualElement>? touch = null)
     {
         _record = record;
         _touch = touch;
+        if (spec.Composition != 0 && record != null)
+        {
+            record.TryGetValue("transform", out _baseTransform);
+            record.TryGetValue("opacity", out _baseOpacity);
+        }
         _ve = ve;
         _frames = frames;
         _spec = spec;
@@ -259,12 +271,57 @@ internal sealed class KeyframeRunner
 
     private void ApplyFrame(CssKeyframe frame)
     {
-        foreach (var d in frame.Declarations)
+        foreach (var raw in frame.Declarations)
         {
+            var d = raw;
+            // animation-composition: add / accumulate. Composed NUMERICALLY and applied as one declaration: the
+            // applier's transform scan sets translate/rotate/scale per function, last one wins, so
+            // "translateX(20px) translateX(0)" would apply as 0. The composed value has to be applied, not only
+            // recorded - the emitter reads the transform off the resolved style, not off the record, which is
+            // where the first attempt at this stopped.
+            if (_spec.Composition != 0 && d.Name == "transform" && _baseTransform != null)
+                d = new CssDeclaration("transform", Composed(_baseTransform, d.Value, _spec.Composition == 2), d.Important);
+            else if (_spec.Composition != 0 && d.Name == "opacity" && _baseOpacity != null)
+                d = new CssDeclaration("opacity", Mathf.Clamp01(StyleApplier.Num(_baseOpacity) + StyleApplier.Num(d.Value)).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture), d.Important);
             StyleApplier.Apply(_ve, d, _warn);
             // the frame's values also go to the record the emitter reads (motion paths, gradients, masks...)
             if (_record != null) { _record[d.Name] = d.Value.Trim(); _touch?.Invoke(_ve); }
         }
         Wrote = true;
+    }
+
+    /// <summary>A CSS transform list read as translate / rotate / scale: what the applier and the emitter keep of one.</summary>
+    internal static (float tx, float ty, float r, float sx, float sy) Parts(string transform)
+    {
+        var tx = 0f; var ty = 0f; var r = 0f; var sx = 1f; var sy = 1f;
+        if (transform.Trim() == "none") return (tx, ty, r, sx, sy);
+        foreach (var (name, args) in StyleApplier.Functions(transform))
+        {
+            float A(int i) => args.Length > i ? StyleApplier.Num(args[i]) : 0f;
+            switch (name)
+            {
+                case "translate": tx = A(0); ty = args.Length > 1 ? A(1) : 0f; break;
+                case "translatex": tx = A(0); break;
+                case "translatey": ty = A(0); break;
+                case "scale": sx = A(0); sy = args.Length > 1 ? A(1) : A(0); break;
+                case "scalex": sx = A(0); break;
+                case "scaley": sy = A(0); break;
+                case "rotate": case "rotatez": r = A(0); break;
+            }
+        }
+        return (tx, ty, r, sx, sy);
+    }
+
+    /// <summary>The frame's transform composed onto the base one, as CSS `add` (translations and turns add,
+    /// scales multiply) or `accumulate` (a scale adds its excess over 1).</summary>
+    internal static string Composed(string baseTransform, string frame, bool accumulate)
+    {
+        var b = Parts(baseTransform);
+        var f = Parts(frame);
+        var sx = accumulate ? b.sx + f.sx - 1f : b.sx * f.sx;
+        var sy = accumulate ? b.sy + f.sy - 1f : b.sy * f.sy;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        return "translate(" + (b.tx + f.tx).ToString("0.###", inv) + "px," + (b.ty + f.ty).ToString("0.###", inv) + "px) rotate("
+               + (b.r + f.r).ToString("0.###", inv) + "deg) scale(" + sx.ToString("0.###", inv) + "," + sy.ToString("0.###", inv) + ")";
     }
 }

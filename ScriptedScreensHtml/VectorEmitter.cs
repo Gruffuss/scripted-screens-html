@@ -503,7 +503,7 @@ internal static class VectorEmitter
             else if (cpath.Trim() is not ("none" or ""))
                 // Failing to read a clip means the element draws UNCLIPPED - everything, not
                 // nothing - so silence here looks like a layout bug rather than a missing feature.
-                Warn(ctx, $"html: clip-path: {cpath.Trim()} is not drawn; the element is not clipped. inset(), rect(), xywh(), circle(), ellipse() and polygon() are.");
+                Warn(ctx, $"html: clip-path: {cpath.Trim()} is not drawn; the element is not clipped. inset(), rect(), xywh(), circle(), ellipse(), polygon() and path() are.");
         }
         if ((css.TryGetValue("mask-image", out var mcss) || css.TryGetValue("-webkit-mask-image", out mcss) || css.TryGetValue("mask", out mcss)) && MaskDef(ctx, mcss, x, y, w, h, css, rs) is { } maskId)
         {
@@ -2237,7 +2237,7 @@ internal static class VectorEmitter
         if (css.TryGetValue("line-height", out var lh0) && lh0.Trim() != "normal")
         {
             var lv = lh0.Trim();
-            lineHpx = lv.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(lv) : (lv.EndsWith("em", StringComparison.OrdinalIgnoreCase) || lv.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(lv) * (lv.EndsWith("%", StringComparison.Ordinal) ? 0.01f : 1f) : StyleApplier.Num(lv)) * rs.fontSize;
+            lineHpx = lv.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(lv) : LineHeightFactor(lv, rs.fontSize) * rs.fontSize;
         }
         var flexCentred = css.TryGetValue("display", out var dsp0) && dsp0.Trim() is "flex" or "inline-flex"
                           && ((css.TryGetValue("align-items", out var ai0) && ai0.Trim() == "center") || (css.TryGetValue("flex-direction", out var fd0) && fd0.Trim().StartsWith("column", StringComparison.Ordinal) && css.TryGetValue("justify-content", out var jc0) && jc0.Trim() == "center"));
@@ -2285,9 +2285,7 @@ internal static class VectorEmitter
         {
             // CSS: a bare number is a multiple of the font size, a length is absolute.
             var v = lh.Trim();
-            var mult = v.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(v) / rs.fontSize
-                     : v.EndsWith("em", StringComparison.OrdinalIgnoreCase) || v.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(v) / (v.EndsWith("%", StringComparison.Ordinal) ? 100f : 1f)
-                     : StyleApplier.Num(v);
+            var mult = v.EndsWith("px", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(v) / rs.fontSize : LineHeightFactor(v, rs.fontSize);
             if (mult > 0f && v != "normal") sb.Append(" lh=").AppendNum(mult);
         }
         sb.AppendNodeId(ctx, label).Append('\n');
@@ -4233,7 +4231,7 @@ internal static class VectorEmitter
         var p = spec.Alternate
             ? "(1-abs(mod(" + elapsed + "," + F(2f * d) + ")/" + F(d) + "-1))"
             : "(mod(" + elapsed + "," + F(d) + ")/" + F(d) + ")";
-        return KeyframeGroup(spec, frames, p, x, y, w, h);
+        return KeyframeGroup(spec, frames, p, x, y, w, h, ctx.Built.CssOf(ve));
     }
 
     /// <summary>The phase of a looping animation in the scene clock, 0..1. Shared, so a colour ramp
@@ -4317,25 +4315,38 @@ internal static class VectorEmitter
         }
         else
             p = "clamp(sy/" + F(Mathf.Max(1f, ctx.ScrollRange)) + ",0,1)";
-        return KeyframeGroup(spec, frames, p, x, y, w, h);
+        return KeyframeGroup(spec, frames, p, x, y, w, h, css);
     }
 
     /// <summary>The frames as a G whose opacity and transform follow progress <paramref name="p"/> (0..1).</summary>
-    private static string? KeyframeGroup(AnimationSpec spec, CssKeyframes frames, string p, float x, float y, float w, float h)
+    /// <remarks>
+    /// This G sits INSIDE the element's own transform and opacity wrappers, which carry the cascade's values, so
+    /// the two compose: what this writes is the frame's value with the base taken out again (the default,
+    /// `replace`, as a browser does), or the frame alone under animation-composition: add / accumulate, where
+    /// the outer wrapper's base is exactly what should be added. Before this a looping animation on an element
+    /// with a transform of its own ran offset by that transform.
+    /// </remarks>
+    private static string? KeyframeGroup(AnimationSpec spec, CssKeyframes frames, string p, float x, float y, float w, float h, Dictionary<string, string>? css = null)
     {
         if (spec.Reverse) p = "(1-" + p + ")";
+        var (btx, bty, br, bsx, bsy) = css != null && css.TryGetValue("transform", out var bt) && !StyleApplier.NeedsMatrix(bt) ? KeyframeRunner.Parts(bt) : (0f, 0f, 0f, 1f, 1f);
+        var bo = css != null && css.TryGetValue("opacity", out var bov) ? Mathf.Clamp01(StyleApplier.Num(bov)) : 1f;
+        // the inner value: the outer wrapper adds (translate, rotate) or multiplies (scale, opacity) the base
+        float Add(float frame, float b) => spec.Composition == 0 ? frame - b : frame;
+        float Mul(float frame, float b, bool accumulate) => b < 0.001f ? frame : spec.Composition == 0 ? frame / b : (accumulate ? b + frame - 1f : b * frame) / b;
+        float Fade(float frame) => bo < 0.001f ? frame : spec.Composition == 0 ? frame / bo : Mathf.Clamp01(bo + frame) / bo;
 
         var keys = new List<(float at, float o, float tx, float ty, float sx, float sy, float r)>();
         foreach (var f in frames.Frames)
         {
             var o = 1f; var tx = 0f; var ty = 0f; var sx = 1f; var sy = 1f; var r = 0f;
-            var seen = false;
+            var seen = false; var sawO = false; var sawT = false;
             foreach (var d in f.Declarations)
             {
-                if (d.Name == "opacity") { o = StyleApplier.Num(d.Value); seen = true; }
+                if (d.Name == "opacity") { o = StyleApplier.Num(d.Value); seen = true; sawO = true; }
                 else if (d.Name == "transform")
                 {
-                    seen = true;
+                    seen = true; sawT = true;
                     foreach (var (name, args) in StyleApplier.Functions(d.Value))
                     {
                         float A(int i) => args.Length > i ? StyleApplier.Num(args[i].Trim()) : 0f;
@@ -4353,6 +4364,10 @@ internal static class VectorEmitter
                 }
             }
             if (!seen && keys.Count > 0) { var prev = keys[keys.Count - 1]; o = prev.o; tx = prev.tx; ty = prev.ty; sx = prev.sx; sy = prev.sy; r = prev.r; }
+            // only what the frame declares composes: a frame naming no transform means the base, which the
+            // outer wrapper already is, so the inner value stays identity
+            if (sawO) o = Fade(o);
+            if (sawT) { var acc = spec.Composition == 2; tx = Add(tx, btx); ty = Add(ty, bty); r = Add(r, br); sx = Mul(sx, bsx, acc); sy = Mul(sy, bsy, acc); }
             keys.Add((f.Percent / 100f, o, tx, ty, sx, sy, r));
         }
         if (keys.Count == 1) keys.Insert(0, (0f, 1f, 0f, 0f, 1f, 1f, 0f));
@@ -4390,6 +4405,17 @@ internal static class VectorEmitter
     }
 
     private static string Quote(string v) => v.StartsWith("=", StringComparison.Ordinal) ? "\"" + v + "\"" : v;
+
+    /// <summary>A line-height that is not px as a factor of the font size: a bare number is one, `%` is one over
+    /// 100, and `em` is its own number - Num() would scale it by the em size, and the factor was being
+    /// squared (a 1.5em line box read as 21x the font size).</summary>
+    private static float LineHeightFactor(string v, float fontSize)
+    {
+        if (v.EndsWith("%", StringComparison.Ordinal)) return StyleApplier.Num(v) / 100f;
+        if (v.EndsWith("rem", StringComparison.OrdinalIgnoreCase)) return StyleApplier.Num(v) / Mathf.Max(1f, fontSize);
+        if (v.EndsWith("em", StringComparison.OrdinalIgnoreCase)) return StyleApplier.Num(v.Substring(0, v.Length - 2));
+        return StyleApplier.Num(v);
+    }
 
     private static string BorderStyle(Dictionary<string, string> css) => SideStyle(css, 0);
 
@@ -4599,6 +4625,19 @@ internal static class VectorEmitter
                     return Through(ring);
                 }
                 ctx.Defs.Append("  CP id=").Append(id).Append(" { C cx=").AppendNum(cx).Append(" cy=").AppendNum(cy).Append(" rx=").AppendNum(rx).Append(" ry=").AppendNum(ry).Append(" }\n");
+                return id;
+            }
+            case "path":
+            {
+                // The path is in the box's own coordinates; flattened like an offset-path, since the CP takes one
+                // shape and a P's d cannot be offset. A concave outline is what the CP is for.
+                var poly = new List<Vector2>();
+                foreach (var p in FlattenPath(inner.Trim().Trim('"', '\''))) poly.Add(new Vector2(x + p.x, y + p.y));
+                if (poly.Count < 3) return null;
+                if (xform != null) return Through(poly);
+                var pts = new StringBuilder();
+                foreach (var p in poly) { if (pts.Length > 0) pts.Append(','); pts.AppendNum(p.x).Append(',').AppendNum(p.y); }
+                ctx.Defs.Append("  CP id=").Append(id).Append(" { Y p=[").Append(pts).Append(']').Append(rule).Append(" }\n");
                 return id;
             }
             case "polygon":

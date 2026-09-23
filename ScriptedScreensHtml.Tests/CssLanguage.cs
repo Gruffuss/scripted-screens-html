@@ -841,7 +841,8 @@ internal static class CssLanguage
 
         // ---- replaced content and images
         P("object-fit", "object-fit:contain", Fix.Img);
-        P("object-position", "object-position:10px 5px", Fix.Img);
+        // Under object-fit: fill there is nothing to position, in a browser either; cover gives it a crop to move.
+        P("object-position", "object-position:10px 5px", Fix.Img, "#p{object-fit:cover}");
         P("image-rendering", "image-rendering:pixelated");
 
         // ---- interaction, scrolling, fragmentation
@@ -870,8 +871,11 @@ internal static class CssLanguage
         P("page-break-inside", "page-break-inside:avoid", Fix.Text);
         P("orphans", "orphans:3", Fix.Text);
         P("widows", "widows:3", Fix.Text);
-        P("container-type", "container-type:inline-size");
-        P("container-name", "container-name:probe", Fix.Box, "#p{container-type:inline-size}");
+        // Both only do anything through a query below them, so each row sets the property on the ancestor #w
+        // and reads it through a block on #p: without the type the query has no container and matches nothing;
+        // without the name a named query passes the container by.
+        P("container-type", "#w{container-type:inline-size}", Fix.Box, "@container (min-width:10px){#p{background-color:#ff0000}}");
+        P("container-name", "#w{container-name:probe}", Fix.Box, "#w{container-type:inline-size}@container probe (min-width:10px){#p{background-color:#ff0000}}");
 
         // ---- SVG presentation attributes written as CSS
         P("fill", "fill:#ff0000", Fix.Svg);
@@ -1142,8 +1146,12 @@ internal static class CssLanguage
         V("dvh", "width", "10dvh", "40px");
         V("svw", "width", "10svw", "40px");
         V("dvw", "width", "10dvw", "40px");
-        V("lh", "width", "2lh", "42px");
-        V("rlh", "width", "2rlh", "48px");
+        // A normal line box is 1.2em here (the emitter's own), so 2lh at 14px is 33.6px and 2rlh at the 16px root
+        // is 38.4px; the two rows after read a declared line-height, the element's own and the root's.
+        V("lh", "width", "2lh", "33.6px");
+        V("rlh", "width", "2rlh", "38.4px");
+        V("lh (line-height set)", "width", "2lh", "40px", Fix.Box, "#p{line-height:20px}");
+        V("rlh (root line-height set)", "width", "2rlh", "60px", Fix.Box, ":root{line-height:30px}");
         V("pt", "width", "37.5pt", "50px");
         V("pc", "width", "3pc", "48px");
         V("cm", "width", "1cm", "37.795px");
@@ -1154,7 +1162,7 @@ internal static class CssLanguage
         V("rad", "transform", "rotate(0.7853982rad)", "rotate(45deg)");
         V("grad", "transform", "rotate(50grad)", "rotate(45deg)");
         V("turn", "transform", "rotate(0.125turn)", "rotate(45deg)");
-        V("s / ms", "transition-duration", "2000ms", "2s");
+        V("s / ms", "transition-duration", "2000ms", "2s", Fix.Box, "@starting-style{#p{opacity:0.1}}#p{transition-property:opacity}");
 
         // ---- images and gradients
         V("linear-gradient()", "background", "linear-gradient(to right,#ff0000,#0000ff)", "~GL ");
@@ -1163,12 +1171,13 @@ internal static class CssLanguage
         V("radial-gradient()", "background", "radial-gradient(circle,#ff0000,#0000ff)", "~GR ");
         V("radial-gradient(at)", "background", "radial-gradient(circle at 20% 30%,#ff0000,#0000ff)", "~GR ");
         V("conic-gradient()", "background", "conic-gradient(#ff0000,#0000ff)", "~GC ");
-        V("repeating-linear-gradient()", "background", "repeating-linear-gradient(to right,#ff0000 0 6px,#0000ff 6px 12px)", "~GL ");
+        V("repeating-linear-gradient()", "background", "repeating-linear-gradient(to right,#ff0000 0 6px,#0000ff 6px 12px)", "~RP n=");
+        V("repeating-linear-gradient() ramp", "background", "repeating-linear-gradient(to right,#ff0000 0,#0000ff 12px)", "~GL ");
         V("repeating-radial-gradient()", "background", "repeating-radial-gradient(circle,#ff0000 0 6px,#0000ff 6px 12px)", "~GR ");
         V("repeating-conic-gradient()", "background", "repeating-conic-gradient(#ff0000 0 20deg,#0000ff 20deg 40deg)", "~GC ");
         V("gradient colour stop hint", "background", "linear-gradient(to right,#ff0000 20%,#0000ff 80%)", "~GL ");
-        V("url()", "background-image", "url(probe.png)", "~image");
-        V("image-set()", "background-image", "image-set(url(probe.png) 1x)", "~image");
+        V("url()", "background-image", "url(probe.png)", "~IMG ");
+        V("image-set()", "background-image", "image-set(url(probe.png) 1x)", "~IMG ");
         V("none", "background-image", "none", "~SCENE");
 
         // ---- shapes and filters

@@ -189,6 +189,8 @@ internal static class HtmlRenderer
         public readonly Dictionary<VisualElement, HtmlNode> Externals = new();
         /// <summary>Computed font size per node, for em units on its children.</summary>
         public readonly Dictionary<HtmlNode, float> FontSizes = new();
+        /// <summary>Each node's declared line-height as computed (px, or a bare factor), for the `lh` unit below it.</summary>
+        public readonly Dictionary<HtmlNode, string> LineHeights = new();
 
         /// <summary>The declarations that won the cascade per element, for the vector emitter (gradients, transforms, fonts).</summary>
         // Weak keys: a record never keeps an element alive. A removed element's own callbacks can still
@@ -2523,7 +2525,7 @@ internal static class HtmlRenderer
                 (node.Vars ??= new Dictionary<string, string>(StringComparer.Ordinal))[raw.Name] = raw.Value.Trim();
                 return;
             }
-            var resolved = HasFn(raw.Value) ? TryResolveVars(raw.Value, node) : raw.Value;
+            var resolved = HasFn(raw.Value) ? TryResolveVars(raw.Value, node, raw.Name) : raw.Value;
             if (resolved == null) return; // an undefined var() with no fallback: the declaration is dropped
             var d = HasFn(raw.Value) ? new CssDeclaration(raw.Name, resolved, raw.Important) : raw;
             switch (d.Name)
@@ -2701,6 +2703,13 @@ internal static class HtmlRenderer
         return null;
     }
 
+    private static string? InheritedLineHeight(HtmlNode? node, Result result)
+    {
+        for (var n = node; n != null; n = n.Parent)
+            if (result.LineHeights.TryGetValue(n, out var lh)) return lh;
+        return null;
+    }
+
     private static float InheritedFontSize(HtmlNode? node, Result result)
     {
         for (var n = node; n != null; n = n.Parent)
@@ -2719,7 +2728,37 @@ internal static class HtmlRenderer
     }
 
     /// <summary>True when a value needs resolving before use: var(), env() or light-dark() in it.</summary>
-    internal static bool HasFn(string v) => v.IndexOf("var(", StringComparison.Ordinal) >= 0 || v.IndexOf("env(", StringComparison.Ordinal) >= 0 || v.IndexOf("light-dark(", StringComparison.Ordinal) >= 0;
+    internal static bool HasFn(string v) => v.IndexOf("var(", StringComparison.Ordinal) >= 0 || v.IndexOf("env(", StringComparison.Ordinal) >= 0 || v.IndexOf("light-dark(", StringComparison.Ordinal) >= 0 || v.IndexOf("attr(", StringComparison.Ordinal) >= 0;
+
+    /// <summary>
+    /// attr(name [unit | type(...)] [, fallback]) anywhere but `content`: the element's attribute, with the unit
+    /// appended when one is asked for. `content` keeps its own attr(), which is a string and is read where
+    /// the text is built. An attribute the element lacks takes the fallback, else the declaration is dropped
+    /// as an unresolvable var() is.
+    /// </summary>
+    private static string ResolveAttr(string value, HtmlNode node, ref bool unresolved)
+    {
+        while (true)
+        {
+            var at = value.IndexOf("attr(", StringComparison.Ordinal);
+            if (at < 0) return value;
+            var depth = 0; var j = at + 4;
+            while (j < value.Length) { if (value[j] == '(') depth++; else if (value[j] == ')' && --depth == 0) break; j++; }
+            var parts = CssParser.SplitTopLevel(value.Substring(at + 5, Math.Max(0, j - at - 5)), ',');
+            var head = parts.Count > 0 ? parts[0].Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries) : Array.Empty<string>();
+            var raw = head.Length > 0 ? node.Attr(head[0]) : null;
+            var type = head.Length > 1 ? head[1].ToLowerInvariant() : null;
+            string? found = null;
+            if (raw != null)
+            {
+                if (type == null || type.StartsWith("type(", StringComparison.Ordinal) || type is "raw-string" or "string") found = raw;
+                else if (StyleApplier.IsNumber(raw.Trim())) found = raw.Trim() + type;   // a unit: px, em, %, deg, s...
+            }
+            if (found == null && parts.Count > 1) found = parts[1].Trim();
+            if (found == null) { unresolved = true; found = string.Empty; }
+            value = value.Substring(0, at) + found + (j + 1 < value.Length ? value.Substring(j + 1) : string.Empty);
+        }
+    }
 
     /// <summary>env(name[, fallback]): the safe-area and titlebar insets are 0 on a console; other names take the fallback.
     /// light-dark(a, b): a, or b when the cascade said color-scheme: dark.</summary>
@@ -2752,16 +2791,17 @@ internal static class HtmlRenderer
 
     /// <summary>null when a var() names no custom property in scope and has no fallback: the declaration
     /// is invalid at computed-value time and is dropped, as a browser drops it.</summary>
-    internal static string? TryResolveVars(string value, HtmlNode node)
+    internal static string? TryResolveVars(string value, HtmlNode node, string? property = null)
     {
-        var r = ResolveVarsCore(value, node, out var unresolved);
+        var r = ResolveVarsCore(value, node, out var unresolved, property != "content");
         return unresolved ? null : r;
     }
 
-    private static string ResolveVarsCore(string value, HtmlNode node, out bool unresolved)
+    private static string ResolveVarsCore(string value, HtmlNode node, out bool unresolved, bool attr = true)
     {
         unresolved = false;
         value = ResolveEnvAndScheme(value);
+        if (attr) value = ResolveAttr(value, node, ref unresolved);
         var sb = new StringBuilder();
         var i = 0;
         while (i < value.Length)
@@ -2908,6 +2948,8 @@ internal static class HtmlRenderer
         }
         node.Cascaded = names;
         StyleApplier.EmSize = InheritedFontSize(node.Parent, result);
+        StyleApplier.LineHeight = InheritedLineHeight(node.Parent, result);
+        if (ve == result.Root) StyleApplier.RootLineHeight = null;   // per page: the field outlives a build
         // Custom properties first, whatever rule they came from: `:root { --pad }` sorts after
         // `body { padding: var(--pad) }` by specificity, and the variable must exist by then.
         foreach (var raw in ordered)
@@ -2930,7 +2972,7 @@ internal static class HtmlRenderer
                 if (!_placeholdersSeen) { _placeholdersSeen = true; Warn("css: this page still has {{ }} template placeholders - its markup was never rendered, so those declarations are skipped"); }
                 continue;
             }
-            var resolved = HasFn(raw.Value) ? TryResolveVars(raw.Value, node) : raw.Value;
+            var resolved = HasFn(raw.Value) ? TryResolveVars(raw.Value, node, raw.Name) : raw.Value;
             if (resolved == null) continue; // an undefined var() with no fallback: the declaration is dropped
             var d = HasFn(raw.Value) ? new CssDeclaration(raw.Name, resolved, raw.Important) : raw;
             // `all`'s only legal values ARE the CSS-wide keywords, so the branch below dropped it
@@ -2971,6 +3013,16 @@ internal static class HtmlRenderer
                 var fs = d.Value.Trim();
                 var px = fs.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.EmSize * StyleApplier.Num(fs) / 100f : StyleApplier.Num(fs);
                 if (px > 0f) { result.FontSizes[node] = px; StyleApplier.EmSize = px; }
+            }
+            if (d.Name == "line-height")
+            {
+                // As computed: a percentage or em is a length of this element's, a bare number inherits as the factor.
+                var lv = d.Value.Trim();
+                var computed = lv.EndsWith("%", StringComparison.Ordinal) ? StyleApplier.Num(lv) / 100f * StyleApplier.EmSize + "px"
+                             : lv.EndsWith("em", StringComparison.OrdinalIgnoreCase) ? StyleApplier.Num(lv) + "px" : lv;
+                result.LineHeights[node] = computed;
+                StyleApplier.LineHeight = computed;
+                if (ve == result.Root) StyleApplier.RootLineHeight = computed;   // :root is the body here
             }
             if (d.Name.StartsWith("animation", StringComparison.Ordinal))
             {
@@ -3102,6 +3154,7 @@ internal static class HtmlRenderer
             case "animation-direction":
             case "animation-fill-mode":
             case "animation-play-state": { var t = 0; anim.ApplyToken(v, ref t); break; }
+            case "animation-composition": anim.Composition = v.ToLowerInvariant() switch { "add" => 1, "accumulate" => 2, _ => 0 }; break;
         }
     }
 

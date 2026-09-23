@@ -1,7 +1,7 @@
 # The CSS gaps that are left, by name
 
-CSS is at **338 of 342 properties accounted for (98.8%)**, 88 of 88 selectors, 34 of 34 at-rules,
-98 of 106 values. This file names what remains so it never has to be audited again.
+CSS is at **341 of 342 properties accounted for (99.7%)**, 88 of 88 selectors, 34 of 34 at-rules,
+109 of 109 values. This file names what remains so it never has to be audited again.
 
 Regenerate the numbers with:
 
@@ -11,61 +11,33 @@ cd ScriptedScreensHtml.Tests && dotnet run -c Release -- --csslanguage
 
 ---
 
-## Properties: 4 left
-
-### `container-type` / `container-name`
-
-Being worked on. `@container` discarded the container's name and answered every query against the
-page's design width, so `@container sidebar (...)` and `@container main (...)` were the same query
-and a 200px panel took a 900px branch. These two properties exist only to feed that, and nothing
-read them.
+## Properties: 1 left
 
 ### `object-position`
 
-**Not implementable here, and the reason is specific.** The picture becomes the scene's `IMG` node,
-whose crop is a `uv` rectangle in *source* coordinates. Turning `object-position` into a uv crop
-needs the image's intrinsic width and height, and the emitter never learns them — it places the node
-and the renderer loads the file later. Same reason `border-image-slice` in pixels is read as thirds
-and reported rather than being exact.
+**Reported, not drawn, and the reason is specific.** The picture becomes the scene's `IMG` node,
+which the vector layer loads after the scene is sent - so the vector side is the only one that ever
+knows the picture's own width and height, and every effect `object-position` has (where a
+letterboxed picture sits under `object-fit: contain`, which part shows under `cover`) needs them.
+The `uv` crop cannot stand in: it is a rectangle in source fractions and would need the same size.
+`IMG` has no alignment key, and an attribute the vector mod does not know is a scene problem, so the
+emitter writes nothing and the cascade says `"object-position: ..." is not drawn` once per page.
 
-Would need the vector side to accept a position in *destination* fractions, which is an addition to
-a separate mod rather than a change here.
-
-### `animation-composition: add`
-
-**Attempted 2026-09-22 and reverted, because it could not be shown to work.** Recording the evidence
-so the next attempt starts three steps along:
-
-- The parsing works. A `case "animation-composition"` in `HtmlRenderer.ApplyAnimationDeclaration`
-  reaches an `AnimationSpec.Add` flag — measured, `spec.Add=True`.
-- The base snapshot works. `add` composes the frame with the element's own value, and the record is
-  the same dictionary the frames write into, so it has to be copied in the `KeyframeRunner`
-  constructor — measured, `base=9 hasTransform=True`.
-- The composition works. `Composed()` turned the frame's `translateX(0)` against a base of
-  `translateX(20px)` into `translateX(20px) translateX(0)` — measured, printed.
-- **And the emitted scene was still `t=[0,0]`, identical to the replace-mode baseline.** So the
-  composed value is written into the record and something downstream does not read it, or reads a
-  different copy. That is where the next attempt should start: dump the record for the element
-  immediately before `VectorEmitter.Emit` and see whether the composed string is in it.
-
-Worth knowing before spending on it: nothing in the corpus of 91 pages uses the property, and its
-browser support is recent. It was reverted rather than left in because unverified code that looks
-wired up is this project's characteristic bug, and shipping one more of those costs more than the
-feature is worth.
+What would close it is an addition on the vector side, not a change here: an `IMG` key giving the
+alignment of the picture within its box (fractions, `[0.5, 0.5]` being today's centring; a `px`
+string an offset from the box's top-left edge), applied by the renderer once the texture size is
+known. Until then a page is told rather than silently drawn centred.
 
 ---
 
-## Values and functions: 8 left
+## Values and functions: none
 
-| value | why |
-|---|---|
-| `attr()` as a length | Reported now rather than silently drawing 0. `attr()` outside `content` is a 2025 feature with one implementation; inside `content` it works. |
-| `image-set()` | Picks a source by resolution, and a console has one. |
-| `lh` / `rlh` | The line box is 1.2em by construction here, so these parse to a plausible but not exact number. |
-| `path()` in `offset-path` | Implemented; the row draws something else. Unclassified. |
-| `repeating-linear-gradient()` | Draws one non-repeating gradient. Known since the repeating-stop bug (BUGS #62). |
-| `url()` | Row draws something else. Unclassified. |
-| `s` / `ms` | The probe flags its own row as bad: the reference draws nothing either. |
+`attr()` as a length (`attr(name unit)`, `attr(name type(...))`, with a fallback), `lh`/`rlh` (a
+declared `line-height`, else the emitter's 1.2em line box), `path()` in `clip-path`, and the
+`repeating-linear-gradient()`, `url()`, `image-set()` and `s`/`ms` rows all pass. Four of those were
+never gaps: their rows expected a string the emitter does not write (`image` for the `IMG` node,
+`GL` for hard stripes that are drawn as a repeat of rects) or, for `s`/`ms`, had no transition for
+the duration to be the duration of.
 
 ---
 
@@ -75,6 +47,11 @@ Both report "nothing missing". Seven selectors and two at-rules are named as del
 `:visited`, `:target`, `::first-line`, `::selection`, `::file-selector-button`, the column
 combinator, `::placeholder` (implemented, but handed to ScriptedScreens' own field control so it
 never enters the scene), `@import` and `@page`.
+
+`@container` is answered by the nearest container above the element, by name when the query gives
+one, from the container's own laid-out box, and its subtree is re-cascaded when that box changes;
+`container-type` and `container-name` are what it reads. Their rows set the property on the
+ancestor and read it through a block below, since neither does anything on its own.
 
 ---
 

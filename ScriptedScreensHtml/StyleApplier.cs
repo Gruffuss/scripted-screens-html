@@ -658,7 +658,7 @@ internal static class StyleApplier
         "box-shadow", "text-shadow", "border-style", "text-decoration",
         "outline", "outline-width", "outline-color", "outline-style", "outline-offset",
         "pointer-events", "cursor", "user-select", "content", "appearance", "-webkit-appearance", "-moz-appearance", "accent-color",
-        "filter", "clip-path", "mask-image", "-webkit-mask-image", "mask", "writing-mode", "text-orientation", "vertical-align", "object-fit", "object-position",
+        "filter", "clip-path", "mask-image", "-webkit-mask-image", "mask", "writing-mode", "text-orientation", "vertical-align", "object-fit",
         "font-variant-numeric", "fill", "stroke", "stroke-width", "stroke-opacity", "fill-opacity", "fill-rule", "stroke-dasharray", "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "text-anchor", "dominant-baseline", "stroke-miterlimit",
         "background-size", "background-position", "background-repeat", "float", "clear", "column-count", "columns", "column-gap", "aspect-ratio", "mix-blend-mode", "backdrop-filter",
         "list-style", "list-style-type", "list-style-position", "border-collapse", "border-spacing",
@@ -721,6 +721,9 @@ internal static class StyleApplier
         ["mask-position"] = "a mask is drawn over the whole box",
         ["mask-repeat"] = "a mask is drawn over the whole box, never tiled",
         ["content-visibility"] = "nothing here skips a subtree, so a hidden one is still drawn",
+        // The picture node is placed by the vector layer, which loads the file after the scene is sent and is
+        // the only side that ever knows the picture's own size - and its fit has no alignment to set yet.
+        ["object-position"] = "the picture is centred in its box under object-fit: contain or cover",
     };
 
     private static void Unknown(CssDeclaration d, Action<string>? warn)
@@ -754,6 +757,17 @@ internal static class StyleApplier
     internal static float ViewportW { get => OffThread.Active ? OffThread.Job.ViewportW : _viewportW; set { if (OffThread.Active) OffThread.Job.ViewportW = value; else _viewportW = value; } }
     internal static float ViewportH { get => OffThread.Active ? OffThread.Job.ViewportH : _viewportH; set { if (OffThread.Active) OffThread.Job.ViewportH = value; else _viewportH = value; } }
     private static float _emSize = 16f, _rootFontSize = 16f, _viewportW = 460f, _viewportH = 460f;
+    /// <summary>The element's computed line-height for `lh` (px, or a bare factor of the font size; null is `normal`,
+    /// the emitter's 1.2em), and the root's for `rlh`. Set by the cascade per element and read in the same call, so
+    /// a thread-static is enough: a worker's re-cascade sets its own.</summary>
+    [ThreadStatic] internal static string? LineHeight;
+    [ThreadStatic] internal static string? RootLineHeight;
+
+    private static float LineBox(string? declared, float fontSize)
+    {
+        if (declared == null || declared == "normal") return fontSize * 1.2f;
+        return IsNumber(declared) ? float.Parse(declared, NumberStyles.Float, CultureInfo.InvariantCulture) * fontSize : Num(declared);
+    }
     private static bool _colorSchemeDark = true;
 
     /// <summary>A number in px (or the bare number of a percentage). Units: px pt em rem vw vh; calc().</summary>
@@ -785,9 +799,10 @@ internal static class StyleApplier
         else if (Ends(v, "svh") || Ends(v, "lvh") || Ends(v, "dvh")) { v = v.Slice(0, v.Length - 3); scale = ViewportH / 100f; }
         else if (Ends(v, "vw")) { v = v.Slice(0, v.Length - 2); scale = ViewportW / 100f; }
         else if (Ends(v, "vh")) { v = v.Slice(0, v.Length - 2); scale = ViewportH / 100f; }
-        // lh / rlh: the line box of this element / of the root. The emitter's own "normal" is 1.2.
-        else if (Ends(v, "rlh")) { v = v.Slice(0, v.Length - 3); scale = RootFontSize * 1.2f; }
-        else if (Ends(v, "lh")) { v = v.Slice(0, v.Length - 2); scale = EmSize * 1.2f; }
+        // lh / rlh: the line box of this element / of the root, as the cascade computed it; "normal" is the
+        // emitter's own 1.2. A line-height in lh is not a thing, so the recursion through Num cannot loop.
+        else if (Ends(v, "rlh")) { v = v.Slice(0, v.Length - 3); scale = LineBox(RootLineHeight, RootFontSize); }
+        else if (Ends(v, "lh")) { v = v.Slice(0, v.Length - 2); scale = LineBox(LineHeight, EmSize); }
         else if (Ends(v, "vmin")) { v = v.Slice(0, v.Length - 4); scale = Mathf.Min(ViewportW, ViewportH) / 100f; }
         else if (Ends(v, "vmax")) { v = v.Slice(0, v.Length - 4); scale = Mathf.Max(ViewportW, ViewportH) / 100f; }
         else if (Ends(v, "pt")) { v = v.Slice(0, v.Length - 2); scale = 4f / 3f; }

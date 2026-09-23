@@ -32,6 +32,7 @@ internal static class CssTests
             ContainersLaidOut(check);
             TextProperties(check);
             LayoutProperties(check);
+            Leftovers(check);
         }
         finally
         {
@@ -311,7 +312,7 @@ internal static class CssTests
     /// the record carries and the emitter ignores draws exactly what its absence draws. The scene
     /// string is the only witness, so these compile the Unity half like CssLanguage does.
     /// </summary>
-    private static string Scene(string body, string css)
+    private static string Scene(string body, string css, bool animate = false, List<string>? warnings = null)
     {
         ResolvedStyle.DefaultFace = FontLibrary.Default();
         HtmlRenderer.SurfaceAspect = 1f;
@@ -330,6 +331,24 @@ internal static class CssTests
         OffThread.Boxes = boxes;
         var size = new Vector2(built.ViewportWidth, built.ViewportWidth);
         panel.Layout(size.x, size.y);
+        if (animate)
+        {
+            // as CssLanguage.Scene: a looping opacity/transform animation is compiled into the scene, any other
+            // is stepped by a runner, twice, so the frame after the first is what the scene shows
+            foreach (var (element, spec) in built.Animations)
+            {
+                if (!built.AnimationAttached.Add(element) || !built.Keyframes.TryGetValue(spec.Name, out var frames)) continue;
+                if (float.IsPositiveInfinity(spec.Iterations) && !spec.Paused && VectorEmitter.Compilable(frames, built.CssOf(element)))
+                {
+                    built.TimeAnimations[element] = (spec, 0f);
+                    continue;
+                }
+                var runner = new KeyframeRunner(element, frames, spec, 0f, _ => { }, built.CssOf(element), built.Touch);
+                runner.Update(0f);
+                runner.Update(0.3f);
+            }
+            panel.Layout(size.x, size.y);
+        }
         OffThread.Capture(built.Root, built, boxes, new List<VisualElement>());
         OffThread.Active = true;
         try
@@ -337,9 +356,69 @@ internal static class CssTests
             var tweens = new Tweens();
             tweens.Diff(built.Root, built, 0f);
             var output = VectorEmitter.Emit(built, built.Root, size.x, size.y, tweens, 0f, null);
+            warnings?.AddRange(built.Warnings);
+            warnings?.AddRange(output.Warnings);
             return new string(output.Chars, 0, output.Length);
         }
         finally { OffThread.Active = false; }
+    }
+
+    // ---- the CSS leftovers: each of these rows read as a gap until the thing under it was built --
+
+    private static void Leftovers(Action<bool, string> check)
+    {
+        const string Box = "<div id=p style=\"width:60px;height:20px;background:#22aa44\">x</div>";
+        const string Frames = "@keyframes probe{from{transform:translateX(0)}to{transform:translateX(40px)}}";
+
+        // animation-composition: add composes the frame onto the element's own transform. Finite, so a runner
+        // steps it: the composed value has to reach the resolved style, which is what the emitter reads.
+        check(Scene(Box, Frames + "#p{transform:translateX(20px);animation:probe 2s linear 1}", animate: true).Contains("t=[0,0]", StringComparison.Ordinal),
+            "a keyframe's transform replaces the element's own by default");
+        check(Scene(Box, Frames + "#p{transform:translateX(20px);animation:probe 2s linear 1;animation-composition:add}", animate: true).Contains("t=[20,0]", StringComparison.Ordinal),
+            "animation-composition: add puts the frame's translate on top of the element's own");
+        // and a compiled loop, which sits inside the element's own transform group: replace takes the base out
+        // again, add leaves the frame as written for the outer group to add
+        var loopReplace = Scene(Box, Frames + "#p{transform:translateX(20px);animation:probe 2s linear infinite}", animate: true);
+        var loopAdd = Scene(Box, Frames + "#p{transform:translateX(20px);animation:probe 2s linear infinite;animation-composition:add}", animate: true);
+        check(loopReplace.Contains("-20+(40)*", StringComparison.Ordinal) && loopAdd.Contains("0+(40)*", StringComparison.Ordinal) && !loopAdd.Contains("-20+", StringComparison.Ordinal),
+            "a compiled loop under replace runs 0..40 despite the base translate, and under add 20..60");
+
+        // attr() as a length: the element's attribute with the unit asked for, a fallback when it is absent
+        const string Attr = "<div id=p data-w=\"50\" style=\"height:20px;background:#22aa44\">x</div>";
+        check(Rects(Scene(Attr, "#p{width:attr(data-w px)}"), "#22AA44") is [(_, _, 50f)], "width: attr(data-w px) reads the attribute as 50px");
+        check(Rects(Scene(Attr, "#p{width:attr(data-nope px, 30px)}"), "#22AA44") is [(_, _, 30f)], "attr() with no such attribute takes its fallback");
+        check(Scene(Attr, "#p{width:attr(data-nope px)}") == Scene(Attr, string.Empty), "attr() with no attribute and no fallback drops the declaration, as a browser does");
+        check(Scene("<div id=p data-t=\"Hi\" style=\"height:20px\"></div>", "#p::before{content:attr(data-t)}").Contains("text=\"Hi\"", StringComparison.Ordinal),
+            "content: attr() is still the string it was");
+
+        // lh: the element's line box, which is its declared line-height when it has one; rlh the root's
+        const string Unsized = "<div id=p style=\"height:20px;background:#22aa44\">x</div>";   // Box's inline width would beat the rule
+        check(Rects(Scene(Unsized, "#p{line-height:20px;width:2lh}"), "#22AA44") is [(_, _, 40f)], "2lh with line-height: 20px is 40px");
+        check(Rects(Scene(Unsized, "#p{font-size:10px;line-height:1.5;width:2lh}"), "#22AA44") is [(_, _, 30f)], "a bare line-height factor scales the font size");
+        check(Rects(Scene(Unsized, ":root{line-height:30px}#p{width:2rlh}"), "#22AA44") is [(_, _, 60f)], "2rlh reads the root's line-height");
+
+        // clip-path: path() is a CP polygon in page coordinates
+        var clipped = Scene(Box, "#p{clip-path:path(\"M 0 0 L 40 0 L 40 20 Z\")}");
+        check(clipped.Contains("G clip=", StringComparison.Ordinal) && clipped.Contains("Y p=[0,0,40,0,40,20", StringComparison.Ordinal),
+            "clip-path: path() clips to the outline, offset to the box");
+
+        // line-height in em is a factor of the font size, not the em size squared
+        check(Scene("<div id=p style=\"width:200px;height:40px\">Agy</div>", "#p{line-height:1.5em}").Contains(" lh=1.5", StringComparison.Ordinal),
+            "line-height: 1.5em reaches the label as the factor 1.5");
+
+        // the attributes DomLanguage's section 8 reads as changing nothing: they size the control's box, which
+        // is not in the scene, so what moves is whatever comes after it
+        float Below(string field) => Rects(Scene(field + "<div id=q style=\"height:9px;background:#ff0000\"></div>", string.Empty), "#FF0000")[0].y;
+        check(Below("<textarea></textarea>") == 60f && Below("<textarea rows=4 cols=30></textarea>") == 78f,
+            $"rows/cols size a textarea's box ({Below("<textarea></textarea>")} -> {Below("<textarea rows=4 cols=30></textarea>")})");
+        check(Below("<input type=text>") == 26f && Below("<input type=range>") == 20f,
+            $"type picks the control's box ({Below("<input type=text>")} -> {Below("<input type=range>")})");
+
+        // object-position is reported, not silently accepted: the picture node has no alignment to carry it
+        var warned = new List<string>();
+        Scene("<img id=p src=\"a.png\" width=80 height=50>", "#p{object-fit:cover;object-position:10px 5px}", warnings: warned);
+        check(warned.Exists(w => w.Contains("object-position", StringComparison.Ordinal) && w.Contains("not drawn", StringComparison.Ordinal)),
+            "object-position says it is not drawn");
     }
 
     /// <summary>The y of the first decoration stroke in the scene, or NaN when none was drawn.</summary>
@@ -603,9 +682,10 @@ internal static class CssTests
 
     /// <summary>
     /// The same question through the real pipeline: a page built, laid out, and re-cascaded the way
-    /// the renderer must once a container's box is known. This is also the proof for the two hooks -
-    /// nothing in HtmlRenderer installs them yet, so the lambda below IS the patch that has to land
-    /// there, run here against the real cascade rather than a stub.
+    /// the renderer must once a container's box is known. This is also the proof for the two hooks,
+    /// which HtmlRenderer.Build now installs (ContainerInfo) and the GeometryChangedEvent on a
+    /// container fires (ContainerResized); the lambda below is the same reading, run here against
+    /// the real cascade rather than a stub.
     /// </summary>
     private static void ContainersLaidOut(Action<bool, string> check)
     {
