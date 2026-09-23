@@ -253,6 +253,7 @@ internal static class PageCompiler
         // The containing block, which is what CSS `top` is measured from: the nearest positioned
         // ancestor for an out-of-flow element, and the parent otherwise.
         var origin = Vector2.zero;
+        VisualElement? block = null;
         for (var p = ve.parent; p != null; p = p.parent)
         {
             if (outOfFlow)
@@ -262,6 +263,7 @@ internal static class PageCompiler
                 if (ppos != "absolute" && ppos != "relative" && ppos != "fixed" && p.parent != null) continue;
             }
             if (absolute.TryGetValue(p, out var at)) origin = at;
+            block = p;
             break;
         }
 
@@ -272,7 +274,12 @@ internal static class PageCompiler
         var inside = new List<(string Id, double Dx, double Dy)>();
         if (absolute.TryGetValue(ve, out var self)) Collect(ve, self, inside);
 
-        return new DomSlots.Box(outOfFlow, origin.x, origin.y, hasBackground, inside);
+        // The containing block's size and this element's own, so `right`/`bottom` can be measured
+        // from the far edge; without them DomSlots refuses those two rather than guessing the near edge.
+        return new DomSlots.Box(outOfFlow, origin.x, origin.y, hasBackground, inside,
+                                block != null ? block.layout.width : double.NaN,
+                                block != null ? block.layout.height : double.NaN,
+                                ve.layout.width, ve.layout.height);
 
         void Collect(VisualElement parent, Vector2 from, List<(string, double, double)> into)
         {
