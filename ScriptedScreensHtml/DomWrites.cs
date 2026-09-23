@@ -57,6 +57,8 @@ internal sealed class DomWrites
         /// For a className write: every class string the script can assign here, when they are all
         /// literals. A class name is a state, not a value, so the compiler lays the page out in each
         /// and emits what each draws. Null when the script computes one, which cannot be enumerated.
+        /// For a style write, the same list of the values it can take: a property the scene has no
+        /// slot for - `color` on a box whose text is its children's - is drawn as those states.
         /// </summary>
         public List<string>? Classes;
 
@@ -313,10 +315,15 @@ internal sealed class DomWrites
                 if (call.Callee is MemberExpression { Computed: false, Property: Identifier { Name: "addEventListener" } }
                     && call.Arguments.Count >= 2 && call.Arguments[1] is Identifier handler)
                     Info(handler.Name).Runtime = true;
-                // an inline callback's body is runtime in place
+                // an inline callback's body is runtime in place, and so is every function it calls:
+                // `setInterval(() => set(on), 100)` writes from set(), not from the arrow
                 foreach (var arg in call.Arguments)
                     if (IsSchedulerCall(call) && arg is ArrowFunctionExpression or FunctionExpression)
+                    {
                         foreach (var w in Found(arg)) { w.Runtime = true; _writes.Add(w); }
+                        foreach (var inner in Everything(arg))
+                            if (inner is CallExpression { Callee: Identifier called }) Info(called.Name).Runtime = true;
+                    }
             }
 
             if (n is not AssignmentExpression { Left: MemberExpression target } assign) continue;
@@ -359,7 +366,11 @@ internal sealed class DomWrites
 
         // el.style.height = ...
         if (target.Object is MemberExpression { Computed: false, Property: Identifier { Name: "style" } } style)
-            return Make(style.Object, "style." + prop.Name, assign);
+        {
+            var write = Make(style.Object, "style." + prop.Name, assign);
+            if (write != null) write.Classes = Literals(assign.Right);
+            return write;
+        }
 
         // el.textContent = ...
         if (ElementProperties.Contains(prop.Name))

@@ -155,6 +155,12 @@ internal static class JsToLuaTests
          @"var o = {}; out(String(o.missing == null) + '/' + String(null == null) + '/' + String(0 == null));"),
         ("?? keeps a falsy but defined left side",
          @"out(String(0 ?? 9) + '/' + String(null ?? 9) + '/' + String('' ?? 9));"),
+        // A plain right side is evaluated as it stands; one step into a parameter that shadows a
+        // top-level table is not, since the parameter may be undefined and is never reached.
+        ("||, && and ?? with a plain right side, and a shadowed table left lazy",
+         @"const T = { k: 'kk' }, A = ['a0'], U = { k: 'top' };
+           function f(v, U) { return (v || T.k) + '/' + (v && A[0]) + '/' + (v ?? 5) + '/' + (v || U.k) + '/' + (v || 'd'); }
+           out(f(0, { k: 'u' }) + '|' + f('x', undefined));"),
         ("a literal as the object of a member access",
          @"out(({ a: 7 }).a + '/' + [3,4].length + '/' + (5).toFixed(1));"),
         ("% keeps the sign of the dividend",
@@ -189,6 +195,16 @@ internal static class JsToLuaTests
         check(wrong.Count == 0, wrong.Count == 0
             ? $"js->lua: all {MustMatch.Length} semantic cases match the original"
             : $"js->lua: {wrong.Count} semantic case(s) wrong - {string.Join("; ", wrong.Take(4))}");
+
+        // The thunk that makes `||` short-circuit is a closure on every evaluation, and a view model
+        // re-rendered 2.4 times a second evaluates hundreds of `x || 0`. A right side that cannot fault
+        // needs none.
+        var plain = JsToLua.Compile("const T = { k: 1 }, A = [2]; var v = 0; var a = v || 0, b = v && 'x', c = v ?? 5, d = v || T.k, e = v || A[0], f = v || a;", out _);
+        check(plain != null && !plain.Contains("function() return", StringComparison.Ordinal), plain == null
+            ? "js->lua: the plain right sides do not compile"
+            : plain.Contains("function() return", StringComparison.Ordinal)
+                ? "js->lua: a plain right side of ||, && or ?? still builds a closure every evaluation"
+                : "js->lua: ||, && and ?? with a plain right side build no closure");
     }
 
     /// <summary>Each one must be turned down, and the report must say where.</summary>

@@ -110,6 +110,15 @@ internal sealed class CompiledRun
     internal IReadOnlyDictionary<string, string> Expressions { get; private set; }
         = new Dictionary<string, string>(StringComparer.Ordinal);
 
+    /// <summary>
+    /// The scene a page's compiled markup draws into, with what it opens with; null for a page with
+    /// no markup to compile. It holds every alternative the markup can draw, each gated, so the
+    /// caller sends THIS as the structure - the scene the interpreter last drew has only the one
+    /// state it was in, and the chunk writes into the rest.
+    /// </summary>
+    internal string? Structure { get; private set; }
+    internal IReadOnlyDictionary<string, SceneSlots.Value>? StructureValues { get; private set; }
+
     /// <summary>Why a page did not compile: every list that has something in it, capped and counted.</summary>
     private static string Reasons(CompiledPage.Result r)
     {
@@ -181,7 +190,18 @@ internal sealed class CompiledRun
             $"html: \"{page}\" is running compiled - {compiled.Bindings.Count} slot binding(s), " +
             $"{compiled.Expressions.Count} slot(s) as scene expressions; " +
             "the page no longer lays out, runs a script or translates");
-        return new CompiledRun(state, env, frame, page) { Expressions = compiled.Expressions };
+        // What compiled but draws less than a browser would, said once, here, by name - never by
+        // falling back to running the page every tick.
+        foreach (var warning in compiled.Warnings)
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: \"{page}\" compiled, but {warning}");
+        foreach (var dropped in compiled.Unmapped)
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: \"{page}\" compiled, but this write reaches nothing drawn and is dropped: {dropped}");
+        return new CompiledRun(state, env, frame, page)
+        {
+            Expressions = compiled.Expressions,
+            Structure = compiled.Structure,
+            StructureValues = compiled.StructureValues,
+        };
     }
 
     /// <summary>

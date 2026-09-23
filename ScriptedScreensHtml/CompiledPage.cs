@@ -42,12 +42,26 @@ internal static class CompiledPage
         public readonly Kind Read;
         /// <summary>For a <see cref="Kind.State"/> binding: what each reachable class name draws.</summary>
         public readonly IReadOnlyList<StateValues>? States;
+        /// <summary>A state binding's state for a value none of its states is named after.</summary>
+        public readonly string? Other;
+        /// <summary>A colour binding's values as the scene's hex: the page writes CSS, `var(--live)`.</summary>
+        public readonly IReadOnlyDictionary<string, string>? Colours;
+        /// <summary>
+        /// A <see cref="Kind.Label"/>'s text, in order: literal text as a string, a value as the
+        /// 1-based position of its argument, and a colour value as that position with its table.
+        /// </summary>
+        public readonly IReadOnlyList<object>? Pieces;
+        /// <summary>`upper` or `lower`: a label's text-transform, which the values in it follow too.</summary>
+        public readonly string? Transform;
 
-        public Binding(string key, string[] slots, double[] bias, Kind read, IReadOnlyList<StateValues>? states = null, double[]? scale = null)
+        public Binding(string key, string[] slots, double[] bias, Kind read, IReadOnlyList<StateValues>? states = null, double[]? scale = null,
+                       string? other = null, IReadOnlyDictionary<string, string>? colours = null,
+                       IReadOnlyList<object>? pieces = null, string? transform = null)
         {
             Key = key; Slots = slots; Bias = bias; Read = read; States = states;
             if (scale == null) { scale = new double[slots.Length]; for (var i = 0; i < scale.Length; i++) scale[i] = 1; }
             Scale = scale;
+            Other = other; Colours = colours; Pieces = pieces; Transform = transform;
         }
     }
 
@@ -71,6 +85,11 @@ internal static class CompiledPage
         /// switch needs, arrived at from the other end.
         /// </summary>
         State,
+        /// <summary>
+        /// Text built from literal pieces and values - `set 101.3 kPa` - written whole when the last
+        /// of its values is known, since one text slot is the whole label.
+        /// </summary>
+        Label,
     }
 
     /// <summary>The slot values one class state produces, emitted for every state the script can reach.</summary>
@@ -93,8 +112,20 @@ internal static class CompiledPage
     /// Keeping it in some would make those states one-way - enterable and not leavable - which is
     /// the bug this whole function exists to remove, reintroduced for a subset.
     /// </remarks>
-    private static void Complete(List<StateValues> states, Func<string, double?>? baseOf)
+    private static void Complete(List<StateValues> states, Func<string, double?>? baseOf, Func<string, string?>? textOf = null)
     {
+        // Text and colour the same way: a state that turns a box red has to be leavable too.
+        var texts = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var s in states)
+            foreach (var (slot, _) in s.Text) texts.Add(slot);
+        foreach (var s in states)
+        {
+            s.Text.RemoveAll(t => textOf?.Invoke(t.Slot) == null);
+            foreach (var slot in texts)
+                if (!s.Text.Exists(t => t.Slot == slot) && textOf?.Invoke(slot) is { } rest)
+                    s.Text.Add((slot, rest));
+        }
+
         var union = new HashSet<string>(StringComparer.Ordinal);
         foreach (var s in states)
             foreach (var (slot, _) in s.Numbers) union.Add(slot);
@@ -113,6 +144,30 @@ internal static class CompiledPage
                 if (!has.Contains(slot) && !unrestorable.Contains(slot) && baseOf!(slot) is { } at)
                     s.Numbers.Add((slot, at));
         }
+    }
+
+    /// <summary>
+    /// Each value laid out and drawn, completed so every one can be left. Null when any cannot be
+    /// drawn, with those named in <paramref name="missing"/>.
+    /// </summary>
+    private static List<StateValues>? Drawn(IEnumerable<string> values, Func<string, StateValues?> draw, List<string> missing,
+                                            Func<string, double?>? baseOf, Func<string, string?>? textOf)
+    {
+        var states = new List<StateValues>();
+        foreach (var value in values.Distinct(StringComparer.Ordinal))
+        {
+            var produced = draw(value);
+            if (produced == null) { missing.Add(value.Length == 0 ? "(none)" : value); continue; }
+            produced.Name = value;
+            states.Add(produced);
+        }
+        if (missing.Count > 0) return null;
+        // Every state carries a value for every slot ANY state moves, not just the ones it moves
+        // itself. States used to be deltas, so the base state's entry came out empty and going
+        // duck -> "" wrote nothing: the page kept the ducked geometry for ever. A state is a
+        // description of what the page looks like, not of what changed to get there.
+        Complete(states, baseOf, textOf);
+        return states;
     }
 
     /// <summary>
@@ -150,7 +205,11 @@ internal static class CompiledPage
     {
         public string? Lua;
         public readonly List<Binding> Bindings = new();
-        /// <summary>Writes that have no slot, each with the reason. A page with any of these is not compiled.</summary>
+        /// <summary>
+        /// Writes that have no slot, each with the reason. The page still compiles and each is said
+        /// once, by name, when it starts: that write alone is dropped. Refusing the page for it put
+        /// the WHOLE page back on the interpreter - a relayout every tick - to keep one value moving.
+        /// </summary>
         public readonly List<string> Unmapped = new();
         public readonly List<string> Problems = new();
         /// <summary>
@@ -160,7 +219,20 @@ internal static class CompiledPage
         /// is the difference between a page that costs something every frame and one that does not.
         /// </summary>
         public readonly Dictionary<string, string> Expressions = new(StringComparer.Ordinal);
-        public bool Ok => Lua != null && Problems.Count == 0 && Unmapped.Count == 0;
+        /// <summary>
+        /// What compiled but draws less than a browser would - an animation the scene cannot run, a
+        /// value that needs the layout engine. Said at compile time, once, by name; the page still
+        /// compiles, because falling back to running it every tick is the cost compiling removes.
+        /// </summary>
+        public readonly List<string> Warnings = new();
+        /// <summary>
+        /// The scene the page opens with when its markup was compiled: every alternative it can draw,
+        /// each gated, with what it opens in. Null when there was no markup to compile, and the
+        /// scene the page last drew is the structure.
+        /// </summary>
+        public string? Structure;
+        public Dictionary<string, SceneSlots.Value>? StructureValues;
+        public bool Ok => Lua != null && Problems.Count == 0;
     }
 
     /// <summary>
@@ -185,6 +257,10 @@ internal static class CompiledPage
     /// sat at the wrong height on any console that is not that tall.
     /// </param>
     /// <param name="element">The vector element's name in Lua, which the flush writes to.</param>
+    /// <param name="styleOf">
+    /// What the page draws with one inline style declaration (element, CSS property, value) added:
+    /// <paramref name="stateOf"/> for a property with no slot of its own.
+    /// </param>
     internal static Result Compile(string script, ICollection<string> available,
                                    Func<string, DomSlots.Box?> boxOf,
                                    Func<string, bool>? tabular = null,
@@ -193,15 +269,17 @@ internal static class CompiledPage
                                    (double Width, double Height)? viewport = null,
                                    IReadOnlyDictionary<string, string>? parents = null,
                                    Tree? tree = null,
-                                   JsToLua.HoleLookup? holes = null,
-                                   IReadOnlyList<(string Key, string Slot, bool IsNumber)>? holeBindings = null,
+                                   IReadOnlyDictionary<string, JsToLua.MarkupPlan>? markup = null,
+                                   IReadOnlyList<Binding>? markupBindings = null,
                                    Func<string, double?>? baseOf = null,
+                                   Func<string, string?>? textOf = null,
                                    (string Surface, string Element, string Scene)? target = null,
-                                   string element = "VDATA")
+                                   string element = "VDATA",
+                                   Func<string, string, string, StateValues?>? styleOf = null)
     {
         var result = new Result();
 
-        var lua = JsToLua.Compile(script, out var problems, holes);
+        var lua = JsToLua.Compile(script, out var problems, markup);
         foreach (var p in problems) result.Problems.Add(p);
         if (lua == null) return result;
 
@@ -224,10 +302,10 @@ internal static class CompiledPage
         var computed = new HashSet<string>(StringComparer.Ordinal);
         foreach (var w in writes)
         {
-            if (!w.Runtime || w.Property != "className") continue;
+            if (!w.Runtime || w.Property != "className" && !w.Property.StartsWith("style.", StringComparison.Ordinal)) continue;
             foreach (var id in Targets(w, available))
             {
-                var name = id + ".className";
+                var name = id + "." + w.Property;
                 // One unknowable write and the set is not a set. A flag rather than a marker value
                 // in the list, because a class really could be called anything.
                 if (w.Classes == null) { computed.Add(name); continue; }
@@ -244,6 +322,8 @@ internal static class CompiledPage
             {
                 var key = id + "." + w.Property;
                 if (!seen.Add(key)) continue;
+                // Markup the compiler turned into structure: the plan's own bindings write it.
+                if (w.Property == "innerHTML" && markup != null && markup.Values.Any(p => p.Id == id)) continue;
 
                 var box = boxOf(id);
                 if (box == null) { result.Unmapped.Add($"line {w.Line}: \"{id}\" is not an element of this page"); continue; }
@@ -264,32 +344,32 @@ internal static class CompiledPage
                         result.Unmapped.Add($"line {w.Line}: {key} - no way to lay the page out in each state");
                         continue;
                     }
-                    var states = new List<StateValues>();
                     var missing = new List<string>();
-                    foreach (var cls in reachable.Distinct(StringComparer.Ordinal))
-                    {
-                        var produced = stateOf(id, cls);
-                        if (produced == null) { missing.Add(cls.Length == 0 ? "(none)" : cls); continue; }
-                        produced.Name = cls;
-                        states.Add(produced);
-                    }
-                    if (missing.Count > 0)
-                    {
+                    if (Drawn(reachable, cls => stateOf(id, cls), missing, baseOf, textOf) is { } states)
+                        result.Bindings.Add(new Binding(key, Array.Empty<string>(), Array.Empty<double>(), Kind.State, states));
+                    else
                         result.Unmapped.Add($"line {w.Line}: {key} - cannot draw the state(s) {string.Join(", ", missing)}");
-                        continue;
-                    }
-                    // Every state carries a value for every slot ANY state moves, not just the ones
-                    // it moves itself. States used to be deltas, so the base state's entry came out
-                    // empty and going duck -> "" wrote nothing: the page kept the ducked geometry
-                    // for ever. A state is a description of what the page looks like, not of what
-                    // changed to get there, and only the first of those can be left.
-                    Complete(states, baseOf);
-                    result.Bindings.Add(new Binding(key, Array.Empty<string>(), Array.Empty<double>(), Kind.State, states));
                     continue;
                 }
 
                 var mapped = DomSlots.Map(id, w.Property, box.Value, available);
-                if (!mapped.Mapped) { result.Unmapped.Add($"line {w.Line}: {key} - {mapped.Problem}"); continue; }
+                if (!mapped.Mapped)
+                {
+                    // No slot for the property itself, but the script only ever assigns a few values:
+                    // then it is a state like a class, and the page is laid out in each. That is
+                    // `color` on a wrapper whose text is its children's - the cascade carries it down
+                    // exactly as a browser would, which no slot on the wrapper could. A property that
+                    // draws the same in every value it takes (an animation the scene cannot express)
+                    // moves nothing, and is reported rather than bound to nothing.
+                    if (styleOf != null && w.Property.StartsWith("style.", StringComparison.Ordinal)
+                        && !computed.Contains(key) && classes.TryGetValue(key, out var values)
+                        && Drawn(values, v => styleOf(id, DomSlots.Dashed(w.Property.Substring(6)), v), new List<string>(), baseOf, textOf) is { } drawn
+                        && drawn.Any(s => s.Numbers.Count + s.Text.Count > 0))
+                        result.Bindings.Add(new Binding(key, Array.Empty<string>(), Array.Empty<double>(), Kind.State, drawn));
+                    else
+                        result.Unmapped.Add($"line {w.Line}: {key} - {mapped.Problem}");
+                    continue;
+                }
 
                 // Motion goes into the scene instead of into a binding. Every slot it covers is one
                 // the chip never writes, so a page whose motion is wholly expressible sends nothing.
@@ -301,14 +381,9 @@ internal static class CompiledPage
             }
         }
 
-        // The markup holes, as bindings the existing runtime already knows how to write. Keyed
-        // `innerHTML#3` so they sit beside the element's other writes and need no new mechanism -
-        // and deliberately NOT a new DOM function, because every name added to the runtime is one
-        // more thing that can be registered and not defined.
-        if (holeBindings != null)
-            foreach (var (key, slot, isNumber) in holeBindings)
-                result.Bindings.Add(new Binding(key, new[] { slot }, new double[1],
-                                                isNumber ? Kind.Length : Kind.Text));
+        // Compiled markup's values and states, keyed `innerHTML#3`, `label#2`, `drive`, `choice#4` and
+        // `rows#1` under the element whose markup it is, so they sit beside its other writes.
+        if (markupBindings != null) result.Bindings.AddRange(markupBindings);
 
         result.Lua = Assemble(lua, result.Bindings, tabular ?? (_ => false), prelude, viewport, parents, tree, target, element);
         return result;
@@ -455,6 +530,26 @@ internal static class CompiledPage
 
             // A state binding carries what each class DRAWS, laid out at compile time, rather than a
             // slot and a number. Picking one at run time is a table lookup and a copy.
+            if (b.Other != null) sb.Append(", other = ").Append(Quote(b.Other));
+            if (b.Transform != null) sb.Append(", case = ").Append(Quote(b.Transform));
+            if (b.Colours != null) sb.Append(", map = ").Append(Map(b.Colours));
+            if (b.Pieces != null)
+            {
+                sb.Append(", pieces = { ");
+                foreach (var piece in b.Pieces)
+                {
+                    switch (piece)
+                    {
+                        case string text: sb.Append(Quote(text)); break;
+                        case int arg: sb.Append(arg.ToString(CultureInfo.InvariantCulture)); break;
+                        case ValueTuple<int, IReadOnlyDictionary<string, string>> colour:
+                            sb.Append("{ ").Append(colour.Item1.ToString(CultureInfo.InvariantCulture)).Append(", ").Append(Map(colour.Item2)).Append(" }");
+                            break;
+                    }
+                    sb.Append(", ");
+                }
+                sb.Append('}');
+            }
             if (b.Read == Kind.State && b.States != null)
             {
                 sb.Append(", states = {");
@@ -496,19 +591,17 @@ internal static class CompiledPage
         }
         sb.Append("}\n\n");
 
-        // How each text slot's value has to be shaped before it reaches the scene. The emitter does
-        // this when it writes a label, and a slot write bypasses the emitter entirely - so without
-        // it a score of "00042" is read back by the scene reader as the NUMBER 42 and the label
-        // draws nothing, and a tabular-figures label loses the monospacing that stops its digits
-        // dancing as they change.
+        // Which text slots draw tabular figures. The emitter monospaces each digit run when it writes
+        // such a label, and a slot write bypasses the emitter, so without this a counter's digits
+        // shift sideways as they change. Nothing else is shaped: a slot value is data, not scene
+        // source, so the scene reader's escapes and numeric guard never meet it.
         sb.Append("TEXT = {\n");
         foreach (var b in bindings)
         {
             if (b.Read != Kind.Text) continue;
             var dot = b.Key.IndexOf('.');
             var id = dot > 0 ? b.Key.Substring(0, dot) : b.Key;
-            sb.Append("  [").Append(Quote(id)).Append("] = ")
-              .Append(tabular(id) ? "js_tabular" : "js_plain").Append(",\n");
+            if (tabular(id)) sb.Append("  [").Append(Quote(id)).Append("] = true,\n");
         }
         sb.Append("}\n\n");
 
@@ -602,6 +695,20 @@ internal static class CompiledPage
 -- console - the chunk ran, computed every value, and dropped them all.
 PAYLOAD, DIRTY = {}, false
 
+-- What each slot last went out as. A page re-renders whole - every value of every visible panel,
+-- 2.4 times a second on the Atmo pages - and nearly all of it is what the scene already shows.
+-- Sending it anyway put ~140 values a render through set_props, commit and the renderer's parse
+-- and rebuild for nothing. Keyed by slot, not by binding: several bindings write one slot (a tab's
+-- state and a choice inside it), and only the slot's last value says what the renderer holds.
+-- Comparing a string or a number allocates nothing; the keys are added once, at a slot's first write.
+local SENT = {}
+local function set(slot, v)
+  if SENT[slot] == v then return end
+  SENT[slot] = v
+  PAYLOAD[slot] = v
+  DIRTY = true
+end
+
 -- A script writes CSS, not numbers: a height arrives as '18px', an offset as '-604.8px', an opacity
 -- as '0.62'. tonumber gives nil for the first two, so coercing instead of parsing made every one of
 -- those writes vanish - which is what happened the first time this was run rather than reasoned about.
@@ -625,7 +732,22 @@ local function translate(v)
 end
 
 local function put(slot, n)
-  if n == n then PAYLOAD[slot] = n DIRTY = true end   -- NaN: a page mid-calculation, not a value
+  if n == n then set(slot, n) end                     -- NaN: a page mid-calculation, not a value
+end
+
+-- tabular-nums, as the emitter draws it: each digit run monospaced so a changing reading does not
+-- shuffle sideways. One function for every call, not a closure per gsub.
+local function digits(run) return '<mspace=0.6em>' .. run .. '</mspace>' end
+
+-- A text or label value that is the same as last time is the same string as last time, so it is
+-- handed over again rather than built again: js_str of a number, a case change and a gsub each make
+-- a new string, and a render re-sends every label whether or not it changed. Handed over through
+-- set() rather than skipped outright, because another binding - a tab's state - may have written the
+-- slot since, and then the renderer holds that, not this.
+local function same(b, v)
+  if b.shown ~= nil and b.last == v and type(v) ~= 'table' then set(b.to[1][1], b.shown) return true end
+  b.last = v
+  return false
 end
 
 function DOM.bind(id, key, value)
@@ -635,25 +757,29 @@ function DOM.bind(id, key, value)
   if b == nil then return end                         -- a setup write, or one the compiler refused
 
   if b.read == 'text' then
-    -- The emitter shapes a label's text - digit runs monospaced, a numeric string guarded - and the
-    -- scene reader takes a bare number as a number, so a text slot given '00042' would draw nothing.
-    -- TEXT() applies the same shaping the emitter did for this element.
-    local shaped = TEXT[id]
+    -- The value goes out as data, never as scene source, so none of the scene reader's escapes or
+    -- guards apply: a quote shipped escaped drew its backslash, and '00042' is a string all the way
+    -- to the label. Only the tabular shaping is drawing rather than encoding, so only it stays.
+    if same(b, value) then for i = 2, #b.to do set(b.to[i][1], b.shown) end return end
     local s = js_str(value)
-    if shaped then s = shaped(s) end
-    for i = 1, #b.to do PAYLOAD[b.to[i][1]] = s end
-    DIRTY = true
+    if TEXT[id] then s = (s:gsub('%d+', digits)) end
+    b.shown = s
+    for i = 1, #b.to do set(b.to[i][1], s) end
     return
   end
 
   if b.read == 'colour' then
-    for i = 1, #b.to do PAYLOAD[b.to[i][1]] = js_str(value) end
-    DIRTY = true
+    -- A page writes CSS - `var(--cb-live)` - and the scene reads hex: compiled markup carries the
+    -- table from one to the other, made when the page was laid out.
+    local s = js_str(value)
+    if b.map then s = b.map[s] or s end
+    for i = 1, #b.to do set(b.to[i][1], s) end
     return
   end
 
   if b.read == 'translate' then
-    local x, y = translate(value)
+    local x, y = b.x, b.y                             -- parsed once per value, as a length is below
+    if b.v ~= value or b.v == nil or type(value) == 'table' then x, y = translate(value) b.v, b.x, b.y = value, x, y end
     if x and b.to[1] then put(b.to[1][1], x + b.to[1][2]) end
     if y and b.to[2] then put(b.to[2][1], y + b.to[2][2]) end
     return
@@ -664,10 +790,18 @@ function DOM.bind(id, key, value)
   -- through to length('duck'), which is nil, and every compiled page drew its base state for ever
   -- while the states sat in the table unused.
   if b.read == 'state' then
-    local st = b.states[js_str(value)]
+    -- Looked up once per value, not per render: a choice arrives as 1 or 0 and a list as its length,
+    -- and js_str of a number is a new string - eighty choices on a page made that eighty a render.
+    local st = b.st
+    if b.v ~= value or b.v == nil or type(value) == 'table' then
+      st = b.states[js_str(value)]
+      -- A value none of the states is named after has one of its own when the markup draws
+      -- something for 'none of them' (a tab the page does not know): its layout is `other`.
+      if st == nil and b.other then st = b.states[b.other] end
+      b.v, b.st = value, st
+    end
     if st == nil then return end                      -- a class the enumeration never saw
-    for i = 1, #st do PAYLOAD[st[i][1]] = st[i][2] end
-    if #st > 0 then DIRTY = true end
+    for i = 1, #st do set(st[i][1], st[i][2]) end
     return
   end
 
@@ -677,15 +811,70 @@ function DOM.bind(id, key, value)
   if b.read == 'visibility' then
     local s = js_str(value)
     local n = (s == 'hidden' or s == 'collapse') and 0 or 1
-    for i = 1, #b.to do PAYLOAD[b.to[i][1]] = n end
-    DIRTY = true
+    for i = 1, #b.to do set(b.to[i][1], n) end
     return
   end
 
-  local n = length(value)
+  -- Parsed once per value for the same reason: '62%' is a pattern match and a capture every time.
+  local n = b.n
+  if b.v ~= value or b.v == nil or type(value) == 'table' then n = length(value) b.v, b.n = value, n end
   if n == nil then return end
   -- to[3] is -1 for a far-edge position (`right`, `bottom`) and absent otherwise.
   for i = 1, #b.to do local to = b.to[i] put(to[1], n * (to[3] or 1) + to[2]) end
+end
+
+-- A label of compiled markup: literal text and values, written whole once its last value is known.
+-- A label whose values are the ones it was last built from is not built again (see same()); one
+-- whose values moved costs exactly one string, its new text. That string is the floor while a
+-- label is one text slot: Lua strings are immutable and the renderer's `T` formats at most one
+-- number, so a label of several values has to arrive as one piece of text. `b.args` is filled once,
+-- at the label's first render.
+local LABEL = {}
+function DOM.label(id, key, ...)
+  local e = BOUND[id]
+  local b = e and e[key]
+  if b == nil then return end
+  local args, n = b.args, select('#', ...)
+  if args == nil then args = {} b.args = args end
+  local moved = b.shown == nil
+  for i = 1, n do
+    local v = (select(i, ...))
+    if args[i] ~= v or type(v) == 'table' then args[i] = v moved = true end
+  end
+  if not moved then set(b.to[1][1], b.shown) return end
+  local pieces = b.pieces
+  for i = 1, #pieces do
+    local piece = pieces[i]
+    local kind = type(piece)
+    if kind == 'string' then LABEL[i] = piece
+    elseif kind == 'number' then
+      -- Data, not scene source (see the text arm): no escapes, or a quote draws its backslash.
+      local s = js_str((select(piece, ...)))
+      if b.case == 'upper' then s = s:upper() elseif b.case == 'lower' then s = s:lower() end
+      LABEL[i] = s
+    else
+      local s = js_str((select(piece[1], ...)))
+      LABEL[i] = piece[2][s] or s
+    end
+  end
+  b.shown = table.concat(LABEL, '', 1, #pieces)
+  set(b.to[1][1], b.shown)
+end
+
+-- An innerHTML write replaced these elements, and their listeners went with them (see the call in
+-- the translated page). Emptied in place, so a render that registers again reuses the same list.
+function DOM.replaced(...)
+  for i = 1, select('#', ...) do
+    local byKind = DOM.listeners[(select(i, ...))]
+    if byKind ~= nil then
+      for _, list in pairs(byKind) do
+        for j = #list, 1, -1 do
+          if type(list[j]) == 'table' and list[j].capture then DOM.captures = DOM.captures - 1 end
+          list[j] = nil
+        end
+      end
+    end
+  end
 end
 
 -- The two the compiler emits instead of a CSS string. A page writes `x + 'px'` and
@@ -702,8 +891,7 @@ function DOM.num(el, key, n)
   local e = BOUND[rawget(el, '__id')]
   local b = e and e[key]
   if b == nil or b.read ~= 'length' then return end
-  for i = 1, #b.to do local to = b.to[i] PAYLOAD[to[1]] = n * (to[3] or 1) + to[2] end
-  DIRTY = true
+  for i = 1, #b.to do local to = b.to[i] set(to[1], n * (to[3] or 1) + to[2]) end
 end
 
 function DOM.xy(el, key, x, y)
@@ -711,8 +899,8 @@ function DOM.xy(el, key, x, y)
   local b = e and e[key]
   if b == nil or b.read ~= 'translate' then return end
   x, y = tonumber(x), tonumber(y)
-  if x ~= nil and x == x and b.to[1] then PAYLOAD[b.to[1][1]] = x + b.to[1][2] DIRTY = true end
-  if y ~= nil and y == y and b.to[2] then PAYLOAD[b.to[2][1]] = y + b.to[2][2] DIRTY = true end
+  if x ~= nil and x == x and b.to[1] then set(b.to[1][1], x + b.to[1][2]) end
+  if y ~= nil and y == y and b.to[2] then set(b.to[2][1], y + b.to[2][2]) end
 end
 
 -- Everything one frame wrote, in one payload: the renderer merges a payload and rebuilds once, so
@@ -741,6 +929,10 @@ DOM.known = {}
 for id in pairs(BOUND) do DOM.known[id] = true end
 
 local SURF, VEC
+-- Made once: a table literal and a closure in the send itself were two allocations every time a
+-- frame had anything to say. PAYLOAD is emptied in place, never replaced, so PROPS keeps pointing at it.
+local PROPS = { data = PAYLOAD, snap = 1 }
+local function send() VEC:set_props(PROPS) SURF:commit() end
 function DOM.flush()
   if not DIRTY then return end
   DIRTY = false
@@ -765,10 +957,7 @@ function DOM.flush()
     if VEC == nil then SURF = nil SENDNOTE = 'surface:element returned nil for ' .. tostring(ELEMENT) return end
     SENDNOTE = 'sending to ' .. tostring(ELEMENT) .. ' on ' .. tostring(SURFACE)
   end
-  local okw, err = pcall(function()
-    VEC:set_props({ data = PAYLOAD, snap = 1 })
-    SURF:commit()
-  end)
+  local okw, err = pcall(send)
   if not okw then SENDNOTE = 'set_props/commit threw: ' .. tostring(err) return end
   -- Emptied after the commit, not before: what was sent has gone by then, and a frame that moves
   -- one number should send one number rather than every slot the page has ever written.
@@ -795,9 +984,12 @@ frame = function(dt)
   local t = CLOCK * 1000
 
   local pending = Pending.frame
-  if #pending > 0 then
-    local fn = pending[#pending]
-    Pending.frame = {}                 -- a rAF page re-registers inside the call
+  local n = #pending
+  if n > 0 then
+    local fn = pending[n]
+    -- Emptied in place before the call, since a rAF page re-registers inside it. A fresh table here
+    -- was an allocation on every frame of every animated page.
+    for i = n, 1, -1 do pending[i] = nil end
     fn(t)
   end
 
@@ -839,6 +1031,13 @@ event = function(id, kind, x, y)
   DOM.flush()
 end
 ";
+
+    private static string Map(IReadOnlyDictionary<string, string> map)
+    {
+        var sb = new StringBuilder("{ ");
+        foreach (var kv in map) sb.Append('[').Append(Quote(kv.Key)).Append("] = ").Append(Quote(kv.Value)).Append(", ");
+        return sb.Append('}').ToString();
+    }
 
     private static string Quote(string s)
     {

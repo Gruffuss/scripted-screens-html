@@ -53,6 +53,8 @@ internal static class SceneSlots
     private static readonly HashSet<string> NumberKeys = new(StringComparer.Ordinal)
     {
         "x", "y", "w", "h", "cx", "cy", "r", "rx", "ry", "x1", "y1", "x2", "y2", "o", "fo", "fo2", "so", "sw", "size",
+        // a scroll box's content height, which a list that grows changes without changing a shape
+        "ch",
     };
     private static readonly HashSet<string> ColourKeys = new(StringComparer.Ordinal) { "f", "s" };
     /// <summary>Two-number pairs the vector mod reads item by item, each item a number or an expression.</summary>
@@ -104,6 +106,15 @@ internal static class SceneSlots
     }
 
     [ThreadStatic] private static Memory? _memory;
+
+    /// <summary>
+    /// Whether a gradient's stop COLOURS become slots (`stops=[[0,$g_stops_0],[1,$g_stops_1]]`; the
+    /// vector mod reads a `$name` stop colour from the payload since 0.11.31). Off for the per-frame
+    /// split, which keeps arrays literal. On while the markup compiler emits: a colour the page picks
+    /// per state inside a gradient is then a value, where literal it would be a different shape per
+    /// value and its whole element written once per colour.
+    /// </summary>
+    [ThreadStatic] internal static bool SlotStops;
 
     /// <summary>The template and the values its slots name, in order. Convenience for tests and tools.</summary>
     public static string Split(string scene, Dictionary<string, Value> values, string prefix = "L")
@@ -375,6 +386,22 @@ internal static class SceneSlots
                 i = comma + 1;
             }
             sb.Append(']');
+            return;
+        }
+        if (SlotStops && Is(scene, sceneLength, keyStart, keyEnd, "stops") && rawEnd - rawStart > 2 && scene[rawStart] == '[')
+        {
+            // Each `#colour` inside the stop list, and nothing else: positions stay as they are.
+            var k = 0;
+            for (var i = rawStart; i < rawEnd; i++)
+            {
+                if (scene[i] != '#') { sb.Append(scene[i]); continue; }
+                var e = i + 1;
+                while (e < rawEnd && Uri.IsHexDigit(scene[e])) e++;
+                var slot = Part(token, k++, name);
+                values[slot] = Keep(slot, new string(scene, i, e - i), memory);
+                sb.Append('$').Append(slot);
+                i = e - 1;
+            }
             return;
         }
         sb.Append(scene, rawStart, rawEnd - rawStart);

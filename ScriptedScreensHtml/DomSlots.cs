@@ -422,7 +422,7 @@ internal static class DomSlots
     }
 
     /// <summary>`backgroundColor` as `background-color`: a script writes one spelling, CSS the other.</summary>
-    private static string Dashed(string property)
+    internal static string Dashed(string property)
     {
         var needs = false;
         foreach (var c in property) if (c >= 'A' && c <= 'Z') { needs = true; break; }

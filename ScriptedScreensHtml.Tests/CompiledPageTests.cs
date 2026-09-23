@@ -276,12 +276,24 @@ internal static class CompiledPageTests
             + "</style></head><body>";
         var (rested, rest) = Emitted(moveHead + "<div id=\"a\">Hi</div><div id=\"b\">below</div></body></html>", "a");
         var (_, moved) = Emitted(moveHead + "<div id=\"a\" class=\"up\">Hi</div><div id=\"b\">below</div></body></html>", "a");
-        var state = PageCompiler.StateOf("a", "up", rested, rested.Root.panel!, new Vector2(rested.ViewportWidth, rested.ViewportWidth),
-                                         PageCompiler.Absolute(rested), rest);
+        var state = PageCompiler.StateOf("a", "up", rested, rested.Root.panel!, new Vector2(rested.ViewportWidth, rested.ViewportWidth), rest);
         double S(string k) => state != null && state.Numbers.FirstOrDefault(n => n.Slot == k) is { Slot: not null } n ? n.Value : double.NaN;
         double M(string k) => moved.TryGetValue(k, out var v) && v.IsNumber ? v.Number : double.NaN;
         check(state != null && Math.Abs(S("a_x") - M("a_x")) < 0.01 && Math.Abs(S("a__2_x") - M("a__2_x")) < 0.01 && M("a__2_x") != M("a_x"),
               $"data: a class state puts a box's label where the emitter draws it (a_x {S("a_x")} vs {M("a_x")}, a__2_x {S("a__2_x")} vs {M("a__2_x")})");
+
+        // A class that repaints a box is a state too: what it draws is read off the emitted scene,
+        // so the box's colour travels with it, not only where it sits.
+        const string paintHead = "<html><head><meta name=\"viewport\" content=\"width=480\"><style>"
+            + "body{padding:10px}#a{width:200px;height:20px;background:#333}#a.hot{background:#ff0000;height:30px}"
+            + "</style></head><body>";
+        var (painted, paintRest) = Emitted(paintHead + "<div id=\"a\"></div><div id=\"b\">below</div></body></html>", "a");
+        var hot = PageCompiler.StateOf("a", "hot", painted, painted.Root.panel!, new Vector2(painted.ViewportWidth, painted.ViewportWidth), paintRest);
+        var fill = hot?.Text.FirstOrDefault(t => t.Slot == "a_f").Value;
+        var tall = hot != null && hot.Numbers.FirstOrDefault(n => n.Slot == "a_h") is { Slot: not null } hn ? hn.Value : double.NaN;
+        check(fill == "#FF0000" && Math.Abs(tall - 30) < 0.01, fill == "#FF0000" && Math.Abs(tall - 30) < 0.01
+            ? "data: a class that repaints and resizes a box carries its colour and its height (a_f #FF0000, a_h 30)"
+            : $"data: the class state carries a_f {fill ?? "(nothing)"} and a_h {tall}, not its red and its 30");
 
         // the note without an id has no slot to move: refused, naming it, rather than left behind
         var (plain, _) = Emitted(head + "<div class=\"note\">Values arrive from Lua every second.</div>" + tail, Driven);
@@ -364,6 +376,13 @@ internal static class CompiledPageTests
     {
         var root = Root();
         if (root == null) { check(false, "compiled: cannot find the source folder"); return; }
+
+        Markup(root, check);
+        MarkupRuntime(root, check);
+        MarkupValues(root, check);
+        StateText(root, check);
+        StyleStates(check);
+        ReplacedListeners(check);
 
         var scenePath = ScenePath(root);
         if (!File.Exists(scenePath)) { check(false, "compiled: the captured scene is missing"); return; }
@@ -623,6 +642,386 @@ internal static class CompiledPageTests
         // in this stub. The real one lays the page out and reads what moved.
         var known = boxes.ContainsKey(id) || available.Contains(id + "_t_0") || available.Contains(id + "_f");
         return known ? values : null;
+    }
+
+    // ---- markup written with innerHTML, compiled -----------------------------------------------
+
+    /// <summary>
+    /// A page that draws with <c>innerHTML</c>, compiled once: its markup becomes the scene, and the
+    /// chunk writes only what fills it.
+    /// </summary>
+    /// <remarks>
+    /// The whole path in one page - a tab the page switches on, a label built round a value, a list
+    /// the page grows, a colour it picks by name, a click that changes tab - laid out headless as a
+    /// surface lays it out, then run in the Lua VM a chip runs. What each check reads is what the
+    /// renderer would be sent.
+    /// </remarks>
+    private static void Markup(string root, Action<bool, string> check)
+    {
+        const string page = @"<meta name=""viewport"" content=""width=300"">
+<style>:root{--live:#33cc66;--dim:#556677} body{margin:0;background:#000;font-family:sans-serif}</style>
+<body><div id=""frame"" style=""width:300px;height:300px;display:flex;flex-direction:column""></div>
+<script>
+const st = { tab: 'a', n: 3, log: [] };
+const TABS = [{ id: 'a', label: 'Alpha' }, { id: 'b', label: 'Beta' }];
+let acts = [];
+const act = (fn) => { acts.push(fn); return ' data-act=""' + (acts.length - 1) + '""'; };
+function tabBar(o) {
+  return '<div style=""display:flex;height:30px"">' + o.tabs.map((t) => '<div' + act(() => o.onSelect(t.id))
+    + ' style=""flex:1;color:' + (t.id === o.active ? 'var(--live)' : 'var(--dim)') + '"">' + t.label + '</div>').join('') + '</div>';
+}
+function values() { return { tab: st.tab, count: st.n.toFixed(0), log: st.log, setTab: (id) => { st.tab = id; render(); } }; }
+function render() {
+  acts = [];
+  const v = values();
+  const frame = document.getElementById('frame');
+  frame.innerHTML = (st.tab === 'a' ? '<div style=""height:40px;color:#ffffff"">Count ' + v.count + ' units</div>' : '<div style=""height:40px;color:#ff0000"">Other</div>')
+    + v.log.map((l) => '<div style=""height:20px;color:#ffffff"">' + l + '</div>').join('')
+    + tabBar({ tabs: TABS, active: v.tab, onSelect: v.setTab });
+}
+function step() { st.n += 1; st.log = ['line ' + st.n].concat(st.log).slice(0, 3); render(); }
+render();
+setInterval(step, 500);
+</script></body>";
+        CompiledPage.Result compiled;
+        MarkupSlots.Result? markup;
+        try { (compiled, markup) = Probe4.Headless(page); }
+        catch (Exception ex) { check(false, "markup: compiling a markup page threw - " + ex.Message.Split('\n')[0]); return; }
+
+        check(compiled.Ok && markup?.Template != null, compiled.Ok
+            ? $"markup: a page drawn with innerHTML compiles - {compiled.Bindings.Count} binding(s), {compiled.Warnings.Count} warning(s)"
+            : $"markup: a page drawn with innerHTML does not compile - {string.Join("; ", compiled.Problems.Concat(compiled.Unmapped).Take(3))}");
+        if (!compiled.Ok || markup?.Template == null) return;
+        var leaks = Regex.Matches(markup.Template + string.Join(" ", markup.Values.Values), "98765\\d|#0F[0-9A-F]{4}\\b").Count;
+        check(leaks == 0, leaks == 0 ? "markup: no stand-in value is left in the structure" : $"markup: {leaks} stand-in value(s) left in the structure");
+
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        string? Do(string text, string name)
+        {
+            try { Chunk(state, text, name); return null; }
+            catch (Exception ex) { return ex.Message.Split('\n')[0]; }
+        }
+        Dictionary<string, string> Sent()
+        {
+            var sent = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (!state.Environment["PAYLOAD"].TryRead<LuaTable>(out var table)) return sent;
+            var key = LuaValue.Nil;
+            while (table.TryGetNext(key, out var pair)) { key = pair.Key; if (key.TryRead<string>(out var k)) sent[k] = Text(pair.Value); }
+            return sent;
+        }
+        bool Holds(Dictionary<string, string> sent, string text) => sent.Values.Any(v => v.Contains(text, StringComparison.Ordinal));
+
+        var load = Do(compiled.Lua!, "page");
+        var first = Sent();
+        check(load == null && Holds(first, "Count 3 units"), load != null
+            ? "markup: the chunk does not load - " + load
+            : Holds(first, "Count 3 units")
+                ? "markup: the first render writes its label whole, literal text and value (\"Count 3 units\")"
+                : $"markup: the first render wrote {first.Count} value(s) and no \"Count 3 units\"");
+
+        // A second of the page's own timer: two steps, two new rows, the count moved.
+        foreach (var k in first.Keys.ToList()) Do("PAYLOAD[\"" + k + "\"] = nil", "clear");
+        var frames = Do("for i = 1, 61 do frame(1 / 60) end", "frames");
+        var later = Sent();
+        check(frames == null && Holds(later, "Count 5 units") && Holds(later, "line 5"), frames != null
+            ? "markup: running frames failed - " + frames
+            : Holds(later, "Count 5 units") && Holds(later, "line 5")
+                ? "markup: the page's timer re-renders by writing values - the count and the newest row"
+                : $"markup: after two steps the chunk wrote {later.Count} value(s), missing the count or the row");
+        var rows = markup.Targets[0].Bindings.FirstOrDefault(b => b.Key.StartsWith("rows#", StringComparison.Ordinal));
+        check(rows != null, rows != null ? $"markup: the list is a state by its length ({rows.States.Count} lengths)" : "markup: the list has no length state");
+
+        // The second tab, pressed: the handler the markup registered runs, and the drive state flips.
+        var beta = Regex.Matches(compiled.Lua!, "DOM\\.on\\(\"([^\"]+)\", \"click\"").Select(m => m.Groups[1].Value).ToList();
+        check(beta.Count == 2, $"markup: {beta.Count} click region(s) registered, one per tab");
+        if (beta.Count != 2) return;
+        foreach (var k in Sent().Keys.ToList()) Do("PAYLOAD[\"" + k + "\"] = nil", "clear");
+        var pressed = Do($"event(\"{beta[1]}\", \"click\", 0, 0)", "click");
+        var after = Sent();
+        var gates = after.Where(p => p.Key.EndsWith("_v", StringComparison.Ordinal)).ToList();
+        check(pressed == null && gates.Any(p => p.Value == "0") && gates.Any(p => p.Value == "1"), pressed != null
+            ? "markup: pressing a tab failed - " + pressed
+            : $"markup: pressing the second tab switches what is shown ({gates.Count(p => p.Value == "1")} shown, {gates.Count(p => p.Value == "0")} hidden)");
+        var live = MarkupSlots.Hex(new Color(0x33 / 255f, 0xcc / 255f, 0x66 / 255f));
+        check(after.Values.Contains(live), after.Values.Contains(live)
+            ? $"markup: the pressed tab takes the page's colour by name, as the scene's hex ({live})"
+            : "markup: no slot took the pressed tab's colour as hex - " + string.Join(", ", after.Where(p => p.Key.EndsWith("_f", StringComparison.Ordinal)).Select(p => p.Key + "=" + p.Value).Take(4)));
+    }
+
+    private static string Text(LuaValue v)
+        => v.TryRead<string>(out var s) ? s : v.TryRead<double>(out var d) ? d.ToString(CultureInfo.InvariantCulture) : v.ToString();
+
+    /// <summary>
+    /// The runtime's own arms for compiled markup: a state for "none of them", a colour by name, a
+    /// label from pieces. Each is a few lines of Lua a page reaches only through markup.
+    /// </summary>
+    private static void MarkupRuntime(string root, Action<bool, string> check)
+    {
+        var bindings = new List<CompiledPage.Binding>
+        {
+            new("frame.drive", Array.Empty<string>(), Array.Empty<double>(), CompiledPage.Kind.State,
+                new List<CompiledPage.StateValues>
+                {
+                    Values("a", ("g_v", 1.0)),
+                    Values("\u0001other", ("g_v", 7.0)),
+                    Titled(Values("tab", ("g_v", 1.0)), ("lab", "TAB")),
+                }, other: "\u0001other"),
+            new("frame.innerHTML#1", new[] { "c_f" }, new double[1], CompiledPage.Kind.Colour,
+                colours: new Dictionary<string, string> { ["var(--x)"] = "#123456" }),
+            new("frame.label#0", new[] { "lab" }, new double[1], CompiledPage.Kind.Label,
+                pieces: new List<object> { "Count ", 1, " in ", (2, (IReadOnlyDictionary<string, string>)new Dictionary<string, string> { ["var(--x)"] = "#123456" }) },
+                transform: "upper"),
+            new("t.textContent", new[] { "t" }, new double[1], CompiledPage.Kind.Text),
+        };
+        var compiled = CompiledPage.Compile("const x = 1;", new HashSet<string>(StringComparer.Ordinal), _ => null,
+                                            prelude: File.ReadAllText(Path.Combine(root, "JsPrelude.lua")),
+                                            markupBindings: bindings);
+        if (compiled.Lua == null) { check(false, "markup runtime: the chunk does not compile - " + string.Join("; ", compiled.Problems)); return; }
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        Chunk(state, compiled.Lua, "page");
+        Chunk(state, "DOM.bind('frame', 'drive', 'zzz') DOM.bind('frame', 'innerHTML#1', 'var(--x)') DOM.label('frame', 'label#0', 'abc', 'var(--x)') DOM.bind('t', 'textContent', 42)", "writes");
+        var payload = state.Environment["PAYLOAD"].Read<LuaTable>();
+        var other = payload["g_v"];
+        check(other.TryRead<double>(out var g) && g == 7, other.TryRead<double>(out var g2) && g2 == 7
+            ? "markup runtime: a value no state is named after draws the state for none of them"
+            : $"markup runtime: an unnamed value drew {other} instead of the state for none of them");
+        var colour = Text(payload["c_f"]);
+        check(colour == "#123456", colour == "#123456" ? "markup runtime: a colour written by name reaches the scene as its hex" : $"markup runtime: the colour reached the scene as {colour}");
+        var label = Text(payload["lab"]);
+        check(label == "Count ABC in #123456", label == "Count ABC in #123456"
+            ? "markup runtime: a label is its pieces, its values in the label's case and its colours as hex"
+            : $"markup runtime: the label reads \"{label}\"");
+
+        // A page re-renders whole, so the same writes arrive again and again. What the scene already
+        // shows is not sent again, and a label built from the same values is not built again: the
+        // second render leaves nothing to send, and a thousand of them allocate nothing.
+        // A text slot's value is data, never scene source: 42 is the text "42", with no guard the
+        // scene reader would need and a data value never meets.
+        var number = Text(payload["t"]);
+        check(number == "42", number == "42" ? "markup runtime: a number written as text arrives as its digits" : $"markup runtime: 42 written as text arrived as \"{number}\"");
+
+        const string again = "DOM.bind('frame', 'drive', 'zzz') DOM.bind('frame', 'innerHTML#1', 'var(--x)') DOM.label('frame', 'label#0', 'abc', 'var(--x)') DOM.bind('t', 'textContent', 42)";
+        Chunk(state, "for k in pairs(PAYLOAD) do PAYLOAD[k] = nil end DIRTY = false", "sent");
+        Chunk(state, again, "again");
+        var resent = new List<string>();
+        for (var key = LuaValue.Nil; payload.TryGetNext(key, out var pair);) { key = pair.Key; resent.Add(pair.Key.ToString()); }
+        var dirty = state.Environment["DIRTY"].TryRead<bool>(out var d) && d;
+        check(resent.Count == 0 && !dirty, resent.Count == 0 && !dirty
+            ? "markup runtime: a render that changes nothing sends nothing"
+            : $"markup runtime: a render that changed nothing sent {string.Join(", ", resent)}{(dirty ? " (and marked the frame dirty)" : "")}");
+        Chunk(state, "function __again(n) for i = 1, n do " + again + " end end __again(3)", "loop");
+        var a0 = GC.GetTotalAllocatedBytes(true);
+        Chunk(state, "__again(0)", "n");
+        var a1 = GC.GetTotalAllocatedBytes(true);
+        Chunk(state, "__again(1000)", "n");
+        var a2 = GC.GetTotalAllocatedBytes(true);
+        var perRender = (a2 - a1 - (a1 - a0)) / 1000.0;
+        check(perRender < 1, $"markup runtime: re-rendering the same values allocates {perRender:0.#} B a render" + (perRender < 1 ? "" : ", where it should allocate nothing"));
+
+        // Handed over again rather than skipped: another binding - a tab's state - wrote the label's
+        // slot in between, so the renderer holds that text, and the label's own must go back.
+        Chunk(state, "DOM.bind('frame', 'drive', 'tab') DOM.label('frame', 'label#0', 'abc', 'var(--x)')", "over");
+        var back = Text(payload["lab"]);
+        check(back == "Count ABC in #123456", back == "Count ABC in #123456"
+            ? "markup runtime: an unchanged label whose slot another binding wrote is written again"
+            : $"markup runtime: after a state wrote the label's slot, the unchanged label left \"{back}\"");
+
+        // A value is data, not scene source: a quote in it is a quote, not an escaped one.
+        Chunk(state, "DOM.label('frame', 'label#0', 'a\"b', 'var(--x)')", "quote");
+        var quoted = Text(payload["lab"]);
+        check(quoted == "Count A\"B in #123456", quoted == "Count A\"B in #123456"
+            ? "markup runtime: a quote in a label's value draws as a quote"
+            : $"markup runtime: a quote in a label's value arrived as \"{quoted}\"");
+
+        static CompiledPage.StateValues Values(string name, params (string Slot, double Value)[] numbers)
+        {
+            var s = new CompiledPage.StateValues { Name = name };
+            s.Numbers.AddRange(numbers);
+            return s;
+        }
+
+        static CompiledPage.StateValues Titled(CompiledPage.StateValues s, (string Slot, string Value) text)
+        {
+            s.Text.Add(text);
+            return s;
+        }
+    }
+
+    /// <summary>
+    /// A class that repaints a box can be left: the state for "no class" carries the resting colour
+    /// back, as it carries a resting position back.
+    /// </summary>
+    private static void StateText(string root, Action<bool, string> check)
+    {
+        const string script = @"
+const el = document.getElementById('a');
+function set(on) { el.className = on ? 'hot' : ''; }
+function tick() { set(Math.random() > 0.5); }
+setInterval(tick, 100);";
+        var available = new HashSet<string>(StringComparer.Ordinal) { "a", "a_x", "a_y", "a_w", "a_h", "a_f" };
+        var compiled = CompiledPage.Compile(script, available,
+            id => id == "a" ? new DomSlots.Box(outOfFlow: false, parentX: 0, parentY: 0, hasBackground: true, new List<(string, double, double)>()) : null,
+            stateOf: (id, cls) =>
+            {
+                var s = new CompiledPage.StateValues();
+                if (cls == "hot") s.Text.Add(("a_f", "#FF0000"));
+                return s;
+            },
+            prelude: File.ReadAllText(Path.Combine(root, "JsPrelude.lua")),
+            baseOf: slot => slot == "a_h" ? 20 : null,
+            textOf: slot => slot == "a_f" ? "#333333" : null);
+        if (compiled.Lua == null || compiled.Unmapped.Count > 0)
+        {
+            check(false, "state text: the page does not compile - " + string.Join("; ", compiled.Problems.Concat(compiled.Unmapped)));
+            return;
+        }
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        Chunk(state, compiled.Lua, "page");
+        Chunk(state, "DOM.bind('a', 'className', 'hot') DOM.bind('a', 'className', '')", "writes");
+        var colour = Text(state.Environment["PAYLOAD"].Read<LuaTable>()["a_f"]);
+        check(colour == "#333333", colour == "#333333"
+            ? "state text: leaving a class that repainted a box puts its resting colour back"
+            : $"state text: after leaving the class the box is {colour}, not its resting #333333");
+
+        // The same write reached from a timer's inline callback is as much a write at run time.
+        const string inlineScript = @"
+const el = document.getElementById('a');
+function set(on) { el.className = on ? 'hot' : ''; }
+setInterval(() => set(Math.random() > 0.5), 100);";
+        var (inline, _) = DomWrites.Of(inlineScript);
+        check(inline.Count == 1 && inline[0].Runtime, inline.Count == 1 && inline[0].Runtime
+            ? "state text: a write in a function a timer's inline callback calls runs at run time"
+            : "state text: a write in a function a timer's inline callback calls is taken for setup, so it is never bound");
+    }
+
+    /// <summary>
+    /// `color` on a wrapper whose text is its child's: nothing on the wrapper takes it, so the few
+    /// values the script assigns are each laid out and the child's colour is what moves - the cascade
+    /// carrying it down as a browser does. And a write that reaches nothing drawn (an animation with
+    /// no keyframes the scene can run) is dropped by name, never by refusing the whole page.
+    /// </summary>
+    private static void StyleStates(Action<bool, string> check)
+    {
+        const string page = @"<body style=""margin:0""><div id=""wrap"" style=""position:absolute;left:0;top:0;width:200px;height:30px;color:#ffffff""><span id=""a"">alarm</span></div>
+<script>
+const RED = '#ff0000', BLUE = '#0000ff';
+let hot = false;
+function tick() {
+  hot = !hot;
+  const tone = hot ? RED : BLUE;
+  document.getElementById('wrap').style.color = tone;
+  document.getElementById('wrap').style.animation = hot ? 'nothing 1s infinite' : 'none';
+}
+setInterval(tick, 500);
+</script></body>";
+        CompiledPage.Result compiled;
+        try { (compiled, _) = Probe4.Headless(page); }
+        catch (Exception ex) { check(false, "style states: compiling the page threw - " + ex.Message.Split('\n')[0]); return; }
+
+        var bound = compiled.Bindings.Where(b => b.Key == "wrap.style.color" && b.Read == CompiledPage.Kind.State).ToList();
+        var colours = bound.SelectMany(b => b.States!).Select(s => s.Text.FirstOrDefault(t => t.Slot == "a_f").Value ?? "").ToList();
+        var red = colours.Any(c => c.StartsWith("#FF0000", StringComparison.OrdinalIgnoreCase));
+        var blue = colours.Any(c => c.StartsWith("#0000FF", StringComparison.OrdinalIgnoreCase));
+        check(red && blue, red && blue
+            ? "style states: `color` on a wrapper is a state per value, moving its child's text colour"
+            : "style states: `color` on a wrapper - " + (bound.Count == 0
+                ? "not bound (" + string.Join("; ", compiled.Unmapped) + ")"
+                : "the child's colour per state is " + string.Join(", ", colours)));
+
+        var dropped = compiled.Unmapped.Count == 1 && compiled.Unmapped[0].Contains("animation", StringComparison.Ordinal);
+        check(compiled.Ok && dropped, compiled.Ok && dropped
+            ? "style states: a write that reaches nothing drawn is named and dropped, and the page still compiles"
+            : $"style states: ok={compiled.Ok}, unmapped: {string.Join("; ", compiled.Unmapped)}; problems: {string.Join("; ", compiled.Problems)}");
+    }
+
+    /// <summary>
+    /// A listener added to an element the markup names, on every render: in a browser the write
+    /// replaced the element and its old listener went with it, so there is only ever one. A compiled
+    /// page keeps one element per id, and used to keep every render's listener too.
+    /// </summary>
+    private static void ReplacedListeners(Action<bool, string> check)
+    {
+        const string page = @"<body style=""margin:0""><div id=""frame"" style=""width:200px;height:100px""></div>
+<script>
+let n = 0;
+function render() {
+  n++;
+  document.getElementById('frame').innerHTML = '<div id=""list"" style=""height:40px"">row ' + n + '</div>';
+  document.getElementById('list').addEventListener('scroll', () => { n = 0; });
+}
+render();
+setInterval(render, 100);
+</script></body>";
+        CompiledPage.Result compiled;
+        try { (compiled, _) = Probe4.Headless(page); }
+        catch (Exception ex) { check(false, "replaced listeners: compiling the page threw - " + ex.Message.Split('\n')[0]); return; }
+        if (!compiled.Ok) { check(false, "replaced listeners: the page does not compile - " + string.Join("; ", compiled.Problems)); return; }
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        try
+        {
+            Chunk(state, compiled.Lua!, "page");
+            Chunk(state, "for i = 1, 20 do frame(1) end LISTENING = #DOM.listeners.list.scroll", "frames");
+        }
+        catch (Exception ex) { check(false, "replaced listeners: running the page threw - " + ex.Message.Split('\n')[0]); return; }
+        var count = state.Environment["LISTENING"].TryRead<double>(out var c) ? c : -1;
+        check(count == 1, count == 1
+            ? "replaced listeners: a listener added on every render to an element the markup replaces is held once"
+            : $"replaced listeners: after 21 renders the element holds {count} listeners");
+    }
+
+    /// <summary>
+    /// What the chunk reads for a value of markup built through the page's helpers: a field of a
+    /// literal read off it, a field of a name that exists read where it exists, and a table read
+    /// with a key from a known few never read as undefined.
+    /// </summary>
+    private static void MarkupValues(string root, Action<bool, string> check)
+    {
+        const string script = @"
+const FILL = { steel: '#111', live: '#222' };
+const st = { v: 3, sel: 'a' };
+function panel(o) { return '<div style=""background:' + FILL[o.tone || 'steel'] + '"">' + o.note + '</div>'; }
+function readout(v) { return '<b>' + v.status + '</b>'; }
+function values() { return { tone: st.v > 2 ? 'live' : undefined, status: 'x' + st.v }; }
+function render() {
+  const v = values();
+  const frame = document.getElementById('frame');
+  frame.innerHTML = panel({ tone: v.tone, note: v.status }) + readout(v);
+}
+function bump() { st.v += 1; st.sel = 'b'; render(); }
+render();";
+        var ast = new Acornima.Parser().ParseScript(script);
+        var write = PageCompiler.InnerHtmlWrites(ast).First().Write;
+        var m = ScriptedScreensHtml.Markup.Of(write, ast, script);
+        var fill = m.Holes.Select(h => m.Enumerate(h.Value)).FirstOrDefault(e => e != null && e.Contains("#111"));
+        check(fill != null && !fill.Contains("undefined"), fill == null
+            ? "markup values: FILL[o.tone || 'steel'] is not drawn from its table"
+            : !fill.Contains("undefined")
+                ? $"markup values: a table read with one of a few keys is one of its entries ({string.Join(", ", fill)}), never undefined"
+                : $"markup values: a table read with a known key can be undefined ({string.Join(", ", fill)})");
+        var js = m.Holes.Select(h => m.Js(h.Value)).ToList();
+        check(js.Contains("(v.status)"), js.Contains("(v.status)")
+            ? "markup values: a helper argument's field is read off the literal it was given - `v.status`"
+            : "markup values: o.note reads " + string.Join(" | ", js));
+        var status = js.Where(j => j != null && j.Contains("status", StringComparison.Ordinal)).ToList();
+        check(status.Count == 2 && status.All(j => !j!.Contains("st.v", StringComparison.Ordinal)), status.All(j => !j!.Contains("st.v", StringComparison.Ordinal))
+            ? "markup values: a helper's parameter holding the render's own `v` is read where the page computed it, not computed again"
+            : "markup values: `v.status` through readout(v) is computed again - " + string.Join(" | ", status));
+
+        // A list the page maps from another, drawn row by row: each row reads its own element of the
+        // list it came from, so a row's state is that row's.
+        var dark = File.ReadAllText(Path.Combine(root, "AtmoDark.lua"));
+        var html = MarkupProbe.Bracketed(dark) ?? dark;
+        var code = string.Concat(Regex.Matches(html, "<script[^>]*>(.*?)</script>", RegexOptions.Singleline).Select(x => x.Groups[1].Value + "\n"));
+        var dast = new Acornima.Parser().ParseScript(code);
+        var dm = ScriptedScreensHtml.Markup.Of(PageCompiler.InnerHtmlWrites(dast).First().Write, dast, code);
+        var missing = dm.Holes.Count(h => dm.Js(h.Value) == null);
+        check(missing == 0, missing == 0
+            ? $"markup values: every one of AtmoDark's {dm.Holes.Count} values can be read by the chunk, candidate rows included"
+            : $"markup values: {missing} of AtmoDark's values cannot be read by the chunk");
     }
 
     // ---- running it ---------------------------------------------------------------------------

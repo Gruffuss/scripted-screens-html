@@ -37,6 +37,11 @@ internal sealed class JsToLua
     /// that shares a name with an outer one must shadow it, not assign it.
     /// </summary>
     private HashSet<string> _hoisted = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Top-level <c>const</c>s bound to an object or array literal and bound nowhere else, so every
+    /// <c>NAME.key</c> in the page reads that table: see <see cref="Eager"/>.
+    /// </summary>
+    private readonly HashSet<string> _constTables = new(StringComparer.Ordinal);
     private int _depth;
     /// <summary>Counts loops so each label is unique.</summary>
     private int _loop;
@@ -151,34 +156,45 @@ internal sealed class JsToLua
     /// Compiles a page's script to Lua. Returns null when something in it cannot be translated, and
     /// <paramref name="problems"/> then names each one with its line.
     /// </summary>
-    /// <summary>Where one hole of an element's markup writes, or null when it reaches no slot.</summary>
-    internal readonly struct HolePlan
-    {
-        public readonly string Slot;
-        public readonly bool IsNumber;
-        /// <summary>The constant text either side of the hole, for a label like `"x " + v + " kPa"`.</summary>
-        public readonly string? Before, After;
-        public HolePlan(string slot, bool isNumber, string? before = null, string? after = null)
-        { Slot = slot; IsNumber = isNumber; Before = before; After = after; }
-    }
-
     /// <summary>
-    /// Answers, for an element and a hole index, where that hole writes.
+    /// What compiling one <c>innerHTML</c> write produced, for the chunk to fill it: the reduction
+    /// the scene was compiled from, and which of its values, states and click handlers reach it.
     /// </summary>
     /// <remarks>
     /// Supplied by the caller rather than worked out here, because the answer needs the page laid
-    /// out and emitted and this file is deliberately Unity-free. The indices line up because both
-    /// sides ask <see cref="Markup"/> the same question about the same syntax tree.
+    /// out and emitted and this file is deliberately Unity-free. The indices line up because the
+    /// compiler and this translation read the same <see cref="Markup"/>.
     /// </remarks>
-    internal delegate HolePlan? HoleLookup(string elementId, int hole);
+    internal sealed class MarkupPlan
+    {
+        public string Id = string.Empty;
+        public Markup Markup = null!;
+        /// <summary>Holes written on their own, as `innerHTML#index`: true for a number.</summary>
+        public readonly Dictionary<int, bool> Holes = new();
+        /// <summary>Text built from several holes, written whole: its key and its holes in order.</summary>
+        public readonly List<(string Key, List<int> Holes)> Labels = new();
+        /// <summary>The states the chunk picks: `drive`, `choice#i`, `rows#i`.</summary>
+        public readonly HashSet<string> States = new(StringComparer.Ordinal);
+        /// <summary>What the drive reads, as JavaScript, when the markup has one.</summary>
+        public string? Drive;
+        /// <summary>Every element with a click handler, and the handler.</summary>
+        public readonly List<(string Element, Markup.Push Push)> Clicks = new();
+        /// <summary>The ids the markup itself gives its elements: each write replaces them.</summary>
+        public readonly List<string> Ids = new();
 
-    private HoleLookup? _holes;
+        /// <summary>The key a plan is found by: the element and where its write starts in the script.</summary>
+        public static string KeyOf(string id, int start) => id + "@" + start.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private IReadOnlyDictionary<string, MarkupPlan>? _markup;
+    /// <summary>Click handlers of compiled markup, registered once at the end of the chunk.</summary>
+    private readonly List<string> _handlers = new();
 
     internal static string? Compile(string source, out IReadOnlyList<string> problems,
-                                    HoleLookup? holes = null)
+                                    IReadOnlyDictionary<string, MarkupPlan>? markup = null)
     {
         var c = new JsToLua();
-        c._holes = holes;
+        c._markup = markup;
         problems = c._problems;
         Script ast;
         try
@@ -200,12 +216,19 @@ internal sealed class JsToLua
         c.Declared(ast);
         // Which name holds which element, so `frame.innerHTML` knows it is writing to #frame. The
         // same shape DomWrites resolves, kept here because the markup rewrite needs it before any
-        // line is emitted.
-        foreach (var node in Walk(ast))
+        // line is emitted. Inside functions too - `render()` is where a page takes its frame - and a
+        // name two functions bind to different elements names neither.
+        var ambiguous = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var node in Markup.Everything(ast))
             if (node is VariableDeclarator { Id: Identifier v, Init: CallExpression { Arguments.Count: 1 } call }
                 && call.Arguments[0] is StringLiteral lit
                 && call.Callee is Identifier or MemberExpression)
+            {
+                if (c._elements.TryGetValue(v.Name, out var had) && had != lit.Value) ambiguous.Add(v.Name);
                 c._elements[v.Name] = lit.Value;
+            }
+        foreach (var name in ambiguous) c._elements.Remove(name);
+        c.ConstTables(ast);
 
         // Everything the script's own scope binds is forward-declared and then assigned where it
         // stood. Two reasons, and the second is the one that bites: JavaScript hoists a function
@@ -218,12 +241,21 @@ internal sealed class JsToLua
         foreach (var n in names)
             if (Reserved.Contains(n))
                 c._problems.Add("the page declares `" + n + "`, which the compiled chunk needs for itself");
+        // `||`, `&&` and `??` whose right side is evaluated as it stands (Eager). No page name can
+        // collide: Safe() spells every `_` of a page's own name as `_5f`.
+        c.Line("local function or_v(a, b) if js_truthy(a) then return a end return b end");
+        c.Line("local function and_v(a, b) if js_truthy(a) then return b end return a end");
+        c.Line("local function nc_v(a, b) if a == nil then return b end return a end");
         c.OpenScope(names);
 
         foreach (var s in ast.Body)
         {
             if (s is Statement st) c.Statement(st);
         }
+
+        // Compiled markup's click handlers, each registered once on the element it belongs to. They
+        // read what the render that drew them kept, so pressing allocates nothing the page did not.
+        foreach (var h in c._handlers) c.Line(h);
 
         // The page's whole top-level scope, by name, for the host to reach: the chunk's own bindings
         // are locals, so without this its frame callback is unreachable from outside it. State goes
@@ -813,38 +845,200 @@ internal sealed class JsToLua
     /// </remarks>
     private bool InnerHtml(AssignmentExpression a)
     {
-        if (_holes == null || _script == null) return false;
+        if (_markup == null) return false;
         if (a.Left is not MemberExpression { Computed: false, Property: Identifier { Name: "innerHTML" }, Object: { } owner })
             return false;
+        if (ElementId(owner) is not { } id || !_markup.TryGetValue(MarkupPlan.KeyOf(id, a.Range.Start), out var plan)) return false;
+        var m = plan.Markup;
 
-        var id = ElementId(owner);
-        if (id == null) return false;
-
-        var markup = Markup.Of(a.Right, _script);
-        if (markup.Problems.Count > 0)
+        // The handlers first, for the names they keep: a handler runs after this render has
+        // returned, so what it reads of the render's locals and rows is put where it can find it.
+        var kept = new Dictionary<string, string>(StringComparer.Ordinal);
+        string Keep(string name)
         {
-            foreach (var problem in markup.Problems) _problems.Add(problem);
-            return true;
+            if (!kept.TryGetValue(name, out var holder))
+            {
+                holder = "mkk_" + Clean(id) + "_" + Clean(name);
+                kept[name] = holder;
+                _known.Add(holder);
+            }
+            return holder;
+        }
+        foreach (var (element, push) in plan.Clicks)
+        {
+            if (m.Handler(push.Handler, Keep) is not { } body)
+            {
+                Unsupported(a, "the click handler of \"" + element + "\" (" + m.Text(push.Handler) + ")");
+                continue;
+            }
+            if (Parsed("(function () {\n" + body + "\n})", a) is not FunctionExpression fn) continue;
+            var depth = _depth;
+            _depth = 0;
+            _handlers.Add("DOM.on(" + Quote(element) + ", \"click\", " + Expr(fn) + ")");
+            _depth = depth;
         }
 
-        var wrote = 0;
-        for (var hole = 0; hole < markup.Holes.Count; hole++)
-        {
-            if (_holes(id, hole) is not { } plan) continue;
-            var value = Expr(markup.Holes[hole]);
-            // A text slot holds the whole label, so the constant words either side of the hole
-            // travel with it. Writing the value alone would delete them.
-            if (!plan.IsNumber && (plan.Before is { Length: > 0 } || plan.After is { Length: > 0 }))
-                value = Quote(plan.Before ?? string.Empty) + " .. js_str(" + value + ") .. " + Quote(plan.After ?? string.Empty);
-            Line("DOM.bind(" + Quote(id) + ", " + Quote("innerHTML#" + hole.ToString(CultureInfo.InvariantCulture))
-                 + ", " + value + ")");
-            wrote++;
-        }
-
-        if (wrote < markup.Holes.Count)
-            Unsupported(a, (markup.Holes.Count - wrote) + " of " + markup.Holes.Count
-                           + " values in this markup reach no slot, so they would never be drawn");
+        Line("-- #" + id + ": its markup is structure in the scene; only what fills it is written here");
+        Line("do");
+        _depth++;
+        // The write replaces every element the markup names, and a listener dies with its element. A
+        // compiled page keeps one element per id for ever, so a render that adds a listener after
+        // this - `list.addEventListener('scroll', ...)` - added one more every render instead: a
+        // list that grew without bound and was scanned whole on every registration.
+        if (plan.Ids.Count > 0)
+            Line("DOM.replaced(" + string.Join(", ", plan.Ids.ConvertAll(Quote)) + ")");
+        foreach (var (name, holder) in kept)
+            if (m.IsLocal(name)) Line(Safe(holder) + " = " + Safe(name));
+        if (plan.States.Contains("drive") && plan.Drive != null && Value(plan.Drive, a) is { } drive)
+            Line("DOM.bind(" + Quote(id) + ", \"drive\", " + drive + ")");
+        var labels = new Dictionary<int, List<(string Key, List<int> Holes)>>();
+        foreach (var label in plan.Labels)
+            foreach (var h in label.Holes)
+            {
+                if (!labels.TryGetValue(h, out var of)) labels[h] = of = new List<(string, List<int>)>();
+                of.Add(label);
+            }
+        MarkupParts(m.Parts);
+        _depth--;
+        Line("end");
         return true;
+
+        void MarkupParts(List<Markup.Part> parts)
+        {
+            foreach (var part in parts)
+            {
+                switch (part)
+                {
+                    case Markup.Hole h:
+                        {
+                            var hole = h.Index.ToString(CultureInfo.InvariantCulture);
+                            if (plan.Holes.TryGetValue(h.Index, out var numeric) && HoleValue(m.Js(h.Value), numeric, h) is { } v)
+                                Line("DOM.bind(" + Quote(id) + ", " + Quote("innerHTML#" + hole) + ", " + v + ")");
+                            if (!labels.TryGetValue(h.Index, out var of)) break;
+                            // A piece of a label goes into a local, and each label is written once,
+                            // after the last of its pieces: one text slot is the whole label.
+                            if (HoleValue(m.Js(h.Value), false, h) is not { } piece) break;
+                            Line("local mkh" + hole + " = " + piece);
+                            foreach (var (key, holes) in of)
+                            {
+                                if (holes[holes.Count - 1] != h.Index) continue;
+                                var args = new StringBuilder();
+                                foreach (var arg in holes) args.Append(", mkh").Append(arg.ToString(CultureInfo.InvariantCulture));
+                                Line("DOM.label(" + Quote(id) + ", " + Quote(key) + args + ")");
+                            }
+                            break;
+                        }
+                    case Markup.Choice c:
+                        {
+                            var key = "choice#" + c.Index.ToString(CultureInfo.InvariantCulture);
+                            if (m.Js(c.Test) is not { } test || Parsed("(" + test + ")", a) is not Expression t)
+                            {
+                                Unsupported(a, "the choice `" + m.Text(c.Test) + "`");
+                                break;
+                            }
+                            // Written only when something depends on it: a side that writes nothing
+                            // and a choice that is not a state of its own need no test at all.
+                            var bind = plan.States.Contains(key);
+                            var then = Lines(() => { if (bind) Line("DOM.bind(" + Quote(id) + ", " + Quote(key) + ", 1)"); MarkupParts(c.Then); });
+                            var otherwise = Lines(() => { if (bind) Line("DOM.bind(" + Quote(id) + ", " + Quote(key) + ", 0)"); MarkupParts(c.Else); });
+                            if (then.Length == 0 && otherwise.Length == 0) break;
+                            Line("if " + Truthy(t) + " then");
+                            _sb.Append(then);
+                            if (otherwise.Length > 0) { Line("else"); _sb.Append(otherwise); }
+                            Line("end");
+                            break;
+                        }
+                    case Markup.Rows r:
+                        {
+                            var n = (++_loop).ToString(CultureInfo.InvariantCulture);
+                            var list = "mkl" + n;
+                            var count = "mkn" + n;
+                            _known.Add(list);
+                            _known.Add(count);
+                            if (m.Js(r.List) is not { } js || Value(js, a) is not { } lv)
+                            {
+                                Unsupported(a, "the list `" + m.Text(r.List) + "`");
+                                break;
+                            }
+                            Line("local " + list + " = " + lv);
+                            // As many rows as the list has, and never more than were drawn.
+                            Line("local " + count + " = math.min(" + Value(list + ".length", a) + ", " + r.Each.Count.ToString(CultureInfo.InvariantCulture) + ")");
+                            var rows = "rows#" + r.Index.ToString(CultureInfo.InvariantCulture);
+                            if (plan.States.Contains(rows)) Line("DOM.bind(" + Quote(id) + ", " + Quote(rows) + ", " + count + ")");
+                            for (var k = 0; k < r.Each.Count; k++)
+                            {
+                                var ks = k.ToString(CultureInfo.InvariantCulture);
+                                var body = Lines(() =>
+                                {
+                                    var item = r.Items[k];
+                                    _known.Add(item);
+                                    Line("local " + Safe(item) + " = " + Value(list + "[" + ks + "]", a));
+                                    if (kept.TryGetValue(item, out var holder)) Line(Safe(holder) + " = " + Safe(item));
+                                    MarkupParts(r.Each[k]);
+                                });
+                                if (body.Length == 0) continue;
+                                Line("if " + count + " > " + ks + " then");
+                                _sb.Append(body);
+                                Line("end");
+                            }
+                            break;
+                        }
+                }
+            }
+        }
+
+        string? HoleValue(string? js, bool numeric, Markup.Hole h)
+        {
+            if (js == null)
+            {
+                Unsupported(a, "the value `" + m.Text(h.Value) + "`");
+                return null;
+            }
+            if (Parsed("(" + js + ")", a) is not Expression e) return null;
+            // A number written as `x.toFixed(1)` lands on a numeric slot as the number, rounded as
+            // toFixed rounds: the string would only be built to be parsed straight back.
+            if (numeric && e is CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "toFixed" }, Object: var of }, Arguments.Count: 1 } fixedCall)
+                return "js_fixnum(" + Expr(of) + ", " + Expr(fixedCall.Arguments[0]) + ")";
+            return Expr(e);
+        }
+    }
+
+    /// <summary>A value the markup compiler wrote as JavaScript, translated where the markup is written.</summary>
+    private string? Value(string js, Node at) => Parsed("(" + js + ")", at) is Expression e ? Expr(e) : null;
+
+    /// <summary>JavaScript the markup compiler wrote, parsed: an expression, or null with the failure reported.</summary>
+    private Expression? Parsed(string js, Node at)
+    {
+        try
+        {
+            if (new Parser().ParseScript(js + ";").Body is { Count: 1 } body && body[0] is ExpressionStatement { Expression: var e }) return e;
+        }
+        catch (Exception ex)
+        {
+            Unsupported(at, "the compiled markup's `" + (js.Length > 60 ? js.Substring(0, 59) + "~" : js) + "` (" + ex.Message + ")");
+            return null;
+        }
+        Unsupported(at, "the compiled markup's `" + (js.Length > 60 ? js.Substring(0, 59) + "~" : js) + "`");
+        return null;
+    }
+
+    /// <summary>What emitting something writes, taken back out of the buffer.</summary>
+    private string Lines(Action emit)
+    {
+        var saved = _sb.Length;
+        _depth++;
+        emit();
+        _depth--;
+        var text = _sb.ToString(saved, _sb.Length - saved);
+        _sb.Length = saved;
+        return text;
+    }
+
+    private static string Clean(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        foreach (var ch in s) sb.Append(ch is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9') ? ch : '_');
+        return sb.ToString();
     }
 
     /// <summary>The element id a write targets, through the page's own getElementById wrapper.</summary>
@@ -1418,6 +1612,70 @@ internal sealed class JsToLua
         _ => false,
     };
 
+    /// <summary>
+    /// Whether the right side of <c>||</c>, <c>&amp;&amp;</c> or <c>??</c> may be evaluated whether or not the
+    /// operator would have reached it: it can neither fault nor do anything a page could see.
+    /// </summary>
+    /// <remarks>
+    /// A literal, a name, and one step into a table that is always there - <c>ROLES[0]</c>,
+    /// <c>ALARM_STATE.ok</c> - which is what almost every fallback in a view model reads. The last is
+    /// safe only for a <see cref="_constTables"/> name: nothing else can be bound under it, so it is
+    /// that literal's table. A table's own fields have no getters here (<see cref="ConstTables"/>
+    /// refuses a literal with one), and an array's missing index reaches only the prelude's method
+    /// lookup, which changes nothing.
+    /// ponytail: a function called during setup, before the const's own line has run, would fault
+    /// here where the short circuit might not have been reached. Loudly, on load, and no page does it.
+    /// </remarks>
+    private bool Eager(Expression e) => e switch
+    {
+        NumericLiteral or StringLiteral or BooleanLiteral or NullLiteral or Identifier => true,
+        MemberExpression { Object: Identifier root } m when _constTables.Contains(root.Name)
+            => m.Computed ? m.Property is NumericLiteral or StringLiteral : m.Property is Identifier,
+        _ => false,
+    };
+
+    /// <summary>Fills <see cref="_constTables"/>: see <see cref="Eager"/>.</summary>
+    private void ConstTables(Script ast)
+    {
+        foreach (var s in ast.Body)
+            if (s is VariableDeclaration { Kind: VariableDeclarationKind.Const } vd)
+                foreach (var d in vd.Declarations)
+                    if (d.Id is Identifier id && (d.Init is ArrayExpression || d.Init is ObjectExpression o && Plain(o)))
+                        _constTables.Add(id.Name);
+        if (_constTables.Count == 0) return;
+
+        // Bound anywhere else - a parameter, an inner declaration, a catch - and `NAME.key` might read
+        // that instead. Every identifier under a binding position counts, a destructuring key
+        // included: counting too many only keeps a thunk that was not needed.
+        var bound = new Dictionary<string, int>(StringComparer.Ordinal);
+        void Bind(Node? n)
+        {
+            if (n == null) return;
+            foreach (var x in Markup.Everything(n))
+                if (x is Identifier i) bound[i.Name] = bound.TryGetValue(i.Name, out var k) ? k + 1 : 1;
+        }
+        foreach (var n in Markup.Everything(ast))
+            switch (n)
+            {
+                case VariableDeclarator d: Bind(d.Id); break;
+                case FunctionDeclaration f: Bind(f.Id); foreach (var p in f.Params) Bind(p); break;
+                case FunctionExpression f: Bind(f.Id); foreach (var p in f.Params) Bind(p); break;
+                case ArrowFunctionExpression f: foreach (var p in f.Params) Bind(p); break;
+                case ClassDeclaration k: Bind(k.Id); break;
+                case ClassExpression k: Bind(k.Id); break;
+                case CatchClause k: Bind(k.Param); break;
+            }
+        _constTables.RemoveWhere(name => bound.TryGetValue(name, out var k) && k > 1);
+
+        // No getter or setter: reading one of those runs page code.
+        static bool Plain(ObjectExpression o)
+        {
+            foreach (var p in o.Properties)
+                if (p is Property { Kind: not PropertyKind.Init }) return false;
+            return true;
+        }
+    }
+
     /// <summary>`null`, or the `undefined` that is spelled as a bare name; Lua's nil is both.</summary>
     private static bool IsNull(Expression e) => e is NullLiteral || (e is Identifier { Name: "undefined" });
 
@@ -1468,9 +1726,19 @@ internal sealed class JsToLua
             // and undefined, so this is exact rather than approximate. It was silently compiling to
             // `||` until a test asked for every unsupported construct to be refused and this one
             // was not refused.
+            case LogicalExpression { Operator: Operator.NullishCoalescing } nc when Eager(nc.Right):
+                return "nc_v(" + Expr(nc.Left) + ", " + Expr(nc.Right) + ")";
+
             case LogicalExpression { Operator: Operator.NullishCoalescing } nc:
                 return "(function() local __v = " + Expr(nc.Left) + " if __v ~= nil then return __v end return "
                        + Expr(nc.Right) + " end)()";
+
+            // A right side that cannot fault and does nothing - a literal, a name - is evaluated as it
+            // stands: short-circuiting it would change nothing a page could see, and the thunk below is
+            // a closure on every evaluation. `x || 0` and `tone || 'live'` are most of a page's `||`,
+            // and a view model re-rendered 2.4 times a second made hundreds of them a render.
+            case LogicalExpression log when Eager(log.Right):
+                return (log.Operator == Operator.LogicalAnd ? "and_v(" : "or_v(") + Expr(log.Left) + ", " + Expr(log.Right) + ")";
 
             case LogicalExpression log:
                 // Value position, so the operand itself is the result as in JS. The right side is a

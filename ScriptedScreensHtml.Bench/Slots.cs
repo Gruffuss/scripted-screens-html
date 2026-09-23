@@ -26,9 +26,11 @@ internal static class Slots
     internal static int Run(string[] args)
     {
         var path = args.Length > 1 ? args[1] : null;
-        if (path == null || !File.Exists(path)) { Console.Error.WriteLine("usage: --slots <page.html>"); return 1; }
+        if (path == null || !File.Exists(path)) { Console.Error.WriteLine("usage: --slots <page.html|page.lua>"); return 1; }
 
-        var html = File.ReadAllText(path);
+        var text = File.ReadAllText(path);
+        var html = path.EndsWith(".lua", StringComparison.OrdinalIgnoreCase) ? Program.PageOf(text) : text;
+        if (html == null) { Console.Error.WriteLine("no page in that file"); return 1; }
         var face = FontLibrary.Default();
         ResolvedStyle.DefaultFace = face;
         HtmlRenderer.SurfaceAspect = 1f;
@@ -61,6 +63,17 @@ internal static class Slots
         }
         finally { OffThread.Active = false; }
 
+        // A page that draws with innerHTML is bound to the structure its markup compiles to, not to
+        // the one state its first render happened to draw: those are the slots its chunk writes.
+        if (built.Script is { } script && script.Contains(".innerHTML", StringComparison.Ordinal))
+        {
+            PageCompiler.Compile(built, panel, size, slots, ("main", "page", "html:page"), out var markup);
+            if (markup?.Template != null)
+            {
+                Console.WriteLine($"# the compiled markup's structure: {markup.Values.Count} slot(s)");
+                slots = new Dictionary<string, SceneSlots.Value>(markup.Values, StringComparer.Ordinal);
+            }
+        }
         foreach (var name in slots.Keys.OrderBy(k => k, StringComparer.Ordinal)) Console.WriteLine(name);
         return 0;
     }

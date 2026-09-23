@@ -27,23 +27,41 @@ internal static class PageCompiler
     internal static CompiledPage.Result Compile(HtmlRenderer.Result built, Panel panel, Vector2 size,
                                                 IReadOnlyDictionary<string, SceneSlots.Value> slots,
                                                 (string Surface, string Element, string Scene)? target = null)
+        => Compile(built, panel, size, slots, target, out _);
+
+    /// <param name="markup">What compiling the page's markup made of it, for a probe to show.</param>
+    internal static CompiledPage.Result Compile(HtmlRenderer.Result built, Panel panel, Vector2 size,
+                                                IReadOnlyDictionary<string, SceneSlots.Value> slots,
+                                                (string Surface, string Element, string Scene)? target,
+                                                out MarkupSlots.Result? markup)
     {
+        // Every innerHTML write first, because the translation depends on it: a write whose markup
+        // is structure becomes a handful of slot writes instead of a document - and the structure it
+        // compiles to, with every alternative in it, is the scene the rest of the page is bound to.
+        markup = null;
+        var plans = new Dictionary<string, JsToLua.MarkupPlan>(StringComparer.Ordinal);
+        var bindings = new List<CompiledPage.Binding>();
+        if (built.Script is { } script && script.Contains(".innerHTML", StringComparison.Ordinal))
+        {
+            markup = CompileMarkup(built, panel).Result;
+            if (markup.Template != null)
+            {
+                slots = markup.Values;
+                foreach (var t in markup.Targets) Plan(t, plans, bindings);
+            }
+        }
+
         var available = new HashSet<string>(StringComparer.Ordinal);
         foreach (var name in slots.Keys) available.Add(name);
-
         var absolute = Absolute(built);
+        var table = slots;
 
-        // Every innerHTML write, reduced to structure plus holes and each hole resolved to the slot
-        // it lands on. Done before the script is translated because the translation depends on it:
-        // a write whose holes are known becomes a handful of slot writes instead of a document.
-        var markup = Markup(built, panel, size);
-
-        return CompiledPage.Compile(
+        var result = CompiledPage.Compile(
             built.Script,
             available,
             id => BoxOf(id, built, absolute, available),
             id => Tabular(id, built),
-            (id, cls) => StateOf(id, cls, built, panel, size, absolute, slots),
+            (id, cls) => StateOf(id, cls, built, panel, size, table),
             // The chunk has to carry its own runtime. Everything the translated page and the
             // binding table use - js_str, DOM, Pending - lives there, and a chunk without it dies
             // on its first line and defines nothing, which reads as "the page defined no frame".
@@ -52,14 +70,96 @@ internal static class PageCompiler
             (size.x, size.y),
             Parents(built),
             Structure(built, absolute),
-            markup.Lookup,
-            markup.Bindings,
+            plans,
+            bindings,
             // The scene's own resting value for a slot, so a state can carry what it does NOT move
             // and therefore be leavable. Numbers only: a state that changes text or colour restores
             // through its own entry, and inventing a base for those would guess.
-            slot => slots.TryGetValue(slot, out var v) && v.IsNumber ? v.Number : (double?)null,
+            slot => table.TryGetValue(slot, out var v) && v.IsNumber ? v.Number : (double?)null,
+            // And its resting text and colour, so a state that repaints something can be left.
+            slot => table.TryGetValue(slot, out var v) && !v.IsNumber ? v.Text : null,
             // Where the chunk sends its own values, so this mod is not in that path at all.
-            target);
+            target,
+            // A style property with no slot, drawn as the few values the script assigns it.
+            styleOf: (id, css, value) => StateOf(id, string.Empty, built, panel, size, table, css + ":" + value));
+
+        if (markup?.Template != null)
+        {
+            result.Structure = markup.Template;
+            result.StructureValues = new Dictionary<string, SceneSlots.Value>(markup.Values, StringComparer.Ordinal);
+            foreach (var p in markup.Problems) result.Warnings.Add("markup: " + p);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// One compiled markup write as the chunk needs it: which of its values, labels and states it
+    /// writes and under which keys, and the bindings those keys resolve to.
+    /// </summary>
+    private static void Plan(MarkupSlots.Target t, Dictionary<string, JsToLua.MarkupPlan> plans, List<CompiledPage.Binding> bindings)
+    {
+        var plan = new JsToLua.MarkupPlan { Id = t.Id, Markup = t.Markup, Drive = t.Drive != null ? t.Markup.Js(t.Drive.Path) : null };
+        plan.Clicks.AddRange(t.Union.Clicks);
+        foreach (var pair in t.Union.Attrs)
+            if (pair.Key.Attribute == "id" && pair.Value.Count == 1 && pair.Value[0].Text is { Length: > 0 } name && !plan.Ids.Contains(name))
+                plan.Ids.Add(name);
+        foreach (var b in t.Bindings)
+        {
+            plan.States.Add(b.Key);
+            bindings.Add(new CompiledPage.Binding(t.Id + "." + b.Key, Array.Empty<string>(), Array.Empty<double>(),
+                                                  CompiledPage.Kind.State, b.States, other: b.Other));
+        }
+        foreach (var pair in t.Holes)
+        {
+            var hs = pair.Value;
+            if (hs.Label >= 0) continue;
+            var key = t.Id + ".innerHTML#" + pair.Key.ToString(CultureInfo.InvariantCulture);
+            var slots = new string[hs.To.Count];
+            var bias = new double[hs.To.Count];
+            var scale = new double[hs.To.Count];
+            for (var i = 0; i < hs.To.Count; i++) (slots[i], scale[i], bias[i]) = hs.To[i];
+            switch (hs.Kind)
+            {
+                case MarkupSlots.Kind.Variant when hs.States != null:
+                    bindings.Add(new CompiledPage.Binding(key, Array.Empty<string>(), Array.Empty<double>(), CompiledPage.Kind.State, hs.States));
+                    plan.Holes[pair.Key] = false;
+                    break;
+                case MarkupSlots.Kind.Number when slots.Length > 0:
+                    bindings.Add(new CompiledPage.Binding(key, slots, bias, CompiledPage.Kind.Length, scale: scale));
+                    plan.Holes[pair.Key] = true;
+                    break;
+                case MarkupSlots.Kind.Colour when slots.Length > 0:
+                    bindings.Add(new CompiledPage.Binding(key, slots, new double[slots.Length], CompiledPage.Kind.Colour, colours: hs.Colours));
+                    plan.Holes[pair.Key] = false;
+                    break;
+                case MarkupSlots.Kind.Text when slots.Length > 0:
+                    bindings.Add(new CompiledPage.Binding(key, slots, new double[slots.Length], CompiledPage.Kind.Text));
+                    plan.Holes[pair.Key] = false;
+                    break;
+            }
+        }
+        for (var i = 0; i < t.Labels.Count; i++)
+        {
+            var label = t.Labels[i];
+            // The label's values in the order the markup computes them, each piece pointing at its own.
+            var holes = new List<int>();
+            foreach (var (_, hole, _) in label.Pieces) if (hole >= 0 && !holes.Contains(hole)) holes.Add(hole);
+            holes.Sort();
+            var pieces = new List<object>();
+            foreach (var (text, hole, colour) in label.Pieces)
+            {
+                if (hole < 0) { pieces.Add(text ?? string.Empty); continue; }
+                var arg = holes.IndexOf(hole) + 1;
+                pieces.Add(colour
+                    ? (arg, (IReadOnlyDictionary<string, string>)(t.Holes.TryGetValue(hole, out var hs) && hs.Colours != null ? hs.Colours : new Dictionary<string, string>()))
+                    : (object)arg);
+            }
+            var key = "label#" + i.ToString(CultureInfo.InvariantCulture);
+            plan.Labels.Add((key, holes));
+            bindings.Add(new CompiledPage.Binding(t.Id + "." + key, new[] { label.Slot }, new double[1], CompiledPage.Kind.Label,
+                                                  pieces: pieces, transform: label.Transform));
+        }
+        plans[JsToLua.MarkupPlan.KeyOf(t.Id, t.Markup.Start)] = plan;
     }
 
     /// <summary>
@@ -91,52 +191,55 @@ internal static class PageCompiler
         }
     }
 
-    /// <summary>
-    /// Every <c>innerHTML</c> write in the page, with each of its holes resolved to a scene slot.
-    /// </summary>
-    /// <remarks>
-    /// The expensive half of compiling markup: each distinct shape the page can take is put into the
-    /// tree, laid out and emitted, and the slots are read back. That is several layout passes per
-    /// write - once, at load, against a page that would otherwise rebuild its whole document at its
-    /// tick rate for the life of the console.
-    /// </remarks>
-    private static (JsToLua.HoleLookup Lookup, List<(string Key, string Slot, bool IsNumber)> Bindings)
-        Markup(HtmlRenderer.Result built, Panel panel, Vector2 size)
-    {
-        var byElement = new Dictionary<string, Dictionary<int, MarkupSlots.Landing>>(StringComparer.Ordinal);
-        var bindings = new List<(string, string, bool)>();
-        if (string.IsNullOrWhiteSpace(built.Script)) return (Nothing, bindings);
 
+    /// <summary>Every markup write in the page's script, reduced, with the element it targets.</summary>
+    /// <param name="expand">Per element, the rounds of holes whose element is written once per value (MarkupSlots.Target.Expand).</param>
+    internal static List<(string Id, ScriptedScreensHtml.Markup Markup)> MarkupOf(HtmlRenderer.Result built,
+        IReadOnlyDictionary<string, List<ICollection<int>>>? expand = null)
+    {
+        var list = new List<(string, ScriptedScreensHtml.Markup)>();
+        if (string.IsNullOrWhiteSpace(built.Script)) return list;
         Acornima.Ast.Script ast;
         try { ast = new Acornima.Parser().ParseScript(built.Script); }
-        catch (Exception) { return (Nothing, bindings); }
-
-        foreach (var (id, value) in InnerHtmlWrites(ast))
-        {
-            if (byElement.ContainsKey(id)) continue;          // one plan per element
-            var shape = ScriptedScreensHtml.Markup.Of(value, ast);
-            if (shape.Problems.Count > 0) continue;           // reported by the translator itself
-
-            var landed = MarkupSlots.ResolveAll(id, shape, built, panel, size);
-            if (landed.Count == 0) continue;
-            byElement[id] = landed;
-            foreach (var pair in landed)
-                bindings.Add((id + ".innerHTML#" + pair.Key.ToString(CultureInfo.InvariantCulture),
-                              pair.Value.Slot, pair.Value.IsNumber));
-        }
-
-        return (Look, bindings);
-
-        JsToLua.HolePlan? Look(string id, int hole)
-            => byElement.TryGetValue(id, out var map) && map.TryGetValue(hole, out var landing)
-                ? new JsToLua.HolePlan(landing.Slot, landing.IsNumber, landing.Before, landing.After)
-                : null;
+        catch (Exception) { return list; }
+        foreach (var (id, write) in InnerHtmlWrites(ast))
+            list.Add((id, ScriptedScreensHtml.Markup.Of(write, ast, built.Script,
+                                                        expand != null && expand.TryGetValue(id, out var holes) ? holes : null)));
+        return list;
     }
 
-    private static JsToLua.HolePlan? Nothing(string id, int hole) => null;
+    /// <summary>
+    /// Every markup write compiled, and compiled again with each element whose values draw different
+    /// shapes written once per value - which only laying the values out can tell.
+    /// </summary>
+    internal static (MarkupSlots.Result Result, Dictionary<string, List<ICollection<int>>> Expand) CompileMarkup(
+        HtmlRenderer.Result built, Panel panel, Func<string, int, string?>? probed = null)
+    {
+        var expand = new Dictionary<string, List<ICollection<int>>>(StringComparer.Ordinal);
+        var result = MarkupSlots.Compile(built, panel, MarkupOf(built), probed);
+        // Until nothing more needs it: a copy of an element carries its holes with it, and one of
+        // those can turn out shaped only where the copy is drawn. Bounded, as a page is.
+        for (var round = 0; round < 4; round++)
+        {
+            var again = false;
+            foreach (var t in result.Targets)
+                if (t.Expand.Count > 0)
+                {
+                    if (!expand.TryGetValue(t.Id, out var rounds)) expand[t.Id] = rounds = new List<ICollection<int>>();
+                    rounds.Add(new HashSet<int>(t.Expand));
+                    again = true;
+                }
+            if (!again) break;
+            result = MarkupSlots.Compile(built, panel, MarkupOf(built, expand), probed);
+        }
+        foreach (var t in result.Targets)
+            if (t.Expand.Count > 0)
+                result.Problems.Add($"\"{t.Id}\": holes {string.Join(", ", t.Expand)} still draw a different shape per value after every element was written once per value");
+        return (result, expand);
+    }
 
     /// <summary>Every `x.innerHTML = …` in a script, with the element it targets.</summary>
-    private static IEnumerable<(string Id, Acornima.Ast.Expression Value)> InnerHtmlWrites(Acornima.Ast.Node root)
+    internal static IEnumerable<(string Id, Acornima.Ast.AssignmentExpression Write)> InnerHtmlWrites(Acornima.Ast.Node root)
     {
         var names = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var node in Every(root))
@@ -156,7 +259,7 @@ internal static class PageCompiler
                 Acornima.Ast.Identifier n when names.TryGetValue(n.Name, out var held) => held,
                 _ => null,
             };
-            if (id != null) yield return (id, a.Right);
+            if (id != null) yield return (id, a);
         }
     }
 
@@ -502,34 +605,57 @@ internal static class PageCompiler
     // ---- what a class draws ----------------------------------------------------------------------
 
     /// <summary>
-    /// The slot values one class produces: apply it, lay the page out, and record every box that
-    /// moved. The page is put back afterwards, so compiling leaves nothing behind.
+    /// The slot values one class produces: the page emitted at rest and emitted with the class
+    /// applied, and every named slot whose value differs - a box that moved or resized, a colour, a
+    /// text. The page is put back afterwards, so compiling leaves nothing behind.
     /// </summary>
+    /// <remarks>
+    /// Diffed from the emitted scene, not from the layout: a state is what the renderer is sent, and
+    /// only the emitter knows that a moved box's label sits off its box by the slack it gave
+    /// TextMeshPro, or that a class which recolours a box changes its `_f` and nothing else. Reading
+    /// positions off the layout carried x and y and nothing more - a class that resized a box or
+    /// turned it red drew its resting self.
+    /// </remarks>
+    /// <param name="declaration">
+    /// Instead of a class, one inline declaration added after the element's own (<c>color:red</c>),
+    /// so it wins as a script's <c>el.style.color = 'red'</c> does; <paramref name="cls"/> is then ignored.
+    /// </param>
     internal static CompiledPage.StateValues? StateOf(string id, string cls, HtmlRenderer.Result built,
                                                       Panel panel, Vector2 size,
-                                                      Dictionary<VisualElement, Vector2> before,
-                                                      IReadOnlyDictionary<string, SceneSlots.Value> slots)
+                                                      IReadOnlyDictionary<string, SceneSlots.Value> slots,
+                                                      string? declaration = null)
     {
         if (!built.ById.TryGetValue(id, out var ve) || ve == null) return null;
 
         // what it wore before, from the node the cascade keeps, so the page can be put back exactly
-        var was = built.NodeOf.TryGetValue(ve, out var node) ? node.Attr("class") ?? string.Empty : string.Empty;
+        var node = built.NodeOf.TryGetValue(ve, out var n) ? n : null;
+        var was = node?.Attr("class") ?? string.Empty;
+        var style = node?.Attr("style");
+        if (declaration != null && node == null) return null;
         try
         {
-            built.Reclass(ve, cls);
             panel.Layout(size.x, size.y);
-            var after = Absolute(built);
+            var rest = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+            Emitted(built, panel, rest);
+            if (declaration != null) node!.Attributes["style"] = (style ?? string.Empty) + ";" + declaration;
+            built.Reclass(ve, declaration != null ? was : cls);
+            panel.Layout(size.x, size.y);
+            var drawn = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+            Emitted(built, panel, drawn);
 
             var values = new CompiledPage.StateValues();
-            foreach (var pair in after)
+            foreach (var pair in drawn)
             {
-                var element = pair.Key;
-                if (element.name is not { Length: > 0 } name) continue;
-                if (!before.TryGetValue(element, out var old)) continue;
-
-                // only what actually moved or resized, and only where a slot exists to carry it
-                if (Moved(old.x, pair.Value.x)) Move(values, name, "_x", pair.Value.x, slots);
-                if (Moved(old.y, pair.Value.y)) Move(values, name, "_y", pair.Value.y, slots);
+                // A line with no id has no name that survives a state moving the lines above it,
+                // and a slot the structure being sent does not carry has nowhere to go.
+                if (Positional(pair.Key).Line >= 0 || !slots.ContainsKey(pair.Key)) continue;
+                if (!rest.TryGetValue(pair.Key, out var before) || before.Equals(pair.Value)) continue;
+                if (pair.Value.IsNumber)
+                {
+                    if (before.IsNumber && Mathf.Abs(before.Number - pair.Value.Number) <= 0.01f) continue;
+                    values.Numbers.Add((pair.Key, pair.Value.Number));
+                }
+                else values.Text.Add((pair.Key, pair.Value.Text ?? string.Empty));
             }
             return values;
         }
@@ -542,33 +668,13 @@ internal static class PageCompiler
         {
             // Compiling must leave the page exactly as it found it: this runs during a build, and
             // whatever the page shows next is laid out from here.
+            if (declaration != null)
+            {
+                if (style == null) node!.Attributes.Remove("style");
+                else node!.Attributes["style"] = style;
+            }
             built.Reclass(ve, was);
             panel.Layout(size.x, size.y);
         }
-    }
-
-    private static bool Moved(float a, float b) => Mathf.Abs(a - b) > 0.01f;
-
-    /// <summary>
-    /// One moved coordinate into a state, for the element's line and for its label's: a box with
-    /// text is two lines under one id, and a state that moved only the first left the text behind.
-    /// </summary>
-    /// <remarks>
-    /// The label's line is NOT at the box's coordinate: the emitter gives its rect slack for
-    /// TextMeshPro's wider measure, shifts a centred label by half of it, and a clipped single
-    /// line by its metric height - so the same number written to both lines put the text off by
-    /// exactly that. The offset is a function of the box's size, which a move does not change, so
-    /// it is read off the resting scene and carried: the label lands where the emitter would draw
-    /// it for this position.
-    /// ponytail: a class that resizes the box changes the slack, and a resize is not recorded here
-    /// at all (only x and y are), so such a class draws the box at its old size.
-    /// </remarks>
-    private static void Move(CompiledPage.StateValues values, string name, string key, float value,
-                             IReadOnlyDictionary<string, SceneSlots.Value> slots)
-    {
-        if (!slots.TryGetValue(name + key, out var box) || !box.IsNumber) return;
-        values.Numbers.Add((name + key, value));
-        if (slots.TryGetValue(name + SceneSlots.SecondSuffix + key, out var label) && label.IsNumber)
-            values.Numbers.Add((name + SceneSlots.SecondSuffix + key, value + (label.Number - box.Number)));
     }
 }

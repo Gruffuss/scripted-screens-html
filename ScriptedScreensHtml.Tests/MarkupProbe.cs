@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using Acornima;
 using Acornima.Ast;
@@ -10,85 +11,100 @@ using ScriptedScreensHtml;
 namespace ScriptedScreensHtml.Tests;
 
 /// <summary>
-/// What the markup analysis makes of every page that writes <c>innerHTML</c>.
+/// What the markup analysis makes of a page's <c>innerHTML</c> writes: every hole, choice and list,
+/// with the source each came from. `--markup [--tree] page.lua...`
 /// </summary>
 /// <remarks>
-/// The same discipline as the other sweeps: the question is not whether one page reduces, it is how
-/// much of the corpus does and what stops the rest. A shape analysis that works on a test case and
-/// not on the pages people wrote is worth nothing.
+/// The question worth asking of an analysis like this is never "does it reduce" but "what did it
+/// decide each piece was" - a value read where structure was meant draws the wrong page, and only
+/// the itemised list shows it.
 /// </remarks>
 internal static class MarkupProbe
 {
     internal static void Run(string[] args)
     {
-        var paths = args.Length > 1 ? args.Skip(1).ToArray() : Corpus();
-        var total = 0;
-        var reduced = 0;
-        var problems = new Dictionary<string, int>(StringComparer.Ordinal);
-
-        foreach (var path in paths)
+        var tree = args.Contains("--tree");
+        foreach (var path in args.Skip(1).Where(a => !a.StartsWith("--", StringComparison.Ordinal)))
         {
-            string text;
-            try { text = File.ReadAllText(path); } catch { continue; }
+            var text = File.ReadAllText(path);
             var html = path.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ? text : Bracketed(text);
             if (html == null) continue;
-
             var script = string.Empty;
             foreach (Match m in Regex.Matches(html, "<script[^>]*>(.*?)</script>", RegexOptions.Singleline | RegexOptions.IgnoreCase))
                 script += m.Groups[1].Value + "\n";
-            if (!script.Contains(".innerHTML", StringComparison.Ordinal)) continue;
-
-            Script ast;
-            try { ast = new Parser().ParseScript(script); }
-            catch { continue; }
-
+            var ast = new Parser().ParseScript(script);
             foreach (var write in Writes(ast))
             {
-                total++;
-                var markup = Markup.Of(write.Right, ast);
-                var skeleton = markup.Skeleton();
-                // Recursively: the top level of a real page is a choice chain, so counting only the
-                // outermost parts reported "0 fixed" for pages whose whole structure had reduced.
-                var fixedChars = FixedChars(markup.Parts);
-                var ok = markup.Problems.Count == 0 && skeleton.Contains('<', StringComparison.Ordinal);
-                if (ok) reduced++;
-
-                Console.WriteLine($"{Path.GetFileName(path),-28} {(ok ? "reduced" : "BLOCKED"),-8} "
-                                  + $"{markup.Holes.Count,3} holes, {markup.Choices,2} choices, "
-                                  + $"{skeleton.Length,6} chars of skeleton ({fixedChars} fixed)");
-                foreach (var p in markup.Problems)
+                var t0 = DateTime.UtcNow;
+                var markup = Markup.Of(write, ast, script);
+                var ms = (DateTime.UtcNow - t0).TotalMilliseconds;
+                var rows = markup.Lists.Sum(l => l.Each.Count);
+                Console.WriteLine($"{Path.GetFileName(path)} line {write.Location.Start.Line}: {markup.Holes.Count} holes, "
+                                  + $"{markup.Choices.Count} choices, {markup.Lists.Count} lists ({rows} rows), {ms:0} ms");
+                foreach (var p in markup.Problems) Console.WriteLine("   ! " + p);
+                if (tree) Dump(markup.Parts, script, "   ");
+                foreach (var c in markup.Choices)
+                    Console.WriteLine($"   choice {c.Index}: {Source(c.Test, script)}");
+                foreach (var l in markup.Lists)
+                    Console.WriteLine($"   list {l.Index}: {Source(l.List, script)} x{l.Each.Count}");
+                if (args.Contains("--js"))
                 {
-                    Console.WriteLine("     ! " + p);
-                    var kind = Regex.Replace(p, @"^line \d+: ", "");
-                    kind = Regex.Replace(kind, "`[^`]*`", "`..`");
-                    problems.TryGetValue(kind, out var n);
-                    problems[kind] = n + 1;
+                    // What the chunk will evaluate for each value, choice, list and handler.
+                    foreach (var h in markup.Holes) Console.WriteLine($"   js {h.Index}: {markup.Js(h.Value) ?? "(none)"}");
+                    foreach (var c in markup.Choices) Console.WriteLine($"   js ?{c.Index}: {markup.Js(c.Test) ?? "(none)"}");
+                    foreach (var l in markup.Lists) Console.WriteLine($"   js *{l.Index}: {markup.Js(l.List) ?? "(none)"}");
+                    var clicks = markup.Write("x", (_, _) => "0").Clicks;
+                    foreach (var (element, push) in clicks) Console.WriteLine($"   on {element}: {markup.Handler(push.Handler, n => "KEPT_" + n)?.Replace("\n", " ") ?? "(none)"}");
+                    continue;
+                }
+                foreach (var h in markup.Holes)
+                {
+                    var alts = markup.Enumerate(h.Value);
+                    Console.WriteLine($"   hole {h.Index}: {Source(h.Value, script)}"
+                                      + (alts != null ? $"   [{alts.Count} alt]" : ""));
                 }
             }
         }
-
-        Console.WriteLine($"\n{reduced} of {total} innerHTML writes reduce to structure + holes");
-        if (problems.Count == 0) return;
-        Console.WriteLine("\nwhat stops the rest:");
-        foreach (var kv in problems.OrderByDescending(k => k.Value))
-            Console.WriteLine($"  {kv.Value,3}  {kv.Key}");
     }
 
-    /// <summary>Fixed markup anywhere in the shape, which is what becomes scene structure.</summary>
-    private static int FixedChars(List<Markup.Part> parts)
+    private static void Dump(List<Markup.Part> parts, string script, string indent)
     {
-        var n = 0;
         foreach (var part in parts)
             switch (part)
             {
-                case Markup.Fixed f: n += f.Text.Length; break;
-                case Markup.Choice c: n += FixedChars(c.Then) + FixedChars(c.Else); break;
-                case Markup.Repeat r: n += FixedChars(r.Body); break;
+                case Markup.Fixed f: Console.WriteLine(indent + "F " + Short(f.Text)); break;
+                case Markup.Hole h: Console.WriteLine(indent + "H" + h.Index + " " + Source(h.Value, script)); break;
+                case Markup.Push p: Console.WriteLine(indent + "P " + Source(p.Handler, script)); break;
+                case Markup.Choice c:
+                    Console.WriteLine(indent + "? " + Source(c.Test, script));
+                    Dump(c.Then, script, indent + "  |");
+                    Console.WriteLine(indent + "  else");
+                    Dump(c.Else, script, indent + "  |");
+                    break;
+                case Markup.Rows r:
+                    Console.WriteLine(indent + "* " + Source(r.List, script) + " x" + r.Each.Count);
+                    if (r.Each.Count > 0) Dump(r.Each[0], script, indent + "  #");
+                    break;
             }
-        return n;
     }
 
-    /// <summary>Every `x.innerHTML = ...` in a script, with the expression assigned.</summary>
+    internal static string Source(Markup.Term t, string script) => t switch
+    {
+        Markup.Src s => Short(script.Substring(s.Expr.Range.Start, s.Expr.Range.End - s.Expr.Range.Start)),
+        Markup.Elem e => Source(e.List, script) + "[" + e.Index + "]",
+        Markup.Row r => r.Lua,
+        Markup.Const c => "=" + Markup.JsString(c.Value),
+        Markup.Applied a => "(call)",
+        Markup.Picked p => Source(p.Of, script) + "." + p.Key,
+        _ => t.GetType().Name,
+    };
+
+    private static string Short(string s)
+    {
+        s = s.Replace('\n', ' ');
+        return s.Length <= 110 ? s : s.Substring(0, 107) + "...";
+    }
+
     private static IEnumerable<AssignmentExpression> Writes(Node n)
     {
         if (n is AssignmentExpression { Left: MemberExpression { Property: Identifier { Name: "innerHTML" } } } a) yield return a;
@@ -99,27 +115,7 @@ internal static class MarkupProbe
         }
     }
 
-    private static string[] Corpus()
-    {
-        var list = new List<string>();
-        var d = AppContext.BaseDirectory;
-        for (var i = 0; i < 9 && d != null; i++)
-        {
-            foreach (var folder in new[] { "StationeersLua", "StationeersLuaAddonTemplate/ScriptedScreensHtml" })
-            {
-                var root = Path.Combine(d, folder);
-                if (!Directory.Exists(root)) continue;
-                foreach (var f in Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories))
-                    if ((f.EndsWith(".html", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".lua", StringComparison.OrdinalIgnoreCase))
-                        && !f.Contains("\\obj\\") && !f.Contains("\\bin\\") && !f.Contains(".bak") && !list.Contains(f))
-                        list.Add(f);
-            }
-            d = Path.GetDirectoryName(d);
-        }
-        return list.ToArray();
-    }
-
-    private static string? Bracketed(string lua)
+    internal static string? Bracketed(string lua)
     {
         var open = lua.IndexOf("[==[", StringComparison.Ordinal);
         var close = lua.LastIndexOf("]==]", StringComparison.Ordinal);
