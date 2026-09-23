@@ -7,7 +7,7 @@ namespace ScriptedScreensHtml;
 
 /// <summary>
 /// Splits an emitted scene into a template and its values, so the vector mod gets the structure
-/// once and only changed values afterwards (REDESIGN.md, step 1). Every position, size, opacity,
+/// once and only changed values afterwards (the compile-once design, ScriptedScreensHtml/CLAUDE.md). Every position, size, opacity,
 /// stroke width, font size, text and colour in a node line becomes a data slot, and so does every
 /// number inside an expression. Two emits of the same page with different values produce the same
 /// template; only the values differ.

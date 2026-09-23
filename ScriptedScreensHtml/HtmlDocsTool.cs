@@ -6,7 +6,7 @@ namespace ScriptedScreensHtml;
 
 /// <summary>
 /// Publishes the shipped docs and examples as StationeersLua MCP resources, the way ScriptedScreens
-/// and ScriptedScreens Vector do: an `html` search scope, the guide and SUPPORT.md one resource
+/// and ScriptedScreens Vector do: an `html` search scope, the guide one resource
 /// per section, the changelog, a quick start served as the index, and everything under examples/.
 /// </summary>
 /// <remarks>
@@ -74,7 +74,6 @@ internal static class HtmlDocsTool
         foreach (var (file, key, title, blurb, deep) in new[]
         {
             ("README.md", "guide", "Guide", "the authoring guide: the html element, showing real device data (reading devices in Lua, the data element), controls, CSS, fonts, SVG, JavaScript, diagnostics", false),
-            ("SUPPORT.md", "support", "Support", "what works from HTML, CSS and JavaScript, what is accepted without effect, and what is still being finished", true),
         })
         {
             var path = System.IO.Path.Combine(folder, file);

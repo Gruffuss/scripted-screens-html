@@ -86,7 +86,7 @@
              update without anything saying so until a console goes blank. -->
         <EmbeddedResource Include="$(ProjectDir)\JsPrelude.lua" />
         <CopyItemsMockups Include="$(ProjectDir)\AtmoApple.lua;$(ProjectDir)\AtmoDark.lua;$(ProjectDir)\AtmoLight.lua" />
-        <CopyItemsDocs Include="$(ProjectDir)\README.md;$(ProjectDir)\SUPPORT.md;$(ProjectDir)\QUICKSTART.md;$(ProjectDir)\CHANGELOG.md;$(ProjectDir)\THIRD-PARTY-NOTICES.md" />
+        <CopyItemsDocs Include="$(ProjectDir)\README.md;$(ProjectDir)\QUICKSTART.md;$(ProjectDir)\CHANGELOG.md;$(ProjectDir)\THIRD-PARTY-NOTICES.md" />
     </ItemGroup>
     <Target Name="CopyAssetsToMods" AfterTargets="PostBuild">
         <Copy SourceFiles="@(CopyItemsDeps)" DestinationFolder="$(StationeersDocumentsDirectory)\mods\$(ModName)" ContinueOnError="true" />
