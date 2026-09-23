@@ -719,7 +719,7 @@ internal sealed class DataSlots
            || slot.EndsWith("_s_1", StringComparison.Ordinal);
 
     /// <summary>The CSS property behind a named slot's key, for the transition its own element declares.</summary>
-    private static readonly (string Suffix, string Property)[] SlotProperty =
+    internal static readonly (string Suffix, string Property)[] SlotProperty =
     {
         ("_t_0", "transform"), ("_t_1", "transform"), ("_r", "transform"), ("_s_0", "transform"), ("_s_1", "transform"),
         ("_w", "width"), ("_h", "height"), ("_x", "left"), ("_y", "top"), ("_o", "opacity"),
@@ -815,7 +815,9 @@ internal sealed class DataSlots
                     // As the emitter writes a colour (VectorEmitter.Hex), so `red` and `rgb()` land as
                     // the same #RRGGBB the scene holds - raw, they would disagree with the proof, and
                     // the renderer does not read `rgb()` at all.
-                    d.LastOut = StyleApplier.TryColor(v.String!, out var c) ? VectorEmitter.Hex(c) : null;
+                    // `none` is a background's no-colour, which TryColor rightly refuses as a colour.
+                    d.LastOut = StyleApplier.TryColor(v.String!, out var c) ? VectorEmitter.Hex(c)
+                              : string.Equals(v.String!.Trim(), "none", StringComparison.OrdinalIgnoreCase) ? "#00000000" : null;
                     d.LastIn = v.String;
                 }
                 text = d.LastOut;

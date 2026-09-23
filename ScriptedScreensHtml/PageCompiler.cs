@@ -155,6 +155,7 @@ internal static class PageCompiler
             StructureValues = open.StructureValues == null ? null : new Dictionary<string, SceneSlots.Value>(open.StructureValues, StringComparer.Ordinal),
             // Placed with the structure it came with: placing again would find no `$slot` text left.
             Placed = open.Placed,
+            Plain = open.Plain,
         };
         r.Bindings.AddRange(open.Bindings);
         r.Unmapped.AddRange(open.Unmapped);
@@ -188,6 +189,9 @@ internal static class PageCompiler
         // is structure becomes a handful of slot writes instead of a document - and the structure it
         // compiles to, with every alternative in it, is the scene the rest of the page is bound to.
         markup = null;
+        // A script whose every write resolves at compile time becomes a scene and plain Lua on the
+        // chip's own tick, with nothing of this mod behind it (THE SPEC). Anything else keeps the path below.
+        if (PlainPage.Compile(built, panel, size, target) is { } plain) return plain;
         var plans = new Dictionary<string, JsToLua.MarkupPlan>(StringComparer.Ordinal);
         var bindings = new List<CompiledPage.Binding>();
         if (built.Script is { } script && script.Contains(".innerHTML", StringComparison.Ordinal))
@@ -703,7 +707,7 @@ internal static class PageCompiler
     }
 
     /// <summary>The page as it is laid out now, emitted and split, leaving the surface's own capture alone.</summary>
-    private static string Emitted(HtmlRenderer.Result built, Panel panel, Dictionary<string, SceneSlots.Value> values)
+    internal static string Emitted(HtmlRenderer.Result built, Panel panel, Dictionary<string, SceneSlots.Value> values)
     {
         var wasBoxes = OffThread.Boxes;
         var wasActive = OffThread.Active;

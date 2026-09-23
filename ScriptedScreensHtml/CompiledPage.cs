@@ -244,6 +244,11 @@ internal static class CompiledPage
         public readonly List<(string Slot, string Text)> Placements = new();
         /// <summary>Whether <see cref="Place"/> has rewritten <see cref="Structure"/>, so a second call does nothing.</summary>
         public bool Placed;
+        /// <summary>
+        /// The Lua is a plain program (<see cref="PlainPage"/>): it makes the page's own vector elements
+        /// and runs on the chip's <c>tick</c>, so once installed nothing of this mod drives it.
+        /// </summary>
+        public bool Plain;
         public bool Ok => Lua != null && Problems.Count == 0;
     }
 
@@ -979,6 +984,119 @@ local function put(slot, n)
   if n == n then set(slot, n) end                     -- NaN: a page mid-calculation, not a value
 end
 
+-- A colour as the scene reads it. The vector mod reads #rgb, #rrggbb, #rrggbbaa and Unity's own
+-- names, and keeps anything else as text: the fill draws MAGENTA. A page writes CSS - rgba() and
+-- hsl() built at run time, a CSS name (CSS green is #008000, Unity's is not) - so every colour a slot
+-- takes is made hex here, and one that cannot be is not written at all: the slot keeps what it shows.
+-- Remembered by the string the page wrote, so a value repeated every render allocates nothing, and
+-- bounded, since a colour animated through rgba() is a new string each frame. `inherit` and
+-- `currentColor` need the layout, so the compiler resolves those into a binding's own table.
+-- In a block, and reached as DOM.colour, so the chunk's main function gains no local: a page's own
+-- top-level locals count against Lua's 200 too, and AtmoDark's and AtmoApple's chunks stopped
+-- loading at the ones this added.
+do
+  local NAMED = '" + StyleApplier.NamedTable + @"'
+  local NAMES, CMEMO, CN, CARGS = nil, {}, 0, {}
+
+  local function byte(v)
+    if v ~= v then return 0 end
+    v = math.floor(v + 0.5)
+    if v < 0 then return 0 elseif v > 255 then return 255 end
+    return v
+  end
+
+  -- As the emitter writes one (VectorEmitter.Hex): #RRGGBB, with AA only when it is not opaque.
+  local function hex(r, g, b, a)
+    a = byte(a * 255)
+    if a == 255 then return string.format('#%02X%02X%02X', byte(r), byte(g), byte(b)) end
+    return string.format('#%02X%02X%02X%02X', byte(r), byte(g), byte(b), a)
+  end
+
+  -- One argument of rgb() or hsl(): a number, a percentage of `full`, or `none`.
+  local function arg(s, full)
+    if s == 'none' then return 0 end
+    local n, pct = s:match('^([-+]?%d*%.?%d+)(%%?)$')
+    n = tonumber(n)
+    if n == nil then return nil end
+    if pct == '%' then return n * full / 100 end
+    return n
+  end
+
+  local function hue(s)
+    if s == 'none' then return 0 end
+    local n, u = s:match('^([-+]?%d*%.?%d+)(%a*)$')
+    n = tonumber(n)
+    if n == nil then return nil end
+    if u == '' or u == 'deg' then return n elseif u == 'turn' then return n * 360
+    elseif u == 'rad' then return n * 180 / math.pi elseif u == 'grad' then return n * 0.9 end
+    return nil
+  end
+
+  local function hue2(p, q, t)
+    if t < 0 then t = t + 1 elseif t > 1 then t = t - 1 end
+    if t < 1 / 6 then return p + (q - p) * 6 * t end
+    if t < 1 / 2 then return q end
+    if t < 2 / 3 then return p + (q - p) * (2 / 3 - t) * 6 end
+    return p
+  end
+
+  local function clamp1(v) if v < 0 then return 0 elseif v > 1 then return 1 end return v end
+
+  local function css_colour(s)
+    s = s:lower():match('^%s*(.-)%s*$')
+    if s == 'transparent' or s == 'none' then return '#00000000' end
+    local h = s:match('^#(%x+)$')
+    if h then
+      local n = #h
+      if n == 3 or n == 4 then h = h:gsub('.', '%0%0') n = n * 2 end
+      if n == 8 and h:sub(7) == 'ff' then h = h:sub(1, 6) n = 6 end
+      if n ~= 6 and n ~= 8 then return nil end
+      return '#' .. h:upper()
+    end
+    local fn, inner = s:match('^(%a+)%((.*)%)$')
+    if fn then
+      local a = CARGS
+      for i = #a, 1, -1 do a[i] = nil end
+      for t in inner:gmatch('[^,%s/]+') do a[#a + 1] = t end
+      if #a < 3 or #a > 4 then return nil end
+      local alpha = 1
+      if a[4] then alpha = arg(a[4], 1) if alpha == nil then return nil end end
+      alpha = clamp1(alpha)
+      if fn == 'rgb' or fn == 'rgba' then
+        local r, g, b = arg(a[1], 255), arg(a[2], 255), arg(a[3], 255)
+        if r == nil or g == nil or b == nil then return nil end
+        return hex(r, g, b, alpha)
+      end
+      if fn == 'hsl' or fn == 'hsla' then
+        local hh, sat, l = hue(a[1]), arg(a[2], 100), arg(a[3], 100)
+        if hh == nil or sat == nil or l == nil then return nil end
+        hh, sat, l = (hh % 360) / 360, clamp1(sat / 100), clamp1(l / 100)
+        local q = l < 0.5 and l * (1 + sat) or l + sat - l * sat
+        local p = 2 * l - q
+        return hex(hue2(p, q, hh + 1 / 3) * 255, hue2(p, q, hh) * 255, hue2(p, q, hh - 1 / 3) * 255, alpha)
+      end
+      return nil
+    end
+    if NAMES == nil then
+      NAMES = {}
+      for name, v in NAMED:gmatch('(%a+) (%x+)') do NAMES[name] = '#' .. v:upper() end
+    end
+    return NAMES[s]
+  end
+
+  function DOM.colour(s)
+    if type(s) ~= 'string' then return nil end
+    local c = CMEMO[s]
+    if c == nil then
+      if CN >= 256 then CMEMO, CN = {}, 0 end
+      c = css_colour(s) or false
+      CMEMO[s] = c
+      CN = CN + 1
+    end
+    return c or nil
+  end
+end
+
 -- tabular-nums, as the emitter draws it: each digit run monospaced so a changing reading does not
 -- shuffle sideways. One function for every call, not a closure per gsub.
 local function digits(run) return '<mspace=0.6em>' .. run .. '</mspace>' end
@@ -1013,11 +1131,13 @@ function DOM.bind(id, key, value)
   end
 
   if b.read == 'colour' then
-    -- A page writes CSS - `var(--cb-live)` - and the scene reads hex: compiled markup carries the
-    -- table from one to the other, made when the page was laid out.
+    -- A page writes CSS - `var(--cb-live)`, `inherit` - and the scene reads hex: compiled markup
+    -- carries the table from one to the other, made when the page was laid out, and DOM.colour reads
+    -- the rest. Passing an unmapped value through drew AtmoDark's gear magenta as `inherit`.
     local s = js_str(value)
-    if b.map then s = b.map[s] or s end
-    for i = 1, #b.to do set(b.to[i][1], s) end
+    local c = b.map and b.map[s] or DOM.colour(s)
+    if c == nil then return end                       -- no colour at all: the slot keeps what it shows
+    for i = 1, #b.to do set(b.to[i][1], c) end
     return
   end
 
@@ -1092,11 +1212,12 @@ function DOM.label(id, key, ...)
         if ps[i] == nil or pv[i] ~= v or type(v) == 'table' then
           local s = js_str(v)
           local map = cmap and cmap[i]
-          if map then s = map[s] or s
+          -- a colour none can read keeps the last one (see DOM.colour)
+          if map then s = map[s] or DOM.colour(s) or ps[i]
           elseif b.case == 'upper' then s = s:upper() elseif b.case == 'lower' then s = s:lower() end
           pv[i], ps[i] = v, s
         end
-        set(ph[i], ps[i])
+        if ps[i] ~= nil then set(ph[i], ps[i]) end
       end
     end
     return
@@ -1124,7 +1245,9 @@ function DOM.label(id, key, ...)
       LABEL[i] = s
     else
       local s = js_str((select(piece[1], ...)))
-      LABEL[i] = piece[2][s] or s
+      local c = piece[2][s] or DOM.colour(s)
+      if c == nil then return end                     -- no colour at all: the label keeps what it shows
+      LABEL[i] = c
     end
   end
   b.shown = table.concat(LABEL, '', 1, #pieces)

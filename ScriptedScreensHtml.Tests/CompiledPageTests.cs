@@ -411,6 +411,7 @@ internal static class CompiledPageTests
         StateText(root, check);
         StyleStates(check);
         ReplacedListeners(check);
+        PlainTimers(root, check);
 
         var scenePath = ScenePath(root);
         if (!File.Exists(scenePath)) { check(false, "compiled: the captured scene is missing"); return; }
@@ -449,6 +450,7 @@ internal static class CompiledPageTests
         FarEdgeSlots(root, check);
         DataSlotsFixture(check);
         DataSlotsTests.Run(check);
+        ColourTests.Run(check);
 
         Dictionary<string, LuaValue> sent;
         LuaValue snap;
@@ -1041,6 +1043,54 @@ setInterval(() => set(Math.random() > 0.5), 100);";
     }
 
     /// <summary>
+    /// 09-transition compiled plainly and driven as its chip drives it: the chunk makes the page's two
+    /// vector elements once, then only its tick runs - at 1 s the bar's class state and the note, with
+    /// the CSS transition as the renderer's `ease`, at 2.6 s the note again - and the author's own tick
+    /// runs every time, untouched. The scene reads exactly the three values the script moves.
+    /// </summary>
+    private static void PlainTimers(string root, Action<bool, string> check)
+    {
+        var text = File.ReadAllText(Path.Combine(root, "examples", "09-transition.lua"));
+        CompiledPage.Result compiled;
+        try { compiled = Probe4.Headless(MarkupProbe.Bracketed(text) ?? text).Compiled; }
+        catch (Exception ex) { check(false, "plain: compiling 09-transition threw - " + ex.Message.Split((char)10)[0]); return; }
+        if (!compiled.Ok || !compiled.Plain || compiled.Lua == null)
+        {
+            check(false, $"plain: 09-transition does not compile plainly (ok {compiled.Ok}, plain {compiled.Plain})");
+            return;
+        }
+        // Compiled once for every console showing it (PageCompiler's cache), then pointed at each one's element.
+        var page = MarkupProbe.Bracketed(text) ?? text;
+        var shared = Probe4.Headless(page, "plain-09", ("main", "tr", "html:tr")).Compiled;
+        var again = Probe4.Headless(page, "plain-09", ("main", "tb", "html:tb")).Compiled;
+        check(shared.Plain && again.Plain
+              && shared.Lua?.Contains("local SURFACE, ELEMENT, SCENE = \"main\", \"tr\", \"html:tr\"\n", StringComparison.Ordinal) == true
+              && again.Lua?.Contains("local SURFACE, ELEMENT, SCENE = \"main\", \"tb\", \"html:tb\"\n", StringComparison.Ordinal) == true,
+              "plain: one compile serves every console, each chunk pointed at its own element");
+        var names = Regex.Matches(compiled.Structure ?? string.Empty, @"\$(\w+)").Select(m => m.Groups[1].Value).OrderBy(n => n, StringComparer.Ordinal);
+        check(string.Join(",", names) == "bar_f,bar_w,note",
+              $"plain: the scene reads only what the script moves (got {string.Join(",", names)})");
+
+        var log = Probe4.DrivePlain(compiled.Lua, 8, 0.5);
+        var at = (string what) => log.FindIndex(l => l.Contains(what, StringComparison.Ordinal));
+        var sets = log.Where(l => l.StartsWith("set_props", StringComparison.Ordinal)).ToList();
+        var opening = log.FirstOrDefault(l => l.StartsWith("element page_d", StringComparison.Ordinal)) ?? "";
+        var ok = !log.Any(l => l.StartsWith("FAILED", StringComparison.Ordinal))
+                 && log.Count(l => l.StartsWith("element ", StringComparison.Ordinal)) == 2
+                 && at("element page_s vector rect={h=460,unit=\"px\",w=460,x=0,y=0}") >= 0
+                 && opening.Contains("data={bar_f=\"#2B6CB0\",bar_w=120,note=\"waiting\"}", StringComparison.Ordinal)
+                 && sets.Count == 2
+                 && sets[0] == "set_props page_d {data={bar_f=\"#2F855A\",bar_w=620,note=\"transition started\"},ease={bar_w={1=1.2,2=\"ease-in-out\"}}}"
+                 && at(sets[0]) > at("tick 1") && at(sets[0]) < at("tick 2")
+                 && sets[1].Contains("note=\"finished - the page is now static\"", StringComparison.Ordinal)
+                 && at(sets[1]) > at("tick 5") && at(sets[1]) < at("tick 6")
+                 && log.Count(l => l == "commit") == 3
+                 && log[^1] == "author ticks 8, its tick untouched";
+        check(ok, ok ? "plain: 09-transition runs on the chip's tick alone - two elements once, two payloads, the author's tick chained"
+                     : "plain: 09-transition driven: " + string.Join(" | ", log));
+    }
+
+    /// <summary>
     /// `color` on a wrapper whose text is its child's: nothing on the wrapper takes it, so the few
     /// values the script assigns are each laid out and the child's colour is what moves - the cascade
     /// carrying it down as a browser does. And a write that reaches nothing drawn (an animation with
@@ -1269,5 +1319,145 @@ DOM.flush()";
             dir = dir.Parent;
         }
         return null;
+    }
+}
+
+/// <summary>
+/// A compiled page never writes a colour slot something the vector mod cannot read as a colour.
+/// </summary>
+/// <remarks>
+/// The vector mod reads #rgb, #rrggbb, #rrggbbaa and Unity's own names, and keeps anything else as
+/// text: the fill draws magenta. AtmoDark's gear did exactly that on a console, `color:inherit`
+/// written as the word. A page writes CSS, so the chunk converts, and the compiler resolves what only
+/// the layout can answer.
+/// </remarks>
+internal static class ColourTests
+{
+    internal static void Run(Action<bool, string> check)
+    {
+        const string page = @"<meta name=""viewport"" content=""width=300"">
+<style>body{margin:0;background:#000;font-family:sans-serif} #frame{color:#8899aa}</style>
+<body><div id=""frame"" style=""width:300px;height:100px;display:flex;flex-direction:column""></div>
+<div id=""dot"" style=""width:20px;height:20px;background:#000000""></div>
+<script>
+const st = { on: false, n: 1, hot: 'hsl(40, 100%, 50%)' };
+function render() {
+  document.getElementById('frame').innerHTML =
+    '<div style=""height:20px;display:flex""><span style=""color:' + (st.on ? '#ff0000' : 'inherit') + '"">G</span></div>'
+    + '<div style=""height:20px"">Set ' + st.n + ' is <span style=""color:' + (st.on ? 'rgba(255,0,0,0.5)' : '#00ff00') + '"">' + st.n + '</span></div>'
+    + '<div style=""height:20px"">Hot ' + st.n + ' <span style=""color:' + st.hot + '"">x</span></div>'
+    + '<div style=""height:20px"">Say &quot;' + st.n + '&quot; <span style=""color:' + st.hot + '"">y</span></div>';
+  document.getElementById('dot').style.background = 'rgba(' + (st.n * 10) + ', 128, 0, 0.5)';
+}
+function step() { st.on = !st.on; st.n += 1; st.hot = 'hsl(' + (st.n * 40) + ', 100%, 50%)'; render(); }
+render();
+setInterval(step, 500);
+</script></body>";
+        CompiledPage.Result compiled;
+        try { (compiled, _) = Probe4.Headless(page); }
+        catch (Exception ex) { check(false, "colours: compiling threw - " + ex.Message.Split('\n')[0]); return; }
+        if (!compiled.Ok || compiled.Lua == null)
+        {
+            check(false, "colours: the page does not compile - " + string.Join("; ", compiled.Problems.Concat(compiled.Unmapped).Take(3)));
+            return;
+        }
+
+        var state = LuaState.Create();
+        state.OpenStandardLibraries();
+        string? Do(string text)
+        {
+            try { state.RunAsync(state.Load(text.AsSpan(), "test", state.Environment)).AsTask().GetAwaiter().GetResult(); return null; }
+            catch (Exception ex) { return ex.Message.Split('\n')[0]; }
+        }
+        var load = Do(compiled.Lua);
+        if (load != null) { check(false, "colours: the chunk does not load - " + load); return; }
+
+        Converts(check, Do, state);
+
+        // Everything the first render and two steps of the timer write, kept aside of PAYLOAD.
+        var written = new List<(string, LuaValue)>();
+        foreach (var (k, v) in Table(state.Environment["PAYLOAD"])) written.Add((k.ToString(), v));
+        Do("__REAL, __W = PAYLOAD, {} PAYLOAD = setmetatable({}, { __newindex = function(_, k, v) "
+           + "local s = __W[k] if s == nil then s = {} __W[k] = s end s[v] = true rawset(__REAL, k, v) end })");
+        var frames = Do("for i = 1, 61 do frame(1 / 60) end");
+        Do("PAYLOAD = __REAL");
+        foreach (var (slot, values) in Table(state.Environment["__W"]))
+            foreach (var (v, _) in Table(values)) written.Add((slot.ToString(), v));
+        var now = Table(state.Environment["PAYLOAD"]).ToDictionary(p => p.Key.ToString(), p => p.Value.ToString(), StringComparer.Ordinal);
+
+        var bad = Probe4.NotColours(compiled.Structure, written);
+        check(frames == null && bad.Count == 0, frames != null ? "colours: running frames failed - " + frames
+            : bad.Count == 0 ? $"colours: all {written.Count} values written are hex wherever the scene reads a colour"
+            : "colours: a colour slot was written what the renderer cannot read - " + string.Join(", ", bad.Take(4)));
+
+        // `inherit`: what the parent draws, resolved when the page was laid out. Written as the word it
+        // drew magenta; left unresolved it is not written, and the red of the other state stays.
+        var inherit = Regex.Match(compiled.Lua, "map = \\{[^}]*\\[\"inherit\"\\] = \"([^\"]+)\"[^}]*\\}, to = \\{ \\{ \"(\\w+)\"");
+        check(inherit.Success && inherit.Groups[1].Value == "#8899AA" && now.GetValueOrDefault(inherit.Groups[2].Value) == "#8899AA",
+            inherit.Success
+                ? $"colours: color:inherit is the parent's #8899AA in the table ({inherit.Groups[1].Value}) and on the slot after leaving red ({now.GetValueOrDefault(inherit.Groups[2].Value)})"
+                : "colours: `inherit` has no entry in any colour table");
+
+        // A colour the script builds at run time, which no table can list: converted on the chip.
+        var dot = Regex.Match(compiled.Lua, "\\[\"style\\.background\"\\] = \\{ read = \"colour\", to = \\{ \\{ \"(\\w+)\"");
+        var dots = written.Where(w => dot.Success && w.Item1 == dot.Groups[1].Value).Select(w => w.Item2.ToString()).ToList();
+        check(dots.Contains("#0A800080") && dots.Contains("#1E800080"), dot.Success
+            ? "colours: rgba() built by the script reaches its slot as hex - " + string.Join(", ", dots)
+            : "colours: the script's style.background has no colour binding");
+
+        // The same in a label: one the scene prints round placeholders, and one built on the chip
+        // (its text has a quote the scene source cannot carry). hsl(80, 100%, 50%) is #AAFF00.
+        var placed = written.Any(w => w.Item1.Contains("_p", StringComparison.Ordinal) && w.Item2.ToString() == "#AAFF00");
+        var built = written.Any(w => w.Item2.ToString().Contains("<color=#AAFF00>", StringComparison.Ordinal));
+        check(placed && built, $"colours: hsl() the script builds reaches a label as hex - placed {placed}, built on the chip {built}");
+    }
+
+    /// <summary>The chunk's own converter against a table of CSS, and against the compiler's for the same text.</summary>
+    private static void Converts(Action<bool, string> check, Func<string, string?> run, LuaState state)
+    {
+        var cases = new (string Css, string? Hex)[]
+        {
+            ("#abc", "#AABBCC"), ("#abcd", "#AABBCCDD"), ("#AABBCC", "#AABBCC"), ("#aabbccff", "#AABBCC"), ("#aabbcc80", "#AABBCC80"),
+            ("rgb(255, 0, 0)", "#FF0000"), ("rgba(255,0,0,0.5)", "#FF000080"), ("rgb(255 0 0 / 50%)", "#FF000080"),
+            ("rgb(100%, 50%, 0%)", "#FF8000"), ("rgba(10, 128, 0, .25)", "#0A800040"), (" RGB(1,2,3) ", "#010203"),
+            ("hsl(120, 100%, 25%)", "#008000"), ("hsla(0 100% 50% / 0.25)", "#FF000040"), ("hsl(0.5turn 100% 50%)", "#00FFFF"),
+            ("green", "#008000"), ("Orange", "#FFA500"), ("rebeccapurple", "#663399"),
+            ("transparent", "#00000000"), ("none", "#00000000"),
+            ("inherit", null), ("currentColor", null), ("rgba(1,2)", null), ("bogus", null), ("#12345", null), ("", null),
+        };
+        var wrong = new List<string>();
+        foreach (var (css, want) in cases)
+        {
+            run("__C = DOM.colour('" + css + "')");
+            var got = state.Environment["__C"].TryRead<string>(out var s) ? s : null;
+            if (got != want) wrong.Add($"{css} -> {got ?? "nil"}, not {want ?? "nil"}");
+            // The same text as the compiler reads it, so a table and a run-time value agree.
+            if (want != null && css != "none" && StyleApplier.TryColor(css, out var c) && MarkupSlots.Hex(c) != want)
+                wrong.Add($"{css}: the compiler says {MarkupSlots.Hex(c)}");
+        }
+        check(wrong.Count == 0, wrong.Count == 0
+            ? $"colours: the chunk reads hex, rgb(), hsl(), CSS names and transparent as the compiler does, and refuses {cases.Count(c => c.Hex == null)} non-colours"
+            : "colours: " + string.Join("; ", wrong.Take(4)));
+
+        // Remembered by the text: the same rgba() every render allocates nothing on the chip.
+        run("function __rep(n) for i = 1, n do DOM.colour('rgba(10, 20, 30, 0.5)') end end __rep(1)");
+        long Cost(string call)
+        {
+            var before = GC.GetTotalAllocatedBytes(true);
+            run(call);
+            return GC.GetTotalAllocatedBytes(true) - before;
+        }
+        Cost("__rep(0)"); Cost("__rep(5000)");
+        var perCall = (Cost("__rep(5000)") - Cost("__rep(0)")) / 5000.0;
+        check(perCall < 1, $"colours: a colour seen before costs {perCall:0.##} B to convert again");
+    }
+
+    private static List<(LuaValue Key, LuaValue Value)> Table(LuaValue v)
+    {
+        var list = new List<(LuaValue, LuaValue)>();
+        if (!v.TryRead<LuaTable>(out var t)) return list;
+        var key = LuaValue.Nil;
+        while (t.TryGetNext(key, out var pair)) { key = pair.Key; list.Add((key, pair.Value)); }
+        return list;
     }
 }

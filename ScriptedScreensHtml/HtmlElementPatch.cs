@@ -94,6 +94,14 @@ internal static class HtmlElementPatch
             if (src == null)
                 return;
 
+            // A page handed to its chip draws through the chunk's own vector elements, which
+            // ScriptedScreens rebuilds by itself (a capture): this host stays off, nothing runs here.
+            if (CompiledRun.StillHanded(key, src, (object?)cartridge ?? board, state, surface, element.Id))
+            {
+                host.SetActive(false);
+                return;
+            }
+
             var surfaceComponent = EnsureSurface(host);
             surfaceComponent.State = state;
             surfaceComponent.Surface = surface;

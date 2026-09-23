@@ -131,10 +131,11 @@ internal static class Probe4
         Dictionary<string, Lua.LuaValue> Payload()
         {
             var sent = new Dictionary<string, Lua.LuaValue>(StringComparer.Ordinal);
-            if (state.Environment["PAYLOAD"].TryRead<Lua.LuaTable>(out var table))
+            // the real table while the colour watch (below) stands in for it
+            if (state.Environment["__REAL"].TryRead<Lua.LuaTable>(out var table) || state.Environment["PAYLOAD"].TryRead(out table))
             {
                 var key = Lua.LuaValue.Nil;
-                while (table.TryGetNext(key, out var pair)) { key = pair.Key; if (key.TryRead<string>(out var k)) sent[k] = pair.Value; }
+                while (table!.TryGetNext(key, out var pair)) { key = pair.Key; if (key.TryRead<string>(out var k)) sent[k] = pair.Value; }
             }
             return sent;
         }
@@ -165,6 +166,10 @@ internal static class Probe4
                           + $"{(l2 - l1) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0} ms its first run");
         var leaks = first.Where(p => p.Value.ToString().Contains("98765") || p.Value.ToString().Contains("#0F0")).Select(p => p.Key).ToList();
         if (leaks.Count > 0) Console.WriteLine($"    SENTINEL in {leaks.Count} value(s): {string.Join(", ", leaks.Take(6))}");
+        // Every value a slot is written from here on, kept aside of PAYLOAD, so a colour slot sent what
+        // the renderer cannot read as a colour shows here rather than as magenta on a console.
+        Do("__REAL, __W = PAYLOAD, {} PAYLOAD = setmetatable({}, { __newindex = function(_, k, v) "
+           + "local s = __W[k] if s == nil then s = {} __W[k] = s end s[v] = true rawset(__REAL, k, v) end })", "watch");
         var frames = Do("for i = 1, 180 do frame(1 / 60) end", "frames");
         Console.WriteLine($"  run: 3 s of frames {(frames == null ? "ok" : "FAILED - " + frames)}, {Payload().Count} value(s) waiting");
         var clicks = System.Text.RegularExpressions.Regex.Matches(compiled.Lua!, @"DOM\.on\(""([^""]+)"", ""click""").Select(m => m.Groups[1].Value).ToList();
@@ -175,6 +180,8 @@ internal static class Probe4
         // and cannot be pressed there, so a failure here on such a row is the probe's, not the page's.
         Console.WriteLine($"  run: {clicks.Count} click region(s) pressed, {failed.Count} failed");
         foreach (var f in failed.Take(8)) Console.WriteLine("    " + f);
+        Do("PAYLOAD = __REAL", "unwatch");
+        Colours(compiled.Structure, first, state.Environment["__W"]);
         // Exploration: every value the frames and presses wrote, for comparing two builds of a page.
         if (Environment.GetEnvironmentVariable("WHY_PAYLOAD_AFTER") is { Length: > 0 } after)
             File.WriteAllLines(after, Payload().OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Key + " = " + p.Value));
@@ -218,6 +225,118 @@ internal static class Probe4
         if (Environment.GetEnvironmentVariable("WHY_PAYLOAD") is { Length: > 0 } path)
             File.WriteAllLines(path, first.OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Key + " = " + p.Value));
     }
+
+    /// <summary>
+    /// A plain chunk (PlainPage) run as its chip runs it: loaded once in an environment of its own that
+    /// falls through to the chip's globals (ChipHost.LoadInto), with a stand-in `ss` that records every
+    /// element it makes and every payload it sends; then its `tick` called as the chip's runtime calls
+    /// the stored one (ChipHost.ChainTick), `ticks` times. The author's program has a `tick` of its own
+    /// that counts its calls. Returns what happened, in order; a failure is a line starting `FAILED`.
+    /// </summary>
+    internal static List<string> DrivePlain(string lua, int ticks, double dt)
+    {
+        var state = Lua.LuaState.Create();
+        Lua.Standard.OpenLibsExtensions.OpenStandardLibraries(state);
+        var log = new List<string>();
+        string? Do(string text, string name, Lua.LuaTable? env = null)
+        {
+            try { state.RunAsync(state.Load(text.AsSpan(), name, env ?? state.Environment)).AsTask().GetAwaiter().GetResult(); return null; }
+            catch (Exception ex) { return ex.Message.Split('\n')[0]; }
+        }
+        var stub = Do(@"
+LOG = {}
+local function put(s) LOG[#LOG + 1] = s end
+local function show(v)
+  if type(v) == 'string' then return '""' .. v .. '""' end
+  if type(v) ~= 'table' then return tostring(v) end
+  local keys = {}
+  for k in pairs(v) do keys[#keys + 1] = k end
+  table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+  local parts = {}
+  for _, k in ipairs(keys) do
+    parts[#parts + 1] = tostring(k) .. '=' .. (k == 'src' and ('<' .. #v[k] .. ' chars>') or show(v[k]))
+  end
+  return '{' .. table.concat(parts, ',') .. '}'
+end
+local surface = {}
+function surface:element(def)
+  put('element ' .. def.id .. ' ' .. def.type .. ' rect=' .. show(def.rect) .. ' props=' .. show(def.props))
+  local handle = {}
+  function handle:set_props(p) put('set_props ' .. def.id .. ' ' .. show(p)) end
+  return handle
+end
+function surface:get(id) return { id = id, type = 'html', rect = { unit = 'px', x = 0, y = 0, w = 460, h = 460 } } end
+function surface:commit() put('commit') end
+ss = { ui = { surface = function(name) put('surface ' .. name) return surface end } }
+AUTHOR_TICKS = 0
+function tick(dt) AUTHOR_TICKS = AUTHOR_TICKS + 1 end
+AUTHOR = tick
+", "stub");
+        if (stub != null) return new List<string> { "FAILED stub: " + stub };
+        var env = new Lua.LuaTable();
+        env.Metatable = new Lua.LuaTable();
+        env.Metatable["__index"] = state.Environment;
+        if (Do(lua, "page", env) is { } load) return new List<string> { "FAILED load: " + load };
+        state.Environment["PAGE_TICK"] = env["tick"];
+        var run = Do($"for i = 1, {ticks} do PAGE_TICK({dt.ToString(System.Globalization.CultureInfo.InvariantCulture)}) LOG[#LOG + 1] = 'tick ' .. i end"
+                     + " LOG[#LOG + 1] = 'author ticks ' .. AUTHOR_TICKS .. (tick == AUTHOR and ', its tick untouched' or ', its tick REPLACED')", "ticks");
+        if (state.Environment["LOG"].TryRead<Lua.LuaTable>(out var lines))
+            for (var i = 1; lines[(double)i].TryRead<string>(out var line); i++) log.Add(line);
+        if (run != null) log.Add("FAILED ticks: " + run);
+        return log;
+    }
+
+    /// <summary>
+    /// Every value the run wrote to a colour slot that is not hex - a fill, a stroke, a gradient stop, a
+    /// label's `&lt;color={$x}&gt;` with whatever the scene writes after it - and every `&lt;color=&gt;`
+    /// inside a label built on the chip. The vector mod keeps such a value as text and draws the fill
+    /// magenta. `WHY_SLOT=name` prints everything one slot was written.
+    /// </summary>
+    internal static List<string> Colours(string? structure, Dictionary<string, Lua.LuaValue> first, Lua.LuaValue watched)
+    {
+        var written = new List<(string Slot, Lua.LuaValue Value)>();
+        foreach (var p in first) written.Add((p.Key, p.Value));
+        if (watched.TryRead<Lua.LuaTable>(out var w))
+        {
+            var key = Lua.LuaValue.Nil;
+            while (w.TryGetNext(key, out var pair))
+            {
+                key = pair.Key;
+                if (!key.TryRead<string>(out var slot) || !pair.Value.TryRead<Lua.LuaTable>(out var values)) continue;
+                var v = Lua.LuaValue.Nil;
+                while (values.TryGetNext(v, out var seen)) { v = seen.Key; written.Add((slot, v)); }
+            }
+        }
+        var bad = NotColours(structure, written);
+        Console.WriteLine($"  colours: {bad.Count} value(s) written to a colour slot that are not hex");
+        foreach (var b in bad.Take(30)) Console.WriteLine("    not a colour: " + b);
+        if (Environment.GetEnvironmentVariable("WHY_SLOT") is { Length: > 0 } one)
+            foreach (var x in written.Where(x => x.Slot == one).Select(x => x.Value.ToString()).Distinct()) Console.WriteLine($"    {one} <- {x}");
+        return bad;
+    }
+
+    /// <summary>What <see cref="Colours"/> reports, for any list of (slot, value) writes.</summary>
+    internal static List<string> NotColours(string? structure, IEnumerable<(string Slot, Lua.LuaValue Value)> written)
+    {
+        // A slot and what the scene writes straight after it: nothing for a fill, `FF` where a label's
+        // rich text once carried the stand-in's alpha behind the placeholder.
+        var slots = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (Match m in Regex.Matches(structure ?? string.Empty, @"(?:(?<=\s[fs]=)|(?<=\[[-0-9.]+,))\$([A-Za-z_]\w*)")) slots[m.Groups[1].Value] = string.Empty;
+        foreach (Match m in Regex.Matches(structure ?? string.Empty, @"<color=\{\$([A-Za-z_]\w*)\}([^>]*)>")) slots[m.Groups[1].Value] = m.Groups[2].Value;
+        var bad = new List<string>();
+        foreach (var (slot, value) in written)
+        {
+            var text = value.TryRead<string>(out var s) ? s : null;
+            if (slots.TryGetValue(slot, out var after) && (text == null || !Hex.IsMatch(text + after))) bad.Add(slot + " = " + value + after);
+            else if (text != null)
+                foreach (Match m in RichColour.Matches(text))
+                    if (!Hex.IsMatch(m.Groups[1].Value)) bad.Add(slot + " holds <color=" + m.Groups[1].Value + ">");
+        }
+        return bad.Distinct().ToList();
+    }
+
+    internal static readonly Regex Hex = new("^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$", RegexOptions.Compiled);
+    private static readonly Regex RichColour = new("<color=([^>]*)>", RegexOptions.Compiled);
 
     /// <summary>
     /// A page built, laid out and compiled as a surface does it, outside the game: the page as it
@@ -287,10 +406,21 @@ internal static class Probe4
             foreach (var u in compiled.Unmapped.Take(verbose ? 200 : 25)) Console.WriteLine("    unmapped: " + u);
             if (Environment.GetEnvironmentVariable("WHY_LUA") is { Length: > 0 } luaPath && compiled.Lua != null) File.WriteAllText(luaPath, compiled.Lua);
             if (Environment.GetEnvironmentVariable("WHY_STRUCTURE") is { Length: > 0 } structurePath && compiled.Structure != null) File.WriteAllText(structurePath, compiled.Structure);
+            // A name the structure reads with no opening value draws magenta until the chip writes it.
+            if (compiled.Structure != null && compiled.StructureValues != null)
+                foreach (var name in System.Text.RegularExpressions.Regex.Matches(compiled.Structure, @"\$([A-Za-z_][A-Za-z0-9_]*)").Select(m => m.Groups[1].Value).Distinct())
+                    if (!compiled.StructureValues.ContainsKey(name)) Console.WriteLine("    no opening value: $" + name);
             // Exploration: run a hand-edited chunk in place of the compiled one, to price a change
             // to the generated Lua before the compiler is taught to make it.
             if (Environment.GetEnvironmentVariable("WHY_LUA_IN") is { Length: > 0 } luaIn) compiled.Lua = File.ReadAllText(luaIn);
-            if (compiled.Lua != null) Run(compiled);
+            if (compiled.Plain && compiled.Lua != null)
+            {
+                // A plain chunk has no frame function and reads no PAYLOAD: it is driven as its chip drives it.
+                Console.WriteLine("  plain: 8 game ticks of 0.5 s, as the chip runs them:");
+                foreach (var line in DrivePlain(compiled.Lua, 8, 0.5)) Console.WriteLine("    " + line);
+                foreach (var w in compiled.Warnings) Console.WriteLine("    warning: " + w);
+            }
+            else if (compiled.Lua != null) Run(compiled);
             if (markupResult == null) return;
             var result = markupResult;
             var markup = result.Targets;

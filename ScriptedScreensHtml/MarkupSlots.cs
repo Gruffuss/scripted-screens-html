@@ -2330,6 +2330,10 @@ internal static class MarkupSlots
                         if (i > from) pieces.Add((text.Substring(from, i - from), -1, false));
                         pieces.Add((null, ch, true));
                         i += 7;
+                        // Rich text writes `<color=#RRGGBBAA>`, so the sentinel arrives with its own
+                        // opaque alpha. Left in the literal text, a translucent value landed before it
+                        // as `#RRGGBBAAFF`, which is no colour; the value carries its alpha itself.
+                        if (i + 3 <= text.Length && text[i] is 'F' or 'f' && text[i + 1] is 'F' or 'f' && text[i + 2] == '>') i += 2;
                         from = i;
                         continue;
                     }
@@ -2393,7 +2397,8 @@ internal static class MarkupSlots
         {
             var place = t.Union.Holes[hole];
             HtmlNode? scope = null;
-            if (place.Element != null && _elements.TryGetValue(place.Element, out var ve)) _built.NodeOf.TryGetValue(ve, out scope);
+            VisualElement? ve = null;
+            if (place.Element != null && _elements.TryGetValue(place.Element, out ve)) _built.NodeOf.TryGetValue(ve, out scope);
             if (scope == null && _built.ById.TryGetValue(t.Id, out var tve)) _built.NodeOf.TryGetValue(tve, out scope);
             var table = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var v in t.Markup.Enumerate(t.Markup.Holes[hole].Value) ?? t.Markup.Literals())
@@ -2403,9 +2408,44 @@ internal static class MarkupSlots
                 // colour left unread here reached the console as the text `var(--live)`.
                 for (var depth = 0; scope != null && depth < 8 && resolved.IndexOf("var(", StringComparison.Ordinal) >= 0; depth++)
                     resolved = HtmlRenderer.ResolveVars(resolved, scope);
-                if (StyleApplier.TryColor(resolved.Trim(), out var colour)) table[v] = Hex(colour);
+                if (StyleApplier.TryColor(resolved.Trim(), out var colour) || Keyword(resolved, place.Property, ve, out colour)) table[v] = Hex(colour);
             }
             return table;
+        }
+
+        /// <summary>
+        /// `inherit`, `currentColor` and the other keywords as the colour the renderer draws for them.
+        /// They mean nothing without the layout, so unresolved here they reached the scene as the word
+        /// and drew magenta - AtmoDark's gear, `color:inherit` whenever its tab was not open.
+        /// </summary>
+        /// <remarks>
+        /// For `color` every one of them is what the parent draws: the renderer drops initial, unset and
+        /// revert, and the text then inherits. currentColor elsewhere is the element's own colour, and a
+        /// background's initial is none. Read from the union's own layout, not OffThread's copies, which
+        /// belong to whichever emit ran last. ponytail: inherit on a property other than color is left
+        /// unmapped (the chip then keeps what the slot shows); resolve it from the parent when a page needs it.
+        /// </remarks>
+        private static bool Keyword(string value, string? property, VisualElement? ve, out Color colour)
+        {
+            colour = default;
+            if (ve == null) return false;
+            var word = value.Trim().ToLowerInvariant();
+            var text = property is null or "color";
+            switch (word)
+            {
+                case "currentcolor" when !text:
+                    colour = ve.resolvedStyle.color;
+                    return true;
+                case "currentcolor" or "inherit" or "initial" or "unset" or "revert" or "revert-layer" when text:
+                    if (ve.parent == null) return false;
+                    colour = ve.parent.resolvedStyle.color;
+                    return true;
+                case "initial" or "unset" or "revert" or "revert-layer" when property is "background" or "background-color":
+                    colour = Color.clear;
+                    return true;
+                default:
+                    return false;
+            }
         }
 
         // ---- the structure --------------------------------------------------------------------------

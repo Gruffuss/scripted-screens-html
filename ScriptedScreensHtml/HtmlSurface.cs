@@ -99,6 +99,9 @@ internal sealed class HtmlSurface : MonoBehaviour
         if (!string.IsNullOrEmpty(PageKey))
             Current[PageKey] = this;
         Hold();
+        // A handed-over page's chunk runs in its chip until another page's replaces it: this host
+        // draws and compiles the new source as any page does (HtmlElementPatch switched it back on).
+        if (_handedOver) { _handedOver = false; _compiled = null; _pageStop = false; }
         _source = source;
         // New source, new compile: the data mapping, its refusal and the names it drove belong to
         // the page that was, and the released working set must not stand in for the new one.
@@ -145,6 +148,8 @@ internal sealed class HtmlSurface : MonoBehaviour
             if (dt > 25f) _slowFrames++;
             if (dt > _worstFrame) _worstFrame = dt;
         }
+        // Handed to its chip (Install): its host is switched off and this never runs again for it.
+        if (_handedOver) return;
         // A compiled page is not laid out, scripted, translated or split: its Lua is in the chip and
         // writes the scene's slots directly, so all this update does is give that Lua a frame.
         //
@@ -217,6 +222,8 @@ internal sealed class HtmlSurface : MonoBehaviour
             return; // the page thread owns the page until its frame ends
         if (_pageState == PageDone)
             FinishJob();
+        // FinishJob may just have handed the page to its chip, and let it go.
+        if (_handedOver) return;
         // A face arriving re-lays out EVERY page showing it, not only the one whose Update drained
         // the queue. Not a released page (compiled, or a data page after its table): it returned at
         // the _panel guard above, on purpose. Its scene already names the face, and the vector mod
@@ -604,6 +611,8 @@ internal sealed class HtmlSurface : MonoBehaviour
 
     /// <summary>True while this page's working set has been let go because it compiled.</summary>
     private bool _released;
+    /// <summary>The page is its chip's now (a plain compile, Install): nothing here runs for it.</summary>
+    private bool _handedOver;
     /// <summary>Set when a page compiles; acted on next Update, once its structure has gone out.</summary>
     private bool _releasePending;
     /// <summary>When the compiled chunk last ran a frame, so it runs at the rate the renderer draws.</summary>
@@ -1084,7 +1093,10 @@ internal sealed class HtmlSurface : MonoBehaviour
         double PerFrame(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / frames;
         ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: frames over 25 ms: {_slowFrames}, slowest {_worstFrame:0} ms, heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}, "
             + AllocLine()
-            + $"game thread per frame: pages {PerFrame(_allUpdateTicks):0.00} ms (emit {PerFrame(_allEmitTicks):0.00})");
+            + $"game thread per frame: pages {PerFrame(_allUpdateTicks):0.00} ms (emit {PerFrame(_allEmitTicks):0.00}), "
+            // THE SPEC: nothing of this mod runs after a page is compiled, so this must read 0.
+            + $"work after compile: {CompiledRun.WorkAfterCompile} calls");
+        CompiledRun.WorkAfterCompile = 0;
         _slowFrames = 0; _worstFrame = 0f;
         _allUpdateTicks = _allEmitTicks = 0;
         foreach (var page in Surfaces)
@@ -1095,7 +1107,9 @@ internal sealed class HtmlSurface : MonoBehaviour
             // "not loaded" rather than as "costing nothing", which is the wrong way round.
             if (page._built == null)
             {
-                if (page._released)
+                if (page._handedOver)
+                    ScriptedScreensHtmlPlugin.Log?.LogInfo($"html \"{page.ElementId}\": handed to its chip - its own vector elements and Lua on the chip's tick; nothing of this mod runs for it");
+                else if (page._released)
                     ScriptedScreensHtmlPlugin.Log?.LogInfo(
                         $"html \"{page.ElementId}\": compiled and released - no layout, script, translate or emit; "
                         + $"sent {page._patchSends} patches ({page._patchSlots} values), heap {System.GC.GetTotalMemory(false) / 1048576f:0} MB, gc {System.GC.CollectionCount(0)}");
@@ -1551,6 +1565,28 @@ internal sealed class HtmlSurface : MonoBehaviour
                 + $"{(System.Diagnostics.Stopwatch.GetTimestamp() - l0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.0} ms "
                 + "(the compile ran on the page thread)");
         if (_compiled == null) return false;
+        if (_compiled.Plain)
+        {
+            // Handed over: the chunk made the page's own vector elements and runs on the chip's tick.
+            // This surface lets the page go and switches its host off - the interpreter's scene is on
+            // that host and must not draw beside the chunk's - so it gets no Update again.
+            CompiledRun.HandedOver(PageKey, _source, _compiled.State);
+            _handedOver = true;
+            ReleaseWorkingSet();
+            // and its thread ends: this page runs no frame again
+            _pageStop = true;
+            _pageWake.Set();
+            _pageThread = null;
+            transform.parent.gameObject.SetActive(false);
+            // The chunk's scene shares this page's scene id, so the vector mod draws one of the two -
+            // whichever structure came last - and switches the other's host off. A page this host drew
+            // again after an earlier hand-over (a new source) switched the chunk's host off that way,
+            // and the vector mod never switches a host back on.
+            if (state.SurfaceElementRoots.TryGetValue(Surface, out var roots) && roots != null
+                && roots.TryGetValue(ElementId + PlainPage.SceneSuffix, out var sceneHost) && sceneHost != null)
+                sceneHost.SetActive(true);
+            return true;
+        }
         var template = ready.Template;
         var values = ready.Values;
         // A page whose markup the compiler laid out itself (every alternative and row at its
@@ -2654,12 +2690,23 @@ internal sealed class HtmlSurface : MonoBehaviour
         ApplyPairs(new List<KeyValuePair<string, SS.UiValue>>(merged));
     }
 
+    private bool _saidNoData;
+
     private void ApplyPairs(List<KeyValuePair<string, SS.UiValue>> entries)
     {
         // Lua data lands outside Update; its cost counts toward the page's game-thread time all the same
         var d0 = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
+            // A page handed to its chip reads no data - its script had no handler, or it would not have
+            // been handed over - so a payload has nowhere to go. Said once, and counted.
+            if (_handedOver)
+            {
+                CompiledRun.WorkAfterCompile++;
+                if (!_saidNoData) ScriptedScreensHtmlPlugin.Log?.LogWarning($"html \"{ElementId}\": this page is handed to its chip and reads no data; the payload is not shown");
+                _saidNoData = true;
+                return;
+            }
             // A data page whose slot table is compiled: the values go to the scene from here, on the
             // game thread the renderer expects, and the page - released by then - is not touched.
             // Each key is placed or dropped on its own (DataSlots says which, once); nothing here
@@ -2672,6 +2719,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                 if (fast.ReadsAny) ForwardData(entries, fast);
                 SendCompiled(fast.Apply(entries));
                 _dataFastTicks++;
+                CompiledRun.WorkAfterCompile++;
                 return;
             }
             // the vector scene's copy goes now (the vector mod is the game thread's); the page's on its thread

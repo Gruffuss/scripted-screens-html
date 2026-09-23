@@ -1,16 +1,16 @@
 -- 09-transition.lua -- a CSS transition that runs once and then stops.
 --
--- Every other example animates with @keyframes, requestAnimationFrame or a timer, so none of them
--- ever leaves a *finished* transition behind. That gap hid a defect: a tween that has ended is kept
--- (deliberately, so its end-value expression stays in the scene) and used to disqualify its element
--- from the emit cache for the life of the page, so every element that had ever transitioned was
--- rebuilt on every frame from then on. This page is the case that catches it.
---
--- Watch the diagnostics line: after the transition ends, `why ... tween` must fall back to 0 and
--- `cache ... rebuilt` must return to what it was before the transition started.
+-- A second in, the bar widens over 1.2 s and the note says so; at 2.6 s the note changes again and
+-- the page is still from then on. Compiled, the page becomes a vector scene and a few lines of Lua on
+-- this chip's tick: nothing of the HTML mod runs for it afterwards, and the width glides on the
+-- renderer. The colour changes at once: the renderer glides numbers, not colours.
 
 local ui = ss.ui.surface("main")
 ss.ui.activate("main")
+
+local size = ui:size()
+local W, H = 460, 460
+if size then W, H = size.w, size.h end
 
 local page = [[
 <html>
@@ -44,5 +44,10 @@ local page = [[
 ]]
 
 ui:clear()
-ui:add("html", { id = "tr", props = { src = page } })
+ui:element({
+    id = "tr",
+    type = "html",
+    rect = { unit = "px", x = 0, y = 0, w = W, h = H },
+    props = { src = page },
+})
 ui:commit()

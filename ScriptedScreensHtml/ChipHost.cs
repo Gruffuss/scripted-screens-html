@@ -77,18 +77,9 @@ internal static class ChipHost
     /// </summary>
     internal static object? StateOf(object? chip)
     {
-        if (chip == null || RuntimesField == null) return null;
         try
         {
-            var id = chip.GetType().GetProperty("ReferenceId")?.GetValue(chip);
-            if (id == null) return null;
-
-            // ConcurrentDictionary implements the non-generic IDictionary, so the private nested
-            // runtime type never has to be named.
-            if (RuntimesField.GetValue(null) is not IDictionary runtimes) return null;
-            var runtime = runtimes[id];
-            if (runtime == null) return null;
-
+            if (RuntimeOf(chip) is not { } runtime) return null;
             _stateField ??= runtime.GetType().GetField("_state", BindingFlags.Instance | BindingFlags.NonPublic);
             return _stateField?.GetValue(runtime);
         }
@@ -101,6 +92,66 @@ internal static class ChipHost
                     $"html: cannot reach a chip's Lua state, so no page can be compiled into one: {ex.Message}");
             }
             return null;
+        }
+    }
+
+    /// <summary>StationeersLua's private runtime object for a chip, or null. May throw; callers catch.</summary>
+    private static object? RuntimeOf(object? chip)
+    {
+        if (chip == null || RuntimesField == null) return null;
+        var id = chip.GetType().GetProperty("ReferenceId")?.GetValue(chip);
+        if (id == null) return null;
+        // ConcurrentDictionary implements the non-generic IDictionary, so the private nested
+        // runtime type never has to be named.
+        return RuntimesField.GetValue(null) is IDictionary runtimes ? runtimes[id] : null;
+    }
+
+    private static FieldInfo? _tickField, _initField;
+
+    /// <summary>
+    /// Whether the chip's program has finished its first run, and a page's <c>tick</c> can be chained in.
+    /// </summary>
+    /// <remarks>
+    /// StationeersLua reads the global <c>tick</c> ONCE, when the program's first run ends
+    /// (<c>LuaChipRuntime.RunInit</c>, and its update loop when the main coroutine dies:
+    /// <c>_tickFunction = _state.Environment["tick"]</c>), and every game tick after calls that
+    /// stored function in a fresh coroutine. Assigning the global later changes nothing, and a
+    /// function stored before that moment would be replaced by the author's.
+    /// </remarks>
+    internal static bool Started(object? chip)
+    {
+        try
+        {
+            if (RuntimeOf(chip) is not { } runtime) return false;
+            _initField ??= runtime.GetType().GetField("_initCompleted", BindingFlags.Instance | BindingFlags.NonPublic);
+            _tickField ??= runtime.GetType().GetField("_tickFunction", BindingFlags.Instance | BindingFlags.NonPublic);
+            return _tickField != null && _initField?.GetValue(runtime) is true;
+        }
+        catch (Exception ex)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: cannot read whether a chip has started: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Makes a plain page's <c>tick</c> the function the chip's runtime calls every tick, once, at
+    /// install. The page's tick ends by calling the author's (it read the global <c>tick</c> when it
+    /// loaded), so the author's program runs exactly as before. See <see cref="Started"/>.
+    /// </summary>
+    internal static bool ChainTick(object? chip, object? environment)
+    {
+        if (environment is not Lua.LuaTable env || !env["tick"].TryRead<Lua.LuaFunction>(out var tick)) return false;
+        try
+        {
+            if (!Started(chip) || RuntimeOf(chip) is not { } runtime) return false;
+            _tickField!.SetValue(runtime, tick);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: cannot chain a page's tick into its chip: {ex.Message}");
+            return false;
         }
     }
 

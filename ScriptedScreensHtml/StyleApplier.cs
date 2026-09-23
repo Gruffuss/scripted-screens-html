@@ -1301,7 +1301,13 @@ internal static class StyleApplier
     // ---- colour ----
 
     /// <summary>The 148 CSS named colours (CSS Color Level 4), plus transparent.</summary>
-    private static readonly Dictionary<string, Color> Named = BuildNamed(
+    private static readonly Dictionary<string, Color> Named = BuildNamed(NamedTable);
+
+    /// <summary>
+    /// The named colours as `name hex` pairs. A compiled page converts the colours its script builds
+    /// on the chip from this same table, since CSS and Unity disagree on names (CSS green is #008000).
+    /// </summary>
+    internal const string NamedTable =
         "aliceblue f0f8ff antiquewhite faebd7 aqua 00ffff aquamarine 7fffd4 azure f0ffff beige f5f5dc bisque ffe4c4 black 000000 " +
         "blanchedalmond ffebcd blue 0000ff blueviolet 8a2be2 brown a52a2a burlywood deb887 cadetblue 5f9ea0 chartreuse 7fff00 " +
         "chocolate d2691e coral ff7f50 cornflowerblue 6495ed cornsilk fff8dc crimson dc143c cyan 00ffff darkblue 00008b " +
@@ -1323,7 +1329,7 @@ internal static class StyleApplier
         "royalblue 4169e1 saddlebrown 8b4513 salmon fa8072 sandybrown f4a460 seagreen 2e8b57 seashell fff5ee sienna a0522d " +
         "silver c0c0c0 skyblue 87ceeb slateblue 6a5acd slategray 708090 slategrey 708090 snow fffafa springgreen 00ff7f " +
         "steelblue 4682b4 tan d2b48c teal 008080 thistle d8bfd8 tomato ff6347 turquoise 40e0d0 violet ee82ee wheat f5deb3 " +
-        "white ffffff whitesmoke f5f5f5 yellow ffff00 yellowgreen 9acd32");
+        "white ffffff whitesmoke f5f5f5 yellow ffff00 yellowgreen 9acd32";
 
     private static Dictionary<string, Color> BuildNamed(string table)
     {

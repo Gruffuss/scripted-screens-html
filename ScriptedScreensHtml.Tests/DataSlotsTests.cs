@@ -163,6 +163,9 @@ internal static class DataSlotsTests
         v = map.Apply(P(("bar", M(("background-color", "red")))));
         check(Txt(v, "bar_f") == "#FF0000" && map.TryEase("bar_f", out var colourEase) && colourEase.Curve == "linear",
               "data late: a colour keyword lands as the hex the emitter writes, with its own transition - " + Txt(v, "bar_f"));
+        var hsla = Txt(map.Apply(P(("bar", M(("background-color", "hsla(120, 100%, 25%, 0.5)"))))), "bar_f");
+        var none = Txt(map.Apply(P(("bar", M(("background-color", "none"))))), "bar_f");
+        check(hsla == "#00800080" && none == "#00000000", $"data late: hsla() and a background's none land as hex ({hsla}, {none})");
         v = map.Apply(P(("lamp", M(("visibility", "hidden")))));
         check(Num(v, "lamp_o") == 0, "data late: visibility hidden is the group's opacity at zero");
         v = map.Apply(P(("bar", M(("height", "30px"), ("width", "10%")))));

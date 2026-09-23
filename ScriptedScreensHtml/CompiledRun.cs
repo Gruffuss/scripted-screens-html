@@ -22,7 +22,7 @@ namespace ScriptedScreensHtml;
 internal sealed class CompiledRun
 {
     private readonly object _state;
-    private readonly object _frame;
+    private readonly object? _frame;
     private readonly string _page;
     private float _last;
     private int _failures;
@@ -61,7 +61,7 @@ internal sealed class CompiledRun
     private object? _dataTables;
     private int _events;
 
-    private CompiledRun(object state, object env, object frame, string page)
+    private CompiledRun(object state, object env, object? frame, string page)
     {
         _state = state; _env = env; _frame = frame; _page = page;
         _event = ChipHost.FunctionIn(env, "event");
@@ -79,6 +79,7 @@ internal sealed class CompiledRun
     /// </remarks>
     internal bool Data(List<KeyValuePair<string, SS.UiValue>> entries)
     {
+        WorkAfterCompile++;
         if (_data == null || !ChipHost.RunData(_state, _data, ref _dataTables, entries)) return false;
         _events++;
         return true;   // the chunk's own flush sends whatever the handler changed
@@ -95,6 +96,7 @@ internal sealed class CompiledRun
     /// </remarks>
     internal bool Click(string id, float x, float y)
     {
+        WorkAfterCompile++;
         if (_event == null) return false;
         ChipHost.Modifiers(_env);
         var any = ChipHost.RunEvent(_state, _event, id, "mousedown", x, y);
@@ -120,12 +122,44 @@ internal sealed class CompiledRun
     /// host - so the chunk's record of what is on screen is wrong: its next frame sends everything
     /// it has ever sent. Call it after every structure or value send for a page running compiled.
     /// </summary>
-    internal void Resync() => ChipHost.Resync(_env);
+    internal void Resync() { WorkAfterCompile++; ChipHost.Resync(_env); }
+
+    /// <summary>
+    /// Every time this mod's C# entered a compiled page after its compile: a frame tick, a data
+    /// payload, a click, a resync. The user's spec (CLAUDE.md, THE SPEC) is that nothing of this mod
+    /// runs after the compile, so this must read 0; the frame line prints it per report. Game thread only.
+    /// </summary>
+    internal static int WorkAfterCompile;
 
     private static double Ms(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
     /// <summary>The chip's Lua state, so the caller can notice when it is replaced.</summary>
     internal object State => _state;
+
+    /// <summary>
+    /// A plain page (<see cref="PlainPage"/>): its chunk made the page's own vector elements and runs on
+    /// the chip's tick, so nothing calls into this run - no Tick, Data, Click or Resync - ever again.
+    /// </summary>
+    internal bool Plain { get; private set; }
+
+    /// <summary>Pages handed to their chip, by page key: the source they were compiled from and the chip state they run in.</summary>
+    private static readonly Dictionary<string, (string Source, object State)> Handed = new(StringComparer.Ordinal);
+
+    internal static void HandedOver(string key, string source, object state) => Handed[key] = (source, state);
+
+    /// <summary>
+    /// Whether an html element ScriptedScreens applies again - a capture's rebuild, the author declaring
+    /// it again - is a page already handed to its chip: the same source, the same chip program, and its
+    /// own vector elements still on the surface (an author's <c>ui:clear()</c> takes them). Then its host
+    /// has nothing to draw and nothing to run. Game thread, once per apply of the element.
+    /// </summary>
+    internal static bool StillHanded(string key, string source, object? holder, SS.BoardState board, string surface, string element)
+    {
+        if (!Handed.TryGetValue(key, out var handed) || !string.Equals(handed.Source, source, StringComparison.Ordinal)) return false;
+        if (!ReferenceEquals(ChipHost.StateOf(ChipHost.ChipOf(holder)), handed.State)) return false;
+        if (!board.Surfaces.TryGetValue(surface, out var model) || model == null) return false;
+        lock (model.PendingOpsLock) return model.Elements.ContainsKey(element + PlainPage.SceneSuffix);
+    }
 
     /// <summary>
     /// Slots the scene should carry as expressions of <c>t</c> rather than as values.
@@ -196,12 +230,15 @@ internal sealed class CompiledRun
         }
 
         var compiled = PageCompiler.Compile(built, panel, size, slots, target);
-        // The chunk writes a placed label's values, never its text slot, so its scene has to carry
-        // the placeholders before it goes out. Does nothing when the compiler already placed them.
-        CompiledPage.Place(compiled);
-        // And the constants inside its animations back into the scene, so a blink that is a function
-        // of time alone is drawn by the renderer's fade path instead of a rebuild every frame.
-        CompiledPage.InlineConstants(compiled);
+        if (!compiled.Plain)
+        {
+            // The chunk writes a placed label's values, never its text slot, so its scene has to carry
+            // the placeholders before it goes out. Does nothing when the compiler already placed them.
+            CompiledPage.Place(compiled);
+            // And the constants inside its animations back into the scene, so a blink that is a function
+            // of time alone is drawn by the renderer's fade path instead of a rebuild every frame.
+            CompiledPage.InlineConstants(compiled);
+        }
         if (!compiled.Ok)
         {
             // Both lists, not whichever one a `Lua == null` test guesses at. A page that translated
@@ -212,6 +249,8 @@ internal sealed class CompiledRun
                 $"html: \"{page}\" stays on the interpreter - {Reasons(compiled)}");
             return null;
         }
+
+        if (compiled.Plain) return HandOver(page, chip, state, compiled);
 
         var (env, frame) = ChipHost.LoadInto(state, compiled.Lua!, "@html:" + page);
         if (env == null || frame == null)
@@ -239,12 +278,46 @@ internal sealed class CompiledRun
     }
 
     /// <summary>
+    /// Puts a plain page into its chip: the chunk runs once, makes the page's own vector elements and
+    /// commits them, and its <c>tick</c> becomes the one the chip's runtime calls (chaining the
+    /// author's). From then on the page is the vector mod's and the chip's; this run is never called.
+    /// </summary>
+    private static CompiledRun? HandOver(string page, object chip, object state, CompiledPage.Result compiled)
+    {
+        // ponytail: a chip still in its program's first run keeps the page as it is drawn now (the
+        // runtime would replace a tick chained in before that ends); it hands over on its next build.
+        if (!ChipHost.Started(chip))
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: \"{page}\" - its chip's program is still starting, so the page stays as it is drawn");
+            return null;
+        }
+        var (env, _) = ChipHost.LoadInto(state, compiled.Lua!, "@html:" + page);
+        if (env == null || !ChipHost.ChainTick(chip, env))
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: \"{page}\" compiled, but could not be handed to its chip");
+            return null;
+        }
+        ScriptedScreensHtmlPlugin.Log?.LogInfo(
+            $"html: \"{page}\" handed to its chip - a vector scene and {compiled.StructureValues?.Count ?? 0} value(s) "
+            + "on the chip's own tick; nothing of this mod runs for it from here");
+        foreach (var warning in compiled.Warnings)
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: \"{page}\" compiled, but {warning}");
+        return new CompiledRun(state, env, null, page)
+        {
+            Plain = true,
+            Structure = compiled.Structure,
+            StructureValues = compiled.StructureValues,
+        };
+    }
+
+    /// <summary>
     /// Runs one frame. Returns false when this page has to go back to the interpreter - the chip
     /// recompiled under it, or its frames keep failing.
     /// </summary>
     /// <param name="send">Given whatever the frame wrote, when it wrote anything.</param>
     internal bool Tick(object? cartridge)
     {
+        WorkAfterCompile++;
         // A chip that recompiles gets a brand new LuaState, and the chunk went with the old one.
         // Silently doing nothing would leave a console frozen with no clue why.
         var now = ChipHost.StateOf(ChipHost.ChipOf(cartridge));

@@ -2855,7 +2855,7 @@ internal sealed class JsToLua
             ? ((long)v).ToString(CultureInfo.InvariantCulture)
             : v.ToString("R", CultureInfo.InvariantCulture);
 
-    private static string Quote(string s)
+    internal static string Quote(string s)
     {
         var sb = new StringBuilder(s.Length + 2).Append('"');
         foreach (var ch in s)
