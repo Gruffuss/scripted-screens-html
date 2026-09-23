@@ -27,6 +27,7 @@ internal static class HtmlConfig
     private static ConfigEntry<bool>? _dumpScenes;
     private static ConfigEntry<bool>? _ablateLua;
     private static ConfigEntry<bool>? _ablateSend;
+    private static ConfigEntry<bool>? _snapData;
     private static ConfigEntry<CullChoice>? _cullOffScreen;
     private static ConfigEntry<bool>? _verifyEmitCache;
     private static ConfigEntry<bool>? _probeV8;
@@ -77,6 +78,13 @@ internal static class HtmlConfig
     /// </remarks>
     internal static bool AblateLua => _ablateLua?.Value ?? false;
     internal static bool AblateSend => _ablateSend?.Value ?? false;
+    /// <summary>
+    /// Whether forwarded values snap or blend. On (the default) a value moves at once and the scene
+    /// goes static between payloads; off, the renderer eases each value over its blend window and
+    /// keeps rebuilding the mesh while it does. Built with snap on 2026-09-22 and never measured
+    /// either way (BUGS #1); a live toggle so the two can be A/B'd in one session without a restart.
+    /// </summary>
+    internal static bool SnapData => _snapData?.Value ?? true;
 
     internal static void Load(ConfigFile file)
     {
@@ -109,6 +117,12 @@ internal static class HtmlConfig
             "Measurement only. Run a compiled page's Lua and drain it, but do not hand the values " +
             "to the renderer. The console freezes; the difference in `alloc MB/s` is what the send " +
             "path costs. Leave it off.");
+
+        _snapData = _file.Bind(
+            "Renderer", "SnapData", true,
+            "Whether a forwarded value snaps to its new value (true) or eases over the renderer's " +
+            "blend window (false). Snapped, the scene is static between payloads; eased, the mesh " +
+            "rebuilds while the value moves. Live: change it and the next payload uses it.");
 
         _verifyEmitCache = _file.Bind(
             "Diagnostics", "VerifyEmitCache", false,

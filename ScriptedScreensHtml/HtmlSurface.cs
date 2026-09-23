@@ -1345,7 +1345,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         var props = _propScratch.ToArray();
 
         VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
-            new SS.UiValue { Type = SS.UiValueType.Map, Map = props }, null, snap: true);
+            new SS.UiValue { Type = SS.UiValueType.Map, Map = props }, null, snap: HtmlConfig.SnapData);
         _patchSends++;
         _patchSlots += props.Length;
     }
@@ -1414,7 +1414,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                 DumpScene(output.Scene);
             }
             VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
-                new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Patch }, null, snap: true);
+                new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Patch }, null, snap: HtmlConfig.SnapData);
             _patchSends++;
             _patchSlots += r.Patch.Length;
             _allocSend += Allocated() - bs;
@@ -1423,7 +1423,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         _structureSends++;
         // the values first, so the structure never shows an unbound slot
         VectorBridge.Data(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId,
-            new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Values ?? Array.Empty<SS.UiProp>() }, null, snap: true);
+            new SS.UiValue { Type = SS.UiValueType.Map, Map = r.Values ?? Array.Empty<SS.UiProp>() }, null, snap: HtmlConfig.SnapData);
         VectorBridge.Structure(Board, Cartridge, Visor, state, Surface, ElementId, "html:" + ElementId, r.Structure);
         if (HtmlConfig.Diagnostics)
             ScriptedScreensHtmlPlugin.Log?.LogInfo($"html: emitted {output.Nodes} vector nodes, {output.Scene.Length} chars");
@@ -2445,7 +2445,7 @@ internal sealed class HtmlSurface : MonoBehaviour
         // fed twice a second never stops being animated and rebuilds its mesh at up to 60 Hz for
         // ever. Snapped values open no window: the scene goes static between payloads and a tick
         // costs exactly one rebuild.
-        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, DataElementId, "html:" + ElementId, map, null, snap: true);
+        VectorBridge.Data(Board, Cartridge, Visor, state, Surface, DataElementId, "html:" + ElementId, map, null, snap: HtmlConfig.SnapData);
     }
 
     private static void Flatten(List<SS.UiProp> into, string key, SS.UiValue v)
