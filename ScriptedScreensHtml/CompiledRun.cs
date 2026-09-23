@@ -199,6 +199,9 @@ internal sealed class CompiledRun
         // The chunk writes a placed label's values, never its text slot, so its scene has to carry
         // the placeholders before it goes out. Does nothing when the compiler already placed them.
         CompiledPage.Place(compiled);
+        // And the constants inside its animations back into the scene, so a blink that is a function
+        // of time alone is drawn by the renderer's fade path instead of a rebuild every frame.
+        CompiledPage.InlineConstants(compiled);
         if (!compiled.Ok)
         {
             // Both lists, not whichever one a `Lua == null` test guesses at. A page that translated

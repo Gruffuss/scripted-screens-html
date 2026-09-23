@@ -26,6 +26,31 @@ namespace ScriptedScreensHtml.Tests;
 /// </remarks>
 internal static class CompiledPageTests
 {
+    /// <summary>
+    /// The constants inside an animation that nothing writes go back into the scene as numbers,
+    /// and a slot the chip does write stays a slot.
+    /// </summary>
+    private static void InlinedConstants(Action<bool, string> check)
+    {
+        var structure = "G a=[$L1_a_0,$L1_a_1] o=\"=if(lt((mod(max($L1_o_0,t-($L1_o_1)),$L1_o_2)/$L1_o_2),0.5),1,0.3)\" {\n"
+                      + "  R x=$bar_x y=4 w=\"=$bar_w*0.5\" h=4 f=#fff id=bar\n}\n";
+        var values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal)
+        {
+            ["L1_a_0"] = new SceneSlots.Value(5f), ["L1_a_1"] = new SceneSlots.Value(6f),
+            ["L1_o_0"] = new SceneSlots.Value(0f), ["L1_o_1"] = new SceneSlots.Value(-1.25f), ["L1_o_2"] = new SceneSlots.Value(1.6f),
+            ["bar_x"] = new SceneSlots.Value(10f), ["bar_w"] = new SceneSlots.Value(80f),
+        };
+        var written = new HashSet<string>(StringComparer.Ordinal) { "bar_w", "bar_x" };
+        var result = CompiledPage.Inline(structure, values, written);
+        check(result.Contains("o=\"=if(lt((mod(max(0,t-((-1.25))),1.6)/1.6),0.5),1,0.3)\""),
+              "inline: an animation's unwritten constants become numbers (" + result.Split('\n')[0] + ")");
+        check(result.Contains("w=\"=$bar_w*0.5\""), "inline: a slot the chip writes stays a slot inside an expression");
+        check(!values.ContainsKey("L1_o_1") && values.ContainsKey("L1_a_0") && values.ContainsKey("bar_w"),
+              "inline: an inlined slot leaves the opening values; one still referenced (a=[...]) and a written one stay");
+        var again = CompiledPage.Inline(result, values, written);
+        check(again == result, "inline: a second pass changes nothing");
+    }
+
     /// <summary>The player's own absolute top in the captured scene; its children's tops are relative to it.</summary>
     private const double PlayerTop = 85;
 
@@ -374,6 +399,7 @@ internal static class CompiledPageTests
 
     internal static void Run(Action<bool, string> check)
     {
+        InlinedConstants(check);
         var root = Root();
         if (root == null) { check(false, "compiled: cannot find the source folder"); return; }
 

@@ -496,6 +496,102 @@ internal static class CompiledPage
     /// is said: the chunk switches every label at once, and a placed label with no `T` would be
     /// written and drawn nowhere.
     /// </remarks>
+    /// <summary>
+    /// Writes back, as literal numbers, every slot inside an expression that nothing on the chip ever
+    /// writes, and drops those slots from the opening values.
+    /// </summary>
+    /// <remarks>
+    /// Splitting the scene into structure and values turns EVERY number into a slot, the constants
+    /// inside a keyframe loop included (<c>o="=...mod(max($L101_o_0,t-($L101_o_1)),...)"</c>). The chip
+    /// never writes those: they are positional leftovers, fixed for the life of the structure. But a
+    /// scene cannot tell a slot nobody writes from live data, so every such animation read as
+    /// data-driven, and the renderer's no-rebuild path for a group whose opacity is a function of
+    /// time and constants alone refused all of them - each blinking status dot kept its console
+    /// rebuilding every frame. Idempotent: a second call finds nothing left to inline.
+    /// </remarks>
+    internal static void InlineConstants(Result r)
+    {
+        if (r.Structure == null || r.StructureValues == null) return;
+        var written = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var b in r.Bindings)
+        {
+            foreach (var s in b.Slots) written.Add(s);
+            if (b.States != null)
+                foreach (var st in b.States)
+                {
+                    foreach (var (slot, _) in st.Numbers) written.Add(slot);
+                    foreach (var (slot, _) in st.Text) written.Add(slot);
+                }
+        }
+        foreach (var slot in r.Expressions.Keys) written.Add(slot);
+        foreach (var (slot, _) in r.Placements) written.Add(slot);
+        r.Structure = Inline(r.Structure, r.StructureValues, written);
+    }
+
+    /// <summary>
+    /// The pass <see cref="InlineConstants"/> runs, on the scene text: inside every <c>"=..."</c>
+    /// expression a <c>$name</c> that is not in <paramref name="written"/> and has a number as its
+    /// opening value becomes that number. A name followed by <c>[</c> is an array and stays; a name
+    /// no longer referenced anywhere is removed from <paramref name="values"/>, so it is not sent.
+    /// A label's placeholder is written by the chip under its label's name plus <c>_p</c>, so any
+    /// name starting with a written name and <c>_p</c> counts as written too.
+    /// </remarks>
+    internal static string Inline(string structure, Dictionary<string, SceneSlots.Value> values, ICollection<string> written)
+    {
+        var sb = new StringBuilder(structure.Length);
+        var inlined = new HashSet<string>(StringComparer.Ordinal);
+        var i = 0;
+        while (i < structure.Length)
+        {
+            var open = structure.IndexOf("\"=", i, StringComparison.Ordinal);
+            if (open < 0) { sb.Append(structure, i, structure.Length - i); break; }
+            var close = structure.IndexOf('"', open + 2);
+            if (close < 0) { sb.Append(structure, i, structure.Length - i); break; }
+            sb.Append(structure, i, open + 2 - i);
+            var k = open + 2;
+            while (k < close)
+            {
+                var c = structure[k];
+                if (c != '$') { sb.Append(c); k++; continue; }
+                var e = k + 1;
+                while (e < close && (char.IsLetterOrDigit(structure[e]) || structure[e] == '_')) e++;
+                var name = structure.Substring(k + 1, e - k - 1);
+                var array = e < close && structure[e] == '[';
+                if (name.Length > 0 && !array && !Written(name, written)
+                    && values.TryGetValue(name, out var v) && v.IsNumber)
+                {
+                    var n = v.Number.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+                    sb.Append(v.Number < 0f ? "(" + n + ")" : n);
+                    inlined.Add(name);
+                }
+                else sb.Append(structure, k, e - k);
+                k = e;
+            }
+            i = close;
+        }
+        var result = sb.ToString();
+        foreach (var name in inlined)
+            if (!Referenced(result, name)) values.Remove(name);
+        return result;
+
+        static bool Written(string name, ICollection<string> written)
+        {
+            if (written.Contains(name)) return true;
+            var p = name.LastIndexOf("_p", StringComparison.Ordinal);
+            return p > 0 && written.Contains(name.Substring(0, p));
+        }
+
+        static bool Referenced(string text, string name)
+        {
+            for (var at = text.IndexOf("$" + name, StringComparison.Ordinal); at >= 0; at = text.IndexOf("$" + name, at + 1, StringComparison.Ordinal))
+            {
+                var end = at + 1 + name.Length;
+                if (end >= text.Length || !(char.IsLetterOrDigit(text[end]) || text[end] == '_')) return true;
+            }
+            return false;
+        }
+    }
+
     internal static void Place(Result r)
     {
         if (r.Placed || r.Structure == null || r.Placements.Count == 0) return;

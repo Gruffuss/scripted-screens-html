@@ -242,6 +242,7 @@ internal static class PageCompiler
             // scene the chip will write into - not only the run that installs it (which places too;
             // placing twice does nothing).
             CompiledPage.Place(result);
+            CompiledPage.InlineConstants(result);
         }
         return result;
     }

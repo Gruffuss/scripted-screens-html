@@ -286,6 +286,7 @@ internal static class Probe4
             foreach (var p in compiled.Problems.Take(verbose ? 200 : 25)) Console.WriteLine("    problem: " + p);
             foreach (var u in compiled.Unmapped.Take(verbose ? 200 : 25)) Console.WriteLine("    unmapped: " + u);
             if (Environment.GetEnvironmentVariable("WHY_LUA") is { Length: > 0 } luaPath && compiled.Lua != null) File.WriteAllText(luaPath, compiled.Lua);
+            if (Environment.GetEnvironmentVariable("WHY_STRUCTURE") is { Length: > 0 } structurePath && compiled.Structure != null) File.WriteAllText(structurePath, compiled.Structure);
             // Exploration: run a hand-edited chunk in place of the compiled one, to price a change
             // to the generated Lua before the compiler is taught to make it.
             if (Environment.GetEnvironmentVariable("WHY_LUA_IN") is { Length: > 0 } luaIn) compiled.Lua = File.ReadAllText(luaIn);
