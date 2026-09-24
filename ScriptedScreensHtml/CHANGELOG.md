@@ -157,6 +157,16 @@ Newest first. The workshop page is a short overview; this file has the full hist
   (`const $ = (id) => document.getElementById(id)`), from `this.id` in a getter of objects pushed into
   an array (`get el() { return $(this.id); }`, then `o.el` is an element), and for an element markup
   makes (`$('pad' + i)` after the markup gave it `id="pad0"`...).
+- `requestAnimationFrame` and `cancelAnimationFrame` compile: a game loop runs on the chip's per-frame
+  callback, every frame, its callbacks given the time in ms since the page loaded, as `performance.now()`
+  counts it. The page takes the chip's frame callback only while a frame is queued and hands it back
+  within half a second of the last one, so a page that stopped its loop costs nothing per frame; a frame
+  callback the chip's own program registered keeps running, after the page's.
+- `mousedown`, `mouseup`, `mouseleave`, `pointerdown`, `pointerup` and `pointerleave` listeners compile, for
+  press-and-hold buttons: the element reports its presses through the scene (vector `press=1`), pointer
+  events first, bubbling as a browser does (a leave only on the element itself). As the vector mod reports
+  them: an up arrives for the element pressed wherever the pointer is released, a leave once per press,
+  and two presses less than a quarter of a second apart arrive as one.
 
 ## 0.2.0
 

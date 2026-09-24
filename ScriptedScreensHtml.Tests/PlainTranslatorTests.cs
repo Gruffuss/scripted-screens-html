@@ -1250,7 +1250,7 @@ internal static class PlainTranslatorTests
     /// <summary>Features outside what is translated, each refused by name - the page keeps its old path.</summary>
     private static readonly (string Feature, string Page, string Reason)[] Refusals =
     {
-        ("requestAnimationFrame", Page("", "<p id=\"a\">x</p>", "requestAnimationFrame(() => { document.getElementById('a').textContent = 'y'; });"), "requestAnimationFrame"),
+        ("performance.now()", Page("", "<p id=\"a\">x</p>", "requestAnimationFrame(() => { document.getElementById('a').textContent = performance.now(); });"), "performance.now()"),
         ("a list whose array grows with nothing holding it", Page("", "<div id=\"a\"></div>", "const log = []; setInterval(() => { log.push('x'); document.getElementById('a').innerHTML = log.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "a list whose length the compile cannot bound: \"log\".push() with nothing holding it to a length"),
         ("a list in an object's field that grows with nothing holding it", Page("", "<div id=\"a\"></div><p>end</p>", "const st = { log: ['a'] }; setInterval(() => { st.log.push('x'); document.getElementById('a').innerHTML = st.log.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "a list whose length the compile cannot bound: \"log\".push() with nothing holding it to a length"),
         ("a list in a field of an object handed where the compile cannot follow it", Page("", "<div id=\"a\"></div>", "const st = { log: ['a'] }; const fs = [function (o) { o.log.push('b'); }]; setInterval(() => { fs[0](st); document.getElementById('a').innerHTML = st.log.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "a list read from the field \"log\" of an object handed where the compile cannot follow what is done to it"),
@@ -1285,7 +1285,7 @@ internal static class PlainTranslatorTests
         ("forEach on an HTMLCollection", Page("", "<p class=\"a\" id=\"a\">x</p>", "document.getElementsByClassName('a').forEach((e) => { e.textContent = 'y'; });"), "forEach on an HTMLCollection"),
         ("a list's member not translated", Page("", "<p id=\"a\">x</p>", "setTimeout(() => { for (const [i, e] of document.querySelectorAll('p').entries()) e.textContent = i; }, 10);"), ".entries of a list of elements"),
         ("a selector matching text drawn inside its parent", Page("", "<p id=\"a\">a <b>b</b></p>", "setTimeout(() => { document.querySelector('p b').textContent = 'y'; }, 10);"), "no box of its own"),
-        ("a non-click event", Page("", "<button id=\"b\">x</button>", "document.getElementById('b').addEventListener('mousedown', () => {});"), "delivers only clicks"),
+        ("an event other than a click or a press", Page("", "<button id=\"b\">x</button>", "document.getElementById('b').addEventListener('mousemove', () => {});"), "delivers only clicks and presses"),
         ("reading the event object", Page("", "<button id=\"b\">x</button><p id=\"a\">x</p>", "document.getElementById('b').addEventListener('click', (e) => { document.getElementById('a').textContent = e.type; });"), "reads its event object"),
         ("a size that moves its siblings", Page("#a { height: 10px; background: #fff; }", "<div id=\"a\"></div><p>below</p>", "setTimeout(() => { document.getElementById('a').style.height = 30 + 'px'; }, 10);"), "is in normal flow"),
         ("classList.replace (not translated)", Page("", "<p id=\"a\" class=\"x\">x</p>", "setTimeout(() => { document.getElementById('a').classList.replace('x', 'y'); }, 10);"), "classList.replace"),
@@ -1305,7 +1305,7 @@ internal static class PlainTranslatorTests
         ("a class name computed at run time", Page("", "<p id=\"a\">x</p>", "let k = 'c' + Math.random(); setTimeout(() => { document.getElementById('a').className = k; }, 10);"), "className of \"a\" set to a value only known at run time"),
         ("an inline handler for an event other than a click", Page("", "<button id=\"b\" onmousedown=\"go()\">x</button>", "function go() {}"), "(onmousedown=) on <button>: the vector mod delivers only clicks"),
         ("an onclick attribute on text drawn inside its parent", Page("", "<p id=\"a\">a <b onclick=\"go()\">b</b></p>", "function go() {}"), "the onclick attribute of <b>, which is drawn as part of its parent's text"),
-        ("a refusal in an onclick attribute's code is said where it is", Page("", "<button id=\"b\" onclick=\"requestAnimationFrame(go)\">x</button>", "function go() {}"), "the onclick attribute of <button>: requestAnimationFrame"),
+        ("a refusal in an onclick attribute's code is said where it is", Page("", "<button id=\"b\" onclick=\"go(performance.now())\">x</button>", "function go() {}"), "the onclick attribute of <button>: performance.now()"),
         ("this in a function also called other than as a listener", Page("", "<button id=\"b\">x</button>",
             "function f() { this.textContent = 'y'; } document.getElementById('b').addEventListener('click', f); setTimeout(f, 10);"), "`this` in f, which is called other than as a click listener"),
         ("this in an arrow inside a listener on two elements", Page("", "<button id=\"b\">x</button><button id=\"c\">y</button>",
@@ -1322,6 +1322,62 @@ internal static class PlainTranslatorTests
     };
 
     /// <summary>The console shapes a page is compiled for in game: square, wide and tall, in canvas units.</summary>
+    /// <summary>
+    /// Frames and presses: requestAnimationFrame on the chip's per-frame callback (a step "~ms" is a frame that
+    /// long after the last step), and the pointer's press events as the scene reports them (`down:id`, `up:id`,
+    /// `leave:id`). Frame lengths are ones a binary number holds exactly, as a clock's are not.
+    /// </summary>
+    private static readonly (string Feature, string Page, List<(double, string?)> Steps, int[] Checkpoints)[] Frames =
+    {
+        ("requestAnimationFrame: a game loop moving a box by the time between frames and counting them; cancelAnimationFrame from a STOP button, a GO button that starts it again",
+         Page("#track { position: relative; height: 40px; background: #222; } #ball { position: absolute; left: 0; top: 5px; width: 30px; height: 30px; background: #fa0; }",
+              "<div id=\"track\"><div id=\"ball\"></div></div><p id=\"count\">frames 0</p><p id=\"state\">running</p><button id=\"stop\">STOP</button><button id=\"go\">GO</button>",
+              "const ball = document.getElementById('ball');" +
+              "const count = document.getElementById('count');" +
+              "let x = 0, frames = 0, last = null, handle = 0;" +
+              "function step(t) {" +
+              "  if (last !== null) x = Math.min(300, x + (t - last) * 0.2);" +
+              "  last = t;" +
+              "  frames++;" +
+              "  ball.style.left = x + 'px';" +
+              "  count.textContent = 'frames ' + frames + ' at ' + Math.round(t) + ' ms';" +
+              "  handle = requestAnimationFrame(step);" +
+              "}" +
+              "handle = requestAnimationFrame(step);" +
+              "document.getElementById('stop').addEventListener('click', () => { cancelAnimationFrame(handle); document.getElementById('state').textContent = 'stopped'; });" +
+              "document.getElementById('go').addEventListener('click', () => { last = null; handle = requestAnimationFrame(step); document.getElementById('state').textContent = 'running'; });"),
+         Steps("~31.25", "~31.25", "~62.5", "stop", "~31.25", 0.5, "~31.25", "go", "~31.25", "~15.625", "~31.25"), new[] { 0, 1, 3, 4, 6, 8, 9, 11 }),
+
+        ("requestAnimationFrame: a one-shot frame queued by a click and one queued inside a frame run in the frame after; one cancelled before its frame never runs",
+         Page(".lamp { width: 40px; height: 40px; background: #522; } .lamp.on { background: #2e5; }",
+              "<div id=\"lamp\" class=\"lamp\"></div><p id=\"n\">0</p><button id=\"flash\">FLASH</button><button id=\"cancel\">CANCEL</button>",
+              "let n = 0, pending = 0;" +
+              "const lamp = document.getElementById('lamp');" +
+              "function off() { lamp.classList.remove('on'); n += 10; document.getElementById('n').textContent = n; }" +
+              "function on() { lamp.classList.add('on'); n += 1; document.getElementById('n').textContent = n; pending = requestAnimationFrame(off); }" +
+              "document.getElementById('flash').addEventListener('click', () => { pending = requestAnimationFrame(on); });" +
+              "document.getElementById('cancel').addEventListener('click', () => cancelAnimationFrame(pending));"),
+         Steps("flash", "~31.25", "~31.25", "~31.25", "flash", "cancel", "~31.25", "flash", "~31.25", "cancel", "~31.25"), new[] { 1, 2, 3, 4, 7, 9, 11 }),
+
+        ("mousedown, mouseup, mouseleave, pointerdown, pointerup and pointerleave: a hold button lit while held, released or slid off; a pointer listener on its panel reached by bubbling from both buttons in it, and a mouseleave there that a leave of the button does not reach; pointer before mouse",
+         Page(".panel { padding: 8px; background: #222; } #hold { width: 120px; height: 40px; background: #345; } #hold.held { background: #6a9; } #count { font-size: 14px; }",
+              "<div id=\"panel\" class=\"panel\"><button id=\"hold\">HOLD</button><button id=\"inner\">B</button></div><p id=\"state\">idle</p><p id=\"count\">none</p>",
+              "const hold = document.getElementById('hold');" +
+              "const state = document.getElementById('state');" +
+              "let downs = 0, ups = 0, leaves = 0, clicks = 0, panel = 0, order = 0;" +
+              "function show() { document.getElementById('count').textContent = 'd' + downs + ' u' + ups + ' l' + leaves + ' c' + clicks + ' p' + panel + ' o' + order; }" +
+              "hold.addEventListener('pointerdown', () => { order = (order * 10 + 1) % 100000; show(); });" +
+              "hold.addEventListener('pointerup', () => { order = (order * 10 + 4) % 100000; show(); });" +
+              "hold.addEventListener('pointerleave', () => { order = (order * 10 + 5) % 100000; show(); });" +
+              "document.getElementById('panel').addEventListener('mouseleave', () => { order = 99; show(); });" +
+              "hold.addEventListener('mousedown', () => { downs++; order = (order * 10 + 2) % 100000; hold.classList.add('held'); state.textContent = 'held'; show(); });" +
+              "hold.addEventListener('mouseup', () => { ups++; hold.classList.remove('held'); state.textContent = 'released'; show(); });" +
+              "hold.addEventListener('mouseleave', () => { leaves++; hold.classList.remove('held'); state.textContent = 'slid off'; show(); });" +
+              "hold.addEventListener('click', () => { clicks++; show(); });" +
+              "document.getElementById('panel').addEventListener('pointerdown', () => { panel++; order = (order * 10 + 3) % 100000; show(); });"),
+         Steps("down:hold", "up:hold", "hold", "down:hold", "leave:hold", "up:hold", "down:inner", "up:inner", "inner"), new[] { 1, 2, 3, 4, 5, 6, 7, 9 }),
+    };
+
     private static readonly (float W, float H)[] Consoles = { (460f, 460f), (1036f, 460f), (460f, 1036f) };
 
     /// <summary>Pages seen in game, each compiled for every console shape and checked there.</summary>
@@ -1366,6 +1422,10 @@ internal static class PlainTranslatorTests
          new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10 }),
         // innerHTML into an element chosen at run time, getElementById with an id built at run time: not yet seen in game
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-runtime-el.lua"), Steps("pad0", "pad2", "pad1", "pad0"), new[] { 0, 1, 2, 3, 4 }),
+        // requestAnimationFrame and press events: not yet seen in game
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-frames.lua"),
+         Steps("~31.25", "~31.25", "~500", "~1000", "stop", "~31.25", "go", "~62.5", "down:hold", "up:hold", "hold", "down:hold", "leave:hold", "up:hold"),
+         new[] { 0, 1, 2, 4, 6, 8, 9, 11, 13, 14 }),
     };
 
     internal static void Run(Action<bool, string> check)
@@ -1389,7 +1449,7 @@ internal static class PlainTranslatorTests
                 try { One(name, page, steps, checkpoints, check, console); }
                 catch (Exception ex) { check(false, $"plain [{name}]: threw - {ex.Message.Split('\n')[0]}"); }
             }
-        foreach (var (feature, page, steps, checkpoints) in Lookups)
+        foreach (var (feature, page, steps, checkpoints) in Lookups.Concat(Frames))
             foreach (var console in Consoles)
             {
                 var name = $"{feature} on a {console.W:0}x{console.H:0} console";
@@ -1413,6 +1473,7 @@ internal static class PlainTranslatorTests
         ScriptRanFirst(root, check);
         OldPathSurvives(check);
         Retired(check);
+        FrameCallback(check);
         Quiet(check);
         Eligibility(root, check);
         Sizes(check);
@@ -1499,13 +1560,13 @@ internal static class PlainTranslatorTests
     {
         var page = Page("", "<div id=\"status\">starting</div>",
                         "setTimeout(() => { document.getElementById('status').innerHTML = '<div class=\"x\">a</div><div>b</div>'; }, 10);" +
-                        "requestAnimationFrame(() => {});");
+                        "performance.now();");
         CompiledPage.Result compiled;
         try { compiled = Probe4.Headless(page).Compiled; }
         catch (Exception ex) { check(false, "plain fallback: the old path took the compile down - " + ex.Message.Split('\n')[0]); return; }
         var said = compiled.Warnings.FirstOrDefault(w => w.StartsWith("not translated to plain Lua:", StringComparison.Ordinal)) ?? "";
         var threw = compiled.Problems.FirstOrDefault(p => p.Contains("threw", StringComparison.Ordinal));
-        check(!compiled.Plain && said.Contains("requestAnimationFrame", StringComparison.Ordinal) && threw == null,
+        check(!compiled.Plain && said.Contains("performance.now()", StringComparison.Ordinal) && threw == null,
               "plain fallback: markup with elements into a text-only element leaves the page on the old path, its plain reason said"
               + (threw != null ? " (" + threw + ")" : said.Length == 0 ? " (no plain reason)" : ""));
     }
@@ -1555,6 +1616,41 @@ internal static class PlainTranslatorTests
                  && log[^1] == "author ticks 5, its tick untouched" && data.TryGetValue("n_p0", out var n) && n.ToString() == "2";
         check(ok, ok ? "plain retired: a replaced page's program stops - no timer, no send, no click - and the tick it chained after still runs"
                      : "plain retired: " + string.Join(" | ", log));
+    }
+
+    /// <summary>
+    /// The chip's one per-frame callback: a page takes it only while a frame is queued (none queued at load, none
+    /// taken), runs the author's own after its frames every frame, and hands it back from its tick once nothing is
+    /// queued; a page with the tick only never registers at all.
+    /// </summary>
+    private static void FrameCallback(Action<bool, string> check)
+    {
+        var page = Page("", "<p id=\"n\">0</p><button id=\"go\">GO</button><button id=\"stop\">STOP</button>",
+                        "let n = 0, h = 0;" +
+                        "function loop() { n++; document.getElementById('n').textContent = n; h = requestAnimationFrame(loop); }" +
+                        "document.getElementById('go').addEventListener('click', () => { h = requestAnimationFrame(loop); });" +
+                        "document.getElementById('stop').addEventListener('click', () => cancelAnimationFrame(h));");
+        var compiled = Probe4.Headless(page).Compiled;
+        if (!compiled.Plain || compiled.Lua == null) { check(false, "plain frames: the page does not compile plainly - " + string.Join("; ", compiled.Warnings.Take(2))); return; }
+        var log = Probe4.DrivePlain(compiled.Lua, Steps("~31.25", 0.5, "go", "~31.25", "~31.25", 0.5, "~31.25", "stop", "~31.25", "~31.25", 0.5, "~31.25"),
+                                    out var data, authorFrame: true);
+        var hooks = log.Where(l => l.StartsWith("on_frame", StringComparison.Ordinal)).ToList();
+        var ok = !log.Any(l => l.StartsWith("FAILED", StringComparison.Ordinal))
+                 && hooks.SequenceEqual(new[] { "on_frame set", "on_frame author" })
+                 && log.Contains("author frames 7") && data.TryGetValue("n_p0", out var n) && n.ToString() == "3";
+        check(ok, ok ? "plain frames: the chip's frame callback is the page's only while a frame is queued, the author's runs every frame, and it is handed back from the tick"
+                     : "plain frames: " + string.Join(" | ", log.Where(l => !l.StartsWith("commit", StringComparison.Ordinal))));
+        // no author callback: it is let go (on_frame with nothing); and a page with none queued never takes it
+        log = Probe4.DrivePlain(compiled.Lua, Steps("go", "~31.25", "stop", "~31.25", 0.5), out _);
+        hooks = log.Where(l => l.StartsWith("on_frame", StringComparison.Ordinal)).ToList();
+        check(hooks.SequenceEqual(new[] { "on_frame set", "on_frame cleared" }), "plain frames: with no callback of the author's, the page's is unregistered once nothing is queued (" + string.Join(", ", hooks) + ")");
+        log = Probe4.DrivePlain(compiled.Lua, Steps("~31.25", 0.5, "~31.25"), out _);
+        check(!log.Any(l => l.StartsWith("on_frame", StringComparison.Ordinal)), "plain frames: nothing queued, the chip's frame callback is never taken");
+
+        // a press listener's element, and a button inside the element with one, report presses to the scene: press=1, not click=1
+        var pressed = Probe4.Headless(Frames[2].Page).Compiled.Structure ?? "";
+        check(Regex.IsMatch(pressed, @"\bid=hold press=1\b") && Regex.IsMatch(pressed, @"\bid=inner press=1\b") && !pressed.Contains("click=1", StringComparison.Ordinal),
+              "plain presses: the regions a press listener hears from are press=1 in the scene");
     }
 
     /// <summary>What decides that a page's script waits for its compile: its DOM use, read from the source alone.</summary>
@@ -1820,7 +1916,13 @@ internal static class PlainTranslatorTests
         var now = 0.0;
         foreach (var (dt, click) in steps)
         {
-            if (click != null) engine.Invoke("__click", click);
+            // "~ms": a frame ms after the last step; timers run on the chip's tick, so only a tick runs them
+            if (click != null && click.StartsWith("~", StringComparison.Ordinal))
+            {
+                now += double.Parse(click.Substring(1), CultureInfo.InvariantCulture);
+                engine.Invoke("__frame", now);
+            }
+            else if (click != null) engine.Invoke("__click", click);
             else { now += dt * 1000; engine.Invoke("__advance", now); }
             if (engine.Evaluate("__reloadAsked").AsBoolean())
             {
@@ -2229,7 +2331,7 @@ internal static class PlainTranslatorTests
     /// time; a click runs the listeners and then the onclick of the element and of each ancestor.
     /// </summary>
     private const string Harness = @"
-var __els = {}, __state = {}, __listeners = {}, __onclick = {}, __handler = {};
+var __els = {}, __state = {}, __listeners = {}, __onclick = {}, __handler = {}, __presses = {};
 function __el(id) {
   if (__els[id]) return __els[id];
   if (!__exists(id)) return null;
@@ -2301,7 +2403,10 @@ function __el(id) {
       if (!f && __onclick[id]) l.splice(l.indexOf(__handler), 1); else if (f && !__onclick[id]) l.push(__handler);
       __onclick[id] = f;
     },
-    addEventListener: function (type, fn) { if (type !== 'click') return; var l = __listeners[id] || (__listeners[id] = []); if (l.indexOf(fn) < 0) l.push(fn); }
+    addEventListener: function (type, fn) {
+      var all = type === 'click' ? __listeners : (__presses[type] || (__presses[type] = {}));
+      var l = all[id] || (all[id] = []); if (l.indexOf(fn) < 0) l.push(fn);
+    }
   };
   __els[id] = e;
   return e;
@@ -2388,7 +2493,30 @@ function __advance(to) {
   }
   __now = to;
 }
+// requestAnimationFrame: the callbacks queued before a frame run in it, in order, with the frame's time; one cancelled before its turn does not
+var __rafs = [], __rafLive = {}, __rafLast = 0;
+function requestAnimationFrame(fn) { __rafLast++; __rafs.push({ id: __rafLast, fn: fn }); __rafLive[__rafLast] = true; return __rafLast; }
+function cancelAnimationFrame(h) { delete __rafLive[h]; }
+function __frame(now) {
+  __now = now;
+  var run = __rafs; __rafs = [];
+  for (var i = 0; i < run.length; i++) if (__rafLive[run[i].id]) { delete __rafLive[run[i].id]; run[i].fn(now); }
+}
+// a press as the scene reports it (down:id, up:id, leave:id): pointer then mouse listeners, bubbling but for a leave
+function __press(kind, id) {
+  var types = { down: ['pointerdown', 'mousedown'], up: ['pointerup', 'mouseup'], leave: ['pointerleave', 'mouseleave'] }[kind];
+  var chain = kind === 'leave' ? [id] : __chain(id);
+  var ev = { target: __el(id), currentTarget: null };
+  for (var k = 0; k < types.length; k++)
+    for (var c = 0; c < chain.length; c++) {
+      var l = ((__presses[types[k]] || {})[chain[c]] || []).slice();
+      ev.currentTarget = __el(chain[c]);
+      for (var i = 0; i < l.length; i++) l[i].call(ev.currentTarget, ev);
+    }
+}
 function __click(id) {
+  var m = /^(down|up|leave):(.*)$/.exec(id);
+  if (m) return __press(m[1], m[2]);
   var chain = __chain(id);
   var ev = { target: __el(id), currentTarget: null };
   for (var c = 0; c < chain.length; c++) {

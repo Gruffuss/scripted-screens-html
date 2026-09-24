@@ -44,8 +44,7 @@ internal static partial class PlainTranslator
     /// <summary>Globals of the browser outside the features translated here, by name.</summary>
     private static readonly Dictionary<string, string> OtherGlobals = new(StringComparer.Ordinal)
     {
-        ["window"] = "window", ["requestAnimationFrame"] = "requestAnimationFrame",
-        ["cancelAnimationFrame"] = "cancelAnimationFrame",
+        ["window"] = "window",
         ["performance"] = "performance.now()", ["Date"] = "Date",
         ["getComputedStyle"] = "getComputedStyle", ["globalThis"] = "globalThis",
         ["queueMicrotask"] = "queueMicrotask", ["Promise"] = "Promise", ["addEventListener"] = "a window event listener",
@@ -53,6 +52,21 @@ internal static partial class PlainTranslator
     };
 
     private static readonly HashSet<string> TimerNames = new(StringComparer.Ordinal) { "setTimeout", "setInterval", "clearTimeout", "clearInterval" };
+
+    private static readonly HashSet<string> FrameNames = new(StringComparer.Ordinal) { "requestAnimationFrame", "cancelAnimationFrame" };
+
+    /// <summary>
+    /// The pointer's press events, which the vector mod reports for a node with `press=1` as `down:id`, `up:id`
+    /// and `leave:id` through the scene's on_click: each is fired as the browser fires it, pointer before mouse.
+    /// </summary>
+    private static readonly (string Sent, string[] Types, bool Bubbles)[] Presses =
+    {
+        ("down", new[] { "pointerdown", "mousedown" }, true),
+        ("up", new[] { "pointerup", "mouseup" }, true),
+        ("leave", new[] { "pointerleave", "mouseleave" }, false),
+    };
+
+    private static readonly HashSet<string> PressTypes = new(Presses.SelectMany(p => p.Types), StringComparer.Ordinal);
 
     /// <summary>The browser's globals translated here, bare or as members of <c>window</c>.</summary>
     private static readonly HashSet<string> WindowNames = new(StringComparer.Ordinal)
@@ -83,7 +97,7 @@ internal static partial class PlainTranslator
         "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "fill-opacity", "n", "marker",
         "text-anchor", "vector-effect", "stops", "spreadmethod", "shape-rendering", "refx", "refy", "x1", "x2", "y1",
         "y2", "transform", "dir", "max", "min", "low", "high", "optimum", "checked", "selected", "disabled",
-        "data-click", "data-control", "data-pseudo", "data-marker", "data-marker-image", "data-content", "data-listed",
+        "data-click", "data-press", "data-control", "data-pseudo", "data-marker", "data-marker-image", "data-content", "data-listed",
         "data-popover-open", "data-empty-cells", "data-focus", "data-modal",
     };
 
@@ -263,6 +277,8 @@ internal static partial class PlainTranslator
         public readonly List<(Expression At, string Verb, List<string> Names, Expression? Force)> ClassOps = new();
         public readonly List<(Expression At, List<object> Values)> ClassNames = new();
         public bool Listens;
+        /// <summary>The press events (mousedown, pointerup...) the script listens for on it; such an element also Listens.</summary>
+        public readonly HashSet<string> Presses = new(StringComparer.Ordinal);
         /// <summary>A label with no text in the page, laid out holding a line so there is a text to write into.</summary>
         public bool Empty;
         /// <summary>setAttribute, removeAttribute, toggleAttribute, hidden and dataset writes, each by its attribute's name.</summary>
@@ -384,7 +400,7 @@ internal static partial class PlainTranslator
         private readonly Dictionary<Node, string> _null = new();
         /// <summary>A console call's arguments that do something, evaluated where the call stood.</summary>
         private readonly Dictionary<Node, List<Expression>> _consoleKept = new();
-        private bool _timers;
+        private bool _timers, _frames;
         /// <summary>Expressions the Lua writes itself: a browser global read, an element read, an attribute or storage call.</summary>
         private readonly Dictionary<Node, Func<JsToLua, string>> _lua = new();
         /// <summary>Nodes of what a dropped console call would have printed: never evaluated, so never checked.</summary>
@@ -1428,6 +1444,12 @@ internal static partial class PlainTranslator
                     }
                     return;
 
+                case Identifier g when FrameNames.Contains(g.Name) && !Declared(g.Name) && Reference(g):
+                    if (_parent[g] is not CallExpression fc || fc.Callee != g) { Refuse(g, g.Name + " used as a value"); return; }
+                    if (fc.Arguments.Count != 1) Refuse(fc, g.Name + " with " + fc.Arguments.Count.ToString(CultureInfo.InvariantCulture) + " arguments");
+                    _frames = true;
+                    return;
+
                 case Identifier o when OtherGlobals.TryGetValue(o.Name, out var what) && !Declared(o.Name) && Reference(o):
                     Refuse(o, what + ", which is outside the translated features");
                     return;
@@ -1637,9 +1659,13 @@ internal static partial class PlainTranslator
                     if (gp is CallExpression ec && ec.Callee == m && Effect(ec))
                     {
                         if (ec.Arguments.Count != 2 || ec.Arguments[0] is not StringLiteral kind) { Refuse(ec, $"addEventListener on {r.Name} with options or a computed event name"); return; }
-                        if (kind.Value != "click") { Refuse(ec, $"the \"{kind.Value}\" event on {r.Name}: the vector mod delivers only clicks"); return; }
+                        if (kind.Value != "click" && !PressTypes.Contains(kind.Value)) { Refuse(ec, $"the \"{kind.Value}\" event on {r.Name}: the vector mod delivers only clicks and presses"); return; }
                         if (ReadsEvent(ec.Arguments[1])) return;
-                        foreach (var x in r.Ts) x.Listens = true;
+                        foreach (var x in r.Ts)
+                        {
+                            x.Listens = true;
+                            if (kind.Value != "click") x.Presses.Add(kind.Value);
+                        }
                         Op(r, ec);
                     }
                     else Refuse(m, $"addEventListener on {r.Name} used as a value");
@@ -1785,7 +1811,7 @@ internal static partial class PlainTranslator
                 Node? handler = null;
                 Expression? on = null;
                 if (n is CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "addEventListener" } } am } ac
-                    && ac.Arguments.Count == 2 && ac.Arguments[0] is StringLiteral { Value: "click" })
+                    && ac.Arguments.Count == 2 && ac.Arguments[0] is StringLiteral { Value: var type } && (type == "click" || PressTypes.Contains(type)))
                     (handler, on) = (ac.Arguments[1], am.Object);
                 else if (n is AssignmentExpression { Operator: Operator.Assignment, Left: MemberExpression { Computed: false, Property: Identifier { Name: "onclick" } } om } oa)
                     (handler, on) = (oa.Right, om.Object);
@@ -3157,6 +3183,12 @@ internal static partial class PlainTranslator
                 }
             }
 
+            // a hit region a press reaches a press listener from (itself or an ancestor) reports presses: the vector mod's press=1
+            var pressing = _order.Where(t => t.Presses.Count > 0).Select(t => t.Ve).ToHashSet();
+            if (pressing.Count > 0)
+                foreach (var pair in _built.NodeOf)
+                    if (Clickable(pair.Value) && !string.IsNullOrEmpty(pair.Key.name) && PressedFrom(pair.Key, pressing)) pair.Value.Attributes["data-press"] = "1";
+
             panel.Layout(size.x, size.y);
             foreach (var t in _order) if (t.Texts.Count > 0) _restHeight[t] = t.Ve.layout.height;
             _template = Emit(rest);
@@ -3292,6 +3324,12 @@ internal static partial class PlainTranslator
 
         private static bool Clickable(HtmlNode node)
             => node.Tag == "button" || node.Attr("onclick") != null || node.Attr("data-click") != null || node.Attr("data-control") != null;
+
+        private static bool PressedFrom(VisualElement? ve, HashSet<VisualElement> pressing)
+        {
+            for (; ve != null; ve = ve.parent) if (pressing.Contains(ve)) return true;
+            return false;
+        }
 
         /// <summary>A label's text as the interpreter writes textContent (ScriptHost.ApplyText): the label and its node.</summary>
         private static void Text(Label label, HtmlNode node, string text)
@@ -4515,7 +4553,8 @@ internal static partial class PlainTranslator
 
             if (e is CallExpression { Callee: MemberExpression { Property: Identifier { Name: "addEventListener" } } } listen)
             {
-                lines.Add("v_listen(" + Q(t.Name) + ", " + tr(listen.Arguments[1]) + ")");
+                var type = ((StringLiteral)listen.Arguments[0]).Value;
+                lines.Add("v_listen(" + Q(type == "click" ? t.Name : t.Name + " " + type) + ", " + tr(listen.Arguments[1]) + ")");
                 return lines;
             }
 
@@ -4603,6 +4642,8 @@ internal static partial class PlainTranslator
                     _ => "v_clear(" + Arg(0) + ")",
                 };
             }
+            if (e is CallExpression { Callee: Identifier frame } fcall && FrameNames.Contains(frame.Name) && !Declared(frame.Name))
+                return (frame.Name == "requestAnimationFrame" ? "v_raf(" : "v_caf(") + lua.Translate(fcall.Arguments[0]) + ")";
             switch (e)
             {
                 // an element is its number, a list of them a table of numbers built once
@@ -4908,10 +4949,36 @@ internal static partial class PlainTranslator
                 sb.Append("    if V_EVERY[best] then V_DUE[best] = V_DUE[best] + V_EVERY[best] else V_FN[best] = nil V_ID[best] = nil end\n");
                 sb.Append("    fn()\n").Append(_reload ? "    if V_RELOAD then break end\n" : string.Empty).Append("  end\n  V_NOW = V_CLOCK\nend\n");
             }
+            if (_frames)
+            {
+                // The chip has one per-frame callback (ui:on_frame); the page takes it only while a frame is
+                // queued and runs the one registered before it (V_FRAMEAUTHOR, set by the host) after its own.
+                // A frame's callbacks are the ones queued before it started, run in order with the time in ms
+                // since the page loaded; the two queues swap, so a frame makes no garbage.
+                sb.Append("-- the page's animation frames, run from the chip's per-frame callback (times in ms since the page loaded)\n");
+                sb.Append("local V_T0 = util.game_time()\n");
+                sb.Append("local V_RQ, V_RQID, V_RN = {}, {}, 0\nlocal V_RR, V_RRID, V_RM = {}, {}, 0\nlocal V_RLAST, V_RON = 0, false\n");
+                sb.Append("local function v_frame()\n  if V_LIVE and V_RN > 0 then\n");
+                sb.Append("    V_RR, V_RQ, V_RRID, V_RQID = V_RQ, V_RR, V_RQID, V_RRID\n    V_RM, V_RN = V_RN, 0\n");
+                sb.Append("    local now = (util.game_time() - V_T0) * 1000\n");
+                sb.Append("    for i = 1, V_RM do\n      local fn = V_RR[i]\n      V_RR[i] = false\n      if fn then fn(now) end\n")
+                  .Append(_reload ? "      if V_RELOAD then break end\n" : string.Empty).Append("    end\n    V_RM = 0\n");
+                if (_reload) sb.Append("    if V_RELOAD then v_reload() end\n");
+                sb.Append("    v_flush()\n  end\n  if V_FRAMEAUTHOR then return V_FRAMEAUTHOR() end\nend\n");
+                sb.Append("V_FRAME = v_frame\n");
+                sb.Append("local function v_raf(fn)\n  V_RLAST = V_RLAST + 1\n  V_RN = V_RN + 1\n  V_RQ[V_RN], V_RQID[V_RN] = fn, V_RLAST\n");
+                sb.Append("  if not V_RON then V_RON = true ui:on_frame(v_frame) end\n  return V_RLAST\nend\n");
+                sb.Append("local function v_caf(h)\n  for i = 1, V_RN do if V_RQID[i] == h then V_RQ[i] = false end end\n");
+                sb.Append("  for i = 1, V_RM do if V_RRID[i] == h then V_RR[i] = false end end\nend\n");
+                // Handing the callback back from inside it would cancel the call running it, so the tick does it.
+                sb.Append("local function v_idle()\n  if not V_RON or V_RN > 0 then return end\n  V_RON = false\n");
+                sb.Append("  if V_FRAMEAUTHOR then ui:on_frame(V_FRAMEAUTHOR) else ui:on_frame() end\nend\n");
+            }
             if (listens)
             {
                 sb.Append("-- click listeners per element, and which elements a click on each hit region reaches, innermost first\n");
-                sb.Append("local V_ON = ").Append(Table(_order.Where(t => t.Listens).Select(t => (t.Name, "{}")))).Append('\n');
+                sb.Append("local V_ON = ").Append(Table(_order.Where(t => t.Listens).SelectMany(t => t.Presses.OrderBy(p => p, StringComparer.Ordinal)
+                    .Select(p => t.Name + " " + p).Prepend(t.Name)).Select(k => (k, "{}")))).Append('\n');
                 sb.Append("local V_ONCLICK = {}\n");
                 sb.Append("local V_CHAIN = ").Append(Table(_chains)).Append('\n');
                 sb.Append("local function v_listen(key, fn)\n  local list = V_ON[key]\n  for i = 1, #list do if list[i] == fn then return end end\n");
@@ -4935,7 +5002,24 @@ internal static partial class PlainTranslator
                     sb.Append("local V_NUM = ").Append(Table(_order.Where(t => t.Hit || t.Listens).Select(t => (t.Name, t.Number.ToString(CultureInfo.InvariantCulture))))).Append('\n');
                 }
                 var ev = _events ? "V_EV" : string.Empty;
-                sb.Append("local function v_click(nodeId)\n  local chain = V_LIVE and V_CHAIN[nodeId]\n  if not chain then return end\n");
+                var presses = PressChains().ToList();
+                if (presses.Count > 0)
+                {
+                    sb.Append("-- what a press the scene sends runs (down:, up:, leave: and the region): the region, then each listener list and its element\n");
+                    sb.Append("local V_PRESS = ").Append(Table(presses)).Append('\n');
+                }
+                sb.Append("local function v_click(nodeId)\n");
+                if (presses.Count > 0)
+                {
+                    sb.Append("  local press = V_LIVE and V_PRESS[nodeId]\n  if press then\n");
+                    if (_events) sb.Append("    V_EV.target = V_NUM[press[1]]\n");
+                    sb.Append("    for c = 2, #press, 2 do\n");
+                    if (_events) sb.Append("      V_EV.currentTarget = V_NUM[press[c + 1]]\n");
+                    sb.Append("      local list = V_ON[press[c]]\n      for i = 1, #list do list[i](").Append(ev).Append(") end\n    end\n");
+                    if (_reload) sb.Append("    if V_RELOAD then v_reload() end\n");
+                    sb.Append("    v_flush()\n    return\n  end\n");
+                }
+                sb.Append("  local chain = V_LIVE and V_CHAIN[nodeId]\n  if not chain then return end\n");
                 if (_events) sb.Append("  V_EV.target = V_NUM[nodeId]\n");
                 sb.Append("  for c = 1, #chain do\n");
                 if (_events) sb.Append("    V_EV.currentTarget = V_NUM[chain[c]]\n");
@@ -4981,11 +5065,12 @@ internal static partial class PlainTranslator
             sb.Append("  rect = { unit = \"px\", x = -4, y = -4, w = 1, h = 1 }, props = { scene = SCENE, keep = 1, data = V_D } })\n");
             sb.Append("ui:commit()\n");
             sb.Append("for k, v in pairs(V_D) do V_F[k] = v end\nfor k in pairs(V_P) do V_P[k] = nil end\nfor k in pairs(V_E) do V_E[k] = nil end\n");
-            if (_timers || _reload)
+            if (_timers || _reload || _frames)
             {
                 sb.Append("\nfunction tick(dt)\n  if V_LIVE then\n");
                 if (_timers) sb.Append("    V_CLOCK = V_CLOCK + dt * 1000\n    v_run()\n");
                 if (_reload) sb.Append("    if V_RELOAD then v_reload() end\n");
+                if (_frames) sb.Append("    v_idle()\n");
                 sb.Append("    v_flush()\n  end\n");
                 sb.Append("  if V_AUTHOR then return V_AUTHOR(dt) end\nend\n");
             }
@@ -5102,6 +5187,7 @@ internal static partial class PlainTranslator
         {
             var sb = new StringBuilder("v_reload = function()\n  V_RELOAD = false\n");
             if (_timers) sb.Append("  for s = 1, V_SLOTS do V_FN[s] = nil V_ID[s] = nil end\n");
+            if (_frames) sb.Append("  for i = 1, V_RN do V_RQ[i] = false end\n  V_RN = 0\n");
             if (_order.Any(t => t.Listens))
                 sb.Append("  for _, list in pairs(V_ON) do for i = #list, 1, -1 do list[i] = nil end end\n  for k in pairs(V_ONCLICK) do V_ONCLICK[k] = nil end\n");
             foreach (var t in _order.Where(t => t.Class != null))
@@ -5133,6 +5219,35 @@ internal static partial class PlainTranslator
                 for (var ve = pair.Key; ve != null; ve = ve.parent)
                     if (listening.TryGetValue(ve, out var name)) chain.Add(name);
                 if (chain.Count > 0) yield return (pair.Key.name, "{ " + string.Join(", ", chain.Select(Q)) + " }");
+            }
+        }
+
+        /// <summary>
+        /// What each press the scene sends (`down:id`, `up:id`, `leave:id`) runs: the region pressed, then each
+        /// listener list with its element, in the browser's order - pointer events bubbling from the region, then
+        /// the mouse events; a leave on the region alone, as mouseleave does not bubble.
+        /// </summary>
+        private IEnumerable<(string, string)> PressChains()
+        {
+            var pressing = _order.Where(t => t.Presses.Count > 0).ToDictionary(t => t.Ve);
+            if (pressing.Count == 0) yield break;
+            foreach (var pair in _built.NodeOf)
+            {
+                if (pair.Value.Attr("data-press") == null || string.IsNullOrEmpty(pair.Key.name)) continue;
+                var chain = new List<Target>();
+                for (var ve = pair.Key; ve != null; ve = ve.parent)
+                    if (pressing.TryGetValue(ve, out var t)) chain.Add(t);
+                foreach (var (sent, types, bubbles) in Presses)
+                {
+                    var parts = new List<string> { Q(pair.Key.name) };
+                    foreach (var type in types)
+                        foreach (var t in chain.Where(t => (bubbles || t.Ve == pair.Key) && t.Presses.Contains(type)))
+                        {
+                            parts.Add(Q(t.Name + " " + type));
+                            parts.Add(Q(t.Name));
+                        }
+                    if (parts.Count > 1) yield return (sent + ":" + pair.Key.name, "{ " + string.Join(", ", parts) + " }");
+                }
             }
         }
 

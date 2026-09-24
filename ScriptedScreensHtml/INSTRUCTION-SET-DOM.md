@@ -12,8 +12,8 @@ Rules and columns: see INSTRUCTION-SET.md.
 | Window.clearTimeout() | ✅ | `v_clear` | PlainTranslatorTests: an element held in a variable ... clearTimeout | |
 | Window.setInterval() | ✅ | `v_timer(fn, ms, true)` on the chip's tick | PlainTranslatorTests: setInterval + clearInterval; plain-counter in game 2026-09-24 | |
 | Window.clearInterval() | ✅ | `v_clear` | PlainTranslatorTests: setInterval + clearInterval; plain-counter in game | |
-| Window.requestAnimationFrame() | | | | |
-| Window.cancelAnimationFrame() | | | | |
+| Window.requestAnimationFrame() | ✅ | `v_raf(fn)`: queued, run by the chip's per-frame callback (`ui:on_frame(v_frame)`, taken while a frame is queued, handed back from the tick to the one registered before it or to none) in the next frame, in order, with `(util.game_time() - V_T0) * 1000` ms; two queues swapped, no garbage per frame | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "requestAnimationFrame: a game loop moving a box by the time between frames ...", "requestAnimationFrame: a one-shot frame queued by a click and one queued inside a frame ..."; "plain frames: the chip's frame callback is the page's only while a frame is queued ..." (and its two siblings); plain-frames.lua (the in-game page, not yet seen in game) | |
+| Window.cancelAnimationFrame() | ✅ | `v_caf(h)`: the entry cleared in the queue, or in the frame being run before its turn | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "requestAnimationFrame: a one-shot frame ... one cancelled before its frame never runs", "requestAnimationFrame: a game loop ... cancelAnimationFrame from a STOP button"; plain-frames.lua | |
 | Window.requestIdleCallback() | | | | |
 | Window.cancelIdleCallback() | | | | |
 | Window.innerWidth | ✅ | a constant: the width the page is laid out at on the console it is compiled for (its `<meta name=viewport>` width, else the console's canvas width; one CSS pixel is one canvas unit), in whole CSS pixels as a browser window is (`PlainTranslator.ConsoleLayout` rounds the layout size). Writing it is refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "innerWidth, innerHeight and devicePixelRatio: the console the page is compiled for"; PlainTranslatorTests: "plain size: …" (the layout size, whole pixels, a world aspect arriving a hair short); PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: plain-globals.lua (the in-game page) | |
@@ -1662,19 +1662,19 @@ Note: this table covers the interface's own generic members only (indexed access
 |---|---|---|---|---|
 | "click" | ✅ | the scene element's `on_click(nodeId)`; bubbling resolved at compile time (`V_CHAIN`) | PlainTranslatorTests: onclick and bubbling | |
 | "dblclick" | | | | |
-| "mousedown" | | | | |
-| "mouseup" | | | | |
+| "mousedown" | ✅ | the region `press=1` (vector 0.11.36); `down:id` on the scene's `on_click` runs the pointerdown then the mousedown listeners, bubbling (`V_PRESS`, resolved at compile time); `this`, `e.target`, `e.currentTarget` as for a click. Two presses within 0.25 s arrive as one | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "mousedown, mouseup, mouseleave, pointerdown, pointerup and pointerleave: a hold button ..."; "plain presses: the regions a press listener hears from are press=1 in the scene"; plain-frames.lua (not yet seen in game) | |
+| "mouseup" | ✅ | `up:id`: pointerup then mouseup listeners, bubbling from the element pressed, wherever the pointer is released (as under pointer capture) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "mousedown, mouseup, mouseleave, pointerdown, pointerup and pointerleave: a hold button ..."; plain-frames.lua | |
 | "mousemove" | | | | |
 | "mouseenter" | | | | |
-| "mouseleave" | | | | |
+| "mouseleave" | ✅ | `leave:id`: pointerleave then mouseleave listeners of the element pressed only (it does not bubble), once per press while held; no leave without a press (a console has no hover) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "mousedown, mouseup, mouseleave, pointerdown, pointerup and pointerleave: a hold button ..."; plain-frames.lua | |
 | "mouseover" | | | | |
 | "mouseout" | | | | |
 | "contextmenu" | | | | |
-| "pointerdown" | | | | |
-| "pointerup" | | | | |
+| "pointerdown" | ✅ | as "mousedown", run before it | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "mousedown, mouseup, mouseleave, pointerdown, pointerup and pointerleave: a hold button ... a pointer listener on its panel reached by bubbling ...; pointer before mouse" | |
+| "pointerup" | ✅ | as "mouseup", run before it | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "mousedown, mouseup, mouseleave, pointerdown, pointerup and pointerleave: a hold button ..." | |
 | "pointermove" | | | | |
 | "pointerenter" | | | | |
-| "pointerleave" | | | | |
+| "pointerleave" | ✅ | as "mouseleave", run before it | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "mousedown, mouseup, mouseleave, pointerdown, pointerup and pointerleave: a hold button ... a mouseleave there that a leave of the button does not reach" | |
 | "pointerover" | | | | |
 | "pointerout" | | | | |
 | "pointercancel" | | | | |
