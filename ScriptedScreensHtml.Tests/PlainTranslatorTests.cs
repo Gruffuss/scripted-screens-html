@@ -789,6 +789,82 @@ internal static class PlainTranslatorTests
               "draw();"),
          Ticks(4), new[] { 0, 1, 2, 3, 4 }),
 
+        ("a table built by an immediately invoked function (arrow and function forms): its rows a list, their fields fixed values, a theme colour one too",
+         Page(".row { display: flex; width: 320px; margin-bottom: 2px; } .k { width: 90px; } .g { width: 60px; } .n { width: 60px; } .sep { height: 2px; width: 320px; background: #333; }",
+              "<h3 id=\"head\">Roles</h3><div id=\"rows\"></div><div id=\"units\"></div><p id=\"n\">-</p>",
+              "const ROLES = (() => {" +
+              "  const PUMPS = [['P1', 'kPa'], ['P2', 'kPa'], ['P3', 'L']];" +
+              "  const R = (key, group, devs) => ({ key, group, colour: group === 'gas' ? '#6cf' : '#fc6', devs: devs.map((d) => ({ name: d[0], unit: d[1] })) });" +
+              "  return [R('O2', 'gas', PUMPS), R('Filt', 'filt', [['F1', '%']]), R('CO2', 'gas', PUMPS.slice(0, 2))];" +
+              "})();" +
+              "const UNITS = function () { return ['kPa', '%', 'L', 'mol']; }();" +
+              "const THEME = (() => { const dark = true; return dark ? '#8cf' : '#246'; })();" +
+              "let t = 0;" +
+              "function draw() {" +
+              "  document.getElementById('head').style.color = t % 2 ? THEME : '#ddd';" +
+              "  document.getElementById('rows').innerHTML = ROLES.filter((r) => t % 3 !== 1 || r.group === 'gas').map((r) =>" +
+              "    `<div class=\"row\"><span class=\"k\" style=\"color:${r.colour}\">${r.key}</span><span class=\"g\">${r.group}</span><span class=\"n\">${r.devs.length}</span></div>`).join('');" +
+              "  document.getElementById('units').innerHTML = UNITS.filter((u, i) => i <= t % 4).map((u) => `<span class=\"n\">${u}</span>`).join('');" +
+              "  document.getElementById('n').textContent = ROLES.length + ' roles, ' + UNITS.length + ' units';" +
+              "  ROLES.forEach((r, i) => { if (i === t % 3) document.getElementById('n').style.color = r.colour; });" +
+              "}" +
+              "setInterval(() => { t++; draw(); }, 500);" +
+              "draw();"),
+         Ticks(5), new[] { 0, 1, 2, 3, 4, 5 }),
+
+        ("an item found in a list the compile knows, with || and ?? fallbacks: its fields fixed values, its own list's rows; findIndex, indexOf, some, every and includes read",
+         Page(".ln { margin: 1px 0; color: #9ab; } #menu { display: flex; } #menu span { width: 110px; } .on { background: #234; } .off { background: #111; } #alt { background: #111; }",
+              "<h3 id=\"title\">-</h3><div id=\"lines\"></div><div id=\"menu\"></div><p id=\"idx\">-</p><p id=\"alt\">-</p>",
+              "const GASES = (() => {" +
+              "  const mk = (key, label, color, lines) => ({ key, label, color, lines: lines.map((x) => ({ name: x[0], unit: x[1] })) });" +
+              "  return [" +
+              "    mk('o2', 'Oxygen', '#6cf', [['Tank A', 'kPa'], ['Tank B', 'kPa']])," +
+              "    mk('n2', 'Nitrogen', '#fc6', [['Line', 'kPa']])," +
+              "    mk('co2', 'Carbon dioxide', '#f66', [['Scrubber', '%'], ['Vent', 'kPa'], ['Tank', 'mol']])];" +
+              "})();" +
+              "let pick = 'n2';" +
+              "let t = 0;" +
+              "function draw() {" +
+              "  const sel = GASES.find((g) => g.key === pick) || GASES[0];" +
+              "  const alt = GASES.findLast((g) => g.lines.length > 5) ?? GASES[t % 3];" +
+              "  document.getElementById('title').textContent = sel.label;" +
+              "  document.getElementById('title').style.color = sel.color;" +
+              "  document.getElementById('lines').innerHTML = sel.lines.map((l, i) => `<p class=\"ln\">${i + 1}. ${l.name} (${l.unit})</p>`).join('');" +
+              "  document.getElementById('menu').innerHTML = GASES.map((g) => `<span class=\"${g.key === sel.key ? 'on' : 'off'}\" style=\"color:${g.color}\">${g.label}</span>`).join('');" +
+              "  document.getElementById('idx').textContent = 'at ' + GASES.findIndex((g) => g.key === pick) + ', ' + (GASES.some((g) => g.lines.length > 2) ? 'long' : 'short') + ', '" +
+              "    + (GASES.every((g) => g.lines.length > 0) ? 'all' : 'not all') + ', ' + (['o2', 'n2'].includes(pick) ? 'in' : 'out') + ', ' + ['o2', 'n2', 'co2'].indexOf(pick);" +
+              "  document.getElementById('alt').textContent = alt.label;" +
+              "  document.getElementById('alt').style.color = alt.color;" +
+              "  document.getElementById('alt').style.background = ['#300', '#030'].find((c, i) => i === t % 3) ?? '#003';" +
+              "}" +
+              "setInterval(() => { t++; pick = ['o2', 'n2', 'co2', 'xe'][t % 4]; draw(); }, 500);" +
+              "draw();"),
+         Ticks(5), new[] { 0, 1, 2, 3, 4, 5 }),
+
+        ("fields of a list's items as fixed values: a log in a state object whose rows take their colour and class from each entry, and rows made by a map callback",
+         Page(".line { display: flex; width: 320px; margin-bottom: 2px; background: #1a2130; } .t { width: 40px; } .m { width: 200px; } .tag { width: 60px; }" +
+              ".row { width: 200px; margin: 1px 0; } .row.hot { background: #422; } .row.cold { background: #224; } .row.mild { background: #242; }",
+              "<div id=\"log\"></div><div id=\"rows\"></div>",
+              "const st = { tick: 0, log: [{ t: 0, msg: 'armed', tag: 'INFO', color: '#888' }] };" +
+              "function push(msg, tag, color) { st.log = [{ t: st.tick, msg, tag, color }].concat(st.log).slice(0, 4); }" +
+              "const temps = [{ name: 'Room', v: 21 }, { name: 'Tank', v: 48 }, { name: 'Pipe', v: 5 }];" +
+              "function draw() {" +
+              "  document.getElementById('log').innerHTML = st.log.map((e) => `<div class=\"line\"><span class=\"t\">${e.t}</span><span class=\"m\">${e.msg}</span><span class=\"tag\" style=\"color:${e.color}\">${e.tag}</span></div>`).join('');" +
+              "  const rows = temps.map((x) => ({ label: x.name + ' ' + x.v, kind: x.v > 30 ? 'hot' : x.v < 10 ? 'cold' : 'mild', ink: x.v > 30 ? '#f96' : '#9cf' }));" +
+              "  document.getElementById('rows').innerHTML = rows.map((r) => `<p class=\"row ${r.kind}\" style=\"color:${r.ink}\">${r.label}</p>`).join('');" +
+              "}" +
+              "setInterval(() => {" +
+              "  st.tick++;" +
+              "  const i = st.tick % 3;" +
+              "  const tag = i === 2 ? 'TRIP' : i === 1 ? 'WATCH' : 'CLEAR';" +
+              "  const color = i === 2 ? '#f55' : i === 1 ? '#fc6' : '#6c6';" +
+              "  push('event ' + st.tick, tag, color);" +
+              "  temps[st.tick % 3].v = (temps[st.tick % 3].v + 17) % 50;" +
+              "  draw();" +
+              "}, 500);" +
+              "draw();"),
+         Ticks(6), new[] { 0, 1, 2, 3, 4, 6 }),
+
         ("a loop over a count from a fixed set, and a list filtered by a test that reads its index",
          Page("#meter { display: flex; } .bar { width: 12px; height: 20px; background: #3a7; margin-right: 3px; } .odd { color: #fc6; }",
               "<div id=\"meter\"></div><div id=\"odd\"></div><p>meter end</p>",
@@ -816,6 +892,7 @@ internal static class PlainTranslatorTests
         ("a list in a field of an object handed where the compile cannot follow it", Page("", "<div id=\"a\"></div>", "const st = { log: ['a'] }; const fs = [function (o) { o.log.push('b'); }]; setInterval(() => { fs[0](st); document.getElementById('a').innerHTML = st.log.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "a list read from the field \"log\" of an object handed where the compile cannot follow what is done to it"),
         ("a list stored in another object's field, where it is added to", Page("", "<div id=\"a\"></div>", "const st = { log: ['a'] }; const view = { rows: st.log }; setInterval(() => { view.rows.push('x'); document.getElementById('a').innerHTML = st.log.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "is stored in the field \"rows\", which adds to it"),
         ("an array copied into an object's field by Object.assign, then added to there", Page("", "<div id=\"a\"></div><p>end</p>", "const st = { log: [] }; const a = ['x']; Object.assign(st, { log: a }); setInterval(() => { st.log.push('y'); document.getElementById('a').innerHTML = a.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "\"a\" is stored in the field \"log\", which adds to it"),
+        ("a colour only known at run time, said as a colour", Page("", "<p id=\"a\">x</p>", "setTimeout(() => { document.getElementById('a').style.color = localStorage.getItem('ink'); }, 10);"), "style.color of \"a\" is written a colour only known at run time"),
         ("markup added with += outside a loop", Page("", "<ul id=\"a\"></ul>", "setInterval(() => { document.getElementById('a').innerHTML += '<li>x</li>'; }, 10);"), "with += outside a list the compile can bound"),
         ("a list of elements joined with text between them", Page("", "<div id=\"a\"></div>", "const xs = ['a', 'b']; setTimeout(() => { document.getElementById('a').innerHTML = xs.map((x) => '<p>' + x + '</p>').join(', '); }, 10);"), "a list joined with \", \" between its elements"),
         ("a list of text-level markup", Page("", "<p id=\"a\">-</p>", "const xs = ['a', 'b']; document.getElementById('a').innerHTML = xs.map((x) => '<b>' + x + '</b>').join(' ');"), "a list of text and text-level markup"),
@@ -878,6 +955,8 @@ internal static class PlainTranslatorTests
          new[] { 0, 1, 3, 5, 8, 11, 13, 14 }),
         // a list in a reassigned object field, patched through Object.assign by a helper: not yet seen in game
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-fields.lua"), Ticks(8), new[] { 0, 1, 2, 3, 4, 5, 8 }),
+        // an item found in a table an immediately invoked function builds, fields of items as fixed values: not yet seen in game
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-find.lua"), Ticks(7), new[] { 0, 1, 2, 3, 4, 7 }),
     };
 
     internal static void Run(Action<bool, string> check)

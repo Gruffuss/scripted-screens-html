@@ -2058,7 +2058,28 @@ internal static partial class PlainTranslator
                 // `x || 'default'`, `x ?? 'default'` with x null or undefined (an argument not passed): the default
                 case LogicalExpression { Operator: Operator.LogicalOr or Operator.NullishCoalescing } dl when Nullish(dl.Left, bind):
                     return Finite(dl.Right, seen, bind);
+                // an item picked from a list the compile knows (find, an index), or the fallback when there is none
+                case LogicalExpression { Operator: Operator.LogicalOr or Operator.NullishCoalescing } pl when Picked(pl.Left) is { } list:
+                    {
+                        if (ItemsOf(list, bind) is not { } items) return null;
+                        List<object>? all = new();
+                        foreach (var (item, env) in items) { all = Union(all, Finite(item, seen, env)); if (all == null) return null; }
+                        return Union(all, Finite(pl.Right, seen, bind));
+                    }
                 case LogicalExpression l: return Union(Finite(l.Left, seen, bind), Finite(l.Right, seen, bind));
+                // a function written in place and called there: what it gives back
+                case CallExpression iife when Unwrap(iife.Callee) is IFunction fn:
+                    {
+                        var inner = Inlined.Of(fn, iife, bind);
+                        List<object>? all = new();
+                        foreach (var r in Returns(fn))
+                        {
+                            if (r == null) return null;
+                            all = Union(all, Finite(r, seen, inner));
+                            if (all == null) return null;
+                        }
+                        return all;
+                    }
                 case NonLogicalBinaryExpression { Operator: Operator.Addition or Operator.Subtraction or Operator.Multiplication } b:
                     return Finite(b.Left, seen, bind) is { } left && Finite(b.Right, seen, bind) is { } right ? Product(left, right, b.Operator) : null;
                 // a text method that gives one text for one text, and toFixed of a number
@@ -2119,6 +2140,9 @@ internal static partial class PlainTranslator
                         foreach (var v in values.Values) { each = Union(each, Finite(v, seen, bind)); if (each == null) return null; }
                         return each;
                     }
+                // an item of a list the compile knows, by its index (`d[1]` of a row `['Pump A', 'on']`)
+                case MemberExpression { Computed: true, Property: not StringLiteral } ix when Indexed(ix, seen, bind) is { } picked:
+                    return picked;
                 case MemberExpression { Computed: false, Property: Identifier { Name: "length" } } len when Elems(len.Object, bind) is { List: true } list:
                     // a list of a list's rows is as long as the rows shown, which only the run knows
                     return list.Rows != null ? null : list.Lists.Select(l => (object)(double)l.Count).Distinct().ToList();
@@ -2165,6 +2189,41 @@ internal static partial class PlainTranslator
                     }
                 return u;
             }
+        }
+
+        /// <summary>
+        /// `list[i]`: the items at the indexes i can be, when the list is an array written in place (through the names and
+        /// arguments bound to it); otherwise any item of a list the compile knows. Null when neither is known.
+        /// </summary>
+        private List<object>? Indexed(MemberExpression ix, HashSet<Identifier>? seen, Inlined? bind)
+        {
+            var list = ix.Object;
+            var env = bind;
+            for (var k = 0; k < 8; k++)
+            {
+                if (list is ParenthesizedExpression pw && _bindOf.TryGetValue(pw, out var within)) { list = pw.Expression; env = within; continue; }
+                list = Unwrap(list);
+                if (list is Identifier id && Decl(id) is { } d && env != null && env.TryGetValue(d, out var arg)) { list = arg.Expr; env = arg.Env; continue; }
+                break;
+            }
+            var all = new List<object>();
+            if (list is ArrayExpression arr && Finite(ix.Property, seen, bind) is { Count: > 0 } indexes && indexes.All(v => v is double))
+            {
+                foreach (double i in indexes)
+                {
+                    if (i != Math.Floor(i) || i < 0 || i >= arr.Elements.Count || arr.Elements[(int)i] is not Expression el || el is SpreadElement) return null;
+                    if (Finite(el, seen, env) is not { } one) return null;
+                    foreach (var v in one) if (!all.Contains(v)) all.Add(v);
+                }
+                return all;
+            }
+            if (ItemsOf(ix.Object, bind) is not { } items) return null;
+            foreach (var (item, ie) in items)
+            {
+                if (Finite(item, seen, ie) is not { } one) return null;
+                foreach (var v in one) if (!all.Contains(v)) all.Add(v);
+            }
+            return all;
         }
 
         /// <summary>Whether an expression is null or undefined in every run: written so, or a name bound to that.</summary>
@@ -2303,6 +2362,8 @@ internal static partial class PlainTranslator
             }
             if (init is ObjectExpression obj)
             {
+                // a field the script can reach unseen (the object patched by Object.assign, handed to a function that writes it) is no constant
+                if (obj.Properties.Any(p => p is Property { Computed: false } fp && (fp.Key is Identifier fk ? fk.Name : (fp.Key as StringLiteral)?.Value) is { } key && FieldWritten(key, obj))) return null;
                 foreach (var p in obj.Properties)
                     if (p is Property { Computed: false, Value: Expression v } prop && prop.Key is Identifier or StringLiteral)
                         table[prop.Key is Identifier k ? k.Name : ((StringLiteral)prop.Key).Value] = v;
@@ -2321,39 +2382,52 @@ internal static partial class PlainTranslator
         /// </summary>
         private List<(ObjectExpression, Inlined?)>? Objects(Expression e, Inlined? bind, int depth)
         {
-            if (depth > 6) return null;
+            if (depth > 12) return null;
             switch (e)
             {
                 case ObjectExpression o:
                     return new() { (o, bind) };
+                case ParenthesizedExpression w when _bindOf.TryGetValue(w, out var within):
+                    return Objects(w.Expression, within, depth + 1);
+                case ParenthesizedExpression pe:
+                    return Objects(pe.Expression, bind, depth + 1);
                 case Identifier row when _itemOf.TryGetValue(row, out var items):
-                    {
-                        if (items == null) return null;
-                        var all = new List<(ObjectExpression, Inlined?)>();
-                        foreach (var (item, env) in items)
-                            if (Objects(item, env, depth + 1) is not { } some) return null;
-                            else all.AddRange(some);
-                        return all;
-                    }
+                    return Each(items);
                 case ArrayExpression or Acornima.Ast.Literal or TemplateLiteral or NonLogicalBinaryExpression or NonUpdateUnaryExpression or IFunction:
                     return new();
                 case ConditionalExpression c:
                     return Objects(c.Consequent, bind, depth + 1) is { } a && Objects(c.Alternate, bind, depth + 1) is { } b ? a.Concat(b).ToList() : null;
+                // `found || fallback`, `found ?? fallback`: either (the fallback alone when there is nothing on the left)
+                case LogicalExpression { Operator: Operator.LogicalOr or Operator.NullishCoalescing } lo:
+                    {
+                        if (Nullish(lo.Left, bind)) return Objects(lo.Right, bind, depth + 1);
+                        return Objects(lo.Left, bind, depth + 1) is { } left && Objects(lo.Right, bind, depth + 1) is { } right ? left.Concat(right).ToList() : null;
+                    }
                 case Identifier id:
                     {
                         if (Decl(id) is not { } decl) return null;
                         if (bind != null && bind.TryGetValue(decl, out var arg)) return Objects(arg.Expr, arg.Env, depth + 1);
                         var all = new List<(ObjectExpression, Inlined?)>();
-                        // a parameter never given another value: every argument its function is called with (none: undefined)
+                        // a parameter never given another value: every argument its function is called with (none: undefined),
+                        // and for a callback walking a list, every item of the list
                         if (ParamOf(decl) is { } param)
                         {
-                            if (_writes.ContainsKey(decl) || NameOf(param.Fn) is not { } fname || !_refs.TryGetValue(fname, out var calls)) return null;
-                            foreach (var c in calls)
+                            if (_writes.ContainsKey(decl)) return null;
+                            foreach (var use in UsesOf(param.Fn))
                             {
-                                if (_parent[c] is not CallExpression call || call.Callee != c || call.Arguments.Take(param.Index + 1).Any(a => a is SpreadElement)) return null;
-                                if (param.Index >= call.Arguments.Count) continue;
-                                if (Objects((Expression)call.Arguments[param.Index], null, depth + 1) is not { } some) return null;
-                                all.AddRange(some);
+                                if (_parent[use] is CallExpression call && call.Callee == use)
+                                {
+                                    if (call.Arguments.Take(param.Index + 1).Any(a => a is SpreadElement)) return null;
+                                    if (param.Index >= call.Arguments.Count) continue;
+                                    if (Objects((Expression)call.Arguments[param.Index], null, depth + 1) is not { } some) return null;
+                                    all.AddRange(some);
+                                    continue;
+                                }
+                                if (WalkedAt(use) is not { } walk) return null;
+                                // the index that comes after the item is a number; anything else the callback is given is not followed
+                                if (param.Index == walk.Item + 1) continue;
+                                if (param.Index != walk.Item || ItemsOf(walk.List, null) is not { } walked || Each(walked) is not { } each) return null;
+                                all.AddRange(each);
                             }
                             return all;
                         }
@@ -2363,7 +2437,7 @@ internal static partial class PlainTranslator
                             else all.AddRange(some);
                         return all;
                     }
-                case CallExpression { Callee: Identifier f } call when Function(f) is { } fn:
+                case CallExpression call when Target(call) is { } fn:
                     {
                         var inner = Inlined.Of(fn, call, bind);
                         var all = new List<(ObjectExpression, Inlined?)>();
@@ -2372,8 +2446,33 @@ internal static partial class PlainTranslator
                             else all.AddRange(some);
                         return all;
                     }
+                // one item of a list the compile knows: any of them
+                case CallExpression or MemberExpression when Picked(e) is { } list:
+                    return ItemsOf(list, bind) is { } picked ? Each(picked) : null;
+                // a field of an object literal nothing writes: what it is written as
+                case MemberExpression { Computed: false, Property: Identifier field } fm:
+                    {
+                        if (Objects(fm.Object, bind, depth + 1) is not { } holders) return null;
+                        var all = new List<(ObjectExpression, Inlined?)>();
+                        foreach (var (o, ob) in holders)
+                        {
+                            if (Field(o, field.Name) is not { } v || FieldWritten(field.Name, o) || Objects(v, ob, depth + 1) is not { } some) return null;
+                            all.AddRange(some);
+                        }
+                        return all;
+                    }
                 default:
                     return null;
+            }
+
+            List<(ObjectExpression, Inlined?)>? Each(List<(Expression, Inlined?)>? items)
+            {
+                if (items == null) return null;
+                var all = new List<(ObjectExpression, Inlined?)>();
+                foreach (var (item, env) in items)
+                    if (Objects(item, env, depth + 1) is not { } some) return null;
+                    else all.AddRange(some);
+                return all;
             }
         }
 
@@ -2421,7 +2520,8 @@ internal static partial class PlainTranslator
             var flow = new FieldFlow();
             var uses = flow.Uses;
             var holders = new HashSet<Identifier>();
-            var functions = new HashSet<IFunction>();
+            var arrays = new HashSet<Node>();
+            var functions = new HashSet<(IFunction, bool)>();
             Value(o);
             return _fieldUses[(name, o)] = written ? null : flow;
 
@@ -2432,18 +2532,23 @@ internal static partial class PlainTranslator
                 if (!_parent.TryGetValue(e, out var p)) { written = true; return; }
                 switch (p)
                 {
+                    case ParenthesizedExpression pe: Value(pe); return;
                     case VariableDeclarator vd when vd.Init == e && vd.Id is Identifier id: Holder(id); return;
                     case AssignmentExpression { Operator: Operator.Assignment } a when a.Right == e && a.Left is Identifier l && Decl(l) is { } d: Holder(d); return;
-                    case ReturnStatement: Returned(p); return;
-                    case ArrowFunctionExpression af when af.Body == e: Returned(p); return;
+                    // a name holding it given another value: nothing is done to the object
+                    case AssignmentExpression { Operator: Operator.Assignment } a0 when a0.Left == e && e is Identifier: return;
+                    // stored in a field of another object literal: wherever that field is read
+                    case Property { Computed: false, Kind: PropertyKind.Init, Method: false } prop when prop.Value == e: Stored(prop, Value); return;
+                    case ReturnStatement: Returned(p, false); return;
+                    case ArrowFunctionExpression af when af.Body == e: Returned(p, false); return;
                     case ConditionalExpression c when c.Test != e: Value(c); return;
                     case LogicalExpression l2: Value(l2); return;
                     case MemberExpression m when m.Object == e: Member(m); return;
                     case CallExpression c2 when c2.Arguments.Contains(e): Passed(c2, e); return;
-                    // an item of an array written in place into a name: wherever the array hands out its items
-                    case ArrayExpression arr when arr.Elements.Contains(e) && _parent.TryGetValue(arr, out var ap) && ap is VariableDeclarator { Id: Identifier aid } avd && avd.Init == arr && Decl(aid) is { } ad:
-                        Items(ad);
-                        return;
+                    // an item of an array written in place: wherever the array hands out its items
+                    case ArrayExpression arr when arr.Elements.Contains(e): ItemsAt(arr); return;
+                    // its fields copied into another object, read only
+                    case SpreadElement when _parent.TryGetValue(p, out var so) && so is ObjectExpression: return;
                     case ExpressionStatement or IfStatement or NonUpdateUnaryExpression { Operator: Operator.LogicalNot }
                         or NonLogicalBinaryExpression { Operator: Operator.StrictEquality or Operator.StrictInequality or Operator.Equality or Operator.Inequality }:
                         return;
@@ -2458,28 +2563,57 @@ internal static partial class PlainTranslator
                 foreach (var r in refs) Value(r);
             }
 
-            // An array holding it among its items, the array never given another value: the object goes where an
-            // item is read (`a[i]`), into each callback walking the array (`a.map(x => …)`) and each for...of's
-            // name; the array handed anywhere else, or given another value, could hand it on unseen.
+            // A name holding an array with it among its items: the object goes wherever each reference hands the
+            // array's items on. Given other values only with `=`, which are other arrays.
             void Items(Identifier array)
             {
-                if (_writes.ContainsKey(array)) { written = true; return; }
+                if (_writes.TryGetValue(array, out var ws) && ws.Any(w => w is not AssignmentExpression { Operator: Operator.Assignment })) { written = true; return; }
                 if (!holders.Add(array) || !_refs.TryGetValue(array, out var refs)) return;
                 foreach (var r in refs) ItemsAt(r);
             }
 
-            // an expression whose value is an array holding the object among its items
+            // a field of object literals an array with it among its items is stored in: wherever that field is read
+            void FieldItems(Expression holder, string field)
+            {
+                if (Objects(holder, null, 0) is not { } targets) { written = true; return; }
+                foreach (var (target, _) in targets)
+                {
+                    if (FieldUses(field, target) is not { } there) { written = true; return; }
+                    foreach (var u in there.Uses) if (!WrittenTo(u)) ItemsAt(u);
+                }
+            }
+
+            // `{ key: value }`: the value stored in that field of that object literal, followed where the field is read
+            void Stored(Property prop, Action<Expression> go)
+            {
+                if (!_parent.TryGetValue(prop, out var holder) || holder is not ObjectExpression lit
+                    || (prop.Key is Identifier k ? k.Name : (prop.Key as StringLiteral)?.Value) is not { } key
+                    || FieldUses(key, lit) is not { } there)
+                {
+                    written = true;
+                    return;
+                }
+                foreach (var u in there.Uses) if (!WrittenTo(u)) go(u);
+            }
+
+            // An expression whose value is an array holding the object among its items: an item read (`a[i]`, find,
+            // pop), each callback walking it, each for...of's name, and wherever the array itself goes - into a name,
+            // a field, a slice or concat of it, a function's return or parameter.
             void ItemsAt(Expression r)
             {
-                if (written) return;
-                switch (_parent[r])
+                if (written || !arrays.Add(r)) return;
+                if (!_parent.TryGetValue(r, out var p)) { written = true; return; }
+                switch (p)
                 {
+                    case ParenthesizedExpression pe:
+                        ItemsAt(pe);
+                        return;
                     case MemberExpression { Computed: true } ix when ix.Object == r:
                         if (WrittenTo(ix)) { written = true; return; }
                         Value(ix);
                         return;
                     case MemberExpression { Computed: false, Property: Identifier { Name: var method } } mm when mm.Object == r:
-                        if (method == "length" && !WrittenTo(mm)) return;
+                        if (method == "length") return;
                         if (_parent[mm] is CallExpression call && call.Callee == mm)
                         {
                             if (method is "map" or "forEach" or "filter" or "some" or "every" or "find" or "findIndex" or "findLast" or "findLastIndex" or "flatMap"
@@ -2495,13 +2629,71 @@ internal static partial class PlainTranslator
                                 else if (method is "find" or "findLast") Value(call);
                                 return;
                             }
-                            if (method is "indexOf" or "lastIndexOf" or "includes" or "join") return;
-                            if (method is "slice" or "concat") { ItemsAt(call); return; }
+                            if (method is "reduce" or "reduceRight" && call.Arguments.Count > 0 && Callback(call.Arguments[0]) is { } rcb)
+                            {
+                                // the item comes in second; with no first value the first item is the first total, and can be the result
+                                if (rcb.Params.Count > 1) { if (rcb.Params[1] is Identifier ri) Holder(ri); else { written = true; return; } }
+                                if (call.Arguments.Count == 1)
+                                {
+                                    if (rcb.Params.Count > 0) { if (rcb.Params[0] is Identifier ra) Holder(ra); else { written = true; return; } }
+                                    Value(call);
+                                }
+                                return;
+                            }
+                            if (method is "indexOf" or "lastIndexOf" or "includes" or "join" or "toString" or "push" or "unshift" or "fill") return;
+                            if (method is "slice" or "concat" or "sort" or "reverse" or "toSorted" or "toReversed" or "splice") { ItemsAt(call); return; }
+                            if (method is "pop" or "shift" or "at") { Value(call); return; }
                         }
                         written = true;
                         return;
                     case ForOfStatement { Left: VariableDeclaration { Declarations: [{ Id: Identifier x }] } } fo when fo.Right == r:
                         Holder(x);
+                        return;
+                    case SpreadElement when _parent.TryGetValue(p, out var outer) && outer is ArrayExpression oa:
+                        ItemsAt(oa);
+                        return;
+                    case CallExpression passed when passed.Arguments.Contains(r):
+                        {
+                            if (passed.Callee is MemberExpression { Computed: false, Property: Identifier { Name: "concat" } }) { ItemsAt(passed); return; }
+                            if (passed.Callee is MemberExpression { Object: Identifier { Name: "JSON" or "console" } g, Computed: false } && !Declared(g.Name)) return;
+                            var index = passed.Arguments.ToList().IndexOf(r);
+                            if (Target(passed) is { } fn && CallsOf(fn) is { } calls && calls.Contains(passed))
+                            {
+                                if (index < fn.Params.Count && fn.Params[index] is Identifier param) Items(param);
+                                return;
+                            }
+                            written = true;
+                            return;
+                        }
+                    case VariableDeclarator vd when vd.Init == r && vd.Id is Identifier id:
+                        Items(id);
+                        return;
+                    case AssignmentExpression { Operator: Operator.Assignment } a when a.Right == r:
+                        if (a.Left is Identifier l && Decl(l) is { } d) { Items(d); return; }
+                        if (a.Left is MemberExpression { Computed: false, Property: Identifier f } fm) { FieldItems(fm.Object, f.Name); return; }
+                        written = true;
+                        return;
+                    // the name or field holding it given another array
+                    case AssignmentExpression { Operator: Operator.Assignment } a2 when a2.Left == r:
+                        return;
+                    case Property { Computed: false, Kind: PropertyKind.Init, Method: false } prop when prop.Value == r:
+                        Stored(prop, ItemsAt);
+                        return;
+                    case ReturnStatement:
+                        Returned(p, true);
+                        return;
+                    case ArrowFunctionExpression af when af.Body == r:
+                        Returned(p, true);
+                        return;
+                    case ConditionalExpression c when c.Test != r:
+                        ItemsAt(c);
+                        return;
+                    case LogicalExpression:
+                        ItemsAt((Expression)p);
+                        return;
+                    // read and nothing more: tested, compared, turned into text
+                    case ExpressionStatement or IfStatement or NonUpdateUnaryExpression { Operator: Operator.LogicalNot } or TemplateLiteral
+                        or NonLogicalBinaryExpression { Operator: Operator.StrictEquality or Operator.StrictInequality or Operator.Equality or Operator.Inequality or Operator.Addition }:
                         return;
                     default:
                         written = true;
@@ -2509,16 +2701,19 @@ internal static partial class PlainTranslator
                 }
             }
 
-            void Returned(Node from)
+            // what a function gives back: at each call of it (the calls' value is it, or with asItems an array of it);
+            // a map callback's value is an item of what map gives
+            void Returned(Node from, bool asItems)
             {
                 Node? n = from;
                 while (n != null && n is not IFunction) n = _parent.TryGetValue(n, out var up) ? up : null;
                 if (n is not IFunction fn) { written = true; return; }
-                if (!functions.Add(fn)) return;
-                if (NameOf(fn) is not { } fname || !_refs.TryGetValue(fname, out var calls)) { written = true; return; }
-                foreach (var c in calls)
-                    if (_parent[c] is CallExpression call && call.Callee == c) Value(call);
-                    else { written = true; return; }
+                if (!functions.Add((fn, asItems))) return;
+                if (!asItems && Mapped(fn) is { } map) { ItemsAt(map); return; }
+                if (CallsOf(fn) is not { } calls) { written = true; return; }
+                foreach (var call in calls)
+                    if (asItems) ItemsAt(call);
+                    else Value(call);
             }
 
             // `x.key` of it: this field, or a field only known at run time, which may be it
@@ -2565,8 +2760,7 @@ internal static partial class PlainTranslator
                     return;
                 }
                 var index = call.Arguments.ToList().IndexOf(arg);
-                if (call.Callee is Identifier f && Function(f) is { } fn && NameOf(fn) is { } fname && _refs.TryGetValue(fname, out var calls)
-                    && calls.All(c => _parent[c] is CallExpression cc && cc.Callee == c))
+                if (Target(call) is { } fn && CallsOf(fn) is { } calls && calls.Contains(call))
                 {
                     if (index < fn.Params.Count && fn.Params[index] is Identifier param) Holder(param);
                     return;
@@ -3408,9 +3602,16 @@ internal static partial class PlainTranslator
             var node = t.Node;
             var style = node.Attr("style");
             var cls = node.Attr("class") ?? string.Empty;
+            var classless = node.Attr("class") == null;
+            // Reclass writes the class attribute; an element the page gave none is put back with none
             Dictionary<string, SceneSlots.Value>? Drawn(string value) => Variant(
                 () => { node.Attributes["style"] = (style ?? string.Empty) + ";" + css + ":" + value; _built.Reclass(t.Ve, cls); },
-                () => { if (style == null) node.Attributes.Remove("style"); else node.Attributes["style"] = style; _built.Reclass(t.Ve, cls); });
+                () =>
+                {
+                    if (style == null) node.Attributes.Remove("style"); else node.Attributes["style"] = style;
+                    _built.Reclass(t.Ve, cls);
+                    if (classless) node.Attributes.Remove("class");
+                });
 
             // Every value from a fixed set: each is laid out, and the write picks the state it draws.
             var sets = writes.Select(w => Finite(w.Value)).ToList();
@@ -3442,7 +3643,11 @@ internal static partial class PlainTranslator
             double factor;
             if (unit == "px" || unit.Length == 0 && css is "opacity") factor = 1;
             else if (unit == "%" && !double.IsNaN(mapped.PercentOf)) factor = mapped.PercentOf / 100;
-            else { Refuse(at, $"{facet} in \"{(unit.Length == 0 ? "no unit" : unit)}\", which is not translated to scene units"); return; }
+            // a value with no unit the compile cannot fix: for a colour, a colour only known at run time
+            else if (unit.Length == 0 && (css == "color" || css.EndsWith("-color", StringComparison.Ordinal) || css is "background" or "fill" or "stroke"))
+            { Refuse(at, $"{facet} is written a colour only known at run time (one from a fixed set is translated: the values the script can give it, each laid out)"); return; }
+            else if (unit.Length == 0) { Refuse(at, $"{facet} is written a value only known at run time, neither one of a fixed set nor a number with a unit"); return; }
+            else { Refuse(at, $"{facet} in \"{unit}\", which is not translated to scene units"); return; }
 
             plan.Linear = new (string, double, double)[mapped.Slots.Length];
             for (var i = 0; i < mapped.Slots.Length; i++) plan.Linear[i] = (mapped.Slots[i], mapped.Scale[i] * factor, mapped.Bias[i]);

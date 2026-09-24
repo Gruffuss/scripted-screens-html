@@ -50,6 +50,17 @@ Newest first. The workshop page is a short overview; this file has the full hist
 - `[x].concat(obj.list)` adds the items of `obj.list`; it was counted as one item.
 - A list passed to a helper that takes items from it (`a.pop()` there) shows fewer rows as it shrinks;
   the rows it dropped stayed drawn.
+- A table built by a function called where it is written (`const ROLES = (() => { ... return [...]; })()`) is
+  a list and a source of fixed values, as a table written out is. An item found in a list with `find` (with a
+  `|| list[0]` or `?? fallback`) has its fields read as the values the list's items can have, and its own lists
+  as lists; the same for each item a callback walking a list is given, and for rows made by a `map` callback.
+- A row of a list takes its colour, class or style from its item's fields (`style="color:${e.color}"`) as one of
+  the values those fields can have, also when the list is kept in a state object and rebuilt with `concat` and
+  `slice`, and when an item is an array read by index (`d[1]`).
+- A style colour only known at run time is now said as such; the log read `style.color ... in "no unit"`.
+- An object patched with `Object.assign` is no longer read as a table of constants: a field it changes that way
+  kept its first value where a fixed value was needed.
+- A style written from a fixed set on an element without a class left an empty `class` attribute on the page.
 - `array.length = n` works (it clears or shortens an array as JavaScript does).
 - A compiled page sends only what changed since its last send: a value set and set back in one go is no
   longer sent again.

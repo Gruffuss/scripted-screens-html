@@ -109,6 +109,66 @@ internal static partial class PlainTranslator
             return e;
         }
 
+        /// <summary>The function a call runs, when the compile sees which: one bound to a name for good, or one written in place and called there.</summary>
+        private IFunction? Target(CallExpression call) => call.Callee is Identifier f ? Function(f) : Unwrap(call.Callee) as IFunction;
+
+        /// <summary>A function written in place as it stands in its parent, past any parentheses around it.</summary>
+        private Node Standing(IFunction fn)
+        {
+            Node n = (Node)fn;
+            while (_parent.TryGetValue(n, out var up) && up is ParenthesizedExpression) n = up;
+            return n;
+        }
+
+        /// <summary>Where a function is used: its name's references, or, written in place, where it stands.</summary>
+        private List<Expression> UsesOf(IFunction fn)
+            => NameOf(fn) is { } name ? (_refs.TryGetValue(name, out var refs) ? refs.Cast<Expression>().ToList() : new List<Expression>())
+               : Standing(fn) is Expression e ? new List<Expression> { e } : new List<Expression>();
+
+        /// <summary>Every call of a function, when every use of it is a call: null when it is handed on (a callback, a value).</summary>
+        private List<CallExpression>? CallsOf(IFunction fn)
+        {
+            var calls = new List<CallExpression>();
+            foreach (var use in UsesOf(fn))
+                if (_parent.TryGetValue(use, out var p) && p is CallExpression c && c.Callee == use) calls.Add(c);
+                else return null;
+            return calls;
+        }
+
+        /// <summary>The `.map` call a function written in place is the callback of.</summary>
+        private CallExpression? Mapped(IFunction fn)
+        {
+            var n = Standing(fn);
+            return _parent.TryGetValue(n, out var p) && p is CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "map" } } } c
+                   && c.Arguments.Count > 0 && c.Arguments[0] == n ? c : null;
+        }
+
+        /// <summary>A function handed to a method walking a list item by item (`list.map(fn)`, find, filter, some, reduce…): the list, and which parameter an item comes in.</summary>
+        private (Expression List, int Item)? WalkedAt(Expression use)
+        {
+            if (!_parent.TryGetValue(use, out var p) || p is not CallExpression c || c.Arguments.Count == 0 || c.Arguments[0] != use
+                || c.Callee is not MemberExpression { Computed: false, Property: Identifier { Name: var m } } me) return null;
+            return m switch
+            {
+                "map" or "forEach" or "filter" or "find" or "findIndex" or "findLast" or "findLastIndex" or "some" or "every" or "flatMap" => (me.Object, 0),
+                "reduce" or "reduceRight" => (me.Object, 1),
+                _ => null,
+            };
+        }
+
+        /// <summary>The items a list can hold (each with the scope it is read in), for one picked from it; null when the compile cannot say.</summary>
+        private List<(Expression, Inlined?)>? ItemsOf(Expression list, Inlined? bind)
+            => Listed(list, bind) is { Max: not null, Items: { } items } ? items : null;
+
+        /// <summary>An item picked from a list the compile knows: `list.find(…)`, `findLast`, or `list[i]` - the list, else null.</summary>
+        private static Expression? Picked(Expression e)
+            => Unwrap(e) switch
+            {
+                CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "find" or "findLast" } } m } => m.Object,
+                MemberExpression { Computed: true, Property: not StringLiteral } ix => ix.Object,
+                _ => null,
+            };
+
         private static List<Statement>? Stmts(Node n) => n switch
         {
             FunctionBody fb => fb.Body.ToList(),
@@ -816,12 +876,14 @@ internal static partial class PlainTranslator
                 case ArrayExpression a:
                     {
                         var l = new Lst { Max = 0 };
+                        var grows = false;
                         foreach (var x in a.Elements)
                         {
                             if (x is SpreadElement sp)
                             {
                                 var inner = Listed(sp.Argument, bind, depth + 1, seen);
-                                if (inner.Again) return Lst.Unknown("it is spread into itself, and so grows each time");
+                                // its own items again: no bound of its own, but the items it can hold are known (a slice of fixed size bounds it)
+                                if (inner.Again) { grows = true; l.Items = Union(l.Items, inner.Items); continue; }
                                 if (inner.Max == null) return inner;
                                 l.Max += inner.Max;
                                 l.Min += inner.Min;
@@ -832,7 +894,7 @@ internal static partial class PlainTranslator
                             l.Min++;
                             l.Items = x is Expression xe ? Union(l.Items, new() { (xe, bind) }) : null;
                         }
-                        return l;
+                        return grows ? new Lst { Why = "it is spread into itself, and so grows each time", Items = l.Items } : l;
                     }
                 case Identifier row when _itemOf.ContainsKey(row):
                     return Lst.Unknown("a list inside a row of another list (not translated yet)");
@@ -867,11 +929,28 @@ internal static partial class PlainTranslator
                             case "sort" or "reverse" or "toSorted" or "toReversed":
                                 return inner;
                             case "map":
-                                return inner.Max == null || inner.Again ? inner : new Lst { Max = inner.Max, Min = inner.Min, Items = null };
+                                {
+                                    if (inner.Max == null || inner.Again) return inner;
+                                    // each item what the callback gives back for an item of the list, that item bound to its parameter
+                                    List<(Expression, Inlined?)>? mapped = null;
+                                    if (inner.Items != null && c.Arguments.Count == 1 && Callback(c.Arguments[0]) is { Params.Count: > 0 } mfn && mfn.Params[0] is Identifier mp
+                                        && Returns(mfn) is var rs && rs.All(r => r != null))
+                                    {
+                                        mapped = new();
+                                        foreach (var (x, xe) in inner.Items)
+                                            foreach (var r in rs)
+                                            {
+                                                var env = new Inlined { [mp] = (x, xe) };
+                                                mapped.Add((r!, env));
+                                            }
+                                    }
+                                    return new Lst { Max = inner.Max, Min = inner.Min, Items = mapped };
+                                }
                             case "concat":
                                 {
-                                    if (inner.Again) return Lst.Unknown("it is concatenated onto itself, and so grows each time");
-                                    if (inner.Max == null) return inner;
+                                    // its own items again: no bound of its own, but the items it can hold are known (a slice of fixed size bounds it)
+                                    var grows = inner.Again;
+                                    if (inner.Max == null && !grows) return inner;
                                     var l = new Lst { Max = inner.Max, Min = inner.Min, Items = inner.Items };
                                     foreach (var arg in c.Arguments)
                                     {
@@ -879,7 +958,7 @@ internal static partial class PlainTranslator
                                         if (ae is ArrayExpression or Identifier or CallExpression or MemberExpression { Computed: false })
                                         {
                                             var more = Listed(ae, bind, depth + 1, seen);
-                                            if (more.Again) return Lst.Unknown("it is concatenated onto itself, and so grows each time");
+                                            if (more.Again) { grows = true; l.Items = Union(l.Items, more.Items); continue; }
                                             if (more.Max == null) return more;
                                             l.Max += more.Max;
                                             l.Min += more.Min;
@@ -887,12 +966,12 @@ internal static partial class PlainTranslator
                                         }
                                         else { l.Max++; l.Min++; l.Items = Union(l.Items, new() { (ae, bind) }); }
                                     }
-                                    return l;
+                                    return grows ? new Lst { Why = "it is concatenated onto itself, and so grows each time", Items = l.Items } : l;
                                 }
                         }
                         return Lst.Unknown($"the array .{p.Name}() gives");
                     }
-                case CallExpression { Callee: Identifier f } call when Function(f) is { } fn:
+                case CallExpression call when Target(call) is { } fn:
                     {
                         var inner = Inlined.Of(fn, call, bind);
                         var l = new Lst { Max = 0, Min = int.MaxValue };
