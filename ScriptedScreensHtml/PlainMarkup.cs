@@ -1764,7 +1764,8 @@ internal static partial class PlainTranslator
                 }
                 else if (of.Plan != null) lua.Emit(pad + "v_state(" + of.Plan.Var + ", " + Key(o) + ")");
                 // the elements a write makes are new ones: what listened on the old ones is gone
-                foreach (var made in of.Made.Where(m => m.Listens)) lua.Emit(pad + "v_unlisten(" + Q(made.Name) + ")");
+                foreach (var made in of.Made.Where(m => m.Listens))
+                    foreach (var key in made.Presses.Select(p => made.Name + " " + p).Prepend(made.Name)) lua.Emit(pad + "v_unlisten(" + Q(key) + ")");
                 Ops(o.Ops, pad);
                 foreach (var rep in o.Reps)
                     for (var k = 0; k < rep.Max; k++)

@@ -252,7 +252,7 @@ internal static class Probe4
     /// limits, set returns true): what it holds before the chunk loads, and what it holds afterwards.
     /// </summary>
     internal static List<string> DrivePlain(string lua, IEnumerable<(double Dt, string? Click)> steps, out Dictionary<string, Lua.LuaValue> data,
-                                            Dictionary<string, string>? persist = null)
+                                            Dictionary<string, string>? persist = null, bool authorFrame = false)
     {
         data = new Dictionary<string, Lua.LuaValue>(StringComparer.Ordinal);
         var state = Lua.LuaState.Create();
@@ -299,6 +299,12 @@ function surface:element(def)
 end
 function surface:get(id) return { id = id, type = 'html', rect = { unit = 'px', x = 0, y = 0, w = 460, h = 460 } } end
 function surface:commit() put('commit') end
+-- the chip's one per-frame callback (ScriptedScreens' ui:on_frame; no argument unregisters it), and the game's clock in seconds
+function surface:on_frame(fn) FRAME = fn put(fn == nil and 'on_frame cleared' or fn == AUTHOR_FRAME and 'on_frame author' or 'on_frame set') end
+GAME_T = 0
+util = { game_time = function() return GAME_T end }
+AUTHOR_FRAMES = 0
+function AUTHOR_FRAME() AUTHOR_FRAMES = AUTHOR_FRAMES + 1 end
 ss = { ui = { surface = function(name) put('surface ' .. name) return surface end } }
 AUTHOR_TICKS = 0
 function tick(dt) AUTHOR_TICKS = AUTHOR_TICKS + 1 end
@@ -322,6 +328,12 @@ ic = { persist = {
         var env = new Lua.LuaTable();
         env.Metatable = new Lua.LuaTable();
         env.Metatable["__index"] = state.Environment;
+        // the author registered a frame callback before the page came: the host hands it to the chunk (ChipHost.FrameOf)
+        if (authorFrame)
+        {
+            Do("FRAME = AUTHOR_FRAME", "author");
+            env["V_FRAMEAUTHOR"] = state.Environment["AUTHOR_FRAME"];
+        }
         if (Do(lua, "page", env) is { } load) return new List<string> { "FAILED load: " + load };
         state.Environment["PAGE_TICK"] = env["tick"];
         state.Environment["PAGE_ENV"] = env;
@@ -331,10 +343,14 @@ ic = { persist = {
         {
             // "!retire" is the host retiring the page (ChipHost.Retire): the chunk's V_LIVE goes false
             if (click == "!retire") script.Append("PAGE_ENV.V_LIVE = false LOG[#LOG + 1] = 'retired'\n");
+            // "~ms": the game's clock moves on by ms and the chip runs its frame callback, if one is registered
+            else if (click != null && click.StartsWith("~", StringComparison.Ordinal))
+                script.Append("GAME_T = GAME_T + ").Append(click.Substring(1)).Append(" / 1000 if FRAME then FRAME() end LOG[#LOG + 1] = 'frame'\n");
             else if (click != null) script.Append("CLICK(").Append(JsToLua.Quote(click)).Append(") LOG[#LOG + 1] = 'click ").Append(click).Append("'\n");
-            else script.Append("if PAGE_TICK then PAGE_TICK(").Append(dt.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
+            else script.Append("GAME_T = GAME_T + ").Append(dt.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append(" if PAGE_TICK then PAGE_TICK(").Append(dt.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
                        .Append(") else AUTHOR(").Append(dt.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append(") end LOG[#LOG + 1] = 'tick ").Append(++n).Append("'\n");
         }
+        if (authorFrame) script.Append("LOG[#LOG + 1] = 'author frames ' .. AUTHOR_FRAMES\n");
         script.Append("LOG[#LOG + 1] = 'author ticks ' .. AUTHOR_TICKS .. (tick == AUTHOR and ', its tick untouched' or ', its tick REPLACED')");
         var run = Do(script.ToString(), "ticks");
         if (state.Environment["LOG"].TryRead<Lua.LuaTable>(out var lines))

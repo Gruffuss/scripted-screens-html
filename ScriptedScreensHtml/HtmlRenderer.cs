@@ -2435,7 +2435,7 @@ internal static class HtmlRenderer
     }
 
     /// <summary>Attributes the mod keeps on a node for itself (click region, list and control markers); markup never carries them.</summary>
-    internal static readonly HashSet<string> InternalAttributes = new(StringComparer.OrdinalIgnoreCase) { "data-click", "data-listed", "data-control", "data-touched" };
+    internal static readonly HashSet<string> InternalAttributes = new(StringComparer.OrdinalIgnoreCase) { "data-click", "data-press", "data-listed", "data-control", "data-touched" };
 
     private static bool SameAttributes(HtmlNode o, HtmlNode n)
     {

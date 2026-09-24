@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
@@ -5449,7 +5449,9 @@ internal static class VectorEmitter
         if (string.IsNullOrEmpty(ve.name) || (ve.name.StartsWith("__", StringComparison.Ordinal) && !button))
             return sb;
         sb.Append(" id=").Append(ve.name);
-        return button ? sb.Append(" click=1") : sb;
+        if (!button) return sb;
+        // press=1: the region also reports down/up/leave (vector 0.11.36), for a script's press listeners; it implies click=1
+        return sb.Append(ctx.Built.NodeOf[ve].Attr("data-press") != null ? " press=1" : " click=1");
     }
 
     /// <summary>

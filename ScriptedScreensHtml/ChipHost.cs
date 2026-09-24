@@ -168,6 +168,10 @@ internal static class ChipHost
     {
         if (environment is not Lua.LuaTable env) return;
         env["V_LIVE"] = false;
+        // Its frame callback likewise, when the chip's is the page's: the one it ran after again, or none. Done
+        // here because a callback that unregisters itself cancels the call running it.
+        if (chip != null && env["V_FRAME"].TryRead<Lua.LuaFunction>(out var frame) && ReferenceEquals(FrameOf(chip), frame))
+            Unframe(chip, env["V_FRAMEAUTHOR"].TryRead<Lua.LuaFunction>(out var author) ? author : null);
         try
         {
             if (RuntimeOf(chip) is not { } runtime || !env["tick"].TryRead<Lua.LuaFunction>(out var tick)) return;
@@ -178,6 +182,60 @@ internal static class ChipHost
         catch (Exception ex)
         {
             ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: cannot take a replaced page's tick out of its chip: {ex.Message}");
+        }
+    }
+
+    /// <summary>ScriptedScreens' per-frame callbacks (ui:on_frame): one per chip, by its reference id, in a private table.</summary>
+    private static readonly Type? FramesType = typeof(SS).Assembly.GetType("ScriptedScreens.ScriptableUi.Lua.FrameCallbackManager", throwOnError: false);
+    private static FieldInfo? _framesInstance, _framesTable, _frameCallback;
+
+    /// <summary>
+    /// The frame callback the chip has registered now - the author's, or a page's before this one - or null. A plain
+    /// page takes the chip's one callback only while it has a frame queued, and runs this one after its own.
+    /// </summary>
+    internal static Lua.LuaFunction? FrameOf(object? chip)
+    {
+        try
+        {
+            if (chip == null || FramesType == null) return null;
+            _framesInstance ??= FramesType.GetField("_instance", BindingFlags.Static | BindingFlags.NonPublic);
+            _framesTable ??= FramesType.GetField("_callbacks", BindingFlags.Instance | BindingFlags.NonPublic);
+            var id = chip.GetType().GetProperty("ReferenceId")?.GetValue(chip);
+            if (id == null || _framesInstance?.GetValue(null) is not { } manager || _framesTable?.GetValue(manager) is not IDictionary table
+                || !table.Contains(id) || table[id] is not { } data) return null;
+            _frameCallback ??= data.GetType().GetField("Callback", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            return _frameCallback?.GetValue(data) as Lua.LuaFunction;
+        }
+        catch (Exception ex)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: cannot read a chip's frame callback: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Gives the chip's frame callback back to <paramref name="author"/>, or unregisters it when there is none.</summary>
+    private static void Unframe(object chip, Lua.LuaFunction? author)
+    {
+        try
+        {
+            if (FramesType == null) return;
+            const BindingFlags any = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+            if (author == null)
+            {
+                FramesType.GetMethod("Unregister", any)?.Invoke(null, new[] { chip });
+                return;
+            }
+            if (StateOf(chip) is not Lua.LuaState state) return;
+            foreach (var m in FramesType.GetMethods(any))
+                if (m.Name == "Register" && m.GetParameters().Length == 3)
+                {
+                    m.Invoke(null, new object[] { chip, state.MainThread, author });
+                    return;
+                }
+        }
+        catch (Exception ex)
+        {
+            ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: cannot give a replaced page's frame callback back: {ex.Message}");
         }
     }
 
@@ -193,7 +251,8 @@ internal static class ChipHost
     /// It is run through a protected coroutine and the stack is rewound afterwards, which is the
     /// pattern StationeersLua itself uses to inject its require bootstrap into a live chip.
     /// </remarks>
-    internal static (object? Env, object? Frame) LoadInto(object? state, string lua, string chunkName)
+    /// <param name="frameAuthor">The chip's frame callback before the page (<see cref="FrameOf"/>), which a plain page runs after its own frames.</param>
+    internal static (object? Env, object? Frame) LoadInto(object? state, string lua, string chunkName, Lua.LuaFunction? frameAuthor = null)
     {
         if (state is not Lua.LuaState chip) return (null, null);
         try
@@ -202,6 +261,8 @@ internal static class ChipHost
             var meta = new Lua.LuaTable();
             meta["__index"] = chip.Environment;
             env.Metatable = meta;
+            // before the chunk runs: its script may queue a frame at once, which takes the chip's callback
+            if (frameAuthor != null) env["V_FRAMEAUTHOR"] = frameAuthor;
 
             var closure = chip.Load(lua.AsSpan(), chunkName, env);
 

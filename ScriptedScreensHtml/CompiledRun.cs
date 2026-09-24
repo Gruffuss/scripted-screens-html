@@ -330,7 +330,7 @@ internal sealed class CompiledRun
             NotYet = true;
             return null;
         }
-        var (env, _) = ChipHost.LoadInto(state, compiled.Lua!, "@html:" + page);
+        var (env, _) = ChipHost.LoadInto(state, compiled.Lua!, "@html:" + page, ChipHost.FrameOf(chip));
         // A page with no timers has no tick: its clicks come through its own scene element.
         if (env == null || env is Lua.LuaTable table && table["tick"].TryRead<Lua.LuaFunction>(out _) && !ChipHost.ChainTick(chip, env))
         {
