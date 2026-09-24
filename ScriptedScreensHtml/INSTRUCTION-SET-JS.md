@@ -1014,4 +1014,4 @@ Grouped per namespace object rather than per member (per task scope).
 
 ## Counts
 
-**797 total data rows** (verified by counting table rows in the assembled file — sub-agent self-reported subtotals below are approximate hand counts, kept for orientation): 3a statements ~54, 3b expressions/operators ~99, 3c built-in object members across 37 built-ins, 3d Intl 13 namespace rows.
+**797 total data rows** (verified by counting table rows in the assembled file — the subtotals below are approximate hand counts, kept for orientation): 3a statements ~54, 3b expressions/operators ~99, 3c built-in object members across 37 built-ins, 3d Intl 13 namespace rows.

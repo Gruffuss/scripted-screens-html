@@ -1237,4 +1237,4 @@ Newer/external-spec `on*` handlers found on `Window`/`Document` during sourcing 
 
 ## Counts
 
-**719 total data rows** (verified by counting table rows in the assembled file, i.e. every `| ... | | | | |` line — sub-agent self-reported subtotals below are approximate hand counts, kept for orientation): 1a elements ~250 across HTML/obsolete/SVG/MathML, 1b global attributes 39, 1c element-specific attributes ~214 across 91 element headings, 1d event handlers 121.
+**719 total data rows** (verified by counting table rows in the assembled file, i.e. every `| ... | | | | |` line — the subtotals below are approximate hand counts, kept for orientation): 1a elements ~250 across HTML/obsolete/SVG/MathML, 1b global attributes 39, 1c element-specific attributes ~214 across 91 element headings, 1d event handlers 121.

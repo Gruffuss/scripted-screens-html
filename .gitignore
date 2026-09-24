@@ -34,7 +34,6 @@ CLAUDE.md
 FOR-VECTOR-SESSION.md
 
 # the knowledge-graph build: generated, and one file per node
-graphify-out/
 
 # bench scene dumps written by --holes
 ScriptedScreensHtml.Bench/holes-scene*.txt

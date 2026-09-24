@@ -5,7 +5,7 @@ This file is the compiler's scope and its progress. One table per language, and 
 compiler is assigned, done and reported by rows of this file, never by pages. Pages are only
 integration checks.
 
-## Rules for everyone who edits this file (sessions and agents)
+## Rules for editing this file
 
 - **Status** is one of three things:
   - ✅ **translated**: the feature compiles the way `CLAUDE.md` ("THE SPEC") says, into a vector scene
@@ -24,7 +24,7 @@ integration checks.
   chunk driven from C#, the Jint interpreter. A feature that works only there is blank.
 - Change a row in the same commit as the code and test that justify it. Never mark a row you did
   not verify.
-- One agent takes one section or one group of rows. Say which rows in the brief and in the report.
+- Work on one section or one group of rows at a time, and name the rows a change covers.
 
 ## Columns
 

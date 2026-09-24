@@ -1440,4 +1440,4 @@ Defined by the CSS Values spec but not currently consumed by any shipped CSS pro
 
 ## Counts
 
-**887 total data rows** (verified by counting table rows in the assembled file — sub-agent self-reported subtotals below are approximate hand counts, kept for orientation): properties across 42 module sections (2a, ~414 distinct properties, some cross-listed under more than one module so the row count runs higher), selectors/at-rules/functions/units (2b/2c/2d/2e).
+**887 total data rows** (verified by counting table rows in the assembled file — the subtotals below are approximate hand counts, kept for orientation): properties across 42 module sections (2a, ~414 distinct properties, some cross-listed under more than one module so the row count runs higher), selectors/at-rules/functions/units (2b/2c/2d/2e).
