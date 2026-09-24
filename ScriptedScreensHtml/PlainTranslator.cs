@@ -695,6 +695,16 @@ internal static partial class PlainTranslator
             return TargetOf(ve, node);
         }
 
+        /// <summary>
+        /// `document.documentElement`: the page's root box. The renderer draws &lt;html&gt; and &lt;body&gt; as one box (`:root`
+        /// matches it), so what the script does to the root element it does to that box.
+        /// </summary>
+        // ponytail: an attribute set here lands on <body>'s node, so a selector naming the html tag with it (`html[data-x]`) does not see it; `:root[data-x]` and `[data-x]` do
+        private bool IsRoot(Expression e)
+            => e is MemberExpression { Computed: false, Object: Identifier { Name: "document" }, Property: Identifier { Name: "documentElement" } } && !Declared("document");
+
+        private Target Root() => TargetOf(_built.Root, _built.NodeOf[_built.Root]);
+
         private Target TargetOf(VisualElement ve, HtmlNode node)
         {
             if (!_targets.TryGetValue(ve, out var t))
@@ -798,6 +808,9 @@ internal static partial class PlainTranslator
 
                 case CallExpression c when DomCall(c) is { } q:
                     return Looked(c, q.Kind, q.Under, q.Arg, bind);
+
+                case MemberExpression root when IsRoot(root):
+                    return Els.Of(Root());
 
                 case MemberExpression { Computed: true } ix when Elems(ix.Object, bind) is { List: true } list:
                     return Pick(list, ix.Property);
@@ -1220,6 +1233,14 @@ internal static partial class PlainTranslator
             }
         }
 
+        /// <summary>
+        /// A scroll container, as CSS makes one: overflow auto, scroll or hidden on either axis (a script can scroll a
+        /// hidden one; visible and clip on both axes make none).
+        /// </summary>
+        private static bool ScrollBox(Dictionary<string, string> css)
+            => new[] { "overflow", "overflow-x", "overflow-y" }.Any(k => css.TryGetValue(k, out var v)
+                   && v.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).Any(w => w.ToLowerInvariant() is "auto" or "scroll" or "hidden" or "overlay"));
+
         private static string ElementWord(Els els)
             => els.Ts.Count == 1 ? $"the element \"{els.Ts[0].Name}\"" : els.Ts.Count == 0 ? "an element the page as written does not have" : $"an element chosen at run time ({els.Ts.Count} candidates)";
 
@@ -1305,6 +1326,9 @@ internal static partial class PlainTranslator
                 case CallExpression c when DomCall(c) != null:
                     Source(c);
                     return;
+                case MemberExpression root when IsRoot(root):
+                    Source(root);
+                    return;
                 case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "item" } } im } ic when Elems(im.Object) is { List: true }:
                     Source(ic);
                     return;
@@ -1332,7 +1356,8 @@ internal static partial class PlainTranslator
 
                 case Identifier { Name: "document" } doc when !Declared("document") && Reference(doc):
                     if (!(_parent[doc] is MemberExpression { Computed: false, Property: Identifier { Name: "getElementById" or "querySelector" or "querySelectorAll" or "getElementsByClassName" or "getElementsByTagName" } } dm
-                          && dm.Object == doc && _parent.TryGetValue(dm, out var dc) && dc is CallExpression cc && cc.Callee == dm))
+                          && dm.Object == doc && _parent.TryGetValue(dm, out var dc) && dc is CallExpression cc && cc.Callee == dm)
+                        && !(_parent[doc] is MemberExpression de && IsRoot(de)))
                         Refuse(doc, "document." + (_parent[doc] is MemberExpression { Computed: false, Property: Identifier dp } ? dp.Name : "…")
                                     + ", which is outside the translated DOM features");
                     return;
@@ -1393,6 +1418,7 @@ internal static partial class PlainTranslator
         private bool Lookupish(Expression e, int depth = 0) => depth < 4 && e switch
         {
             Identifier => true,
+            MemberExpression root when IsRoot(root) => true,
             CallExpression c when DomCall(c) is { } q => (q.Under == null || Lookupish(q.Under, depth + 1)) && c.Arguments.All(a => a is Expression x && Pure(x)),
             CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "item" } } im } ic
                 => Lookupish(im.Object, depth + 1) && ic.Arguments.All(a => a is Expression x && Pure(x)),
@@ -1523,6 +1549,27 @@ internal static partial class PlainTranslator
 
                 case "dataset":
                     Dataset(r, m);
+                    return;
+
+                // An element that is no scroll container has no offset: it reads 0 and a write does nothing, as in a browser.
+                case "scrollTop" or "scrollLeft":
+                    if (r.Ts.FirstOrDefault(x => ScrollBox(_built.CssOf(x.Ve))) is { } box)
+                    {
+                        Refuse(m, WrittenTo(m)
+                            ? $".{prop.Name} written on \"{box.Name}\", a scroll box (not translated yet: the vector mod's SC takes a jump as so=/sov=)"
+                            : $".{prop.Name} of \"{box.Name}\", a scroll box: the chip never learns the offset the player scrolled it to "
+                              + "(the vector mod keeps it on each client and tells only C#, VectorGraphic.ScrollChanged; reading it needs the offset sent to the chip, as on_click is)");
+                        return;
+                    }
+                    if (Assigned(m) is { } scroll) Read(r, scroll.At, (_, _, tr) => tr(scroll.Value));
+                    else if (Compound(m) is { } moved)
+                    {
+                        // `el.scrollTop += v`: the offset read (0), the sum worked out for its effects, the write dropped
+                        Read(r, m, (_, _, _) => "0");
+                        Read(r, moved.At, (_, _, tr) => tr(moved.Value));
+                    }
+                    else if (!WrittenTo(m)) Read(r, m, (_, _, _) => "0");
+                    else Refuse(m, $"this use of .{prop.Name} of {r.Name}");
                     return;
 
                 case "classList":
@@ -3877,6 +3924,7 @@ internal static partial class PlainTranslator
 
             var node = t.Node;
             var was = node.Attr("class") ?? string.Empty;
+            var hadClass = node.Attr("class") != null;
             var wasAttrs = plan.Attrs.Select(a => node.Attr(a.Name)).ToList();
             var wasDisplay = t.Ve.style.display;
             var hides = plan.Attrs.Any(a => a.Name == "hidden");
@@ -3900,7 +3948,8 @@ internal static partial class PlainTranslator
                 var attrs = new List<string?>();
                 var rest = key >> plan.Names.Count;
                 foreach (var a in plan.Attrs) { attrs.Add(a.Options[rest % a.Options.Count]); rest /= a.Options.Count; }
-                var drawn = Variant(() => Apply(cls, attrs), () => { Apply(was, wasAttrs); t.Ve.style.display = wasDisplay; });
+                // put back as built: an element written with no class attribute is left with none
+                var drawn = Variant(() => Apply(cls, attrs), () => { Apply(was, wasAttrs); if (!hadClass) node.Attributes.Remove("class"); t.Ve.style.display = wasDisplay; });
                 if (drawn == null)
                 {
                     var described = cls + string.Concat(plan.Attrs.Select((a, i) => attrs[i] == null ? string.Empty : $" [{a.Name}=\"{attrs[i]}\"]"));
@@ -4468,6 +4517,8 @@ internal static partial class PlainTranslator
                 // an element is its number, a list of them a table of numbers built once
                 case CallExpression c when DomCall(c) != null:
                     return DomValue(c, lua);
+                case MemberExpression root when IsRoot(root):
+                    return Root().Number.ToString(CultureInfo.InvariantCulture);
                 case Identifier id when _vars.TryGetValue(id.Name, out var held):
                     return held.Number.ToString(CultureInfo.InvariantCulture);
                 // `this` in a click listener: its element, or the one the click is going through (V_EV.currentTarget)

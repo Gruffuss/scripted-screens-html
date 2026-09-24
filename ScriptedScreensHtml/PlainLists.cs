@@ -59,6 +59,11 @@ internal static partial class PlainTranslator
             public readonly Dictionary<int, List<(MkAlt Alt, List<int> Keys)>> Gates = new();
             /// <summary>Per gated row, its choices laid out together (one, or those moving a slot in common) and what each combination of their shapes draws.</summary>
             public readonly List<(int K, List<int> Members, StylePlan Plan)> GatePlans = new();
+            /// <summary>
+            /// The callback reads the array it walks (`(x, i, all) => … all.length`) and that array is not the source
+            /// but the source after this many stages: the Lua keeps it as the view `v`, refilled when the rows are counted.
+            /// </summary>
+            public int Whole = -1;
             public string Var => "V_R" + Id.ToString(CultureInfo.InvariantCulture);
             public bool Filtered => Stages.Any(s => s.Test != null);
             public bool Sliced => Stages.Count > 0;
@@ -211,6 +216,17 @@ internal static partial class PlainTranslator
             return id;
         }
 
+        /// <summary>
+        /// The array a map or forEach callback walks, its third parameter: the source array the Lua read when it counted the
+        /// rows, or, after slices and filters, the view of what is left of it that the count keeps (<see cref="MkRep.Whole"/>).
+        /// </summary>
+        private Identifier Walked(MkRep rep, List<(Expression, Inlined?)>? items)
+        {
+            if (rep.Stages.Count == 0) return Held(rep.Var + ".a", items);
+            rep.Whole = rep.Stages.Count;
+            return Held(rep.Var + ".v", items);
+        }
+
         private static string ItemLua(MkRep rep, int k)
         {
             var at = k.ToString(CultureInfo.InvariantCulture);
@@ -278,13 +294,15 @@ internal static partial class PlainTranslator
             }
             rep.Max = most;
             rep.Min = Math.Min(least, most);
-            if (!Params(fn, map, out var item, out var index, out var fields)) return null;
+            if (!Params(fn, map, out var item, out var index, out var fields, out var all, walked: true)) return null;
             var exact = Exact(src, env, rep);
+            var whole = all != null ? Walked(rep, listed.Items) : null;
             var ok = FillRows(rep, (x, i) =>
             {
                 var rowEnv = Copy(env);
                 if (item != null) rowEnv[item] = (x, null);
                 if (index != null) rowEnv[index] = (i, null);
+                if (all != null) rowEnv[all] = (whole!, null);
                 foreach (var (name, field) in fields) rowEnv[field] = (Made(new MemberExpression(x, new Identifier(name), false, false), map), null);
                 return fn.Body is Expression body ? Tpl(body, rowEnv, write, depth + 1) : Steps(((FunctionBody)fn.Body).Body, 0, rowEnv, write, depth + 1, fn);
             }, exact ?? listed.Items, exact != null, index != null && Reads(fn, index), sep, write);
@@ -293,8 +311,16 @@ internal static partial class PlainTranslator
 
         /// <summary>A callback's item and index parameters; an object pattern of plain names is the item's fields.</summary>
         private bool Params(IFunction fn, Node at, out Identifier? item, out Identifier? index, out List<(string Name, Identifier Id)> fields)
+            => Params(fn, at, out item, out index, out fields, out _, walked: false);
+
+        /// <summary>
+        /// The same, and the third parameter, the array walked, when the callback reads it and <paramref name="walked"/>
+        /// says the caller binds it (map and forEach: the rows' own array).
+        /// </summary>
+        private bool Params(IFunction fn, Node at, out Identifier? item, out Identifier? index, out List<(string Name, Identifier Id)> fields,
+                            out Identifier? all, bool walked)
         {
-            item = index = null;
+            item = index = all = null;
             fields = new List<(string, Identifier)>();
             for (var p = 0; p < fn.Params.Count; p++)
             {
@@ -313,6 +339,7 @@ internal static partial class PlainTranslator
                 }
                 if (p == 0) item = id;
                 else if (p == 1) index = id;
+                else if (p == 2 && walked && Reads(fn, id)) all = id;
                 else if (Reads(fn, id)) { Refuse(param, "a list callback reading the whole array it walks (not translated yet)"); return false; }
             }
             return true;
@@ -693,7 +720,7 @@ internal static partial class PlainTranslator
             Expression? src = null, count = null;
             double start = 0, step = 1;
             var op = Operator.LessThan;
-            Identifier? item = null, index = null;
+            Identifier? item = null, index = null, all = null;
             List<(string Name, Identifier Id)> fields = new();
             Node body;
             switch (s)
@@ -710,7 +737,7 @@ internal static partial class PlainTranslator
                     break;
                 case ExpressionStatement { Expression: CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "forEach" } } fm } fc }
                     when fc.Arguments.Count == 1 && Callback(fc.Arguments[0]) is { } fn:
-                    if (!Params(fn, fc, out item, out index, out fields)) return null;
+                    if (!Params(fn, fc, out item, out index, out fields, out all, walked: true)) return null;
                     src = fm.Object;
                     body = (Node)fn.Body;
                     break;
@@ -750,11 +777,13 @@ internal static partial class PlainTranslator
             var statements = body is Expression ? null : Stmts(body);
             var readIndex = index != null && Markup.Everything(body).Any(x => x is Identifier r && r != index && Reference(r) && Decl(r) == index);
             var exact = src != null ? Exact(Unwrap(src), env, rep) : null;
+            var whole = all != null ? Walked(rep, items) : null;
             var ok = FillRows(rep, (x, i) =>
             {
                 var rowEnv = Copy(env);
                 if (item != null) rowEnv[item] = (x, null);
                 if (index != null) rowEnv[index] = (i, null);
+                if (all != null) rowEnv[all] = (whole!, null);
                 foreach (var (name, field) in fields) rowEnv[field] = (Made(new MemberExpression(x, new Identifier(name), false, false), s), null);
                 if (statements == null)
                 {
