@@ -116,6 +116,10 @@ internal static partial class PlainTranslator
         private readonly HashSet<AssignmentExpression> _markupSeen = new();
         private readonly Dictionary<Target, MarkupOf> _markupOf = new();
         private readonly Dictionary<Target, MarkupOf> _madeBy = new();
+        /// <summary>The ids markup gives what it makes, as its author wrote them: elements of the page for a lookup by an id built at run time.</summary>
+        private readonly HashSet<string> _markupIds = new(StringComparer.Ordinal);
+        /// <summary>A markup write into an element chosen at run time: what picks it, and the write laid out into each element it can be.</summary>
+        private readonly Dictionary<AssignmentExpression, (Expression Recv, List<MarkupWrite> Writes)> _markupPick = new();
         private readonly HashSet<Node> _synthetic = new();
         private readonly Dictionary<Node, Node> _origin = new();
         private readonly Dictionary<ParenthesizedExpression, Inlined?> _bindOf = new();
@@ -174,34 +178,45 @@ internal static partial class PlainTranslator
                     _markupSeen.Add(a);
                     var m = (MemberExpression)a.Left;
                     var els = Elems(m.Object);
-                    if (els == null || els.Bad != null || !els.One || !Lookupish(m.Object))
+                    if (els == null || els.Bad != null || els.List || els.Ts.Count == 0 || !Lookupish(m.Object))
                     {
-                        Refuse(a, els?.Bad ?? "innerHTML on an element chosen at run time (not translated yet: one element the script names is)");
+                        Refuse(a, els?.Bad ?? (els == null ? "innerHTML on a value the compile does not follow as an element"
+                            : els.List ? "innerHTML on a list of elements, which a browser's lists do not have"
+                            : els.Ts.Count == 0 ? "innerHTML on an element the page as written does not have (a browser throws on the property of null)"
+                            : "innerHTML on an element picked by an expression that does more than look it up (not translated yet)"));
                         continue;
                     }
-                    var t = els.Ts[0];
-                    if (Tpl(a.Right, null, a, 0) is not { } tpl) continue;
-                    // `el.innerHTML = …;` then `el.innerHTML += …` (in loops, too): one write, made after its last step
-                    Statement? last = null;
-                    if (_parent[a] is ExpressionStatement start && _parent.TryGetValue(start, out var block) && Stmts(block) is { } list)
+                    // an element chosen at run time: the markup laid out into each element it can be, and the Lua picks one
+                    var pick = !els.One;
+                    List<MarkupWrite>? laid = new();
+                    foreach (var t in els.Ts)
                     {
-                        var seen = new List<AssignmentExpression>();
-                        var consumed = new List<Statement>();
-                        if (Sequence(list, list.IndexOf(start) + 1, AppendToElement(t, seen), null, a, 0, bindDecls: false, out _, consumed) is not { } more) continue;
-                        if (consumed.Count > 0)
+                        if (Tpl(a.Right, null, a, 0) is not { } tpl) { laid = null; break; }
+                        // `el.innerHTML = …;` then `el.innerHTML += …` (in loops, too): one write, made after its last step
+                        Statement? last = null;
+                        if (!pick && _parent[a] is ExpressionStatement start && _parent.TryGetValue(start, out var block) && Stmts(block) is { } list)
                         {
-                            tpl = tpl.Concat(more).ToList();
-                            _silenced.Add(start);
-                            foreach (var s in consumed) _silenced.Add(s);
-                            foreach (var plus in seen) _markupSeen.Add(plus);
-                            last = consumed[^1];
+                            var seen = new List<AssignmentExpression>();
+                            var consumed = new List<Statement>();
+                            if (Sequence(list, list.IndexOf(start) + 1, AppendToElement(t, seen), null, a, 0, bindDecls: false, out _, consumed) is not { } more) { laid = null; break; }
+                            if (consumed.Count > 0)
+                            {
+                                tpl = tpl.Concat(more).ToList();
+                                _silenced.Add(start);
+                                foreach (var s in consumed) _silenced.Add(s);
+                                foreach (var plus in seen) _markupSeen.Add(plus);
+                                last = consumed[^1];
+                            }
                         }
+                        if (!_markupOf.TryGetValue(t, out var of)) _markupOf[t] = of = new MarkupOf { T = t };
+                        var w = new MarkupWrite { At = a, Of = of, Template = tpl };
+                        of.Writes.Add(w);
+                        laid.Add(w);
+                        if (last != null) _markupAt[last] = w;
                     }
-                    if (!_markupOf.TryGetValue(t, out var of)) _markupOf[t] = of = new MarkupOf { T = t };
-                    var w = new MarkupWrite { At = a, Of = of, Template = tpl };
-                    of.Writes.Add(w);
-                    _markup[a] = w;
-                    if (last != null) _markupAt[last] = w;
+                    if (laid == null) continue;
+                    if (pick) _markupPick[a] = (m.Object, laid);
+                    else _markup[a] = laid[0];
                 }
                 foreach (var of in _markupOf.Values.ToList())
                 {
@@ -892,8 +907,8 @@ internal static partial class PlainTranslator
         {
             var t = of.T;
             // What the page wrote shows until the first write - unless a write runs as the page loads,
-            // before a browser has drawn anything.
-            of.KeepOwn = !of.Writes.Any(w => AtSetup(w.At));
+            // before a browser has drawn anything, and into this element (not one picked at run time).
+            of.KeepOwn = !of.Writes.Any(w => AtSetup(w.At) && !_markupPick.ContainsKey(w.At));
             if (of.KeepOwn && (t.Ve is Label || t.Node.Children.Any(c => c.IsText && c.Text.Trim().Length > 0)))
             {
                 Refuse(of.Writes[0].At, $"the text \"{t.Name}\" holds as the page wrote it, shown until markup replaces it later, next to elements the markup makes (not translated yet)");
@@ -928,6 +943,7 @@ internal static partial class PlainTranslator
             if (!of.KeepOwn) foreach (var child in t.Ve.Children().ToList()) Drop(child);
             Rebuild(of, (of.KeepOwn ? own : new List<HtmlNode>()).Concat(built.SelectMany(b => b.Stand.Children)).ToList());
             if (_refused.Count > 0) return;
+            _markupIds.UnionWith(ids);
 
             if (of.KeepOwn) of.Own.AddRange(own.Where(n => !n.IsText && Ve(n) != null).Select(n => TargetOf(Ve(n)!, n)));
             foreach (var b in built)

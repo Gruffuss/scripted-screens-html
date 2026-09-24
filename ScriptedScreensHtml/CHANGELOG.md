@@ -124,6 +124,14 @@ Newest first. The workshop page is a short overview; this file has the full hist
   exactly.
 - `getAttribute('data-click')` and `hasAttribute` on an element markup makes read null and false, as for
   any attribute the page never wrote: they read the compile's own click-region marker.
+- `innerHTML` compiles when it is written into an element chosen while the page runs: one of two ids
+  (`getElementById(on ? 'a' : 'b')`), an element of a list, an element passed to a function, an id a
+  helper is given. The markup is laid out once into each element it can reach, and the console picks
+  the one the script holds. An element a write at load does not reach shows what the page wrote there.
+- `getElementById` with an id built while the page runs compiles in more forms: through a helper
+  (`const $ = (id) => document.getElementById(id)`), from `this.id` in a getter of objects pushed into
+  an array (`get el() { return $(this.id); }`, then `o.el` is an element), and for an element markup
+  makes (`$('pad' + i)` after the markup gave it `id="pad0"`...).
 
 ## 0.2.0
 
