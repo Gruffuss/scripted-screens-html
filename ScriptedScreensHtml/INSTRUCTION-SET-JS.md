@@ -15,7 +15,7 @@ Rules and columns: see INSTRUCTION-SET.md.
 | `await using` declaration | | | | |
 | `if...else` | | | | |
 | `switch...case...default` | | | | |
-| `for` | | | | |
+| `for` | ✅ | a Lua `while` loop with its initialiser and update (`JsToLua.ForLoop`). A loop adding markup counting from a start the compile knows as one number, by a fixed step (`++`, `--`, `+=`, `-=`, `i = i ± s`), to a bound tested with `<`, `<=`, `>` or `>=`: a list laid out once at the most rows its bounds give, each row's index as JavaScript steps it (added up, so a fractional step rounds as it does there), and the rows shown counted on the chip by the loop's own steps (from 0 by 1: `math.ceil`/`math.floor` of the bound). Refused by name for now: a start that is one of several values, and a count loop that skips rows (`continue`) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "for loops counting from 1 with <=, down with > and with >= by -5, by a step of 2, and by a fraction"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a loop over a count from a fixed set, and a list filtered by a test that reads its index"; PlainTranslatorTests: "the script's own logic: arrays, a loop, Math, an object; a px width and a class from it"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: plain-events.lua (the in-game page, not yet seen in game) | |
 | `for...in` | | | | |
 | `for...of` | | | | |
 | `for await...of` | | | | |
@@ -148,7 +148,7 @@ Rules and columns: see INSTRUCTION-SET.md.
 | `yield` | | | | |
 | `yield*` | | | | |
 | `await` | | | | |
-| `this` | | | | |
+| `this` | ✅ | in a click listener - a `function` given to `addEventListener('click')`, an `onclick` handler, an onclick attribute's code, and an arrow inside one (whose `this` is the function's): the element it listens on, as `e.currentTarget`; its number when it listens on one element, else `V_EV.currentTarget` read when the click reaches it. Refused by name: in a function also called some other way (its `this` there is not the element), in an arrow inside a listener on more than one element; elsewhere as before | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "onclick attributes and this: an attribute's code with this and event, one handing this to a function, one on an element with no id, a listener's this on two elements, an onclick property's this, an attribute's handler running before a listener the script adds, and one the script replaces"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: plain-events.lua (the in-game page, not yet seen in game) | |
 | `super(...)` call form | | | | |
 | `super.prop` property access form | | | | |
 | Template literal (`` `text ${expr}` ``) | ✅ | the pieces concatenated, each value through `js_str`; a null (written, or a read that gives null) prints "null" | PlainTranslatorTests: toFixed and a template literal; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a method called on a literal array, and null as text in a larger expression, a template and String()" | |
@@ -246,8 +246,8 @@ Rules and columns: see INSTRUCTION-SET.md.
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
 | Boolean() (constructor) | | | | |
-| Boolean.prototype.toString | | | | |
-| Boolean.prototype.valueOf | | | | |
+| Boolean.prototype.toString | ✅ | "true" or "false": `BooleanMethods.toString` through `js_m`. A boolean (or undefined, or an array) written into text by any route - `+`, a template, a whole `textContent` - goes to the scene as JavaScript prints it (`v_txt`, `js_str`), never as a Lua boolean, which the vector mod does not read | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "booleans and undefined written into text: every(), includes(), a comparison, a boolean held in a name, toString(), valueOf() and String() of one, a variable never set"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: plain-bool.lua (the in-game page) | |
+| Boolean.prototype.valueOf | ✅ | the boolean itself (`BooleanMethods.valueOf`) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "booleans and undefined written into text: every(), includes(), a comparison, a boolean held in a name, toString(), valueOf() and String() of one, a variable never set" | |
 | Boolean.prototype.constructor | | | | |
 
 #### Symbol

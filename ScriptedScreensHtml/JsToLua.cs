@@ -210,6 +210,8 @@ internal sealed class JsToLua
         /// effect (an expression statement, a loop's update, a concise arrow's body).
         /// </summary>
         public Func<JsToLua, Node, bool>? Statement;
+        /// <summary>Where a node is, for a problem found there: null for its line in the script.</summary>
+        public Func<Node, string?>? Where;
     }
 
     private Hooks? _hooks;
@@ -578,7 +580,7 @@ internal sealed class JsToLua
     }
 
     private void Unsupported(Node n, string what) =>
-        _problems.Add("line " + n.Location.Start.Line.ToString(CultureInfo.InvariantCulture) + ": " + what + " is not translatable");
+        _problems.Add((_hooks?.Where?.Invoke(n) ?? "line " + n.Location.Start.Line.ToString(CultureInfo.InvariantCulture)) + ": " + what + " is not translatable");
 
     private string Fail(Node n, string what)
     {

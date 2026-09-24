@@ -1570,7 +1570,7 @@ end
 -- receiver. That is not a shortcut: every function stored on an object across these pages is an
 -- arrow function, which by definition ignores `this`.
 
-local StringMethods, ArrayMethods, NumberMethods = {}, {}, {}
+local StringMethods, ArrayMethods, NumberMethods, BooleanMethods = {}, {}, {}, {}
 -- Methods every object has, kept apart from ArrayMethods so the array path - the hot one - is
 -- unchanged, and consulted only after it misses.
 local ObjectMethods = {}
@@ -1602,6 +1602,9 @@ function js_m(obj, name, ...)
     if m then return m(obj, ...) end
   elseif type(obj) == "number" then
     local m = NumberMethods[name]
+    if m then return m(obj, ...) end
+  elseif type(obj) == "boolean" then
+    local m = BooleanMethods[name]
     if m then return m(obj, ...) end
   end
   error("the page calls ." .. tostring(name) .. "() on a " .. js_typeof(obj) .. ", which the prelude does not provide")
@@ -1912,6 +1915,10 @@ function NumberMethods.toFixed(v, digits)
 end
 
 function NumberMethods.toString(v) return js_str(v) end
+
+-- Boolean.prototype: the two words, as String(b) gives them
+function BooleanMethods.toString(b) return b and "true" or "false" end
+function BooleanMethods.valueOf(b) return b end
 
 -- %g picks the shorter of fixed and exponential at the same significance, which is what toPrecision
 -- does; the one place they part is that %g strips trailing zeros and toPrecision keeps them, so

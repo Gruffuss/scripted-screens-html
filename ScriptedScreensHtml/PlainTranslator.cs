@@ -125,7 +125,7 @@ internal static partial class PlainTranslator
         }
         if (refused.Count > 0) return null;
 
-        var hooks = new JsToLua.Hooks { Expression = page.Expression, Statement = page.Statement };
+        var hooks = new JsToLua.Hooks { Expression = page.Expression, Statement = page.Statement, Where = page.Where };
         var lua = JsToLua.Compile(ast, out var problems, null, hooks);
         if (lua == null || problems.Count > 0)
         {
@@ -174,14 +174,41 @@ internal static partial class PlainTranslator
                 refused.Add($"the animation \"{spec.Name}\" is not one the scene runs on its own clock");
                 return null;
             }
-        foreach (var node in built.NodeOf.Values)
-            foreach (var name in node.Attributes.Keys)
-                if (name.StartsWith("on", StringComparison.OrdinalIgnoreCase) && name.Length > 2)
+        // each element's box, by the name the page's ids know it by (its id, or one the build gave it; the body's is "body")
+        var boxed = new Dictionary<HtmlNode, string>();
+        foreach (var pair in built.NodeOf)
+            if (!string.IsNullOrEmpty(pair.Key.name) && built.ById.TryGetValue(pair.Key.name, out var same) && same == pair.Key) boxed[pair.Value] = pair.Key.name;
+        // An onclick attribute is the element's click handler, made before any script runs: a function of
+        // `event` whose `this` is the element. It goes in front of the script as the property write it is
+        // (`el.onclick = function (event) { … }`), so a script that sets onclick replaces it, as in a browser.
+        var inline = new Dictionary<Node, string>();
+        var handlers = new List<Statement>();
+        foreach (var node in Elements(built.Document))
+            foreach (var attr in node.Attributes)
+            {
+                var name = attr.Key;
+                if (!name.StartsWith("on", StringComparison.OrdinalIgnoreCase) || name.Length <= 2) continue;
+                var where = $"the {name} attribute of <{node.Tag}>";
+                if (!name.Equals("onclick", StringComparison.OrdinalIgnoreCase))
                 {
-                    refused.Add($"an inline event handler attribute ({name}=) on <{node.Tag}>");
+                    refused.Add($"an inline event handler attribute ({name}=) on <{node.Tag}>: the vector mod delivers only clicks");
                     return null;
                 }
-        var page = new Page(built, ast, refused);
+                if (!boxed.TryGetValue(node, out var id))
+                {
+                    refused.Add(where + ", which is drawn as part of its parent's text: it has no box of its own to click");
+                    return null;
+                }
+                var js = "document.getElementById('" + id.Replace("\\", "\\\\").Replace("'", "\\'") + "').onclick = function (event) {\n" + attr.Value + "\n};";
+                Script one;
+                try { one = new Parser().ParseScript(js); }
+                catch (Exception ex) { refused.Add(where + ": parse: " + ex.Message); return null; }
+                if (one.Body.Count != 1) { refused.Add(where + ", which is not one function body"); return null; }
+                inline[one.Body[0]] = where;
+                handlers.Add(one.Body[0]);
+            }
+        if (handlers.Count > 0) ast = new Script(NodeList.From(handlers.Concat(ast.Body)), ast.Strict);
+        var page = new Page(built, ast, refused, inline);
         try { page.Analyse(); }
         catch { page.Unlay(); throw; }
         if (refused.Count == 0) return (page, ast);
@@ -189,20 +216,32 @@ internal static partial class PlainTranslator
         return null;
     }
 
+    private static IEnumerable<HtmlNode> Elements(HtmlNode? n)
+    {
+        if (n == null) yield break;
+        foreach (var c in n.Children)
+        {
+            if (c.IsText) continue;
+            yield return c;
+            foreach (var d in Elements(c)) yield return d;
+        }
+    }
+
     /// <summary>
     /// The size a page is laid out and compiled for on its console, as a browser window of that size:
     /// the page's own viewport width (a `&lt;meta name=viewport&gt;`), else the console's, and a height
     /// in the console's proportions. The console's size is its rect, and while the game has the screen
     /// switched off - no one in the room - that rect may never have been laid out, so the size the
-    /// element was pushed with stands in; the world aspect likewise falls back to the rect's own.
+    /// element was pushed with stands in; the world aspect likewise falls back to the rect's own. A browser
+    /// window is whole CSS pixels, so both are rounded: a world aspect a hair short reads 460, not 459.9.
     /// </summary>
     internal static Vector2 ConsoleLayout(float designWidth, Vector2 rect, Vector2 world, Vector2 pushed)
     {
         var w = rect.x >= 1f ? rect.x : pushed.x >= 1f ? pushed.x : 460f;
         var h = rect.y >= 1f ? rect.y : pushed.y >= 1f ? pushed.y : w;
-        var width = Mathf.Max(64f, designWidth > 0f ? designWidth : w);
+        var width = Mathf.Round(Mathf.Max(64f, designWidth > 0f ? designWidth : w));
         var aspect = world.x > 1e-5f && world.y > 1e-5f ? world.y / world.x : h / w;
-        return new Vector2(width, Mathf.Max(64f, width * aspect));
+        return new Vector2(width, Mathf.Round(Mathf.Max(64f, width * aspect)));
     }
 
     // ---- the page: what its script touches, and what that draws ------------------------------------
@@ -365,18 +404,30 @@ internal static partial class PlainTranslator
 
         private readonly List<Action> _restore = new();
 
-        public Page(HtmlRenderer.Result built, Script ast, List<string> refused)
+        /// <summary>The statements an onclick attribute became, each with the attribute it is.</summary>
+        private readonly Dictionary<Node, string> _inline;
+
+        public Page(HtmlRenderer.Result built, Script ast, List<string> refused, Dictionary<Node, string> inline)
         {
             _built = built;
             _ast = ast;
             _refused = refused;
+            _inline = inline;
+        }
+
+        /// <summary>The onclick attribute a node's code is in, for what is said about it; null for a node of the script.</summary>
+        public string? Where(Node at)
+        {
+            for (Node? n = at; n != null; n = _parent.TryGetValue(n, out var up) ? up : null)
+                if (_inline.TryGetValue(n, out var attr)) return attr;
+            return null;
         }
 
         private void Refuse(Node at, string what)
         {
             // a node the compile made (a write standing for markup) is reported where its source is
             while (_origin.TryGetValue(at, out var from)) at = from;
-            var line = "line " + at.Location.Start.Line.ToString(CultureInfo.InvariantCulture) + ": " + what;
+            var line = (Where(at) ?? "line " + at.Location.Start.Line.ToString(CultureInfo.InvariantCulture)) + ": " + what;
             if (!_refused.Contains(line)) _refused.Add(line);
         }
 
@@ -754,6 +805,9 @@ internal static partial class PlainTranslator
                 case MemberExpression { Computed: false, Object: Identifier ev, Property: Identifier { Name: "target" or "currentTarget" } which }
                     when Decl(ev) is { } evd && _eventOf.ContainsKey(evd):
                     return EventElems(evd, which.Name == "currentTarget");
+
+                case ThisExpression th:
+                    return ThisElems(th);
 
                 case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "closest" } } cm } cc
                     when Elems(cm.Object, bind) is { List: false, Neutral: false } from:
@@ -1250,6 +1304,9 @@ internal static partial class PlainTranslator
                 case MemberExpression { Computed: false, Property: Identifier { Name: "target" or "currentTarget" } } et when Elems(et) is { Neutral: false }:
                     Source(et);
                     return;
+                case ThisExpression th when Elems(th) is { Neutral: false }:
+                    Source(th);
+                    return;
                 case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "closest" } } } cl when Elems(cl) is { Neutral: false }:
                     Source(cl);
                     return;
@@ -1625,10 +1682,44 @@ internal static partial class PlainTranslator
                     (handler, on) = (ac.Arguments[1], am.Object);
                 else if (n is AssignmentExpression { Operator: Operator.Assignment, Left: MemberExpression { Computed: false, Property: Identifier { Name: "onclick" } } om } oa)
                     (handler, on) = (oa.Right, om.Object);
-                if (handler == null || Callback(handler) is not { } fn || fn.Params.Count == 0 || fn.Params[0] is not Identifier ev) continue;
+                if (handler == null || Callback(handler) is not { } fn) continue;
+                if (!_listenerOn.TryGetValue(fn, out var ons)) _listenerOn[fn] = ons = new List<Expression>();
+                ons.Add(on!);
+                if (handler is Identifier named) _listenerNames.Add(named);
+                if (fn.Params.Count == 0 || fn.Params[0] is not Identifier ev) continue;
                 if (!_eventOf.TryGetValue(ev, out var list)) _eventOf[ev] = list = new List<Expression>();
                 list.Add(on!);
             }
+        }
+
+        /// <summary>Each click listener function, and the elements it is registered on; and the names that register one by name.</summary>
+        private readonly Dictionary<IFunction, List<Expression>> _listenerOn = new();
+        private readonly HashSet<Identifier> _listenerNames = new();
+
+        /// <summary>
+        /// `this` in a click listener (an arrow's `this` is the function's around it): the element the listener is on,
+        /// as `e.currentTarget` is. Null when it is in a function that is not only ever a click listener.
+        /// </summary>
+        private Els? ThisElems(ThisExpression th)
+        {
+            Node n = th;
+            var arrow = false;
+            while (_parent.TryGetValue(n, out var p) && p is not (FunctionExpression or FunctionDeclaration))
+            {
+                arrow |= p is ArrowFunctionExpression;
+                n = p;
+            }
+            if (!_parent.TryGetValue(n, out var f) || f is not IFunction fn || !_listenerOn.TryGetValue(fn, out var ons)) return null;
+            // a listener also called by name, or handed on, has another `this` there
+            if (NameOf(fn) is { } name && _refs.TryGetValue(name, out var refs) && refs.Any(r => !_listenerNames.Contains(r)))
+                return Els.Refused($"`this` in {name.Name}, which is called other than as a click listener (its `this` there is not the element)");
+            var listening = Els.Choice(ons.Select(o => Elems(o)));
+            if (listening == null || listening.Bad != null) return listening;
+            if (listening.List) return Els.Refused("`this` in a click listener on a list of elements");
+            // the element a click is on is read when the listener starts; a later run of an arrow in it needs it kept
+            if (arrow && !listening.One) return Els.Refused("`this` in an arrow function inside a click listener on more than one element (not translated yet)");
+            if (!listening.One) _events = true;
+            return listening;
         }
 
         /// <summary>
@@ -3015,7 +3106,7 @@ internal static partial class PlainTranslator
                     foreach (var a in attrs) if (o.Attr(a) is { } v) node.Attributes[a] = v; else node.Attributes.Remove(a);
                     if (hides) t.Ve.style.display = StyleKeyword.Null;
                     _built.Reclass(t.Ve, was);
-                    if (hides && node.Attr("hidden") != null) t.Ve.style.display = DisplayStyle.None;
+                    if (hides && HtmlRenderer.HiddenByAttribute(node, _built.CssOf(t.Ve))) t.Ve.style.display = DisplayStyle.None;
                     _restore.Add(() =>
                     {
                         node.ScriptStyle = script;
@@ -3777,7 +3868,7 @@ internal static partial class PlainTranslator
                 if (hides) t.Ve.style.display = StyleKeyword.Null;
                 _built.Reclass(t.Ve, cls);
                 // the browser's own [hidden] { display: none }, as the page was built with it
-                if (hides && node.Attr("hidden") != null) t.Ve.style.display = DisplayStyle.None;
+                if (hides && HtmlRenderer.HiddenByAttribute(node, _built.CssOf(t.Ve))) t.Ve.style.display = DisplayStyle.None;
             }
             var moved = new HashSet<string>(StringComparer.Ordinal);
             var facet = $"the classes and attributes of \"{t.Name}\"";
@@ -4242,7 +4333,8 @@ internal static partial class PlainTranslator
                     lines.Add("v_classname(" + t.Class!.Var + ", " + tr(a.Right) + ")");
                     return lines;
                 }
-                lines.Add("V_ONCLICK[" + Q(t.Name) + "] = " + tr(a.Right));
+                _onclick = true;
+                lines.Add("v_onclick(" + Q(t.Name) + ", " + tr(a.Right) + ")");
                 return lines;
             }
 
@@ -4312,7 +4404,7 @@ internal static partial class PlainTranslator
         private int _dispatches;
         /// <summary>Tables the chunk builds once, before the page's script runs: the picks, element lists and id lookups.</summary>
         private readonly List<string> _tables = new();
-        private bool _nullref, _item, _clsItem, _clsCount, _collapse, _nadd;
+        private bool _nullref, _item, _clsItem, _clsCount, _collapse, _nadd, _onclick;
 
         /// <summary>A call, which Lua takes as a statement of its own.</summary>
         private static readonly Regex Call = new(@"^[A-Za-z_][A-Za-z0-9_.]*\(.*\)$", RegexOptions.Singleline);
@@ -4343,6 +4435,9 @@ internal static partial class PlainTranslator
                     return DomValue(c, lua);
                 case Identifier id when _vars.TryGetValue(id.Name, out var held):
                     return held.Number.ToString(CultureInfo.InvariantCulture);
+                // `this` in a click listener: its element, or the one the click is going through (V_EV.currentTarget)
+                case ThisExpression th when Elems(th) is { Bad: null, Neutral: false } me:
+                    return me.One ? me.Ts[0].Number.ToString(CultureInfo.InvariantCulture) : "V_EV.currentTarget";
                 case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "item" } } im } ic when Elems(im.Object) is { List: true }:
                     _item = true;
                     return "v_item(" + lua.Translate(im.Object) + ", " + (ic.Arguments.Count > 0 ? lua.Translate(ic.Arguments[0]) : "nil") + ")";
@@ -4427,8 +4522,31 @@ internal static partial class PlainTranslator
             var inner = Unwrap(hole.Hole!);
             if (Boolean(inner) || _bool.Contains(inner)) return "js_str(" + v + ")";
             // a read that can be null prints "null", as JavaScript's string conversion does
-            return _null.TryGetValue(inner, out var none) ? "(" + v + " or " + Q(none) + ")" : v;
+            if (_null.TryGetValue(inner, out var none)) return "(" + v + " or " + Q(none) + ")";
+            if (Printable(inner)) return v;
+            // the scene reads a number or a string; anything else (a boolean, undefined, an array) is sent as JavaScript prints it
+            _txt = true;
+            return "v_txt(" + v + ")";
         }
+
+        private bool _txt;
+
+        /// <summary>Whether a value is a number or a string in every run, which the scene takes as it is.</summary>
+        private static bool Printable(Expression e) => e switch
+        {
+            NumericLiteral or StringLiteral or TemplateLiteral or UpdateExpression => true,
+            NonUpdateUnaryExpression { Operator: Operator.UnaryNegation or Operator.UnaryPlus or Operator.BitwiseNot or Operator.TypeOf } => true,
+            NonLogicalBinaryExpression b => b.Operator is Operator.Subtraction or Operator.Multiplication or Operator.Division
+                or Operator.Remainder or Operator.Exponentiation
+                || b.Operator == Operator.Addition && Printable(b.Left) && Printable(b.Right),
+            AssignmentExpression { Operator: not Operator.Assignment and not Operator.NullishCoalescingAssignment
+                and not Operator.LogicalAndAssignment and not Operator.LogicalOrAssignment } => true,
+            CallExpression { Callee: MemberExpression { Computed: false, Object: Identifier { Name: "Math" } } } => true,
+            CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "toFixed" or "toString" or "toUpperCase"
+                or "toLowerCase" or "trim" or "padStart" or "padEnd" or "join" or "repeat" or "charAt" or "substring" } } } => true,
+            ConditionalExpression c => Printable(c.Consequent) && Printable(c.Alternate),
+            _ => false,
+        };
 
         /// <summary>Whether the program rounds a toFixed value, so the chunk carries v_fixed.</summary>
         private bool _fixed;
@@ -4611,6 +4729,15 @@ internal static partial class PlainTranslator
                 sb.Append("local V_CHAIN = ").Append(Table(_chains)).Append('\n');
                 sb.Append("local function v_listen(key, fn)\n  local list = V_ON[key]\n  for i = 1, #list do if list[i] == fn then return end end\n");
                 sb.Append("  list[#list + 1] = fn\nend\n");
+                if (_onclick)
+                {
+                    // as a browser keeps an event handler: among the listeners from when it is first set, out when set to null
+                    sb.Append("-- el.onclick = f: the handler takes its place among the element's listeners when it is first set\n");
+                    sb.Append("local V_HANDLER = {}\n");
+                    sb.Append("local function v_onclick(key, fn)\n  local list = V_ON[key]\n  if type(fn) ~= \"function\" then fn = nil end\n");
+                    sb.Append("  if fn == nil and V_ONCLICK[key] ~= nil then\n    for i = 1, #list do if list[i] == V_HANDLER then table.remove(list, i) break end end\n");
+                    sb.Append("  elseif fn ~= nil and V_ONCLICK[key] == nil then list[#list + 1] = V_HANDLER end\n  V_ONCLICK[key] = fn\nend\n");
+                }
                 if (_madeBy.Keys.Any(t => t.Listens))
                     sb.Append("-- markup written again makes new elements: what listened on the old ones is gone\n")
                       .Append("local function v_unlisten(key)\n  local list = V_ON[key]\n  for i = #list, 1, -1 do list[i] = nil end\n  V_ONCLICK[key] = nil\nend\n");
@@ -4625,8 +4752,10 @@ internal static partial class PlainTranslator
                 if (_events) sb.Append("  V_EV.target = V_NUM[nodeId]\n");
                 sb.Append("  for c = 1, #chain do\n");
                 if (_events) sb.Append("    V_EV.currentTarget = V_NUM[chain[c]]\n");
-                sb.Append("    local list = V_ON[chain[c]]\n    for i = 1, #list do list[i](").Append(ev).Append(") end\n");
-                sb.Append("    local f = V_ONCLICK[chain[c]]\n    if f then f(").Append(ev).Append(") end\n  end\n");
+                if (_onclick)
+                    sb.Append("    local list = V_ON[chain[c]]\n    for i = 1, #list do\n      local f = list[i]\n")
+                      .Append("      if f == V_HANDLER then f = V_ONCLICK[chain[c]] end\n      if f then f(").Append(ev).Append(") end\n    end\n  end\n");
+                else sb.Append("    local list = V_ON[chain[c]]\n    for i = 1, #list do list[i](").Append(ev).Append(") end\n  end\n");
                 if (_reload) sb.Append("  if V_RELOAD then v_reload() end\n");
                 sb.Append("  v_flush()\nend\n");
             }
@@ -4680,6 +4809,11 @@ internal static partial class PlainTranslator
         private string Browser()
         {
             var sb = new StringBuilder();
+            if (_txt)
+            {
+                sb.Append("-- a value written into a text: a number or a string as it is, anything else as JavaScript prints it\n");
+                sb.Append("local function v_txt(v)\n  local t = type(v)\n  if t == \"number\" or t == \"string\" then return v end\n  return js_str(v)\nend\n");
+            }
             if (_attrs)
             {
                 sb.Append("-- attributes, as the browser stores them: a string, or nil for absent\n");

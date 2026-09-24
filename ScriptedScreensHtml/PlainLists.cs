@@ -30,9 +30,10 @@ internal static partial class PlainTranslator
             public Node At = null!;
             /// <summary>The array the rows are read from, in the scope it is written in; null for a loop over a count.</summary>
             public Expression? Source;
-            /// <summary>A loop over a count (`for (let i = 0; i &lt; n; i++)`): how many rows, and whether `&lt;=` counts one more.</summary>
+            /// <summary>A loop over a count (`for (let i = 1; i &lt;= n; i += 2)`): its bound, and where it starts, its step and its test.</summary>
             public Expression? Count;
-            public bool Inclusive;
+            public double Start, Step = 1;
+            public Operator Op = Operator.LessThan;
             /// <summary>What happens to the array before its rows are made: slices and filters, in order.</summary>
             public readonly List<Stage> Stages = new();
             public int Max;
@@ -396,6 +397,12 @@ internal static partial class PlainTranslator
             var probeIndex = Held(rep.Var + "q" + (rep.Stages.Count + 1).ToString(CultureInfo.InvariantCulture));
             if (build(rep.Item, probeIndex) is not { } probe) return false;
             var filter = Choice(probe);
+            // the Lua counts a loop over a count without testing its rows (Count): drawing them all would be wrong
+            if (filter != null && rep.Source == null)
+            {
+                Refuse(write, "a loop over a count that skips some of its rows (continue, or a row empty on one side of a test; not translated yet)");
+                return false;
+            }
             if (filter != null)
             {
                 exact = false;
@@ -404,7 +411,9 @@ internal static partial class PlainTranslator
                 rep.Min = 0;
             }
             var total = 0;
-            for (var k = 0; k < rep.Max; k++)
+            // a loop's index as JavaScript steps it, row by row: added up, not multiplied, so a fraction rounds as it does there
+            var at = rep.Start;
+            for (var k = 0; k < rep.Max; k++, at += rep.Step)
             {
                 var row = k.ToString(CultureInfo.InvariantCulture);
                 var itemNode = new Identifier(rep.Var + "_" + row);
@@ -414,7 +423,7 @@ internal static partial class PlainTranslator
                 _itemOf[itemNode] = exact && items != null ? (k < items.Count ? new List<(Expression, Inlined?)> { items[k] } : null) : items;
                 Expression indexNode = filter != null && indexRead
                     ? Held(rep.Var + ".m[" + row + "]")
-                    : new NumericLiteral(k, row);
+                    : new NumericLiteral(at, at.ToString("R", CultureInfo.InvariantCulture));
                 if (build(itemNode, indexNode) is not { } tpl) return false;
                 if (filter != null)
                 {
@@ -682,7 +691,8 @@ internal static partial class PlainTranslator
         private MkRep? Loop(Statement s, Func<Node, List<Expression>?> append, Inlined? env, Node write, int depth)
         {
             Expression? src = null, count = null;
-            var inclusive = false;
+            double start = 0, step = 1;
+            var op = Operator.LessThan;
             Identifier? item = null, index = null;
             List<(string Name, Identifier Id)> fields = new();
             Node body;
@@ -691,14 +701,11 @@ internal static partial class PlainTranslator
                 case ForOfStatement { Left: VariableDeclaration { Declarations: [{ Id: Identifier x }] } } fo:
                     src = fo.Right; item = x; body = fo.Body;
                     break;
-                case ForStatement { Init: VariableDeclaration { Declarations: [{ Id: Identifier i, Init: NumericLiteral { Value: 0 } }] },
-                                    Test: NonLogicalBinaryExpression { Operator: Operator.LessThan or Operator.LessThanOrEqual, Left: Identifier ti } test } f
-                    when Decl(ti) == i && _writes.TryGetValue(i, out var iw) && iw.Count == 1 && iw[0] == f.Update
-                         && f.Update is UpdateExpression { Operator: Operator.Increment } or AssignmentExpression { Operator: Operator.AdditionAssignment, Right: NumericLiteral { Value: 1 } }:
-                    index = i;
-                    inclusive = test.Operator == Operator.LessThanOrEqual;
-                    if (!inclusive && test.Right is MemberExpression { Computed: false, Property: Identifier { Name: "length" } } lm) src = lm.Object;
-                    else count = test.Right;
+                case ForStatement f when Counting(f, env) is { } counted:
+                    index = counted.Index;
+                    (start, step, op) = (counted.Start, counted.Step, counted.Op);
+                    if (counted.OverList is { } over) src = over;
+                    else count = counted.Bound;
                     body = f.Body;
                     break;
                 case ExpressionStatement { Expression: CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "forEach" } } fm } fc }
@@ -707,8 +714,12 @@ internal static partial class PlainTranslator
                     src = fm.Object;
                     body = (Node)fn.Body;
                     break;
+                case ForStatement:
+                    Refuse(s, "a for loop the compile does not follow (it follows one counting from a start it knows as one number, by a fixed step, "
+                              + "to a bound tested with <, <=, > or >=, its counter changed by the step alone)");
+                    return null;
                 default:
-                    Refuse(s, "a loop adding markup that the compile does not follow (for...of, a for counting up from 0 by 1, and forEach are followed)");
+                    Refuse(s, "a loop adding markup that the compile does not follow (for...of, forEach, and a for counting from a start the compile knows by a fixed step to a bound are followed)");
                     return null;
             }
             var rep = NewRep(s);
@@ -725,15 +736,15 @@ internal static partial class PlainTranslator
             else
             {
                 rep.Count = Within(count!, env, count!);
-                rep.Inclusive = inclusive;
+                (rep.Start, rep.Step, rep.Op) = (start, step, op);
                 if (Finite(count!, null, env) is not { Count: > 0 } set || set.Any(v => v is not double))
                 {
                     Refuse(count!, "a loop over a count only known at run time (the list is laid out at the largest count, so it has to be one of a fixed set)");
                     return null;
                 }
-                int Rows(double v) => Math.Max(0, inclusive ? (int)Math.Floor(v) + 1 : (int)Math.Ceiling(v));
-                rep.Max = Rows(set.Cast<double>().Max());
-                rep.Min = Rows(set.Cast<double>().Min());
+                var rows = set.Cast<double>().Select(v => Iterations(start, step, op, v, MostRows + 1)).ToList();
+                rep.Max = rows.Max();
+                rep.Min = rows.Min();
             }
             if (rep.Max > MostRows) { Refuse(s, $"a list of up to {rep.Max} rows, more than the {MostRows} laid out"); return null; }
             var statements = body is Expression ? null : Stmts(body);
@@ -759,6 +770,53 @@ internal static partial class PlainTranslator
                 return RowBody(statements, 0, append, rowEnv, write, depth + 1);
             }, exact ?? items, exact != null, readIndex, string.Empty, write);
             return ok ? rep : null;
+        }
+
+        /// <summary>
+        /// A `for` counting from a start the compile knows by a fixed step to a bound: `for (let i = 1; i &lt;= n; i++)`,
+        /// `i += 2`, `i = i - 1`, `i--` down to a `&gt;` or `&gt;=` test. Its index is written by the update alone. The
+        /// list the index walks (`i &lt; list.length`, from 0 by 1) is <c>OverList</c>, any other bound <c>Bound</c>.
+        /// </summary>
+        private (Identifier Index, double Start, double Step, Operator Op, Expression Bound, Expression? OverList)? Counting(ForStatement f, Inlined? env)
+        {
+            if (f is not { Init: VariableDeclaration { Declarations: [{ Id: Identifier i, Init: { } init }] }, Test: NonLogicalBinaryExpression { Left: Identifier ti } test }
+                || Decl(ti) != i || !_writes.TryGetValue(i, out var iw) || iw.Count != 1 || iw[0] != f.Update
+                || Finite(init, null, env) is not [double start] || double.IsNaN(start) || double.IsInfinity(start))
+                return null;
+            var one = new NumericLiteral(1, "1");
+            (Expression? By, bool Down) update = f.Update switch
+            {
+                UpdateExpression { Operator: Operator.Increment } => (one, false),
+                UpdateExpression { Operator: Operator.Decrement } => (one, true),
+                AssignmentExpression { Operator: Operator.AdditionAssignment } a => (a.Right, false),
+                AssignmentExpression { Operator: Operator.SubtractionAssignment } a => (a.Right, true),
+                AssignmentExpression { Operator: Operator.Assignment, Right: NonLogicalBinaryExpression { Operator: Operator.Addition or Operator.Subtraction, Left: Identifier l } b } when Decl(l) == i
+                    => (b.Right, b.Operator == Operator.Subtraction),
+                _ => (null, false),
+            };
+            if (update.By == null || Finite(update.By, null, env) is not [double step] || double.IsNaN(step) || double.IsInfinity(step)) return null;
+            if (update.Down) step = -step;
+            // a step away from the bound never ends, and a browser hangs on it
+            var up = test.Operator is Operator.LessThan or Operator.LessThanOrEqual;
+            if (!(up && step > 0 || test.Operator is Operator.GreaterThan or Operator.GreaterThanOrEqual && step < 0)) return null;
+            var overList = start == 0 && step == 1 && test.Operator == Operator.LessThan
+                           && test.Right is MemberExpression { Computed: false, Property: Identifier { Name: "length" } } lm ? lm.Object : null;
+            return (i, start, step, test.Operator, test.Right, overList);
+        }
+
+        /// <summary>How many times a counting loop runs for one bound, as JavaScript steps it; stops counting at <paramref name="cap"/>.</summary>
+        private static int Iterations(double start, double step, Operator op, double bound, int cap)
+        {
+            var n = 0;
+            for (var x = start; n < cap && op switch
+                 {
+                     Operator.LessThan => x < bound,
+                     Operator.LessThanOrEqual => x <= bound,
+                     Operator.GreaterThan => x > bound,
+                     _ => x >= bound,
+                 }; x += step)
+                n++;
+            return n;
         }
 
         /// <summary>One row of a loop's body: appends, declarations bound for the row, ifs of those, and `continue`.</summary>
@@ -1387,13 +1445,12 @@ internal static partial class PlainTranslator
                             times *= m;
                             break;
                         }
-                    case ForStatement { Init: VariableDeclaration { Declarations: [{ Id: Identifier i, Init: NumericLiteral { Value: 0 } }] }, Test: NonLogicalBinaryExpression { Operator: Operator.LessThan or Operator.LessThanOrEqual, Left: Identifier ti } test } f
-                        when f.Body == n && Decl(ti) == i:
+                    case ForStatement f when f.Body == n && Counting(f, null) is { } counted:
                         {
                             int? m;
-                            if (test.Right is MemberExpression { Computed: false, Property: Identifier { Name: "length" } } lm && test.Operator == Operator.LessThan)
-                                m = Listed(lm.Object, null, depth + 1, seen).Max;
-                            else m = Finite(test.Right) is { Count: > 0 } set && set.All(v => v is double) ? (int)Math.Ceiling(set.Cast<double>().Max()) + (test.Operator == Operator.LessThanOrEqual ? 1 : 0) : null;
+                            if (counted.OverList is { } over) m = Listed(over, null, depth + 1, seen).Max;
+                            else m = Finite(counted.Bound) is { Count: > 0 } set && set.All(v => v is double)
+                                ? set.Cast<double>().Max(v => Iterations(counted.Start, counted.Step, counted.Op, v, MostRows + 1)) : null;
                             if (m == null) return null;
                             times *= Math.Max(0, m.Value);
                             break;

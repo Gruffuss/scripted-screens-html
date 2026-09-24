@@ -271,6 +271,57 @@ internal static class PlainTranslatorTests
               "});"),
          Steps("t", "t", "t"), new[] { 0, 1, 2, 3 }),
 
+        ("hidden under a display rule of the page's own: the rule wins, as it does over a browser's [hidden] { display: none }",
+         Page(".row { display: flex; height: 24px; background: #345; } .plain { height: 20px; background: #a33; } #tag { display: block; color: #fc6; }",
+              "<div id=\"row\" class=\"row\" hidden>row</div><div id=\"gone\" class=\"plain\" hidden>gone</div><p id=\"tag\" hidden>tag</p><p id=\"state\">-</p><button id=\"t\">Toggle</button>",
+              "document.getElementById('t').addEventListener('click', () => {" +
+              "  const row = document.getElementById('row'), gone = document.getElementById('gone');" +
+              "  row.hidden = !row.hidden;" +
+              "  gone.hidden = !gone.hidden;" +
+              "  document.getElementById('state').textContent = row.hidden + ' ' + gone.hidden;" +
+              "});"),
+         Steps("t", "t"), new[] { 0, 1, 2 }),
+
+        ("onclick attributes and this: an attribute's code with this and event, one handing this to a function, one on an element with no id, " +
+         "a listener's this on two elements, an onclick property's this, an attribute's handler running before a listener the script adds, and one the script replaces",
+         Page(".box { width: 120px; height: 30px; background: #333; margin-bottom: 4px; } .box.on { background: #2a6; }",
+              "<div id=\"a\" class=\"box\" onclick=\"this.classList.toggle('on'); count(event.currentTarget === this)\">A 0</div>" +
+              "<div id=\"b\" class=\"box\" onclick=\"hit(this)\">B 0</div>" +
+              "<div class=\"box\" onclick=\"plain++; document.getElementById('log').textContent = 'plain ' + plain\">C</div>" +
+              "<div id=\"c\" class=\"box\">c 0</div><div id=\"d\" class=\"box\">d 0</div><div id=\"e\" class=\"box\">e 0</div>" +
+              "<div id=\"o\" class=\"box\" onclick=\"order += 'h'\">O</div><div id=\"r\" class=\"box\" onclick=\"document.getElementById('log').textContent = 'attribute'\">R</div>" +
+              "<p id=\"log\">none</p><p id=\"order\">-</p>",
+              "let n = 0, plain = 0, order = '';" +
+              "function count(same) { n++; document.getElementById('a').textContent = 'A ' + n + ' ' + same; }" +
+              "function hit(el) { n++; el.textContent = 'B ' + n; }" +
+              "[document.getElementById('c'), document.getElementById('d')].forEach(function (el) {" +
+              "  el.addEventListener('click', function () { n++; this.classList.toggle('on'); this.textContent = this.id + ' ' + n; });" +
+              "});" +
+              "document.getElementById('e').onclick = function () { this.textContent = 'e ' + (n > 3); };" +
+              "document.getElementById('o').addEventListener('click', function () { order += 'l'; document.getElementById('order').textContent = order; });" +
+              "document.getElementById('r').onclick = function () { document.getElementById('log').textContent = 'replaced ' + (this === document.getElementById('r')); };"),
+         Steps("a", "b", "div1", "c", "d", "c", "e", "o", "o", "a", "r"), new[] { 1, 2, 3, 6, 7, 9, 10, 11 }),
+
+        ("an onclick attribute on the body, and this there",
+         Head + "#n { font-size: 20px; }</style></head><body onclick=\"hits++; document.getElementById('n').textContent = this.tagName + ' hits ' + hits\"><p id=\"n\">hits 0</p>" +
+         "<script>var hits = 0;</script></body></html>",
+         Steps("body", "body"), new[] { 1, 2 }),
+
+        ("booleans and undefined written into text: every(), includes(), a comparison, a boolean held in a name, toString(), valueOf() and String() of one, a variable never set",
+         Page("", "<p id=\"flag\">flag ?</p><p id=\"all\">all on: ?</p><p id=\"has\">has 3: ?</p><p id=\"big\">?</p><p id=\"never\">?</p>",
+              "var n = 0; var on = [1, 2]; var unset;" +
+              "var t = setInterval(function () {" +
+              "  n++;" +
+              "  const big = n > 1;" +
+              "  document.getElementById('flag').textContent = 'flag ' + (n > 2);" +
+              "  document.getElementById('all').textContent = 'all on: ' + on.every(function (x) { return x > n - 2; });" +
+              "  document.getElementById('has').textContent = 'has 3: ' + on.includes(n);" +
+              "  document.getElementById('big').textContent = big + ' ' + big.toString() + ' ' + on.includes(1).toString() + ' ' + String(n > 2) + ' ' + big.valueOf();" +
+              "  document.getElementById('never').textContent = 'never ' + unset;" +
+              "  if (n >= 3) clearInterval(t);" +
+              "}, 500);"),
+         Ticks(4), new[] { 1, 2, 4 }),
+
         ("reads: textContent, className, classList.contains and style answer what the script wrote",
          Page(".bar { position: absolute; left: 10px; top: 120px; height: 10px; background: #36c; } .bar.full { background: #c33; }",
               "<p id=\"count\">0</p><div id=\"bar\" class=\"bar\" style=\"width: 10px\"></div><p id=\"info\">-</p><p id=\"note\">\n    Ready   now\n  </p><button id=\"b\">Add</button>",
@@ -881,6 +932,33 @@ internal static class PlainTranslatorTests
               "setInterval(() => { k++; show(); }, 500);" +
               "show();"),
          Ticks(5), new[] { 0, 1, 2, 3, 5 }),
+
+        ("for loops counting from 1 with <=, down with > and with >= by -5, by a step of 2, and by a fraction",
+         Page(".row { display: flex; } .cell { width: 44px; height: 20px; background: #3a7; margin-right: 3px; }",
+              "<div id=\"up\" class=\"row\"></div><div id=\"down\" class=\"row\"></div><div id=\"fives\" class=\"row\"></div><div id=\"even\" class=\"row\"></div><div id=\"tenths\" class=\"row\"></div><p>loops end</p>",
+              "const sizes = [2, 4, 3, 1];" +
+              "let k = 0;" +
+              "function show() {" +
+              "  const n = sizes[k % 4];" +
+              "  let up = '';" +
+              "  for (let i = 1; i <= n; i++) up += '<div class=\"cell\">' + i + '</div>';" +
+              "  document.getElementById('up').innerHTML = up;" +
+              "  let down = '';" +
+              "  for (var j = 4; j > 4 - n; j--) down += `<div class=\"cell\">${j}</div>`;" +
+              "  document.getElementById('down').innerHTML = down;" +
+              "  let fives = '';" +
+              "  for (let i = 20; i >= 20 - 5 * n; i -= 5) fives += '<div class=\"cell\">' + i + '</div>';" +
+              "  document.getElementById('fives').innerHTML = fives;" +
+              "  let even = '';" +
+              "  for (let i = 0; i < 2 * n; i = i + 2) even += '<div class=\"cell\">' + i + '</div>';" +
+              "  document.getElementById('even').innerHTML = even;" +
+              "  let tenths = '';" +
+              "  for (let i = 0; i < n * 0.1; i += 0.1) tenths += '<div class=\"cell\">' + i.toFixed(1) + '</div>';" +
+              "  document.getElementById('tenths').innerHTML = tenths;" +
+              "}" +
+              "setInterval(() => { k++; show(); }, 500);" +
+              "show();"),
+         Ticks(4), new[] { 0, 1, 2, 3, 4 }),
     };
 
     /// <summary>Features outside what is translated, each refused by name - the page keeps its old path.</summary>
@@ -936,6 +1014,20 @@ internal static class PlainTranslatorTests
         ("a class that takes shapes away says what it changed", Page(".box { width: 40px; height: 20px; background: #a33; } .box.gone { display: none; }", "<div id=\"a\" class=\"box\"></div><p>below</p>",
             "setTimeout(() => { document.getElementById('a').classList.add('gone'); }, 10);"), "scene lines at rest, "),
         ("a class name computed at run time", Page("", "<p id=\"a\">x</p>", "let k = 'c' + Math.random(); setTimeout(() => { document.getElementById('a').className = k; }, 10);"), "className of \"a\" set to a value only known at run time"),
+        ("an inline handler for an event other than a click", Page("", "<button id=\"b\" onmousedown=\"go()\">x</button>", "function go() {}"), "(onmousedown=) on <button>: the vector mod delivers only clicks"),
+        ("an onclick attribute on text drawn inside its parent", Page("", "<p id=\"a\">a <b onclick=\"go()\">b</b></p>", "function go() {}"), "the onclick attribute of <b>, which is drawn as part of its parent's text"),
+        ("a refusal in an onclick attribute's code is said where it is", Page("", "<button id=\"b\" onclick=\"requestAnimationFrame(go)\">x</button>", "function go() {}"), "the onclick attribute of <button>: requestAnimationFrame"),
+        ("this in a function also called other than as a listener", Page("", "<button id=\"b\">x</button>",
+            "function f() { this.textContent = 'y'; } document.getElementById('b').addEventListener('click', f); setTimeout(f, 10);"), "`this` in f, which is called other than as a click listener"),
+        ("this in an arrow inside a listener on two elements", Page("", "<button id=\"b\">x</button><button id=\"c\">y</button>",
+            "for (const el of document.querySelectorAll('button')) el.addEventListener('click', function () { setTimeout(() => { this.textContent = 'z'; }, 10); });"), "`this` in an arrow function inside a click listener on more than one element"),
+        ("an onclick attribute in markup", Page("", "<div id=\"a\"></div>", "function go() {} document.getElementById('a').innerHTML = '<button onclick=\"go()\">x</button>';"),
+            "an inline event handler attribute (onclick=) in markup written into \"a\""),
+        ("a markup loop over a count that skips rows", Page("", "<div id=\"up\"></div><p>end</p>",
+            "const sizes = [2, 4]; let k = 0; setInterval(() => { k++; const n = sizes[k % 2]; let h = ''; for (let i = 0; i < n; i++) { if (i % 2) continue; h += '<p>' + i + '</p>'; } document.getElementById('up').innerHTML = h; }, 10);"),
+            "a loop over a count that skips some of its rows"),
+        ("a markup loop whose start is one of several values", Page("", "<div id=\"a\"></div>",
+            "const ns = [2, 3]; let k = 0; setInterval(() => { k++; const n = ns[k % 2]; let h = ''; for (let i = n; i > 0; i--) h += '<p>x</p>'; document.getElementById('a').innerHTML = h; }, 10);"), "a for loop the compile does not follow"),
     };
 
     /// <summary>The console shapes a page is compiled for in game: square, wide and tall, in canvas units.</summary>
@@ -957,6 +1049,14 @@ internal static class PlainTranslatorTests
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-fields.lua"), Ticks(8), new[] { 0, 1, 2, 3, 4, 5, 8 }),
         // an item found in a table an immediately invoked function builds, fields of items as fixed values: not yet seen in game
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-find.lua"), Ticks(7), new[] { 0, 1, 2, 3, 4, 7 }),
+        // booleans written into text: seen in game leaving the old text (a Lua boolean sent), not yet seen fixed there
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-bool.lua"), Ticks(4), new[] { 0, 2, 4 }),
+        // the window's size, storage, an attribute CSS selects on, hidden, location.hash
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-globals.lua"), Ticks(8), new[] { 0, 2, 4, 8 }),
+        // onclick attributes, this, for loops counting from 1, down and by 2, hidden under a display rule: not yet seen in game.
+        // Box C (no id) is clicked in game only: the browser side here names an element with no id its own way.
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-events.lua"), Steps("a", "b", "d", "e", "d", "o", "o", "a"),
+         new[] { 0, 1, 2, 3, 5, 6, 7, 8 }),
     };
 
     internal static void Run(Action<bool, string> check)
@@ -1007,6 +1107,7 @@ internal static class PlainTranslatorTests
         Quiet(check);
         Eligibility(root, check);
         Sizes(check);
+        HiddenRule(check);
         foreach (var (feature, page, reason) in Refusals)
         {
             CompiledPage.Result compiled;
@@ -1176,14 +1277,28 @@ internal static class PlainTranslatorTests
             ("a laid-out wide console, its world aspect", 0, new(1036, 460), new(2.25f, 1), new(1036, 460), new(1036, 460)),
             ("a wide console whose screen is off: the size it was pushed with", 0, none, none, new(1036, 460), new(1036, 460)),
             ("a tall console whose screen is off", 0, none, none, new(460, 1036), new(460, 1036)),
-            ("a 768 viewport on a tall console whose screen is off", 768, none, none, new(460, 1036), new(768, 768 * 1036f / 460f)),
+            ("a 768 viewport on a tall console whose screen is off, in whole pixels", 768, none, none, new(460, 1036), new(768, Mathf.Round(768 * 1036f / 460f))),
+            ("a square console whose world aspect arrives a hair short: 460 whole pixels, not 459.9", 0, new(460, 460), new(1, 0.99978f), new(460, 460), new(460, 460)),
+            ("a tall console whose world aspect arrives a hair short: 1036, not 1035.7", 0, new(460, 1036), new(1, 2.2515f), new(460, 1036), new(460, 1036)),
             ("nothing known: the canvas's 460 square, never the 64 floor", 0, none, none, none, new(460, 460)),
         };
         foreach (var (what, design, rect, world, pushed, want) in cases)
         {
             var got = PlainTranslator.ConsoleLayout(design, rect, world, pushed);
-            check(Mathf.Abs(got.x - want.x) < 0.5f && Mathf.Abs(got.y - want.y) < 0.5f, $"plain size: {what} is {want.x:0.#}x{want.y:0.#} (got {got.x:0.#}x{got.y:0.#})");
+            // a browser window is whole CSS pixels: innerHeight reads what this is
+            check(got.x == want.x && got.y == want.y, $"plain size: {what} is {want.x:0.###}x{want.y:0.###} (got {got.x:0.###}x{got.y:0.###})");
         }
+    }
+
+    /// <summary>The page as built: an element hidden by its attribute is not drawn, unless the page's own CSS gives it a display.</summary>
+    private static void HiddenRule(Action<bool, string> check)
+    {
+        ResolvedStyle.DefaultFace = FontLibrary.Default();
+        var built = HtmlRenderer.Build(Page("#tag { display: block; } .row { display: flex; }",
+            "<p id=\"tag\" hidden>tag</p><div id=\"row\" class=\"row\" hidden>row</div><p id=\"gone\" hidden>gone</p><p id=\"shown\">shown</p>", ""), FontLibrary.Default());
+        bool None(string id) => built.ById[id].style.display.value == DisplayStyle.None;
+        check(!None("tag") && !None("row") && None("gone") && !None("shown"),
+              $"plain hidden: [hidden] is display: none unless the page's own CSS gives a display (tag {None("tag")}, row {None("row")}, gone {None("gone")}, shown {None("shown")})");
     }
 
     private static string Root()
@@ -1209,8 +1324,13 @@ internal static class PlainTranslatorTests
         {
             // and the compile lays it into the page only for as long as it compiles: the page is as it was built
             var fresh = HtmlRenderer.Build(page, FontLibrary.Default());
-            var same = HtmlRenderer.ToHtml(built.Document!, outer: false, keepIds: true) == HtmlRenderer.ToHtml(fresh.Document!, outer: false, keepIds: true)
-                       && built.ById.Keys.OrderBy(k => k, StringComparer.Ordinal).SequenceEqual(fresh.ById.Keys.OrderBy(k => k, StringComparer.Ordinal));
+            // what the compile gives the page for good: a name for an element with no id that the script drives (`__div2`
+            // is `div2` after it), and a hit region for an element a listener is on
+            string Named(string k) => k.StartsWith("__", StringComparison.Ordinal) && !built.ById.ContainsKey(k) && built.ById.ContainsKey(k.Substring(2)) ? k.Substring(2) : k;
+            var freshHtml = HtmlRenderer.ToHtml(fresh.Document!, outer: false, keepIds: true);
+            foreach (var k in fresh.ById.Keys.Where(k => Named(k) != k)) freshHtml = freshHtml.Replace("id=\"" + k + "\"", "id=\"" + Named(k) + "\"");
+            var same = HtmlRenderer.ToHtml(built.Document!, outer: false, keepIds: true).Replace(" data-click=\"1\"", "") == freshHtml.Replace(" data-click=\"1\"", "")
+                       && built.ById.Keys.OrderBy(k => k, StringComparer.Ordinal).SequenceEqual(fresh.ById.Keys.Select(Named).OrderBy(k => k, StringComparer.Ordinal));
             check(same, $"plain [{feature}]: the page is put back as it was built after its markup compiles");
             var built2 = compiled.Lua.Split('\n').FirstOrDefault(l => Regex.IsMatch(l, @"v_(classname|state|setattr|set)\(.*(js_add\(\s*""|js_add\([^()]*,\s*""|\s\.\.\s)"));
             check(built2 == null, $"plain [{feature}]: markup writes send values, building no string" + (built2 == null ? "" : " (" + built2.Trim() + ")"));
@@ -1344,6 +1464,10 @@ internal static class PlainTranslatorTests
             engine.SetValue("__carrySession", carry.Session);
             engine.SetValue("__carryNow", carry.Now);
             engine.Execute(Harness);
+            var inline = doc != null
+                ? doc.ById.Where(p => p.Value.Attr("onclick") != null).Select(p => (p.Key, p.Value.Attr("onclick")!))
+                : built.NodeOf.Where(p => p.Value.Attr("onclick") != null).Select(p => (p.Key.name, p.Value.Attr("onclick")!));
+            foreach (var (id, code) in inline.ToList()) engine.Invoke("__inline", id, code);
             engine.Execute(script);
             return engine;
         }
@@ -1404,7 +1528,8 @@ internal static class PlainTranslatorTests
                     }
                     if (declarations.Count > 0) node.Attributes["style"] = (style ?? "") + ";" + string.Join(";", declarations);
                     if (declarations.Count > 0 || className != cls || attrsWere.Count > 0) built.Reclass(ve, className);
-                    if (hidden) ve.style.display = DisplayStyle.None;
+                    // a user-agent rule: a display the page's own CSS gives the element wins over it
+                    if (hidden && !built.CssOf(ve).ContainsKey("display")) ve.style.display = DisplayStyle.None;
                     undo.Add(() =>
                     {
                         if (style == null) node.Attributes.Remove("style"); else node.Attributes["style"] = style;
@@ -1538,8 +1663,9 @@ internal static class PlainTranslatorTests
             foreach (var grid in built.Grids)
                 if (built.LayoutAttached.Add(grid)) GridLayout.Attach(grid, built);
             PostLayout.Attach(built);
-            // [hidden] { display: none }, as the renderer builds it
-            foreach (var pair in built.NodeOf) if (pair.Value.Attr("hidden") != null) pair.Key.style.display = DisplayStyle.None;
+            // [hidden] { display: none }, a user-agent rule: a display the page's own CSS gives the element wins over it
+            foreach (var pair in built.NodeOf)
+                if (pair.Value.Attr("hidden") != null && !built.CssOf(pair.Key).ContainsKey("display")) pair.Key.style.display = DisplayStyle.None;
             panel.Layout(size.x, size.y);
             var values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
             var template = PageCompiler.Emitted(built, panel, values);
@@ -1757,7 +1883,7 @@ internal static class PlainTranslatorTests
     /// time; a click runs the listeners and then the onclick of the element and of each ancestor.
     /// </summary>
     private const string Harness = @"
-var __els = {}, __state = {}, __listeners = {}, __onclick = {};
+var __els = {}, __state = {}, __listeners = {}, __onclick = {}, __handler = {};
 function __el(id) {
   if (__els[id]) return __els[id];
   if (!__exists(id)) return null;
@@ -1819,7 +1945,14 @@ function __el(id) {
     getElementsByClassName: function (c) { return __list(__select(__classes(c), id), true); },
     getElementsByTagName: function (t) { return __list(__select(t, id), true); },
     get className() { return st.className; }, set className(v) { st.className = String(v); st.classWritten = true; },
-    get onclick() { return __onclick[id] || null; }, set onclick(f) { __onclick[id] = f; },
+    get onclick() { return __onclick[id] || null; },
+    // an event handler joins the listeners where it is first set, and leaves them when set to null
+    set onclick(f) {
+      var l = __listeners[id] || (__listeners[id] = []);
+      if (typeof f !== 'function') f = null;
+      if (!f && __onclick[id]) l.splice(l.indexOf(__handler), 1); else if (f && !__onclick[id]) l.push(__handler);
+      __onclick[id] = f;
+    },
     addEventListener: function (type, fn) { if (type !== 'click') return; var l = __listeners[id] || (__listeners[id] = []); if (l.indexOf(fn) < 0) l.push(fn); }
   };
   __els[id] = e;
@@ -1912,10 +2045,11 @@ function __click(id) {
   for (var c = 0; c < chain.length; c++) {
     ev.currentTarget = __el(chain[c]);
     var l = (__listeners[chain[c]] || []).slice();
-    for (var i = 0; i < l.length; i++) l[i](ev);
-    if (__onclick[chain[c]]) __onclick[chain[c]](ev);
+    for (var i = 0; i < l.length; i++) { var f = l[i] === __handler ? __onclick[chain[c]] : l[i]; if (f) f.call(ev.currentTarget, ev); }
   }
 }
+// an onclick attribute: the element's handler before any script runs, a function of event with the element as this
+function __inline(id, code) { __el(id).onclick = new Function('event', code); }
 function __final() {
   var out = {};
   for (var id in __state) {

@@ -278,7 +278,15 @@ local function show(v)
   return '{' .. table.concat(parts, ',') .. '}'
 end
 DATA = {}
-local function merge(d) if type(d) == 'table' then for k, v in pairs(d) do DATA[k] = v end end end
+-- as the vector mod reads a payload: a number, a string or a list; anything else it drops, and the old value stays
+local function merge(d)
+  if type(d) ~= 'table' then return end
+  for k, v in pairs(d) do
+    local t = type(v)
+    if t == 'number' or t == 'string' or t == 'table' then DATA[k] = v
+    else put('FAILED sent a ' .. t .. ' as ' .. tostring(k) .. ', which the vector mod does not read') end
+  end
+end
 local surface = {}
 function surface:element(def)
   put('element ' .. def.id .. ' ' .. def.type .. ' rect=' .. show(def.rect) .. ' props=' .. show(def.props))
@@ -443,8 +451,7 @@ ic = { persist = {
             PostLayout.Attach(built);
             var boxes = new Dictionary<VisualElement, OffThread.Box>();
             OffThread.Boxes = boxes;
-            var width = Mathf.Max(64f, built.ViewportWidth > 0f ? built.ViewportWidth : cw);
-            size = new Vector2(width, Mathf.Max(64f, width * ch / cw));
+            size = PlainTranslator.ConsoleLayout(built.ViewportWidth, new Vector2(cw, ch), Vector2.zero, Vector2.zero);
             panel.Layout(size.x, size.y);
             // What a running page did before its compile (the interpreter's script, in game).
             if (beforeCompile != null) { beforeCompile(built); panel.Layout(size.x, size.y); }

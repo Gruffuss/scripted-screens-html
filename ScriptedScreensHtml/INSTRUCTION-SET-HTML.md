@@ -288,7 +288,7 @@ Source enumerates elements by category (Animation, Basic shapes, Container, Desc
 | exportparts | | | | |
 | headingoffset | | | | |
 | headingreset | | | | |
-| hidden | | | | |
+| hidden | ✅ | the browser's own `[hidden] { display: none }`, a user-agent rule: not drawn and out of the layout, unless the page's own CSS gives the element a `display` (a rule or its style attribute), which wins and the element shows (`HtmlRenderer.HiddenByAttribute`, the one test the page's build and every laid-out state use). Set and cleared by a script: see HTMLElement.hidden | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "hidden under a display rule of the page's own: the rule wins, as it does over a browser's [hidden] { display: none }"; PlainTranslatorTests: "plain hidden: [hidden] is display: none unless the page's own CSS gives a display"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "hidden: the element leaves the layout and comes back, and one hidden from the start shows" | |
 | id | | | | |
 | inert | | | | |
 | inputmode | | | | |
@@ -1087,7 +1087,7 @@ Core set defined on the `GlobalEventHandlers` mixin — applies to every HTML el
 | oncanplay | | | | |
 | oncanplaythrough | | | | |
 | onchange | | | | |
-| onclick | | | | |
+| onclick | ✅ | the element's click handler, made before the script runs: `v_onclick(name, function(event) … end)` at the top of the chunk, the element a hit region on the scene's `on_click`; `this` is the element and `event` the click (`V_EV`); it runs in the element's listener list where it was first set (so before any listener the script adds), and a script's `el.onclick = …` replaces it. The element needs no id (the compile names it), and `<body onclick>` takes a click anywhere on the page. Refused for now: on an element drawn as part of its parent's text, and inside markup a script writes | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "onclick attributes and this: an attribute's code with this and event, one handing this to a function, one on an element with no id, a listener's this on two elements, an onclick property's this, an attribute's handler running before a listener the script adds, and one the script replaces"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "an onclick attribute on the body, and this there"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: plain-events.lua (the in-game page, not yet seen in game) | |
 | onclose | | | | |
 | oncommand | | | | |
 | oncontextmenu | | | | |

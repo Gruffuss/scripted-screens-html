@@ -1085,6 +1085,13 @@ internal static partial class PlainTranslator
             var parentVe = t.Ve.parent;
             var parentNode = t.Node.Parent;
             if (parentVe == null || parentNode == null) { Refuse(of.Writes[0].At, $"markup written into \"{t.Name}\", which has no parent to be built again in"); return; }
+            // an event handler attribute in markup would be dropped: the page's own are made into listeners before the script runs
+            foreach (var n in children.Where(c => !c.IsText).SelectMany(c => new[] { c }.Concat(Elements(c))))
+                if (n.Attributes.Keys.FirstOrDefault(k => k.Length > 2 && k.StartsWith("on", StringComparison.OrdinalIgnoreCase)) is { } on)
+                {
+                    Refuse(of.Writes[0].At, $"an inline event handler attribute ({on}=) in markup written into \"{t.Name}\" (not translated yet; a listener the script adds to what markup makes is)");
+                    return;
+                }
             var fresh = new HtmlNode { Tag = t.Node.Tag };
             if (t.Node.AttributeCount > 0) foreach (var a in t.Node.Attributes) fresh.Attributes[a.Key] = a.Value;
             var parents = children.Select(c => (Node: c, Was: c.Parent)).ToList();
@@ -1097,6 +1104,8 @@ internal static partial class PlainTranslator
             parentVe.Remove(oldVe);
             parentNode.Children.RemoveAt(nodeIndex);
             HtmlRenderer.AppendNodes(parentVe, parentNode, new[] { fresh }, _built);
+            // the ids the markup made; an id given later (the compile naming an element it drives) is not one of them
+            var added = new HashSet<string>(_built.ById.Keys.Where(k => !before.Contains(k)), StringComparer.Ordinal);
             Attach();
             var made = parentVe.Children()[^1];
             parentVe.Insert(index, made);
@@ -1109,7 +1118,7 @@ internal static partial class PlainTranslator
             _undo.Add(() =>
             {
                 foreach (var id in _built.ById.Keys.ToList())
-                    if (!before.Contains(id) || _built.ById[id] is { } now && Inside(now, made))
+                    if (added.Contains(id) || _built.ById[id] is { } now && Inside(now, made))
                     {
                         if (_built.ById[id] is { } gone) _built.ForgetElement(gone);
                         _built.ById.Remove(id);
@@ -1743,11 +1752,22 @@ internal static partial class PlainTranslator
             var most = N(rep.Max);
             if (rep.Source == null)
             {
-                // a loop over a count: as many rows as whole numbers below it (up to it, for `<=`)
                 lua.Emit(pad + "do");
                 lua.Emit(pad + "  local V_c = js_num(" + lua.Translate(rep.Count!) + ")");
-                lua.Emit(pad + "  if V_c ~= V_c then V_c = 0 end");
-                lua.Emit(pad + "  " + v + ".n = math.max(0, math.min(" + (rep.Inclusive ? "math.floor(V_c) + 1" : "math.ceil(V_c)") + ", " + most + "))");
+                if (rep is { Start: 0, Step: 1, Op: Operator.LessThan or Operator.LessThanOrEqual })
+                {
+                    // counting from 0 by 1: as many rows as whole numbers below the bound (up to it, for `<=`)
+                    lua.Emit(pad + "  if V_c ~= V_c then V_c = 0 end");
+                    lua.Emit(pad + "  " + v + ".n = math.max(0, math.min(" + (rep.Op == Operator.LessThanOrEqual ? "math.floor(V_c) + 1" : "math.ceil(V_c)") + ", " + most + "))");
+                }
+                else
+                {
+                    // any other start and step: the loop's own steps, counted as JavaScript takes them
+                    var test = rep.Op switch { Operator.LessThan => "<", Operator.LessThanOrEqual => "<=", Operator.GreaterThan => ">", _ => ">=" };
+                    lua.Emit(pad + "  local V_n, V_i = 0, " + JsToLuaNumber(rep.Start));
+                    lua.Emit(pad + "  while V_n < " + most + " and V_i " + test + " V_c do V_n, V_i = V_n + 1, V_i + " + JsToLuaNumber(rep.Step) + " end");
+                    lua.Emit(pad + "  " + v + ".n = V_n");
+                }
                 lua.Emit(pad + "end");
                 return;
             }

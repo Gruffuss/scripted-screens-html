@@ -877,7 +877,7 @@ internal static class HtmlRenderer
         parent.Add(ve);
         if (node.Tag == "dialog" && node.Attr("open") == null)
             ve.style.display = DisplayStyle.None;
-        if (node.Attr("hidden") != null)
+        if (HiddenByAttribute(node, result.CssOf(ve)))
             ve.style.display = DisplayStyle.None;
         if (node.Attr("popover") != null && node.Attr("data-popover-open") == null)
             ve.style.display = DisplayStyle.None;
@@ -1405,6 +1405,13 @@ internal static class HtmlRenderer
         }
         return any ? m : null;
     }
+
+    /// <summary>
+    /// The browser's own `[hidden] { display: none }`. It is a user-agent rule, so any `display` the page's own CSS
+    /// gives the element (a rule or its style attribute) wins over it, and the element shows.
+    /// </summary>
+    internal static bool HiddenByAttribute(HtmlNode node, Dictionary<string, string> css)
+        => node.Attr("hidden") != null && !css.ContainsKey("display");
 
     /// <summary>Name, classes, id (a synthetic one when the page gave none) and the node map.</summary>
     private static void Register(VisualElement ve, HtmlNode node, Result result)

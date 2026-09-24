@@ -80,6 +80,26 @@ Newest first. The workshop page is a short overview; this file has the full hist
 - `parseInt` and `parseFloat` read a leading number as JavaScript does: `parseInt("10px")` is 10, not
   NaN.
 - A stylesheet `%` width no longer overrides a width set later by a class or an inline style.
+- `onclick="..."` on an element compiles: its code runs as the element's click handler, with `this`
+  the element and `event` the click, before any listener the script adds, as in a browser. A script
+  setting `el.onclick` replaces it. The element needs no id. An `onclick` handler set by the script
+  also takes its turn among the element's listeners in the order it was first set; it always ran last.
+  Other `on...` attributes are still refused, and so is `onclick` inside markup a script writes (before,
+  that one was dropped without a word).
+- `this` in a click listener (a `function`, an `onclick` handler or attribute) is the element it listens
+  on, as `e.currentTarget` is.
+- A `for` loop adding markup can count from any number, up or down, by any fixed step: `i = 1; i <= n`,
+  `i = 4; i > 0; i--`, `i += 2`. Before, only a count from 0 by 1 compiled. A count loop that skips
+  rows (`if (...) continue`) is now refused by name; it compiled and drew every row.
+- A boolean, `undefined` or an array written into text now shows as JavaScript prints it: `'all on: ' +
+  list.every(...)` left the old text on the console, because the value went out as a Lua boolean.
+  `toString()` and `valueOf()` on a boolean work; they stopped the page's Lua with an error.
+- `hidden` on an element the page's CSS gives a `display` (`.row { display: flex }`) no longer hides it:
+  the browser's own `[hidden] { display: none }` gives way to the page's rules.
+- A console is laid out in whole CSS pixels: `innerHeight` read 459 on a 460x460 console and 1035 on a
+  460x1036 one.
+- An element with no id that the script drives on a page that also writes markup lost its entry in the
+  page's ids after the compile.
 
 ## 0.2.0
 
