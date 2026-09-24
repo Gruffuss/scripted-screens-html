@@ -249,7 +249,7 @@ internal sealed class CompiledRun
     {
         NotYet = false;
         if (!ChipHost.Available) return null;           // reported once at startup
-        if (string.IsNullOrWhiteSpace(built.Script)) return null;
+        if (!built.HasCode) return null;
 
         var chip = ChipHost.ChipOf(cartridge);
         if (chip == null)

@@ -100,6 +100,19 @@ Newest first. The workshop page is a short overview; this file has the full hist
   460x1036 one.
 - An element with no id that the script drives on a page that also writes markup lost its entry in the
   page's ids after the compile.
+- Clicks kept as functions in an array compile: a helper that pushes a function and returns an attribute
+  for the markup (`'<div' + act(fn) + ' style="...">'`, returning `' data-act="' + (acts.length - 1) +
+  '"'`), then `document.querySelectorAll('[data-act]')` after the write and a listener on each calling
+  `acts[Number(el.getAttribute('data-act'))]()`. The attribute's name is fixed and its value is the
+  number the helper returned; `cond ? act(fn) : ''` gives an element the attribute or not. A function
+  made in a list's row keeps the row it was made in, as a JavaScript closure does.
+- A list looked up over elements markup makes in only some of its shapes (a tab that is one of two
+  elements, rows that have an attribute or not) holds what is shown when it is looked up, as a
+  browser's list does; it was refused. A first match (`querySelector`) there is still refused.
+- `[name]` in a selector asks only whether an attribute is there, so an attribute markup gives a value
+  no longer stops a lookup by its presence from compiling.
+- A page whose only code is in `onclick` attributes, with no `<script>`, runs them: it was treated as a
+  page driven by data alone, and its clicks did nothing.
 
 ## 0.2.0
 

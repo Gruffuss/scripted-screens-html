@@ -45,7 +45,13 @@ internal static partial class PlainTranslator
         private abstract class Mk { }
         private sealed class MkLit : Mk { public readonly string Text; public MkLit(string text) { Text = text; } }
         /// <summary>A value: <see cref="Expr"/> is read in its own scope (a wrapper, <see cref="_bindOf"/>).</summary>
-        private sealed class MkVal : Mk { public readonly Expression Expr; public MkVal(Expression expr) { Expr = expr; } }
+        private sealed class MkVal : Mk
+        {
+            public readonly Expression Expr;
+            /// <summary>What the helper returning this value did first (`acts.push(fn)`), done right before the write it lands in.</summary>
+            public readonly List<Expression>? Before;
+            public MkVal(Expression expr, List<Expression>? before = null) { Expr = expr; Before = before; }
+        }
         private sealed class MkAlt : Mk
         {
             public readonly Expression Test;
@@ -295,9 +301,11 @@ internal static partial class PlainTranslator
                         return Value(e, env, write);
                     }
 
-                case CallExpression { Callee: Identifier f } call when Function(f) is { } fn && Markupish((Node)(object)fn):
+                // a helper returning markup, or part of a tag (`' data-act="' + n + '"'`): its markup, the attribute's name fixed
+                case CallExpression { Callee: Identifier f } call when Function(f) is { } fn && (Markupish((Node)(object)fn) || Attributish(fn)):
                     {
-                        if (call.Arguments.Any(a => a is SpreadElement || Writes(a))) { Refuse(call, $"markup from \"{f.Name}\" called with arguments that change something (not translated yet)"); return null; }
+                        // a function written as an argument changes nothing by being passed
+                        if (call.Arguments.Any(a => a is SpreadElement || a is not IFunction && Writes(a))) { Refuse(call, $"markup from \"{f.Name}\" called with arguments that change something (not translated yet)"); return null; }
                         var bind = Inlined.Of(fn, call, env);
                         var inlined = fn.Body is Expression body ? Tpl(body, bind, write, depth + 1) : Steps(((FunctionBody)fn.Body).Body, 0, bind, write, depth + 1, fn);
                         return inlined;
@@ -319,7 +327,7 @@ internal static partial class PlainTranslator
 
         /// <summary>A template that is one value, or one literal with no markup in it: a value, not a shape.</summary>
         private static bool Plain(List<Mk> t)
-            => t.Count == 1 && (t[0] is MkVal || t[0] is MkLit l && l.Text.IndexOfAny(new[] { '<', '&' }) < 0);
+            => t.Count == 1 && (t[0] is MkVal { Before: null } || t[0] is MkLit l && l.Text.IndexOfAny(new[] { '<', '&' }) < 0);
 
         private List<Mk>? Value(Expression e, Inlined? env, Node write)
         {
@@ -383,6 +391,14 @@ internal static partial class PlainTranslator
                             if (no == null || !Readable(ifs.Test, bind, write)) return null;
                             return new List<Mk> { new MkAlt(Within(ifs.Test, bind, ifs.Test), yes, no) };
                         }
+                    // `acts.push(fn);`: done for what it does, right before the value after it is read
+                    case ExpressionStatement { Expression: var fx } when !Writes(fx):
+                        {
+                            if (!Readable(fx, bind, write)) return null;
+                            var fxEnv = Copy(bind);
+                            if (Steps(body, i + 1, bind, write, depth, fn) is not { } rest) return null;
+                            return Ahead(rest, Within(fx, fxEnv, fx), body[i]);
+                        }
                 }
                 Refuse(body[i], "a function building markup with statements the compile cannot follow (constants, if and return are followed)");
                 return null;
@@ -438,6 +454,62 @@ internal static partial class PlainTranslator
             return true;
 
             static bool Bound(Inlined? b, Identifier d) => b != null && b.ContainsKey(d);
+        }
+
+        /// <summary>
+        /// The names a function made in markup reads that the compile stands in for with an expression the Lua works
+        /// out where it is read (a list's row, a helper's argument), rather than a variable the function captures.
+        /// </summary>
+        private List<Identifier> LateNames(IFunction fn, Inlined env)
+        {
+            var late = new List<Identifier>();
+            foreach (var x in Markup.Everything((Node)fn.Body))
+                if (x is Identifier id && Reference(id) && Decl(id) is { } d && !late.Contains(d) && env.TryGetValue(d, out var arg) && Late(arg.Expr, arg.Env)) late.Add(d);
+            return late;
+
+            bool Late(Expression e, Inlined? at)
+                => Unwrap(e) switch
+                {
+                    Acornima.Ast.Literal => false,
+                    Identifier i when _lua.ContainsKey(i) => true,
+                    Identifier i when Decl(i) is { } di && at != null && at.TryGetValue(di, out var next) => Late(next.Expr, next.Env),
+                    Identifier => false,
+                    _ => true,
+                };
+        }
+
+        /// <summary>Whether a function returns part of a tag: a string starting with an attribute (`' data-act="'`), as a helper adding one to markup does.</summary>
+        private static bool Attributish(IFunction fn)
+            => Markup.Everything((Node)fn).Any(x => x is StringLiteral s && AttrStart.IsMatch(s.Value)
+                                                  || x is TemplateElement q && AttrStart.IsMatch(q.Value.Cooked ?? string.Empty));
+
+        private static readonly System.Text.RegularExpressions.Regex AttrStart = new(@"^\s+[A-Za-z_:][-A-Za-z0-9_:.]*=[""']");
+
+        /// <summary>
+        /// A helper's template with something it does first (`acts.push(fn);`) done right before its first value is
+        /// read: kept on that value, or on the first value of each side of a choice before it. Null, refused, when no
+        /// value follows.
+        /// </summary>
+        private List<Mk>? Ahead(List<Mk> tpl, Expression fx, Node at)
+        {
+            var list = new List<Mk>(tpl);
+            for (var i = 0; i < list.Count; i++)
+                switch (list[i])
+                {
+                    case MkLit: continue;
+                    case MkVal v:
+                        list[i] = new MkVal(v.Expr, new List<Expression> { fx }.Concat(v.Before ?? new List<Expression>()).ToList());
+                        return list;
+                    case MkAlt a:
+                        if (Ahead(a.Yes, fx, at) is not { } yes || Ahead(a.No, fx, at) is not { } no) return null;
+                        list[i] = new MkAlt(a.Test, yes, no);
+                        return list;
+                    default:
+                        i = list.Count;
+                        break;
+                }
+            Refuse(at, "a function building markup that does something with no value of its markup after it (not translated yet)");
+            return null;
         }
 
         /// <summary>Whether a declaration is in scope at a node.</summary>
@@ -685,7 +757,7 @@ internal static partial class PlainTranslator
                     var map = new Dictionary<MkVal, Mk>();
                     foreach (var v in expand)
                     {
-                        if (Finite(v.Expr) is not { Count: > 0 } set) { Refuse(v.Expr, "a value in an attribute of text markup, only known at run time (not translated yet)"); return; }
+                        if (v.Before != null || Finite(v.Expr) is not { Count: > 0 } set) { Refuse(v.Expr, "a value in an attribute of text markup, only known at run time (not translated yet)"); return; }
                         Mk choice = new MkLit(Text(set[^1]));
                         for (var i = set.Count - 2; i >= 0; i--)
                             choice = new MkAlt(Made(new NonLogicalBinaryExpression(Operator.StrictEquality, v.Expr, Literal(set[i])), w.At),
@@ -799,6 +871,8 @@ internal static partial class PlainTranslator
                 var value = Made(new StringLiteral(string.Empty, string.Empty), w.At);
                 _givenPieces[value] = Split(rich, vals);
                 var at = Made(new AssignmentExpression(Operator.Assignment, new MemberExpression(new Identifier("__markup"), new Identifier("textContent"), false, false), value), w.At);
+                var done = new HashSet<MkVal>();
+                if (!Before(at, rich, vals, done, w.At) || !AllDone(vals, done, w.At)) return;
                 t.Texts.Add((at, value));
                 _ops[at] = new List<Target> { t };
                 var shapeOut = new ShapeOut();
@@ -984,6 +1058,7 @@ internal static partial class PlainTranslator
         {
             var back = pair.ToDictionary(p => p.Value, p => p.Key);
             var labels = new HashSet<Target>();
+            var done = new HashSet<MkVal>();
             foreach (var mnode in Below(marked))
             {
                 if (!back.TryGetValue(mnode, out var node)) continue;
@@ -1007,8 +1082,10 @@ internal static partial class PlainTranslator
                     var ops = opsFor(back[owner]);
                     if (!labels.Add(target)) continue;
                     var value = Made(new StringLiteral(string.Empty, string.Empty), write);
-                    _givenPieces[value] = Split(HtmlRenderer.RichText(owner, _built.Rules), vals);
+                    var rich = HtmlRenderer.RichText(owner, _built.Rules);
+                    _givenPieces[value] = Split(rich, vals);
                     var at = Made(new AssignmentExpression(Operator.Assignment, new MemberExpression(new Identifier("__markup"), new Identifier("textContent"), false, false), value), write);
+                    if (!Before(at, rich, vals, done, write)) return false;
                     target.Texts.Add((at, value));
                     _ops[at] = new List<Target> { target };
                     ops.Add(at);
@@ -1038,6 +1115,7 @@ internal static partial class PlainTranslator
                             var value = Joined(decl.Substring(colon + 1).Trim(), vals, write);
                             var target = Made(new MemberExpression(Made(new MemberExpression(new Identifier("__markup"), new Identifier("style"), false, false), write), new StringLiteral(css, css), true, false), write);
                             var at = Made(new AssignmentExpression(Operator.Assignment, target, value), write);
+                            if (!Before(at, decl, vals, done, write)) return false;
                             if (!el.Styles.TryGetValue(css, out var list)) el.Styles[css] = list = new();
                             list.Add((at, value));
                             _ops[at] = new List<Target> { el };
@@ -1049,16 +1127,45 @@ internal static partial class PlainTranslator
                     if (name == "class")
                     {
                         var at = Made(new AssignmentExpression(Operator.Assignment, new MemberExpression(new Identifier("__markup"), new Identifier("className"), false, false), joined), write);
+                        if (!Before(at, attr.Value, vals, done, write)) return false;
                         ClassName(r, at, joined);
                         elOps.Add(at);
                         continue;
                     }
                     var set = Made(new AssignmentExpression(Operator.Assignment, new MemberExpression(new Identifier("__markup"), new Identifier(name), false, false), joined), write);
+                    if (!Before(set, attr.Value, vals, done, write)) return false;
                     AttrWrite(r, set, name, "set", joined);
                     elOps.Add(set);
                 }
             }
+            return AllDone(vals, done, write);
+        }
+
+        /// <summary>What the helpers of a write's values did first (`acts.push(fn)`), done right before the write.</summary>
+        private readonly Dictionary<Expression, List<Expression>> _before = new();
+
+        /// <summary>
+        /// What the helper of a value in a write's text did first, kept to be done right before the write; false,
+        /// refused, for two such values in one write, since the Lua would do both before reading either.
+        /// </summary>
+        private bool Before(Expression op, string text, List<MkVal> vals, HashSet<MkVal> done, Node write)
+        {
+            foreach (var k in Markers(text))
+            {
+                if (vals[k].Before is not { } fx) continue;
+                if (_before.ContainsKey(op)) { Refuse(write, "two values in one text or attribute of markup whose helpers do something first (not translated yet)"); return false; }
+                _before[op] = fx;
+                done.Add(vals[k]);
+            }
             return true;
+        }
+
+        /// <summary>Whether every value whose helper does something first landed in a write that does it; refused otherwise.</summary>
+        private bool AllDone(List<MkVal> vals, HashSet<MkVal> done, Node write)
+        {
+            if (!vals.Any(v => v.Before != null && !done.Contains(v))) return true;
+            Refuse(write, "a value of markup whose helper does something first, landing where nothing is written (not translated yet)");
+            return false;
         }
 
         /// <summary>An attribute's text with values in it as the expression JavaScript would add up: literals and values, left to right.</summary>
@@ -1185,7 +1292,7 @@ internal static partial class PlainTranslator
         /// </summary>
         private string? Transient(Expression at, Els els)
         {
-            if (!els.List && !(at is CallExpression c && DomCall(c) is { Kind: "querySelector" })) return null;
+            if (!els.List && !(at is CallExpression c && DomCall(c) is { Kind: "querySelector" }) || els.List && els.Shown) return null;
             foreach (var t in els.Ts)
             {
                 if (!_madeBy.TryGetValue(t, out var of) || !Varies(of)) continue;
@@ -1193,6 +1300,19 @@ internal static partial class PlainTranslator
                 return $"\"{t.Name}\", which markup written into \"{of.T.Name}\" makes in only some of its shapes or lengths (not translated yet: a list of one list's rows, one element per row, is)";
             }
             return null;
+        }
+
+        /// <summary>
+        /// The visibility slots that show an element markup makes, in a lookup's list of what is shown (<see cref="Els.Shown"/>):
+        /// its own and those of what holds it, each a top a state shows or hides. None for an element always there.
+        /// </summary>
+        private List<string> ShownBy(Target t)
+        {
+            var slots = new List<string>();
+            if (!_madeBy.TryGetValue(t, out var of) || !Varies(of)) return slots;
+            for (var ve = t.Ve; ve != null && ve != of.T.Ve; ve = ve.parent)
+                if (of.Hide.FirstOrDefault(h => h.Ve == ve) is { } top) slots.Add(DomSlots.Slot(top.Name) + "_v");
+            return slots;
         }
 
         /// <summary>
@@ -1679,6 +1799,19 @@ internal static partial class PlainTranslator
             {
                 foreach (var op in ops)
                 {
+                    // what the values' helpers did first (`acts.push(fn)`), right before the value is read
+                    if (_before.TryGetValue(op, out var fx))
+                        foreach (var x in fx)
+                        {
+                            _effectBlocks = 0;
+                            try
+                            {
+                                var code = lua.Translate(x);
+                                lua.Emit(pad + (Unwrap(x) is CallExpression && Call.IsMatch(code) ? code : "do local _ = " + code + " end"));
+                                for (; _effectBlocks > 0; _effectBlocks--) lua.Emit(pad + "end");
+                            }
+                            finally { _effectBlocks = -1; }
+                        }
                     if (_lua.TryGetValue(op, out var own)) { lua.Emit(pad + own(lua)); continue; }
                     foreach (var line in EmitOp(op, _ops[op][0], lua.Translate, early: true)) lua.Emit(pad + line);
                 }
@@ -1875,12 +2008,46 @@ internal static partial class PlainTranslator
             if (_rowsList)
                 sb.Append("-- a lookup's list of a list's rows: as long as the rows shown when it is looked up\n")
                   .Append("local function v_rows(l, p, r) l.length = p + r.n return l end\n");
+            if (_shownList)
+                sb.Append("-- a lookup's list of what markup makes: the members shown when it is looked up (vis: what shows each)\n")
+                  .Append("local function v_shown(l, all, vis)\n  local n = 0\n  for i = 0, all.length - 1 do\n    local ok, s = true, vis[i]\n")
+                  .Append("    if s then for j = 1, #s do if V_D[s[j]] == 0 then ok = false break end end end\n")
+                  .Append("    if ok then l[n] = all[i] n = n + 1 end\n  end\n  for i = n, l.length - 1 do l[i] = nil end\n  l.length = n\n  return l\nend\n");
             return sb.ToString();
         }
+
+        /// <summary>While a helper's effect is written: the blocks opened for what a function made there keeps, closed after it (-1: none being written).</summary>
+        private int _effectBlocks = -1;
+        private int _captures;
+        private readonly HashSet<Node> _capturing = new();
 
         /// <summary>A value of markup, translated in its own scope; a name there as what it stands for.</summary>
         private string? MarkupExpression(JsToLua lua, Node e)
         {
+            // A function made by a helper's effect (`acts.push(() => pick(g))`) keeps what it reads of the row as it is
+            // made, as a JavaScript closure does: each such name in a local of its own, set just before it.
+            if (_effectBlocks >= 0 && e is IFunction made && _active != null && !_capturing.Contains(e) && LateNames(made, _active) is { Count: > 0 } late)
+            {
+                var kept = Copy(_active);
+                foreach (var name in late)
+                {
+                    var (expr, at) = _active[name];
+                    var local = "V_K" + (++_captures).ToString(CultureInfo.InvariantCulture);
+                    var was = _active;
+                    _active = at;
+                    string value;
+                    try { value = lua.Translate(expr); }
+                    finally { _active = was; }
+                    lua.Emit("do local " + local + " = " + value);
+                    _effectBlocks++;
+                    kept[name] = (Held(local), null);
+                }
+                var outer = _active;
+                _capturing.Add(e);
+                _active = kept;
+                try { return lua.Translate(e); }
+                finally { _active = outer; _capturing.Remove(e); }
+            }
             // an attribute's whole text by its one value, from a table made once: no string is built
             if (e is Expression je && _joined.TryGetValue(je, out var pieces))
             {

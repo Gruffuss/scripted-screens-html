@@ -45,7 +45,8 @@ internal static class Probe4
         foreach (Match m in Regex.Matches(page, "<script[^>]*>(.*?)</script>", RegexOptions.Singleline | RegexOptions.IgnoreCase))
             script += m.Groups[1].Value + "\n";
         Console.WriteLine($"{name}: page {page.Length} chars, script {script.Length} chars");
-        if (script.Trim().Length == 0) { Console.WriteLine("  no script"); return; }
+        // a page whose only code is in handler attributes (onclick=…) is compiled like any other
+        if (script.Trim().Length == 0 && !Regex.IsMatch(page, @"<[^>]*\son[a-z]+\s*=", RegexOptions.IgnoreCase)) { Console.WriteLine("  no script"); return; }
 
         var translated = JsToLua.Compile(script, out var problems);
         Console.WriteLine($"  translate: {(translated == null ? "FAILED" : translated.Length + " chars")}, {problems.Count} problem(s)");

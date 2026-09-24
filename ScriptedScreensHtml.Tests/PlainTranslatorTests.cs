@@ -307,6 +307,15 @@ internal static class PlainTranslatorTests
          "<script>var hits = 0;</script></body></html>",
          Steps("body", "body"), new[] { 1, 2 }),
 
+        ("a page whose only code is in onclick attributes, with no script: classes added, removed and toggled on this, text written",
+         Head + ".lamp { width: 40px; height: 40px; background: #522; } .lamp.lit { background: #2e5; } .box { width: 160px; height: 40px; background: #234; } .box.sel { background: #fa0; color: #111; }" +
+         "</style></head><body><div id=\"lamp\" class=\"lamp\"></div><p id=\"state\">OFF</p>" +
+         "<button id=\"on\" onclick=\"document.getElementById('lamp').classList.add('lit'); document.getElementById('state').textContent = 'ON'\">On</button>" +
+         "<button id=\"off\" onclick=\"document.getElementById('lamp').classList.remove('lit'); document.getElementById('state').textContent = 'OFF'\">Off</button>" +
+         "<div id=\"box\" class=\"box\" onclick=\"this.classList.toggle('sel'); document.getElementById('pick').textContent = this.classList.contains('sel') ? 'box: selected' : 'box: none'\">Toggle me</div>" +
+         "<p id=\"pick\">box: none</p></body></html>",
+         Steps("on", "box", "off", "box", "on"), new[] { 0, 1, 2, 3, 4, 5 }),
+
         ("booleans and undefined written into text: every(), includes(), a comparison, a boolean held in a name, toString(), valueOf() and String() of one, a variable never set",
          Page("", "<p id=\"flag\">flag ?</p><p id=\"all\">all on: ?</p><p id=\"has\">has 3: ?</p><p id=\"big\">?</p><p id=\"never\">?</p>",
               "var n = 0; var on = [1, 2]; var unset;" +
@@ -959,6 +968,40 @@ internal static class PlainTranslatorTests
               "setInterval(() => { k++; show(); }, 500);" +
               "show();"),
          Ticks(4), new[] { 0, 1, 2, 3, 4 }),
+
+        ("clicks kept as functions in an array: a helper pushes each and returns the attribute data-act=\"index\" (a tab of two shapes, rows, rows that have it or not), " +
+         "every [data-act] shown found after the write and given a listener calling acts[Number(getAttribute)]; a row's function keeps the item it was made with",
+         Page(".btn { width: 120px; height: 30px; background: #234; margin: 4px; } .btn.on { background: #363; } .row { height: 24px; background: #222; margin: 2px; } .row.on { color: #6c6; }",
+              "<div id=\"tabs\"></div><div id=\"panel\"></div><p id=\"log\">-</p><p id=\"count\">-</p><button id=\"rot\">Rotate</button>",
+              "let acts = [];" +
+              "const act = (fn) => { acts.push(fn); return ' data-act=\"' + (acts.length - 1) + '\"'; };" +
+              "let n = 0, mode = 'a';" +
+              "const items = [{ name: 'Pump', pick: null }, { name: 'Fan', pick: null }, { name: 'Vent', pick: null }];" +
+              "items[0].pick = () => say('pick Pump');" +
+              "items[2].pick = () => say('pick Vent');" +
+              "function say(s) { document.getElementById('log').textContent = s + ' / ' + acts.length; render(); }" +
+              "function tabs(v) {" +
+              "  return v.mode === 'a'" +
+              "    ? '<div id=\"ta\" class=\"btn\"' + act(() => { mode = 'b'; render(); }) + '>Tab A ' + v.n + '</div>'" +
+              "    : '<div id=\"tb\" class=\"btn on\"' + act(() => { mode = 'a'; render(); }) + '>Tab B</div>';" +
+              "}" +
+              "function render() {" +
+              "  acts = [];" +
+              "  const v = { mode, n };" +
+              "  document.getElementById('tabs').innerHTML = tabs(v);" +
+              "  document.getElementById('panel').innerHTML = '<div id=\"add\" class=\"btn\"' + act(() => { n++; render(); }) + '>Add ' + n + '</div>'" +
+              "    + items.map((g, i) => '<div id=\"r' + i + '\" class=\"row\"' + act(() => say(i + ' ' + g.name)) + '>' + g.name + '</div>').join('')" +
+              "    + items.map((g) => '<div class=\"row' + (g.pick ? ' on' : '') + '\"' + (g.pick ? act(g.pick) : '') + '>' + g.name + '</div>').join('');" +
+              "  const bound = document.querySelectorAll('[data-act]');" +
+              "  for (let i = 0; i < bound.length; i++) {" +
+              "    const el = bound[i], idx = Number(el.getAttribute('data-act'));" +
+              "    el.addEventListener('click', () => acts[idx]());" +
+              "  }" +
+              "  document.getElementById('count').textContent = bound.length + ' bound';" +
+              "}" +
+              "document.getElementById('rot').addEventListener('click', () => { const first = items.shift(); if (items.length < 3) items.push(first); });" +
+              "render();"),
+         Steps("r0", "rot", "r0", "add", "ta", "r1", "tb", "add"), new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8 }),
     };
 
     /// <summary>Features outside what is translated, each refused by name - the page keeps its old path.</summary>
@@ -986,7 +1029,8 @@ internal static class PlainTranslatorTests
         ("markup chosen with &&", Page("", "<div id=\"a\"></div>", "let on = true; setTimeout(() => { document.getElementById('a').innerHTML = on && '<b>on</b>'; }, 10);"), "chosen with && or ||"),
         ("markup whose tag is a value", Page("", "<div id=\"a\"></div>", "let t = 'b' + Math.random(); setTimeout(() => { document.getElementById('a').innerHTML = '<' + t + '>x</' + t + '>'; }, 10);"), "whose tag is a value"),
         ("reading innerHTML", Page("", "<div id=\"a\"><b>x</b></div><p id=\"o\">-</p>", "setTimeout(() => { document.getElementById('o').textContent = document.getElementById('a').innerHTML; }, 10);"), "reading .innerHTML"),
-        ("a list over markup that has more than one shape", Page("", "<div id=\"a\"></div>", "let on = false; setInterval(() => { on = !on; document.getElementById('a').innerHTML = on ? '<p class=\"x\">1</p>' : '<p class=\"x\">2</p><p class=\"x\">3</p>'; document.querySelectorAll('.x').forEach((e) => e.classList.add('y')); }, 10);"), "in only some of its shapes"),
+        // a list of them is what is shown when it is looked up (the data-act case in Lists); a first match is not followed yet
+        ("a first match among what markup makes in only some of its shapes", Page("", "<div id=\"a\"></div><p id=\"n\">-</p>", "let on = false; setInterval(() => { on = !on; document.getElementById('a').innerHTML = on ? '<p class=\"x\">1</p>' : '<p class=\"x\">2</p><p class=\"x\">3</p>'; document.getElementById('n').textContent = document.querySelector('.x') ? 'y' : 'n'; }, 10);"), "in only some of its shapes"),
         ("a write to an element markup makes", Page("", "<div id=\"a\"></div>", "setTimeout(() => { document.getElementById('a').innerHTML = '<p id=\"m\">1</p>'; document.getElementById('m').style.color = '#f00'; }, 10);"), "the next markup write would undo it"),
         ("an element chosen by an id the compile cannot bound", Page("", "<p id=\"a1\">x</p>", "setTimeout(() => { document.getElementById(localStorage.getItem('which')).textContent = 'y'; }, 10);"), "from ids the compile cannot bound"),
         ("an element stored in an object", Page("", "<p id=\"a\">x</p>", "const o = { el: document.getElementById('a') }; setTimeout(() => { o.el.textContent = 'y'; }, 10);"), "used as a value this way"),
@@ -1057,6 +1101,11 @@ internal static class PlainTranslatorTests
         // Box C (no id) is clicked in game only: the browser side here names an element with no id its own way.
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-events.lua"), Steps("a", "b", "d", "e", "d", "o", "o", "a"),
          new[] { 0, 1, 2, 3, 5, 6, 7, 8 }),
+        // clicks kept as functions in an array, found by [data-act]: not yet seen in game. The second row's boxes (no id) are clicked in game only.
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-acts.lua"), Steps("r0", "rot", "r0", "add", "ta", "r1", "tb", "add"),
+         new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8 }),
+        // a page whose only code is in onclick attributes: not yet seen in game
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-noscript.lua"), Steps("on", "box", "off", "box", "on"), new[] { 0, 1, 2, 3, 5 }),
     };
 
     internal static void Run(Action<bool, string> check)
@@ -1254,6 +1303,8 @@ internal static class PlainTranslatorTests
         {
             (System.IO.Path.Combine("ScriptedScreensHtml", "examples", "09-transition.lua"), true),
             (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-counter.lua"), true),
+            // no script, only onclick attributes: compiled like any page with one
+            (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-noscript.lua"), true),
             (System.IO.Path.Combine("ScriptedScreensHtml", "AtmoDark.lua"), false),
             (System.IO.Path.Combine("ScriptedScreensHtml", "examples", "07-game.lua"), false),
         };
@@ -1264,6 +1315,17 @@ internal static class PlainTranslatorTests
             var built = HtmlRenderer.Build(MarkupProbe.Bracketed(text) ?? text, FontLibrary.Default());
             var got = PlainTranslator.Eligible(built);
             check(got == eligible, $"plain: {System.IO.Path.GetFileName(file)} {(eligible ? "is" : "is not")} compiled before its script runs (got {got})");
+        }
+        // what the surface runs, compiles or drives by data alone keys on: a script, handler attributes, or neither
+        foreach (var (what, body, code) in new[]
+                 {
+                     ("only an onclick attribute", "<p id=\"a\" onclick=\"this.textContent = 'b'\">a</p>", true),
+                     ("a script", "<p id=\"a\">a</p><script>var x = 1;</script>", true),
+                     ("neither", "<p id=\"a\">a</p>", false),
+                 })
+        {
+            var built = HtmlRenderer.Build(Head + "</style></head><body>" + body + "</body></html>", FontLibrary.Default());
+            check(built.HasCode == code, $"plain: a page with {what} {(code ? "has" : "has no")} code of its own (got {built.HasCode})");
         }
     }
 

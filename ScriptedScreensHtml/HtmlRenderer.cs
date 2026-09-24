@@ -39,6 +39,10 @@ internal static class HtmlRenderer
         public readonly Dictionary<string, SvgShape> Shapes = new(StringComparer.Ordinal);
         public readonly List<(VisualElement element, AnimationSpec spec)> Animations = new();
         public string Script = string.Empty;
+        /// <summary>An event handler attribute (onclick=…) on an element of the page as written: code a browser runs, script or not.</summary>
+        public bool Handlers;
+        /// <summary>Whether the page has code of its own: a script, or only handler attributes.</summary>
+        public bool HasCode => Handlers || !string.IsNullOrWhiteSpace(Script);
         /// <summary>The page's own source, as it was built: what the compiler reads the page as it was written from.</summary>
         public string Source = string.Empty;
         /// <summary>&lt;script src&gt; urls in document order and &lt;link rel=stylesheet href&gt; urls; the surface fetches them.</summary>
@@ -328,6 +332,20 @@ internal static class HtmlRenderer
         finally { _building = false; }
     }
 
+    /// <summary>Whether any element under a node has an event handler attribute (onclick=…).</summary>
+    private static bool HasHandler(HtmlNode n)
+    {
+        foreach (var c in n.Children)
+        {
+            if (c.IsText) continue;
+            if (c.AttributeCount > 0)
+                foreach (var k in c.Attributes.Keys)
+                    if (k.Length > 2 && k.StartsWith("on", StringComparison.OrdinalIgnoreCase)) return true;
+            if (HasHandler(c)) return true;
+        }
+        return false;
+    }
+
     private static Result BuildInner(string source, FaceData? font, Result result, HtmlNode doc, List<CssRule> rules, StringBuilder script, Action<string> Warn)
     {
         Collect(doc, rules, script, result.Keyframes, Warn, result);
@@ -339,6 +357,7 @@ internal static class HtmlRenderer
         foreach (var (family, src, weight, style) in CssParser.FontFaces)
             FontLibrary.Alias(family, src, weight, style);
         result.Script = script.ToString();
+        result.Handlers = HasHandler(doc);
         rules.Sort((a, b) => a.Order.CompareTo(b.Order));
         result.Rules = rules;
 

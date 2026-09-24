@@ -101,7 +101,7 @@ internal static partial class PlainTranslator
         private readonly Dictionary<Node, MarkupWrite> _markupAt = new();
         /// <summary>Each element a list's row makes: its list, its row and which of the row's shapes.</summary>
         private readonly Dictionary<Target, (MkRep Rep, int K, int C)> _rowOf = new();
-        private bool _slice, _rowsList;
+        private bool _slice, _rowsList, _shownList;
 
         private static Inlined Copy(Inlined? env)
         {

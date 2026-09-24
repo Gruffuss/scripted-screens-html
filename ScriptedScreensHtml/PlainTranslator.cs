@@ -163,7 +163,8 @@ internal static partial class PlainTranslator
     /// <summary>The script parsed and its every DOM use checked against the translated features; null with the reasons otherwise.</summary>
     private static (Page Page, Script Ast)? Analysed(HtmlRenderer.Result built, List<string> refused)
     {
-        if (string.IsNullOrWhiteSpace(built.Script)) return null;
+        // a page with no code; one whose only code is in onclick attributes is compiled like any other
+        if (!built.HasCode) return null;
         Script ast;
         try { ast = new Parser().ParseScript(built.Script); }
         catch (Exception ex) { refused.Add("parse: " + ex.Message); return null; }
@@ -726,6 +727,8 @@ internal static partial class PlainTranslator
             public bool Neutral;
             /// <summary>A list that is one list of markup's rows (after <c>Prefix</c> elements always there): as long as the rows shown.</summary>
             public (MkRep Rep, int Prefix)? Rows;
+            /// <summary>A list holding elements markup makes in only some of its writes: those shown when it is looked up, as a browser's list holds what is there.</summary>
+            public bool Shown;
             public bool One => !List && Bad == null && !Null && !Neutral && Ts.Count == 1;
 
             public static Els Nothing(bool isNull) => new() { Neutral = true, Null = isNull };
@@ -757,6 +760,7 @@ internal static partial class PlainTranslator
                     if (u.Neutral) { u.Neutral = false; u.List = x.List; u.Kind = x.Kind; }
                     else if (u.Kind != x.Kind) u.Kind = "Array";
                     u.Null |= x.Null;
+                    u.Shown |= x.Shown;
                     foreach (var t in x.Ts) if (!u.Ts.Contains(t)) u.Ts.Add(t);
                     foreach (var l in x.Lists) if (!u.Lists.Any(y => y.SequenceEqual(l))) u.Lists.Add(l);
                 }
@@ -916,7 +920,7 @@ internal static partial class PlainTranslator
         private static Els Pick(Els list, Expression? index)
         {
             var e = new Els();
-            if (index is NumericLiteral { Value: var k } && k >= 0 && k == Math.Floor(k))
+            if (index is NumericLiteral { Value: var k } && k >= 0 && k == Math.Floor(k) && !list.Shown)
             {
                 foreach (var l in list.Lists)
                     if (k < l.Count) { if (!e.Ts.Contains(l[(int)k])) e.Ts.Add(l[(int)k]); }
@@ -971,6 +975,7 @@ internal static partial class PlainTranslator
             if (kind == "querySelector") return found.Count > 0 ? Els.Of(found[0]) : Els.Nothing(true);
             var list = Els.ListOf(found, kind == "querySelectorAll" ? "NodeList" : "HTMLCollection");
             list.Rows = RowsOf(found);
+            list.Shown = list.Rows == null && found.Any(t => _madeBy.TryGetValue(t, out var of) && Varies(of));
             return list;
         }
 
@@ -1251,6 +1256,8 @@ internal static partial class PlainTranslator
             if (_selectors.Count == 0) return;
             var classes = new HashSet<string>(StringComparer.Ordinal);
             var attrs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // attributes the script adds or takes away, not only gives another value
+            var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             static string[] Words(string v) => v.Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries);
             foreach (var t in _order)
             {
@@ -1263,7 +1270,12 @@ internal static partial class PlainTranslator
                     foreach (var set in sets) always.IntersectWith(set);
                     foreach (var set in sets) classes.UnionWith(set.Where(c => !always.Contains(c)));
                 }
-                foreach (var op in t.AttrOps) attrs.Add(op.Name);
+                foreach (var op in t.AttrOps)
+                {
+                    attrs.Add(op.Name);
+                    // markup's own value for an attribute its element is made with: the attribute is there in every write
+                    if (!(op.Verb == "set" && _synthetic.Contains(op.At))) present.Add(op.Name);
+                }
             }
             foreach (var (selector, at) in _selectors)
             {
@@ -1273,8 +1285,9 @@ internal static partial class PlainTranslator
                         Refuse(at, $"the selector \"{selector}\" tests the class \"{c.Groups[1].Value}\", which the script changes, so what it finds changes as the page runs (not translated yet)");
                         break;
                     }
-                foreach (Match a in Regex.Matches(selector, @"\[\s*([\w-]+)"))
-                    if (attrs.Contains(a.Groups[1].Value))
+                // `[name]` asks only whether the attribute is there; `[name=…]` reads its value too
+                foreach (Match a in Regex.Matches(selector, @"\[\s*([\w-]+)\s*(\])?"))
+                    if ((a.Groups[2].Success ? present : attrs).Contains(a.Groups[1].Value))
                     {
                         Refuse(at, $"the selector \"{selector}\" tests the attribute \"{a.Groups[1].Value}\", which the script changes, so what it finds changes as the page runs (not translated yet)");
                         break;
@@ -2034,7 +2047,7 @@ internal static partial class PlainTranslator
                 {
                     foreach (var x in r.Ts) x.AttrsByName = true;
                     if (verb == "hasAttribute") _bool.Add(call); else _null[call] = "null";
-                    Read(r, call, (_, x, tr) => AttrRead(x, verb == "hasAttribute", null, args[0], tr));
+                    Read(r, call, (_, x, tr) => AttrRead(x, verb == "hasAttribute", null, args[0], tr, call));
                 }
                 else Refuse(call, $"{verb} on {r.Name} with a name only known at run time");
                 return;
@@ -2046,7 +2059,7 @@ internal static partial class PlainTranslator
                 else
                 {
                     if (verb == "hasAttribute") _bool.Add(call); else _null[call] = "null";
-                    Read(r, call, (_, x, tr) => AttrRead(x, verb == "hasAttribute", name, null, tr));
+                    Read(r, call, (_, x, tr) => AttrRead(x, verb == "hasAttribute", name, null, tr, call));
                 }
                 return;
             }
@@ -2090,7 +2103,7 @@ internal static partial class PlainTranslator
                 var name = Data(d.Property is Identifier k ? k.Name : ((StringLiteral)d.Property).Value);
                 if (Assigned(d) is { } w) { AttrWrite(r, w.At, name, "set", w.Value); return; }
                 if (_parent[d] is NonUpdateUnaryExpression { Operator: Operator.Delete } del) { AttrWrite(r, del, name, "remove", null); return; }
-                if (!WrittenTo(d) && !(_parent[d] is CallExpression dc && dc.Callee == d)) { _null[d] = "undefined"; Read(r, d, (_, x, tr) => AttrRead(x, false, name, null, tr)); return; }
+                if (!WrittenTo(d) && !(_parent[d] is CallExpression dc && dc.Callee == d)) { _null[d] = "undefined"; Read(r, d, (_, x, tr) => AttrRead(x, false, name, null, tr, d)); return; }
             }
             else if (gp is NonLogicalBinaryExpression { Operator: Operator.In, Left: StringLiteral key } test && test.Right == ds)
             {
@@ -4181,16 +4194,22 @@ internal static partial class PlainTranslator
         /// An attribute read: from the program's table when the script changes this element's attributes
         /// (or reads them by a run-time name), else the constant the page's source gives it.
         /// </summary>
-        private string AttrRead(Target t, bool has, string? name, Expression? byName, Func<Node, string> tr)
+        private string AttrRead(Target t, bool has, string? name, Expression? byName, Func<Node, string> tr, Node? read = null)
         {
             if (t.AttrTable != null)
             {
                 var v = t.AttrTable + "[" + (name != null ? Q(name) : "string.lower(js_str(" + tr(byName!) + "))") + "]";
-                return has ? "(" + v + " ~= nil)" : "v_attr(" + v + ")";
+                return has ? "(" + v + " ~= nil)" : (read != null && Numbered(read) ? "v_attrnum(" : "v_attr(") + v + ")";
             }
             var own = SourceNode(t).Attr(name!);
             return has ? (own != null ? "true" : "false") : own != null ? Q(own) : "nil";
         }
+
+        /// <summary>Whether a read is turned straight into a number: `Number(x)` or `+x`.</summary>
+        private bool Numbered(Node read)
+            => _parent.TryGetValue(read, out var p)
+               && (p is CallExpression { Callee: Identifier { Name: "Number" } num, Arguments.Count: 1 } c && c.Arguments[0] == read && Decl(num) == null
+                   || p is NonUpdateUnaryExpression { Operator: Operator.UnaryPlus });
 
         private static string AttrLua(Target t, AttrOp op, Func<Node, string> tr)
         {
@@ -4501,6 +4520,16 @@ internal static partial class PlainTranslator
                     // as long as the rows shown when it is looked up, as a browser's list is
                     _rowsList = true;
                     value = "v_rows(" + name + ", " + rows.Prefix.ToString(CultureInfo.InvariantCulture) + ", " + rows.Rep.Var + ")";
+                }
+                else if (els.Shown)
+                {
+                    // the elements markup shows when it is looked up: each one's own and its holders' visibility slots, read
+                    _shownList = true;
+                    var vis = items.Select((t, i) => (i, Slots: ShownBy(t))).Where(x => x.Slots.Count > 0)
+                        .Select(x => "[" + x.i.ToString(CultureInfo.InvariantCulture) + "] = { " + string.Join(", ", x.Slots.Select(Q)) + " }");
+                    _tables.Add("local " + name + "s = { length = 0 } -- the members shown\n");
+                    _tables.Add("local " + name + "v = { " + string.Join(", ", vis) + " } -- what shows each\n");
+                    value = "v_shown(" + name + "s, " + name + ", " + name + "v)";
                 }
             }
             else value = els.One ? els.Ts[0].Number.ToString(CultureInfo.InvariantCulture) : "nil";
@@ -4818,6 +4847,8 @@ internal static partial class PlainTranslator
             {
                 sb.Append("-- attributes, as the browser stores them: a string, or nil for absent\n");
                 sb.Append("local function v_attr(v)\n  if v == nil or type(v) == \"string\" then return v end\n  return js_str(v)\nend\n");
+                sb.Append("-- one read straight into a number (Number(el.getAttribute(…))): a number written there is that number, no text made for it\n");
+                sb.Append("local function v_attrnum(v)\n  if type(v) == \"number\" then return v end\n  return v_attr(v)\nend\n");
                 sb.Append("local function v_setattr(at, name, v, c)\n  if v == nil then v = \"undefined\" elseif type(v) == \"table\" then v = js_str(v) end\n");
                 sb.Append("  at[name] = v\n  if c then v_class(c) end\nend\n");
                 sb.Append("local function v_rmattr(at, name, c)\n  at[name] = nil\n  if c then v_class(c) end\n  return true\nend\n");

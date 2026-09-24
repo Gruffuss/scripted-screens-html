@@ -701,11 +701,12 @@ internal sealed class HtmlSurface : MonoBehaviour
         // write - even a zero radius or width - and the first payload compiles against the very
         // next emit, with no emit spent only on naming. Groups are not named here: a named node
         // makes the renderer retain its props, so only the data that needs one names it (BindById).
-        if (string.IsNullOrWhiteSpace(built.Script))
+        if (!built.HasCode)
             foreach (var id in built.ById.Keys)
                 if (!id.StartsWith("__", StringComparison.Ordinal)) built.Driven.Add(id);
 
-        if (!string.IsNullOrWhiteSpace(built.Script))
+        // a page whose only code is in onclick attributes runs them as a browser does
+        if (built.HasCode)
         {
             _script = new ScriptHost(
                 id => _byId.TryGetValue(id, out var e) ? e : null,
@@ -1575,7 +1576,7 @@ internal sealed class HtmlSurface : MonoBehaviour
     private void CompileHere(Vector2 layout, string template)
     {
         var built = _built;
-        if (built == null || _panel == null || _compileTried == built || string.IsNullOrWhiteSpace(built.Script)) return;
+        if (built == null || _panel == null || _compileTried == built || !built.HasCode) return;
         // Whichever holds the chip. A console's host is a Motherboard and its `cartridge` is
         // null; only a tablet has one. Gating on the cartridge alone meant no console ever
         // reached this, which is why nothing happened the first time it was switched on.
