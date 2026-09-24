@@ -526,6 +526,73 @@ internal static class PlainTranslatorTests
               "  document.getElementById('list').innerHTML = `<div class=\"item ok\">${n} ready</div>` + (n > 1 ? '<div class=\"item\">second</div>' : '');" +
               "}, 1000);"),
          Ticks(6), new[] { 0, 1, 2, 4, 6 }),
+
+        ("a style attribute written from a fixed set, display:flex in each value: the spans in it are boxes, a colour and an attribute only known at run time in theirs; " +
+         "cards whose border and fill follow each value, in rows and alone",
+         Page("#cards { display: flex; gap: 6px; } p { margin: 4px 0; }",
+              "<div id=\"cards\"></div><div id=\"head\"></div><p>end</p>",
+              "const alarm = ['#e33', '#a3a', '#fa0'];" +
+              "let load = 0, k = 0;" +
+              "function draw() {" +
+              "  const cards = [{ label: 'Room', hot: load > 5 }, { label: 'Vent', hot: false }].map((c) => ({ label: c.label, ink: c.hot ? alarm[k % 3] : '#ccc'," +
+              "    style: 'box-sizing:border-box;flex:1;display:flex;flex-direction:column;gap:2px;padding:6px;border:2px solid ' + (c.hot ? '#c33' : '#556') + ';background:' + (c.hot ? '#311' : '#222') }));" +
+              "  document.getElementById('cards').innerHTML = cards.map((c) => '<div style=\"' + c.style + '\"><span data-at=\"' + k + '\" style=\"font-size:13px;color:' + c.ink + '\">' + c.label + '</span>'" +
+              "    + '<div style=\"height:4px;background:' + (load > 5 ? '#fa0' : '#444') + '\"></div></div>').join('');" +
+              "  const head = load > 5 ? 'display:flex;gap:8px;background:#402020;padding:4px' : 'display:flex;gap:8px;background:#203040;padding:4px';" +
+              "  document.getElementById('head').innerHTML = '<div style=\"' + head + '\"><span>state</span><span style=\"width:60px;color:' + alarm[k % 3] + '\">' + (load > 5 ? 'HOT' : 'ok') + '</span></div>';" +
+              "}" +
+              "setInterval(() => { k++; load = load > 5 ? 0 : 10; draw(); }, 500);" +
+              "draw();"),
+         Ticks(4), new[] { 0, 1, 2, 3, 4 }),
+
+        ("a style attribute whose values fold what it holds differently: display:flex makes its spans boxes, display:block a line of text - one shape per style",
+         Page("p { margin: 4px 0; }",
+              "<div id=\"box\"></div><p>end</p>",
+              "let wide = true;" +
+              "function draw() {" +
+              "  const st = wide ? 'display:flex;gap:12px;background:#223' : 'display:block;background:#322';" +
+              "  document.getElementById('box').innerHTML = '<div style=\"' + st + '\"><span>left</span><span>right</span></div>';" +
+              "}" +
+              "setInterval(() => { wide = !wide; draw(); }, 500);" +
+              "draw();"),
+         Ticks(3), new[] { 0, 1, 2, 3 }),
+
+        ("one write with more than 32 shapes: five badges that come and go, a label that switches, a panel of three with a list in one - each choice its own state, " +
+         "the badges in one flex row laid out together, the panel on its own",
+         Page(".bar { display: flex; gap: 6px; height: 30px; align-items: center; } .b { padding: 2px 6px; background: #345; } .p { height: 40px; background: #223; margin-top: 6px; } .r { height: 20px; background: #2b3a55; margin: 2px 0; }",
+              "<div id=\"screen\"></div><p>end</p>",
+              "const st = { a: true, b: false, c: true, d: false, e: true, mode: 0, items: ['x', 'y', 'z'] };" +
+              "let k = 0;" +
+              "function render() {" +
+              "  document.getElementById('screen').innerHTML = '<div class=\"bar\">'" +
+              "    + (st.a ? '<span class=\"b\">A</span>' : '')" +
+              "    + (st.b ? '<span class=\"b\">B</span>' : '<span class=\"b\">no B</span>')" +
+              "    + (st.c ? '<span class=\"b\">C</span>' : '')" +
+              "    + (st.d ? '<span class=\"b\">D</span>' : '')" +
+              "    + (st.e ? '<span class=\"b\">E</span>' : '')" +
+              "    + '</div>'" +
+              "    + (st.mode === 0 ? '<div class=\"p\">panel one ' + k + '</div>' : st.mode === 1 ? '<div class=\"p\">panel two</div>' + st.items.map((x) => '<div class=\"r\">' + x + '</div>').join('') : '<div class=\"p\">panel three</div>');" +
+              "}" +
+              "setInterval(() => { k++; st.a = !st.a; if (k % 2) st.b = !st.b; if (k % 3 === 0) st.c = !st.c; st.d = k % 4 === 1; st.e = k % 5 !== 2; st.mode = k % 3; render(); }, 500);" +
+              "render();"),
+         Ticks(7), new[] { 0, 1, 2, 3, 4, 5, 6, 7 }),
+
+        ("one write with more than 32 shapes whose choices sit in different places: a header badge, an icon in a card, a note under it, clicks on each - independent states",
+         Page(".hd { height: 26px; background: #1b2230; } .card { margin-top: 6px; padding: 6px; background: #223; height: 60px; } .i { width: 18px; height: 18px; } .big { height: 36px; background: #333; margin-top: 6px; }",
+              "<div id=\"app\"></div><p>end</p>",
+              "const s = { live: true, icon: 0, note: false, extra: false, warn: false, flag: true };" +
+              "function render() {" +
+              "  document.getElementById('app').innerHTML = '<div class=\"hd\">' + (s.live ? '<b id=\"live\" style=\"color:#3e5\">LIVE</b>' : '<b id=\"idle\" style=\"color:#888\">IDLE</b>') + '</div>'" +
+              "    + '<div class=\"card\">' + (s.icon === 0 ? '<div class=\"i\" style=\"background:#3e5\"></div>' : s.icon === 1 ? '<div class=\"i\" style=\"background:#fa0\"></div>' : '<div class=\"i\" style=\"background:#e33\"></div>')" +
+              "    + (s.flag ? '<div style=\"height:8px;background:#fff\"></div>' : '') + '</div>'" +
+              "    + (s.note ? '<p>a note</p>' : '<p>no note</p>')" +
+              "    + (s.extra ? '<p>extra</p>' : '')" +
+              "    + (s.warn ? '<p style=\"color:#e33\">warning</p>' : '')" +
+              "    + '<div id=\"go\" class=\"big\">GO</div>';" +
+              "  document.getElementById('go').addEventListener('click', () => { s.live = !s.live; s.icon = (s.icon + 1) % 3; s.note = !s.note; s.flag = !s.flag; if (s.icon === 2) s.extra = !s.extra; s.warn = s.icon === 1; render(); });" +
+              "}" +
+              "render();"),
+         Steps("go", "go", "go", "go", "go"), new[] { 0, 1, 2, 3, 4, 5 }),
     };
 
     /// <summary>
@@ -1056,6 +1123,22 @@ internal static class PlainTranslatorTests
               "setInterval(() => { k++; if (k % 2) n++; const first = items.shift(); if (items.length < 3) items.push(first); render(); }, 500);" +
               "render();"),
          Ticks(4), new[] { 0, 1, 2, 3, 4 }),
+
+        ("lists turned round in place: push(shift()), unshift(pop()), and a shift with a push in the next statement - their lengths never change",
+         Page(".row { height: 22px; background: #2b3a55; margin-bottom: 3px; } .row.on { background: #2f855a; } .tag { display: inline-block; width: 40px; background: #345; margin-right: 4px; }",
+              "<div id=\"list\"></div><div id=\"tags\"></div><div id=\"log\"></div><p>end</p>",
+              "const items = [{ n: 'Pump', on: true }, { n: 'Fan', on: false }, { n: 'Vent', on: true }];" +
+              "const tags = ['a', 'b', 'c', 'd'];" +
+              "const log = ['one', 'two'];" +
+              "let k = 0;" +
+              "function show() {" +
+              "  document.getElementById('list').innerHTML = items.map((g) => '<div class=\"row' + (g.on ? ' on' : '') + '\">' + g.n + '</div>').join('');" +
+              "  document.getElementById('tags').innerHTML = tags.map((t) => '<div class=\"tag\">' + t + '</div>').join('');" +
+              "  document.getElementById('log').innerHTML = log.map((x) => '<p>' + x + '</p>').join('');" +
+              "}" +
+              "setInterval(() => { k++; items.push(items.shift()); tags.unshift(tags.pop()); const old = log.shift(); log.push(k % 2 ? 'three' : old); show(); }, 500);" +
+              "show();"),
+         Ticks(5), new[] { 0, 1, 2, 3, 5 }),
     };
 
     /// <summary>Features outside what is translated, each refused by name - the page keeps its old path.</summary>
@@ -1165,6 +1248,9 @@ internal static class PlainTranslatorTests
          new[] { 0, 1, 2, 3, 5, 6, 7 }),
         // a page whose only code is in onclick attributes: not yet seen in game
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-noscript.lua"), Steps("on", "box", "off", "box", "on"), new[] { 0, 1, 2, 3, 5 }),
+        // style attributes from a fixed set, one write of more than 32 shapes, lists turned round in place: not yet seen in game
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-styles.lua"), Steps(0.5, "next", 0.5, "next", "next", "next", 0.5, "next"),
+         new[] { 0, 1, 2, 3, 4, 5, 6, 8 }),
     };
 
     internal static void Run(Action<bool, string> check)

@@ -1228,6 +1228,8 @@ internal static partial class PlainTranslator
             int? cap = null;
             var added = 0;
             var items = new List<(Expression, Inlined?)>();
+            var rotations = Rotations(h);
+            var rotated = false;
             foreach (var r in h.Refs)
             {
                 var p = _parent[r];
@@ -1255,6 +1257,11 @@ internal static partial class PlainTranslator
                         int adds;
                         switch (method)
                         {
+                            // an item taken off and one put back: the length it had (an empty list's comes back as one, undefined)
+                            case "push" or "unshift" when rotations.TryGetValue(c, out var put):
+                                if (put != null) items.Add((put, null));
+                                rotated = true;
+                                continue;
                             case "push" or "unshift":
                                 adds = c.Arguments.Count;
                                 break;
@@ -1324,20 +1331,57 @@ internal static partial class PlainTranslator
                 if (p is MemberExpression pm && pm.Object == r) continue;
                 return Lst.Unknown($"\"{name}\" is handed where the compile cannot follow what is done to it");
             }
-            if (cap == null && added == 0 && items.Count == 0) return null;
+            if (cap == null && added == 0 && items.Count == 0 && !rotated) return null;
+            // turned round in place: as long as it was, and at least one (an empty list gets one back, undefined)
+            if (rotated && added == 0) cap = Math.Max(cap ?? 0, 1);
             if (cap != null && added > 0) return Lst.Unknown($"\"{name}\" is both held to a length and added to in loops, which the compile does not combine");
             return cap != null ? new Lst { Max = cap, Again = true, Items = items } : new Lst { Max = added, Items = items };
+        }
+
+        /// <summary>
+        /// A list turned round in place: `a.push(a.shift())`, `a.unshift(a.pop())` (any of the four), or one item taken
+        /// off (`a.shift();`, `const x = a.pop();`) in the statement right before one put back (`a.push(x)`). Each put
+        /// back, with the item it adds when that is not the one taken; the takes are keys too (with nothing).
+        /// </summary>
+        private Dictionary<CallExpression, Expression?> Rotations(Holder h)
+        {
+            var found = new Dictionary<CallExpression, Expression?>();
+            foreach (var r in h.Refs)
+            {
+                if (Take(r) is not { } take) continue;
+                // taken off as the argument of the put back
+                if (_parent[take] is CallExpression put && Put(put) && put.Arguments[0] == take) { found[put] = null; found[take] = null; continue; }
+                // taken off in the statement before
+                var at = _parent[take] is VariableDeclarator { Init: var init } vd && init == take && _parent[vd] is VariableDeclaration { Declarations.Count: 1 } decl ? (Node)decl
+                    : StatementOf(take);
+                if (at == null || !_parent.TryGetValue(at, out var block) || Stmts(block) is not { } sibs || sibs.IndexOf((Statement)at) is not (var ix and >= 0)
+                    || ix + 1 >= sibs.Count || sibs[ix + 1] is not ExpressionStatement { Expression: CallExpression next } || !Put(next)) continue;
+                found[next] = (Acornima.Ast.Expression)next.Arguments[0];
+                found[take] = null;
+            }
+            return found;
+
+            // `a.shift()` or `a.pop()` of this list, from where it is read
+            CallExpression? Take(Expression r)
+                => _parent[r] is MemberExpression { Computed: false, Property: Identifier { Name: "shift" or "pop" } } m && m.Object == r
+                   && _parent[m] is CallExpression { Arguments.Count: 0 } c && c.Callee == m ? c : null;
+            // `a.push(x)` or `a.unshift(x)` of this list, one item, as a statement
+            bool Put(CallExpression c)
+                => c.Callee is MemberExpression { Computed: false, Property: Identifier { Name: "push" or "unshift" }, Object: var o } && Is(h, o)
+                   && c.Arguments.Count == 1 && c.Arguments[0] is not SpreadElement && StatementOf(c) != null;
         }
 
         /// <summary>Whether a held array has anything done to it besides being read, where it is held or handed on: then it can hold fewer items than it was given.</summary>
         private bool Shrunk(Holder h, HashSet<Node>? seen = null)
         {
+            var rotations = Rotations(h);
             foreach (var r in h.Refs)
             {
                 if (_parent[r] is MemberExpression m && m.Object == r
                     && (m.Computed ? WrittenTo(m)
                         : m.Property is Identifier { Name: var n } && (n == "length" && WrittenTo(m)
-                            || n is "pop" or "shift" or "splice" or "push" or "unshift" or "fill" or "copyWithin" && _parent[m] is CallExpression c && c.Callee == m)))
+                            || n is "pop" or "shift" or "splice" or "push" or "unshift" or "fill" or "copyWithin" && _parent[m] is CallExpression c && c.Callee == m
+                               && !rotations.ContainsKey(c))))
                     return true;
                 if (HandedOn(r) is { To: { } to, Key: var key } && (seen ??= new HashSet<Node>()).Add(key) && Shrunk(to, seen)) return true;
             }

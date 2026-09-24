@@ -305,7 +305,7 @@ Source enumerates elements by category (Animation, Basic shapes, Container, Desc
 | role + aria-* (WAI-ARIA global attributes, ~50 aria-* properties plus role) — one grouped row | | | | |
 | slot | | | | |
 | spellcheck | | | | |
-| style | | | | |
+| style | ✅ | the cascade's inline declarations, laid out once. Written in markup: a value inside one declaration (`color:' + c + '`) is that style write (a number a scale and offset, a value from a fixed set a laid-out state); a value standing for declarations (`style="' + r.style + '"`) from a fixed set is the whole attribute, each value laid out as the style attribute it is and the write picking its state (`v_state(V_Sn, value)`, no string built), and what folds into text inside it is decided by its values: a `flex` or `grid` value makes its children boxes, and values that fold them differently are one shape each. Refused by name: a value standing for declarations only known at run time | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a style attribute written from a fixed set, display:flex in each value: …", "a style attribute whose values fold what it holds differently: …"; plain-styles.lua (the in-game page) | |
 | tabindex | | | | |
 | title | | | | |
 | translate | | | | |

@@ -124,6 +124,17 @@ Newest first. The workshop page is a short overview; this file has the full hist
   exactly.
 - `getAttribute('data-click')` and `hasAttribute` on an element markup makes read null and false, as for
   any attribute the page never wrote: they read the compile's own click-region marker.
+- A style attribute written in markup from a value the page picks from a fixed set
+  (`'<div style="' + r.style + '">'`) compiles: each of its values is laid out as the style attribute it
+  is. What is inside it is laid out as that style says, so the children of a `display: flex` or `grid`
+  value are boxes, a value only known at run time can sit in their attributes, and a value that is
+  `flex` one time and `block` another gives the element one shape per style.
+- One markup write with more than 32 shapes compiles when its choices are separate: a badge here, an
+  icon there, a panel that switches each keep a state of their own, and only choices that move the same
+  things are combined. A write it still cannot lay out names the choices in its message.
+- A list turned round in place (`items.push(items.shift())`, `items.unshift(items.pop())`, or a
+  `shift()` right before a `push()`) keeps its length; it was refused as a list whose length cannot be
+  bounded.
 
 ## 0.2.0
 

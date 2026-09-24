@@ -3014,8 +3014,10 @@ internal static partial class PlainTranslator
                 }
                 t.Name = t.Ve.name;
                 _built.Driven.Add(t.Name);
-                foreach (var css in t.Styles.Keys)
-                    if (css is "opacity" or "visibility" or "transform") _built.NamedGroups.Add(t.Name);
+                foreach (var (css, writes) in t.Styles)
+                    if (css is "opacity" or "visibility" or "transform"
+                        || css == WholeStyle && writes.Any(w => Finite(w.Value)?.Any(v => v is string s && Regex.IsMatch(s, @"(^|;)\s*(opacity|visibility|transform)\s*:", RegexOptions.IgnoreCase)) == true))
+                        _built.NamedGroups.Add(t.Name);
                 if ((t.Listens || t.Hit) && !Clickable(t.Node)) t.Node.Attributes["data-click"] = "1";
                 // hidden takes the element out of the layout; the scene keeps its shapes and a `v` to show them
                 if (t.Top || t.AttrOps.Any(o => o.Name == "hidden")) { _hide.Add(t); _built.NamedGroups.Add(t.Name); }
@@ -3695,21 +3697,23 @@ internal static partial class PlainTranslator
                            HashSet<string> available, Dictionary<VisualElement, Vector2> absolute)
         {
             var at = writes[0].At;
+            // the whole style attribute, written in markup: each value laid out as the attribute it is, as a browser cascades it
+            var whole = css == WholeStyle;
             var box = PageCompiler.BoxOf(t.Name, _built, absolute, available);
             if (box == null) { Refuse(at, $"\"{t.Name}\" is not laid out"); return; }
-            var mapped = DomSlots.Map(t.Name, "style." + css, box.Value, available);
-            if (!mapped.Mapped) { Refuse(at, $"style.{css} on \"{t.Name}\": {mapped.Problem}"); return; }
-            if (mapped.NeedsGroup) { Refuse(at, $"style.{css} on \"{t.Name}\": its group carries no name"); return; }
+            var mapped = whole ? default : DomSlots.Map(t.Name, "style." + css, box.Value, available);
+            if (!whole && !mapped.Mapped) { Refuse(at, $"style.{css} on \"{t.Name}\": {mapped.Problem}"); return; }
+            if (!whole && mapped.NeedsGroup) { Refuse(at, $"style.{css} on \"{t.Name}\": its group carries no name"); return; }
 
             var plan = new StylePlan { Var = "V_S" + (_order.Sum(x => x.StylePlans.Count) + 1).ToString(CultureInfo.InvariantCulture) };
-            var facet = $"style.{css} of \"{t.Name}\"";
+            var facet = whole ? $"the style attribute of \"{t.Name}\"" : $"style.{css} of \"{t.Name}\"";
             var node = t.Node;
             var style = node.Attr("style");
             var cls = node.Attr("class") ?? string.Empty;
             var classless = node.Attr("class") == null;
             // Reclass writes the class attribute; an element the page gave none is put back with none
             Dictionary<string, SceneSlots.Value>? Drawn(string value) => Variant(
-                () => { node.Attributes["style"] = (style ?? string.Empty) + ";" + css + ":" + value; _built.Reclass(t.Ve, cls); },
+                () => { node.Attributes["style"] = whole ? value : (style ?? string.Empty) + ";" + css + ":" + value; _built.Reclass(t.Ve, cls); },
                 () =>
                 {
                     if (style == null) node.Attributes.Remove("style"); else node.Attributes["style"] = style;
@@ -3736,6 +3740,8 @@ internal static partial class PlainTranslator
                 t.StylePlans[css] = plan;
                 return;
             }
+
+            if (whole) { Refuse(at, $"{facet} is written in markup a value only known at run time (one from a fixed set is translated: each laid out as the attribute it is)"); return; }
 
             // Otherwise a number: the slots DomSlots names, each a scale and an offset of it.
             var numbers = writes.Select(w => Numeric(w.Value)).ToList();
@@ -4608,7 +4614,7 @@ internal static partial class PlainTranslator
             var listens = _order.Any(t => t.Listens);
             var classes = _order.Where(t => t.Class != null).ToList();
             var states = _order.SelectMany(t => t.StylePlans.Values).Where(p => p.States != null)
-                .Concat(_markupOf.Values.Select(m => m.Plan).OfType<StylePlan>().Distinct()).ToList();
+                .Concat(_markupOf.Values.SelectMany(m => m.Parts).Select(m => m.Plan).OfType<StylePlan>().Distinct()).ToList();
 
             var sb = new StringBuilder(scene.Length + page.Length + 4096);
             sb.Append("-- Compiled once by ScriptedScreens Html. The scene is the page; this program is its script,\n");
