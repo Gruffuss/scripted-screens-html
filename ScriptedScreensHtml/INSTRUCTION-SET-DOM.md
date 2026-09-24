@@ -300,7 +300,7 @@ Rules and columns: see INSTRUCTION-SET.md.
 | Document.designMode | | | | |
 | Document.dir | | | | |
 | Document.doctype | | | | |
-| Document.documentElement | | | | |
+| Document.documentElement | ✅ | the page's root box (the renderer draws `<html>` and `<body>` as one, `:root` matching it): an element like any other, its number in the Lua; `setAttribute` of a theme attribute a laid-out state per value, every custom property it reaches moving with it (`v_setattr`); an attribute on it lands on the body's node, so a selector naming the `html` tag with it does not see it | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "document.documentElement: a theme attribute set on the root element, held in a name and read back, the colours every element takes from custom properties following it; an accent flipped on a timer from the root's own attribute"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: plain-apple.lua (the in-game page, not yet seen in game) | |
 | Document.documentURI | | | | |
 | Document.domain | | | | |
 | Document.embeds | | | | |
@@ -568,9 +568,9 @@ Note: same orphaned-page caveat as ParentNode above.
 | Element.previousElementSibling | | | | |
 | Element.role | | | | |
 | Element.scrollHeight | | | | |
-| Element.scrollLeft | | | | |
+| Element.scrollLeft | ✅ | on an element that is no scroll container (`overflow` visible or clip): the number 0, and a write (`=`, `+=`) only its value worked out, as a browser ignores it; on a scroll box refused by name: the vector mod keeps the player's offset on each client (`SC`, reported only to C# through `VectorGraphic.ScrollChanged`), so the chip cannot read it, and a write would be `SC so=`/`sov=` (not done yet) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "scrollTop and scrollLeft of elements that are no scroll container: kept before a re-render and put back after, moved on, and printed - they read 0 and a write does nothing, as in a browser"; PlainTranslatorTests refusals: "reading the offset of a scroll box"; plain-apple.lua (the in-game page, not yet seen in game) | |
 | Element.scrollLeftMax (non-standard) | | | | |
-| Element.scrollTop | | | | |
+| Element.scrollTop | ✅ | on an element that is no scroll container (`overflow` visible or clip): the number 0, and a write (`=`, `+=`) only its value worked out, as a browser ignores it; on a scroll box refused by name: the vector mod keeps the player's offset on each client (`SC`, reported only to C# through `VectorGraphic.ScrollChanged`), so the chip cannot read it, and a write would be `SC so=`/`sov=` (not done yet) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "scrollTop and scrollLeft of elements that are no scroll container: kept before a re-render and put back after, moved on, and printed - they read 0 and a write does nothing, as in a browser"; PlainTranslatorTests refusals: "reading the offset of a scroll box"; plain-apple.lua (the in-game page, not yet seen in game) | |
 | Element.scrollTopMax (non-standard) | | | | |
 | Element.scrollWidth | | | | |
 | Element.shadowRoot | | | | |

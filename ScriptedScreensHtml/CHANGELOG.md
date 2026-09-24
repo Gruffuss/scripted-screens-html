@@ -124,6 +124,20 @@ Newest first. The workshop page is a short overview; this file has the full hist
   exactly.
 - `getAttribute('data-click')` and `hasAttribute` on an element markup makes read null and false, as for
   any attribute the page never wrote: they read the compile's own click-region marker.
+- A list callback may read the array it walks, its third argument (`arr.map((x, i, all) => ... all.length
+  ...)`), in `map` and `forEach`: over the array itself, or after `filter` and `slice` over what is left
+  of it, which the console keeps as the rows are counted. Marking the last row and counting the rows no
+  longer stop a page from compiling.
+- `document.documentElement` compiles: the root element, drawn as one box with the body, so a theme
+  attribute set on it (`setAttribute('data-mode', 'dark')`) recolours everything its custom properties
+  reach, and reads back.
+- `scrollTop` and `scrollLeft` of an element that is not a scroll box read 0 and ignore a write, as in a
+  browser. On a scroll box (`overflow` auto, scroll or hidden) they are refused and the log says why: the
+  offset the player scrolled to stays on each client and never reaches the chip.
+- Custom properties from a rule that stopped matching (a class or attribute taken away) no longer stay
+  on the element: after a theme attribute went from "green" back to none, the green accent stayed.
+- The page rebuilt from its own markup keeps its styles: `<style>` text was written with its quotes as
+  `&quot;`, so a selector like `[data-mode="light"]` stopped matching.
 
 ## 0.2.0
 

@@ -465,6 +465,40 @@ internal static class PlainTranslatorTests
               "out.textContent = text + ' ' + ['a', 'b'].map((s) => s + '!').join('') + ' ' + ('n' + null) + `${null}`;" +
               "document.getElementById('sum').textContent = total + (d.getAttribute('nothing') + 1);"),
          Steps(0.5), new[] { 0, 1 }),
+
+        ("document.documentElement: a theme attribute set on the root element, held in a name and read back, the colours every element " +
+         "takes from custom properties following it; an accent flipped on a timer from the root's own attribute",
+         Page(":root { --bg: #1a2230; --ink: #dddddd; } [data-mode=\"dark\"] { --bg: #05070a; --ink: #88ffbb; } [data-accent=\"green\"] { --accent: #22ee55; }" +
+              ".card { width: 200px; height: 40px; background: var(--bg); color: var(--ink); } .bar { width: 120px; height: 8px; background: var(--accent, #3366cc); }",
+              "<div class=\"card\">Status</div><div class=\"bar\"></div><button id=\"mode\">Mode</button><p id=\"out\">-</p>",
+              "let dark = false;" +
+              "const root = document.documentElement;" +
+              "function apply() {" +
+              "  root.setAttribute('data-mode', dark ? 'dark' : 'light');" +
+              "  document.getElementById('out').textContent = 'mode ' + root.getAttribute('data-mode');" +
+              "}" +
+              "document.getElementById('mode').addEventListener('click', () => { dark = !dark; apply(); });" +
+              "setInterval(() => { document.documentElement.setAttribute('data-accent', document.documentElement.getAttribute('data-accent') === 'green' ? 'blue' : 'green'); }, 500);" +
+              "apply();"),
+         Steps("mode", 0.5, "mode", 0.5, 0.5), new[] { 0, 1, 2, 3, 4, 5 }),
+
+        ("scrollTop and scrollLeft of elements that are no scroll container: kept before a re-render and put back after, " +
+         "moved on, and printed - they read 0 and a write does nothing, as in a browser",
+         Page("#panel { width: 220px; background: #1a2230; }",
+              "<div id=\"panel\"><p id=\"line\">-</p></div><p id=\"pos\">-</p><button id=\"go\">Go</button>",
+              "let n = 0;" +
+              "function render() {" +
+              "  const panel = document.getElementById('panel');" +
+              "  const kept = panel.scrollTop;" +
+              "  document.getElementById('line').textContent = 'reading ' + n;" +
+              "  panel.scrollTop = kept + 10 * n;" +
+              "  document.getElementById('line').scrollLeft += 5;" +
+              "  document.getElementById('pos').textContent = 'top ' + panel.scrollTop + ', left ' + document.getElementById('line').scrollLeft;" +
+              "}" +
+              "document.getElementById('go').addEventListener('click', () => { n++; render(); });" +
+              "setInterval(() => { n += 2; render(); }, 500);" +
+              "render();"),
+         Steps("go", 0.5, "go", 0.5), new[] { 0, 1, 2, 3, 4 }),
     };
 
     /// <summary>
@@ -1056,6 +1090,24 @@ internal static class PlainTranslatorTests
               "setInterval(() => { k++; if (k % 2) n++; const first = items.shift(); if (items.length < 3) items.push(first); render(); }, 500);" +
               "render();"),
          Ticks(4), new[] { 0, 1, 2, 3, 4 }),
+
+        ("a list callback reading the array it walks, its third argument: the last row marked and the rows counted over the whole array, " +
+         "a filtered one (the next item read from it) and a slice, and a forEach loop's",
+         Page(".row { height: 22px; background: #1a2230; } .row.last { background: #2f5a3a; } .box { height: 112px; }",
+              "<div id=\"all\" class=\"box\"></div><div id=\"low\" class=\"box\"></div><div id=\"rest\" class=\"box\"></div><div id=\"left\" class=\"box\"></div><p>end</p>",
+              "const tanks = [{ n: 'O2', low: false }, { n: 'N2', low: true }, { n: 'CO2', low: false }];" +
+              "let k = 0;" +
+              "function render() {" +
+              "  document.getElementById('all').innerHTML = tanks.map((t, i, arr) => '<div class=\"row' + (i === arr.length - 1 ? ' last' : '') + '\">' + t.n + ' ' + (i + 1) + ' of ' + arr.length + '</div>').join('');" +
+              "  document.getElementById('low').innerHTML = tanks.filter((t) => t.low).map((t, i, arr) => '<div class=\"row' + (i === arr.length - 1 ? ' last' : '') + '\">' + t.n + ' low, next ' + (i + 1 < arr.length ? arr[i + 1].n : 'none') + '</div>').join('');" +
+              "  document.getElementById('rest').innerHTML = tanks.slice(1).map((t, i, arr) => '<div class=\"row\">' + t.n + ' ' + (arr.length - i) + '</div>').join('');" +
+              "  let h = '';" +
+              "  tanks.forEach((t, i, arr) => { h += '<div class=\"row\">' + t.n + ' ' + (arr.length - i) + ' left</div>'; });" +
+              "  document.getElementById('left').innerHTML = h;" +
+              "}" +
+              "setInterval(() => { k++; if (tanks.length < 5) tanks.push({ n: 'H' + k, low: k % 2 === 1 }); else { tanks.shift(); tanks[1].low = !tanks[1].low; } render(); }, 500);" +
+              "render();"),
+         Ticks(6), new[] { 0, 1, 2, 3, 4, 5, 6 }),
     };
 
     /// <summary>Features outside what is translated, each refused by name - the page keeps its old path.</summary>
@@ -1124,6 +1176,8 @@ internal static class PlainTranslatorTests
         ("a markup loop over a count that skips rows", Page("", "<div id=\"up\"></div><p>end</p>",
             "const sizes = [2, 4]; let k = 0; setInterval(() => { k++; const n = sizes[k % 2]; let h = ''; for (let i = 0; i < n; i++) { if (i % 2) continue; h += '<p>' + i + '</p>'; } document.getElementById('up').innerHTML = h; }, 10);"),
             "a loop over a count that skips some of its rows"),
+        ("reading the offset of a scroll box", Page("#s { height: 40px; overflow-y: auto; }", "<div id=\"s\"><p>a</p><p>b</p><p>c</p></div><p id=\"o\">-</p>",
+            "setTimeout(() => { document.getElementById('o').textContent = document.getElementById('s').scrollTop; }, 10);"), "a scroll box: the chip never learns the offset"),
         ("a markup loop whose start is one of several values", Page("", "<div id=\"a\"></div>",
             "const ns = [2, 3]; let k = 0; setInterval(() => { k++; const n = ns[k % 2]; let h = ''; for (let i = n; i > 0; i--) h += '<p>x</p>'; document.getElementById('a').innerHTML = h; }, 10);"), "a for loop the compile does not follow"),
     };
@@ -1165,6 +1219,9 @@ internal static class PlainTranslatorTests
          new[] { 0, 1, 2, 3, 5, 6, 7 }),
         // a page whose only code is in onclick attributes: not yet seen in game
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-noscript.lua"), Steps("on", "box", "off", "box", "on"), new[] { 0, 1, 2, 3, 5 }),
+        // a theme on document.documentElement, list callbacks reading the array they walk, scrollTop of a box that does not scroll: not yet seen in game
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-apple.lua"), Steps(0.5, "theme", 0.5, "add", "add", 0.5, "add", "add", "theme", 0.5),
+         new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10 }),
     };
 
     internal static void Run(Action<bool, string> check)
@@ -1597,6 +1654,8 @@ internal static class PlainTranslatorTests
                 return chain.ToArray();
             }));
             }
+            // the root element: the renderer draws <html> and <body> as one box, the body's
+            engine.SetValue("__root", doc?.RootId ?? "body");
             engine.SetValue("__w", Math.Floor(size.x));
             engine.SetValue("__h", Math.Floor(size.y));
             engine.SetValue("__carryFrag", carry.Frag);
@@ -1728,6 +1787,8 @@ internal static class PlainTranslatorTests
 
         public Dictionary<string, string> Attributes(string id) => NodeAttributes(ById[id]);
 
+        public string RootId => ById.First(p => p.Value.Tag == "body").Key;
+
         /// <summary>element.closest(): the element or its nearest ancestor the selector matches, by id; null for none.</summary>
         public string? Closest(string id, string selector)
         {
@@ -1795,8 +1856,7 @@ internal static class PlainTranslatorTests
                 // what a click lands on: the renderer's hit region, as the compile gives an element with a listener
                 if (el.Value.TryGetProperty("listens", out var l) && l.GetBoolean() && node.Tag != "button") node.Attributes["data-click"] = "1";
             }
-            var html = HtmlRenderer.ToHtml(Root, outer: false, keepIds: true);
-            ResolvedStyle.DefaultFace = FontLibrary.Default();
+            var html = HtmlRenderer.ToHtml(Root, outer: false, keepIds: true);            ResolvedStyle.DefaultFace = FontLibrary.Default();
             var built = HtmlRenderer.Build(html, FontLibrary.Default());
             HtmlRenderer.NameDrivenGroups(built);
             var panel = new Panel(built.Root);
@@ -2068,6 +2128,8 @@ function __el(id) {
     removeAttribute: function (n) { delete st.attrs[attr(n)]; },
     toggleAttribute: function (n, force) { n = attr(n); var has = n in st.attrs, want = force === undefined ? !has : !!force;
       if (want && !has) st.attrs[n] = ''; if (!want && has) delete st.attrs[n]; return want; },
+    // no scroll container here (the compile refuses one): no offset, and a write does nothing
+    get scrollTop() { return 0; }, set scrollTop(v) {}, get scrollLeft() { return 0; }, set scrollLeft(v) {},
     get hidden() { return 'hidden' in st.attrs; }, set hidden(v) { if (v) st.attrs[attr('hidden')] = ''; else delete st.attrs[attr('hidden')]; },
     get textContent() { return st.text !== undefined ? st.text : __initialText(id); }, set textContent(v) { st.text = String(v); },
     get innerText() { return __rendered(id, st.text !== undefined ? st.text : null); }, set innerText(v) { st.text = String(v); },
@@ -2110,6 +2172,7 @@ function __list(ids, collection) {
 }
 function __classes(c) { return String(c).trim().split(/\s+/).map(function (n) { return '.' + n; }).join(''); }
 var document = {
+  get documentElement() { return __el(__root); },
   getElementById: __el,
   querySelector: function (s) { var ids = __select(s, null); return ids.length ? __el(ids[0]) : null; },
   querySelectorAll: function (s) { return __list(__select(s, null), false); },

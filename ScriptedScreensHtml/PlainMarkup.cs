@@ -1920,16 +1920,32 @@ internal static partial class PlainTranslator
             {
                 if (rep.Sliced) lua.Emit(pad + "  " + v + ".o = V_s");
                 lua.Emit(pad + "  " + v + ".n = math.min(V_e - V_s, " + most + ")");
+                // the slice the callback walks, as an array of its own: the rows' items
+                if (rep.Whole > 0)
+                {
+                    lua.Emit(pad + "  for V_k = 0, " + N(rep.Max - 1) + " do");
+                    lua.Emit(pad + "    if V_k < " + v + ".n then " + v + ".v[V_k] = " + v + ".a[V_s + V_k] else " + v + ".v[V_k] = nil end");
+                    lua.Emit(pad + "  end");
+                    lua.Emit(pad + "  " + v + ".v.length = " + v + ".n");
+                }
                 lua.Emit(pad + "end");
                 return;
             }
             lua.Emit(pad + "  local V_n = 0");
+            if (rep.Whole > 0) lua.Emit(pad + "  local V_w = 0");
             for (var i = first; i < rep.Stages.Count; i++) lua.Emit(pad + "  local " + v + "c" + N(i + 1) + " = 0");
             lua.Emit(pad + "  for V_j = V_s, V_e - 1 do");
             lua.Emit(pad + "    local " + v + "x = " + v + ".a[V_j]");
             var depth = pad + "    ";
+            // an item every stage before the callback's own array kept: one of that array's items (the view `v`)
+            void View(string at)
+            {
+                lua.Emit(at + v + ".v[V_w] = " + v + "x");
+                lua.Emit(at + "V_w = V_w + 1");
+            }
             for (var i = first; i < rep.Stages.Count; i++)
             {
+                if (rep.Whole == i) View(depth);
                 var st = rep.Stages[i];
                 var q = v + "q" + N(i + 1);
                 var c = v + "c" + N(i + 1);
@@ -1940,6 +1956,7 @@ internal static partial class PlainTranslator
                     : "if " + q + " >= " + N(st.From) + (st.To is { } to ? " and " + q + " < " + N(to) : string.Empty) + " then"));
                 depth += "  ";
             }
+            if (rep.Whole == rep.Stages.Count) View(depth);
             lua.Emit(depth + v + ".i[V_n] = V_j");
             if (rep.Positions) lua.Emit(depth + v + ".m[V_n] = " + v + "q" + N(rep.Stages.Count));
             lua.Emit(depth + "V_n = V_n + 1");
@@ -1951,6 +1968,11 @@ internal static partial class PlainTranslator
             lua.Emit(pad + "    if V_n >= " + most + " then break end");
             lua.Emit(pad + "  end");
             lua.Emit(pad + "  " + v + ".n = V_n");
+            if (rep.Whole > 0)
+            {
+                lua.Emit(pad + "  for V_k = V_w, " + N(rep.Max - 1) + " do " + v + ".v[V_k] = nil end");
+                lua.Emit(pad + "  " + v + ".v.length = V_w");
+            }
             lua.Emit(pad + "end");
         }
 
@@ -1969,6 +1991,8 @@ internal static partial class PlainTranslator
                 sb.Append("local ").Append(rep.Var).Append(" = { n = 0, o = 0");
                 if (rep.Filtered) sb.Append(", i = ").Append(Zeros());
                 if (rep.Positions) sb.Append(", m = ").Append(Zeros());
+                // the array the callback walks, made once and refilled in place
+                if (rep.Whole > 0) sb.Append(", v = ").Append(Zeros().Replace(" }", ", length = 0 }"));
                 if (rep.RowPlans.Count > 0)
                 {
                     sb.Append(", w = {");

@@ -576,7 +576,8 @@ internal static class HtmlRenderer
 
     private static void WriteNode(StringBuilder sb, HtmlNode node, bool keepIds = false)
     {
-        if (node.IsText) { sb.Append(EscapeHtml(node.Text)); return; }
+        // the text of <style> and <script> is raw: the parser reads no entities there, so none are written
+        if (node.IsText) { sb.Append(node.Parent?.Tag is "style" or "script" ? node.Text : EscapeHtml(node.Text)); return; }
         if (node.Attr("data-pseudo") != null || node.Attr("data-marker") != null) return;
         sb.Append('<').Append(node.Tag);
         foreach (var kv in node.Attributes)
@@ -2993,6 +2994,8 @@ internal static class HtmlRenderer
         if (ve == result.Root) StyleApplier.RootLineHeight = null;   // per page: the field outlives a build
         // Custom properties first, whatever rule they came from: `:root { --pad }` sorts after
         // `body { padding: var(--pad) }` by specificity, and the variable must exist by then.
+        // A re-cascade starts them from scratch too: one a rule no longer matching declared is gone (a script's own are in `ordered`).
+        node.Vars?.Clear();
         foreach (var raw in ordered)
         {
             if (raw.Name.StartsWith("--", StringComparison.Ordinal))
