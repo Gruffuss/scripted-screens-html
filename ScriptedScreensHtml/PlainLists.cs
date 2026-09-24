@@ -51,9 +51,25 @@ internal static partial class PlainTranslator
             public readonly Dictionary<int, StylePlan> RowPlans = new();
             /// <summary>A lookup lists these rows, so the count of rows shown is kept for that list's length.</summary>
             public bool Queried;
+            /// <summary>
+            /// Per row whose choices take their shapes each on its own (see <see cref="Gate"/>): each choice, and the copy
+            /// key of the gate drawing each of its shapes (the first its shape at rest).
+            /// </summary>
+            public readonly Dictionary<int, List<(MkAlt Alt, List<int> Keys)>> Gates = new();
+            /// <summary>Per gated row, its choices laid out together (one, or those moving a slot in common) and what each combination of their shapes draws.</summary>
+            public readonly List<(int K, List<int> Members, StylePlan Plan)> GatePlans = new();
             public string Var => "V_R" + Id.ToString(CultureInfo.InvariantCulture);
             public bool Filtered => Stages.Any(s => s.Test != null);
             public bool Sliced => Stages.Count > 0;
+        }
+
+        /// <summary>One shape of a choice in a gated row, drawn in place as elements of its own and shown while the choice takes it.</summary>
+        private sealed class MkGate : Mk
+        {
+            /// <summary>Its copy key in the row: 1 and up (0 is the row itself).</summary>
+            public readonly int Key;
+            public readonly List<Mk> Body;
+            public MkGate(int key, List<Mk> body) { Key = key; Body = body; }
         }
 
         /// <summary>A slice (literal bounds) or a filter (its test, with its item and index bound) between the array and its rows.</summary>
@@ -67,9 +83,11 @@ internal static partial class PlainTranslator
         }
 
         private const int MostRows = 64;
+        /// <summary>The most shapes a row is laid out in as one product of its choices, and the most any choices laid out together take.</summary>
         private const int MostRowShapes = 8;
         private const int MostCopies = 512;
-        private const string RowTag = "ss-row";
+        private const int MostChoices = 16;
+        private const string RowTag = "ss-row", GateTag = "ss-gate";
 
         private readonly List<MkRep> _reps = new();
         /// <summary>The items a row's item node can be (null: any), for fixed-set questions about it.</summary>
@@ -343,28 +361,141 @@ internal static partial class PlainTranslator
                     if (Choice(tpl) is not { } again) { Refuse(write, "a list whose rows choose differently from each other what to show (not translated yet)"); return false; }
                     tpl = again.Yes.Count == 0 ? again.No : again.Yes;
                 }
+                // what the row's own item and index decide is no choice for that row
+                else tpl = Fold(tpl);
                 if (k > 0 && sep.Length > 0) tpl.Insert(0, new MkLit(sep));
                 if (tpl.Any(m => m is MkRep) || Flatten(tpl).Any(m => m is MkRep))
                 {
                     Refuse(write, "a list inside a row of another list (not translated yet)");
                     return false;
                 }
-                var copies = Shapes(tpl);
-                if (copies.Count > MostRowShapes)
-                {
-                    Refuse(write, $"a list whose rows have more than {MostRowShapes} shapes each");
-                    return false;
-                }
-                total += copies.Count;
+                rep.Rows.Add(tpl);
+                rep.Copies.Add(new List<List<Mk>>());
+                if (!ShapeRow(rep, k, write)) return false;
+                total += rep.Gates.TryGetValue(k, out var gated) ? gated.Sum(g => g.Keys.Count) : rep.Copies[k].Count;
                 if (total > MostCopies)
                 {
                     Refuse(write, $"a list with more than {MostCopies} rows and row shapes to lay out");
                     return false;
                 }
-                rep.Rows.Add(tpl);
-                rep.Copies.Add(copies);
             }
             return true;
+        }
+
+        /// <summary>
+        /// A row's shapes: every combination of its choices as one copy each, up to <see cref="MostRowShapes"/>; past
+        /// that, each choice drawn in place with its shapes gated (<see cref="Gate"/>), so its shapes add up rather than multiply.
+        /// </summary>
+        private bool ShapeRow(MkRep rep, int k, Node write)
+        {
+            rep.Gates.Remove(k);
+            var copies = Shapes(rep.Rows[k]);
+            if (copies.Count <= MostRowShapes)
+            {
+                rep.Copies[k] = copies;
+                return true;
+            }
+            if (Gate(rep, k, write) is not { } copy) return false;
+            rep.Copies[k] = new List<List<Mk>> { copy };
+            return true;
+        }
+
+        /// <summary>
+        /// A row whose choices are too many to lay out every combination of: one copy, each of its choices (at the top
+        /// of the row's markup) standing as every one of its shapes side by side, each in a gate - the elements of all
+        /// but one hidden. Each choice is then a state of its own, and only choices that move the same things are laid
+        /// out together (<see cref="GateFacets"/>).
+        /// </summary>
+        private List<Mk>? Gate(MkRep rep, int k, Node write)
+        {
+            var copy = new List<Mk>();
+            var choices = new List<(MkAlt, List<int>)>();
+            var key = 0;
+            foreach (var m in rep.Rows[k])
+            {
+                if (m is not MkAlt alt) { copy.Add(m); continue; }
+                var shapes = Shapes(new List<Mk> { alt });
+                if (shapes.Count > MostRowShapes)
+                {
+                    Refuse(write, $"a list whose rows have a choice of more than {MostRowShapes} shapes");
+                    return null;
+                }
+                var keys = new List<int>();
+                foreach (var shape in shapes)
+                {
+                    keys.Add(++key);
+                    copy.Add(new MkGate(key, shape));
+                }
+                choices.Add((alt, keys));
+            }
+            if (choices.Count > MostChoices)
+            {
+                Refuse(write, $"a list whose rows have more than {MostChoices} choices each");
+                return null;
+            }
+            rep.Gates[k] = choices;
+            return copy;
+        }
+
+        /// <summary>A row's markup with every choice the compile can decide for that row made: the side it takes, in its place.</summary>
+        private List<Mk> Fold(List<Mk> tpl)
+        {
+            var result = new List<Mk>();
+            foreach (var m in tpl)
+            {
+                if (m is not MkAlt alt) { result.Add(m); continue; }
+                switch (Truth(alt.Test))
+                {
+                    case true: result.AddRange(Fold(alt.Yes)); break;
+                    case false: result.AddRange(Fold(alt.No)); break;
+                    default: result.Add(new MkAlt(alt.Test, Fold(alt.Yes), Fold(alt.No))); break;
+                }
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// A test's truth when every run gives the same one: a value from a fixed set all truthy or all falsy, a
+        /// comparison of fixed sets, `!`, `&amp;&amp;` and `||` of those. Null when it can go either way, or the compile cannot say.
+        /// </summary>
+        private bool? Truth(Expression e, Inlined? bind = null)
+        {
+            switch (e)
+            {
+                case ParenthesizedExpression w when _bindOf.TryGetValue(w, out var within): return Truth(w.Expression, within);
+                case ParenthesizedExpression p: return Truth(p.Expression, bind);
+                case NonUpdateUnaryExpression { Operator: Operator.LogicalNot } not: return Truth(not.Argument, bind) is { } t ? !t : null;
+                case LogicalExpression { Operator: Operator.LogicalAnd } and:
+                    return Truth(and.Left, bind) switch { false => false, true => Truth(and.Right, bind), _ => Truth(and.Right, bind) == false ? false : null };
+                case LogicalExpression { Operator: Operator.LogicalOr } or:
+                    return Truth(or.Left, bind) switch { true => true, false => Truth(or.Right, bind), _ => Truth(or.Right, bind) == true ? true : null };
+                case NonLogicalBinaryExpression { Operator: Operator.StrictEquality or Operator.StrictInequality or Operator.LessThan or Operator.LessThanOrEqual
+                                                  or Operator.GreaterThan or Operator.GreaterThanOrEqual } b:
+                    {
+                        if (Finite(b.Left, null, bind) is not { Count: > 0 } left || Finite(b.Right, null, bind) is not { Count: > 0 } right) return null;
+                        bool? all = null;
+                        foreach (var x in left)
+                            foreach (var y in right)
+                            {
+                                bool one;
+                                if (x is not (double or string) || y is not (double or string)) return null;
+                                if (b.Operator is Operator.StrictEquality or Operator.StrictInequality)
+                                    one = (x is double dx && double.IsNaN(dx) ? false : x.Equals(y)) == (b.Operator == Operator.StrictEquality);
+                                else if (x is double nx && y is double ny)
+                                    one = b.Operator switch { Operator.LessThan => nx < ny, Operator.LessThanOrEqual => nx <= ny, Operator.GreaterThan => nx > ny, _ => nx >= ny };
+                                else return null;
+                                if (all != null && all != one) return null;
+                                all = one;
+                            }
+                        return all;
+                    }
+                default:
+                    {
+                        if (Finite(e, null, bind) is not { Count: > 0 } set || set.Any(v => v is not (double or string))) return null;
+                        static bool Truthy(object v) => v is double d ? d != 0 && !double.IsNaN(d) : ((string)v).Length > 0;
+                        return set.All(Truthy) ? true : set.All(v => !Truthy(v)) ? false : null;
+                    }
+            }
         }
 
         private static IEnumerable<Mk> Flatten(List<Mk> tpl)
@@ -673,7 +804,7 @@ internal static partial class PlainTranslator
         /// is bounded - pushes capped by a length test before or a trim after, or made in loops over bounded lists
         /// into an array made fresh each time - a function's return, slices of fixed bounds, filters, concat.
         /// </summary>
-        private Lst Listed(Expression e, Inlined? bind, int depth = 0, HashSet<Identifier>? seen = null)
+        private Lst Listed(Expression e, Inlined? bind, int depth = 0, HashSet<Node>? seen = null)
         {
             if (depth > 16) return Lst.Unknown("it is followed through more steps than the compile follows");
             switch (e)
@@ -709,7 +840,7 @@ internal static partial class PlainTranslator
                     {
                         if (Decl(id) is not { } decl) return Lst.Unknown($"\"{id.Name}\" is not declared by the script");
                         if (bind != null && bind.TryGetValue(decl, out var arg)) return Listed(arg.Expr, arg.Env, depth + 1, seen);
-                        seen ??= new HashSet<Identifier>();
+                        seen ??= new HashSet<Node>();
                         if (!seen.Add(decl)) return new Lst { Again = true, Max = 0 };
                         try { return Variable(decl, depth, seen); }
                         finally { seen.Remove(decl); }
@@ -745,7 +876,7 @@ internal static partial class PlainTranslator
                                     foreach (var arg in c.Arguments)
                                     {
                                         if (arg is not Expression ae || ae is SpreadElement) return Lst.Unknown("concat of a spread");
-                                        if (ae is ArrayExpression or Identifier or CallExpression)
+                                        if (ae is ArrayExpression or Identifier or CallExpression or MemberExpression { Computed: false })
                                         {
                                             var more = Listed(ae, bind, depth + 1, seen);
                                             if (more.Again) return Lst.Unknown("it is concatenated onto itself, and so grows each time");
@@ -779,7 +910,7 @@ internal static partial class PlainTranslator
                     }
                 case MemberExpression me when Markup.Everything(me).Any(x => x is Identifier i && _itemOf.ContainsKey(i)):
                     return Lst.Unknown("a list inside a row of another list (not translated yet)");
-                // a field of an object literal the script never gives another value: every array that field is written as
+                // a field of an object literal: every array it is given and every change made to it, as for a name
                 case MemberExpression { Computed: false, Property: Identifier field } fm:
                     {
                         if (Objects(fm.Object, bind, 0) is not { Count: > 0 } objects) return Lst.Unknown($"a list read from the field \"{field.Name}\" of an object the compile cannot follow (not translated yet)");
@@ -787,8 +918,9 @@ internal static partial class PlainTranslator
                         foreach (var (o, ob) in objects)
                         {
                             if (Field(o, field.Name) is not { } value) return Lst.Unknown($"a list read from the field \"{field.Name}\", which an object it can be does not have");
-                            if (FieldWritten(field.Name, o)) return Lst.Unknown($"a list read from the field \"{field.Name}\", which the script gives other values (not translated yet)");
-                            var one = Listed(value, ob, depth + 1, seen);
+                            var one = FieldList(o, field.Name, value, ob, depth, seen ??= new HashSet<Node>());
+                            // the field's own value met again while it is worked out: what it already holds, adding nothing
+                            if (one.Again) { if (objects.Count == 1) return one; return Lst.Unknown($"a list read from the field \"{field.Name}\" of one of several objects, itself among them"); }
                             if (one.Max == null) return one;
                             l.Max = Math.Max(l.Max.Value, one.Max.Value);
                             l.Min = Math.Min(l.Min, one.Min);
@@ -824,10 +956,26 @@ internal static partial class PlainTranslator
                 => a == null || b == null ? null : a.Concat(b).ToList();
         }
 
+        /// <summary>Where an array is held: a declared name, or a field of object literals; each reference is a place it is read or changed.</summary>
+        private sealed class Holder
+        {
+            public readonly string Name;
+            public readonly Identifier? Decl;
+            public readonly HashSet<Expression> Refs;
+            public Holder(string name, Identifier? decl, IEnumerable<Expression> refs) { Name = name; Decl = decl; Refs = new HashSet<Expression>(refs); }
+        }
+
+        private Holder HolderOf(Identifier decl)
+            => new(decl.Name, decl, _refs.TryGetValue(decl, out var refs) ? refs : Enumerable.Empty<Expression>());
+
+        /// <summary>Whether an expression is the array a holder holds, where it is read.</summary>
+        private bool Is(Holder h, Expression e) => h.Decl != null ? e is Identifier i && Decl(i) == h.Decl : h.Refs.Contains(e);
+
         /// <summary>A declared name's array: a parameter's arguments, or every value it is given with every change made to it.</summary>
-        private Lst Variable(Identifier decl, int depth, HashSet<Identifier> seen)
+        private Lst Variable(Identifier decl, int depth, HashSet<Node> seen)
         {
             var name = decl.Name;
+            var h = HolderOf(decl);
             if (ParamOf(decl) is { } param)
             {
                 if (NameOf(param.Fn) is not { } fname || !_refs.TryGetValue(fname, out var calls))
@@ -843,26 +991,61 @@ internal static partial class PlainTranslator
                     all.Min = Math.Min(all.Min, one.Min);
                     all.Items = all.Items == null || one.Items == null ? null : all.Items.Concat(one.Items).ToList();
                 }
-                if (Changes(decl, depth, seen) is { } changed && (changed.Max != 0 || changed.Why.Length > 0))
+                if (Changes(h, depth, seen) is { } changed && (changed.Max != 0 || changed.Why.Length > 0))
                     return Lst.Unknown(changed.Why.Length > 0 ? changed.Why : $"\"{name}\" is a parameter the function adds to");
-                if (all.Min == int.MaxValue || Shrunk(decl)) all.Min = 0;
+                if (all.Min == int.MaxValue || Shrunk(h)) all.Min = 0;
                 return all;
             }
             if (Given(decl) is not { } given) return Lst.Unknown($"\"{name}\" is changed in a way the compile cannot follow");
+            return Kept(h, given.Select(v => (v, (Inlined?)null, (ObjectExpression?)null)).ToList(), depth, seen);
+        }
+
+        /// <summary>
+        /// A field of an object literal's array: the value it is written with, every `x.field = …` of it and every
+        /// object `Object.assign` copies it from (that object's field, followed the same way), with every change made
+        /// to it - wherever the object goes, which has to be where the compile can see every use of it.
+        /// </summary>
+        private Lst FieldList(ObjectExpression o, string field, Expression value, Inlined? bind, int depth, HashSet<Node> seen)
+        {
+            // the field as written: its value's node, one per object and field
+            if (!seen.Add(value)) return new Lst { Again = true, Max = 0 };
+            try
+            {
+                if (FieldUses(field, o) is not { } flow)
+                    return Lst.Unknown($"a list read from the field \"{field}\" of an object handed where the compile cannot follow what is done to it");
+                var given = new List<(Expression?, Inlined?, ObjectExpression?)> { (value, bind, null) };
+                foreach (var u in flow.Uses)
+                {
+                    if (!WrittenTo(u)) continue;
+                    if (_parent[u] is AssignmentExpression { Operator: Operator.Assignment } a && a.Left == u && !u.Computed) given.Add((a.Right, null, null));
+                    else return Lst.Unknown($"a list read from the field \"{field}\", which is changed in a way the compile cannot follow");
+                }
+                foreach (var (from, v, env) in flow.Assigned) given.Add((v, env, from));
+                return Kept(new Holder(field, null, flow.Uses), given, depth, seen);
+            }
+            finally { seen.Remove(value); }
+        }
+
+        /// <summary>
+        /// An array from every value it is given (null: none, undefined; with <c>From</c>, that object literal's field of
+        /// the same name, copied by `Object.assign`) and every change made to it where it is held.
+        /// </summary>
+        private Lst Kept(Holder h, List<(Expression? Expr, Inlined? Env, ObjectExpression? From)> given, int depth, HashSet<Node> seen)
+        {
             var l = new Lst { Max = 0, Min = int.MaxValue };
-            foreach (var v in given)
+            foreach (var (v, env, from) in given)
             {
                 if (v == null) { l.Min = 0; continue; }
-                var one = Listed(v, null, depth + 1, seen);
+                var one = from != null ? FieldList(from, h.Name, v, env, depth + 1, seen) : Listed(v, env, depth + 1, seen);
                 if (one.Again) { l.Items = one.Items == null ? null : l.Items; continue; }
-                if (one.Max == null) return Lst.Unknown($"\"{name}\" is given a value whose length the compile cannot bound ({one.Why})");
+                if (one.Max == null) return Lst.Unknown($"\"{h.Name}\" is given a value whose length the compile cannot bound ({one.Why})");
                 l.Max = Math.Max(l.Max!.Value, one.Max.Value);
                 l.Min = Math.Min(l.Min, one.Min);
                 l.Items = l.Items == null || one.Items == null ? null : l.Items.Concat(one.Items).ToList();
             }
             // taken from, or changed at all: it can hold fewer
-            if (l.Min == int.MaxValue || Shrunk(decl)) l.Min = 0;
-            var grown = Changes(decl, depth, seen);
+            if (l.Min == int.MaxValue || Shrunk(h)) l.Min = 0;
+            var grown = Changes(h, depth, seen);
             if (grown == null) return l;
             if (grown.Why.Length > 0) return Lst.Unknown(grown.Why);
             // grown.Max is what the changes add; Again marks a cap: the array never holds more than it
@@ -872,18 +1055,43 @@ internal static partial class PlainTranslator
         }
 
         /// <summary>
-        /// What is done to an array held in a name, besides giving it values: null when nothing adds to it. Otherwise
-        /// a Why (a change the compile cannot bound), or Max with Again set for a cap every addition is held to, or
-        /// Max for the most that additions in bounded loops add to an array made fresh each time.
+        /// Where an array read at <paramref name="r"/> goes on to, still the same array: a parameter of a function every
+        /// use of which is a call, or a field of an object literal it is written into (null there: the object goes where
+        /// the compile cannot follow it). Null for anywhere else.
         /// </summary>
-        private Lst? Changes(Identifier decl, int depth, HashSet<Identifier> seen)
+        private (Holder? To, Node Key, string What)? HandedOn(Expression r)
         {
-            if (!_refs.TryGetValue(decl, out var refs)) return null;
-            var name = decl.Name;
+            switch (_parent[r])
+            {
+                case CallExpression call when call.Arguments.Contains(r) && call.Callee is Identifier f && Function(f) is { } fn && NameOf(fn) is { } fname
+                                              && _refs.TryGetValue(fname, out var fr) && fr.All(x => _parent[x] is CallExpression cc && cc.Callee == x):
+                    {
+                        var index = call.Arguments.ToList().IndexOf(r);
+                        return index < fn.Params.Count && fn.Params[index] is Identifier param ? (HolderOf(param), param, $"passed to \"{fname}\"") : null;
+                    }
+                case Property { Computed: false, Kind: PropertyKind.Init, Method: false } prop when prop.Value == r && _parent.TryGetValue(prop, out var po) && po is ObjectExpression alias
+                                                                                                   && prop.Key is Identifier or StringLiteral:
+                    {
+                        var key = prop.Key is Identifier k ? k.Name : ((StringLiteral)prop.Key).Value;
+                        return (FieldUses(key, alias) is { } flow ? new Holder(key, null, flow.Uses) : null, prop, $"stored in the field \"{key}\"");
+                    }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// What is done to a held array, besides giving it values: null when nothing adds to it. Otherwise a Why (a
+        /// change the compile cannot bound), or Max with Again set for a cap every addition is held to, or Max for the
+        /// most that additions in bounded loops add to an array made fresh each time.
+        /// </summary>
+        private Lst? Changes(Holder h, int depth, HashSet<Node> seen)
+        {
+            if (h.Refs.Count == 0) return null;
+            var name = h.Name;
             int? cap = null;
             var added = 0;
             var items = new List<(Expression, Inlined?)>();
-            foreach (var r in refs)
+            foreach (var r in h.Refs)
             {
                 var p = _parent[r];
                 if (p is MemberExpression m && m.Object == r)
@@ -902,7 +1110,7 @@ internal static partial class PlainTranslator
                             cap = Math.Max(cap ?? 0, (int)lens.Cast<double>().Max());
                             continue;
                         }
-                        if (Trim(StatementOf(_parent[m]), decl) is { } k) { cap = Math.Max(cap ?? 0, k); continue; }
+                        if (Trim(StatementOf(_parent[m]), h) is { } k) { cap = Math.Max(cap ?? 0, k); continue; }
                         return Lst.Unknown($"\"{name}\".length is set to a value only known at run time");
                     }
                     if (_parent[m] is CallExpression c && c.Callee == m)
@@ -929,14 +1137,14 @@ internal static partial class PlainTranslator
                         foreach (var a in c.Arguments.Skip(method == "splice" ? 2 : 0)) items.Add(((Expression)a, null));
                         var at = StatementOf(c);
                         if (at == null) return Lst.Unknown($"\"{name}\".{method}() used as a value");
-                        if (Guarded(at, decl) is { } g) { cap = Math.Max(cap ?? 0, g - 1 + adds); continue; }
+                        if (Guarded(at, h) is { } g) { cap = Math.Max(cap ?? 0, g - 1 + adds); continue; }
                         if (_parent.TryGetValue(at, out var holder) && Stmts(holder) is { } sibs && sibs.IndexOf((Statement)at) is var ix and >= 0
-                            && ix + 1 < sibs.Count && Trim(sibs[ix + 1], decl) is { } trim && (adds == 1 || !OneAtATime(sibs[ix + 1])))
+                            && ix + 1 < sibs.Count && Trim(sibs[ix + 1], h) is { } trim && (adds == 1 || !OneAtATime(sibs[ix + 1])))
                         {
                             cap = Math.Max(cap ?? 0, trim);
                             continue;
                         }
-                        if (Fresh(decl, at, depth, seen) is { } times) { added += adds * times; continue; }
+                        if (h.Decl != null && Fresh(h.Decl, at, depth, seen) is { } times) { added += adds * times; continue; }
                         return Lst.Unknown($"\"{name}\".{method}() with nothing holding it to a length (an `if ({name}.length < N)` before it, or a trim after it, is followed)");
                     }
                     continue;
@@ -952,33 +1160,29 @@ internal static partial class PlainTranslator
                     case ConditionalExpression cond when cond.Test == r:
                     case LogicalExpression or TemplateLiteral or NonLogicalBinaryExpression:
                         continue;
-                    case CallExpression call when call.Arguments.Contains(r):
+                    case CallExpression call when call.Arguments.Contains(r)
+                        // read and nothing more: JSON.stringify, Array.isArray, String, a console call (which the compile drops)
+                        && (call.Callee is MemberExpression { Object: Identifier { Name: "JSON" or "Array" or "console" } g, Computed: false } && !Declared(g.Name)
+                            || call.Callee is Identifier { Name: "String" } s && !Declared(s.Name)
+                            // another array's concat copies its items, and includes/indexOf only look
+                            || call.Callee is MemberExpression { Computed: false, Property: Identifier { Name: "concat" or "includes" or "indexOf" or "lastIndexOf" } }):
+                        continue;
+                    case CallExpression or Property:
                         {
-                            // read and nothing more: JSON.stringify, Array.isArray, String, a console call (which the compile drops)
-                            if (call.Callee is MemberExpression { Object: Identifier { Name: "JSON" or "Array" or "console" } g, Computed: false } && !Declared(g.Name)
-                                || call.Callee is Identifier { Name: "String" } s && !Declared(s.Name)
-                                // another array's concat copies its items, and includes/indexOf only look
-                                || call.Callee is MemberExpression { Computed: false, Property: Identifier { Name: "concat" or "includes" or "indexOf" or "lastIndexOf" } })
-                                continue;
-                            if (call.Callee is Identifier f && Function(f) is { } fn && NameOf(fn) is { } fname && _refs.TryGetValue(fname, out var fr)
-                                && fr.All(x => _parent[x] is CallExpression cc && cc.Callee == x))
+                            // handed on, the same array: whatever is done to it there
+                            if (HandedOn(r) is not { } on) break;
+                            if (on.To == null) return Lst.Unknown($"\"{name}\" is {on.What} of an object the compile cannot follow");
+                            if (!seen.Add(on.Key)) continue;
+                            try
                             {
-                                var index = call.Arguments.ToList().IndexOf(r);
-                                if (index < fn.Params.Count && fn.Params[index] is Identifier param)
-                                {
-                                    if (!seen.Add(param)) continue;
-                                    try
-                                    {
-                                        if (Changes(param, depth + 1, seen) is { } inner && (inner.Why.Length > 0 || inner.Max != 0))
-                                            return Lst.Unknown($"\"{name}\" is passed to \"{fname}\", which adds to it");
-                                    }
-                                    finally { seen.Remove(param); }
-                                    continue;
-                                }
+                                if (Changes(on.To, depth + 1, seen) is { } inner && (inner.Why.Length > 0 || inner.Max != 0))
+                                    return Lst.Unknown($"\"{name}\" is {on.What}, which adds to it");
                             }
-                            return Lst.Unknown($"\"{name}\" is passed where the compile cannot follow what is done to it");
+                            finally { seen.Remove(on.Key); }
+                            continue;
                         }
                 }
+                if (p is CallExpression pc && pc.Arguments.Contains(r)) return Lst.Unknown($"\"{name}\" is passed where the compile cannot follow what is done to it");
                 // the list a markup write reads its rows from, and any other read of it as a value
                 if (p is MemberExpression pm && pm.Object == r) continue;
                 return Lst.Unknown($"\"{name}\" is handed where the compile cannot follow what is done to it");
@@ -988,51 +1192,59 @@ internal static partial class PlainTranslator
             return cap != null ? new Lst { Max = cap, Again = true, Items = items } : new Lst { Max = added, Items = items };
         }
 
-        /// <summary>Whether an array held in a name has anything done to it besides being read: then it can hold fewer items than it was given.</summary>
-        private bool Shrunk(Identifier decl)
-            => _refs.TryGetValue(decl, out var refs) && refs.Any(r => _parent[r] is MemberExpression m && m.Object == r
-                && (m.Computed ? WrittenTo(m)
-                    : m.Property is Identifier { Name: var n } && (n == "length" && WrittenTo(m)
-                        || n is "pop" or "shift" or "splice" or "push" or "unshift" or "fill" or "copyWithin" && _parent[m] is CallExpression c && c.Callee == m)));
+        /// <summary>Whether a held array has anything done to it besides being read, where it is held or handed on: then it can hold fewer items than it was given.</summary>
+        private bool Shrunk(Holder h, HashSet<Node>? seen = null)
+        {
+            foreach (var r in h.Refs)
+            {
+                if (_parent[r] is MemberExpression m && m.Object == r
+                    && (m.Computed ? WrittenTo(m)
+                        : m.Property is Identifier { Name: var n } && (n == "length" && WrittenTo(m)
+                            || n is "pop" or "shift" or "splice" or "push" or "unshift" or "fill" or "copyWithin" && _parent[m] is CallExpression c && c.Callee == m)))
+                    return true;
+                if (HandedOn(r) is { To: { } to, Key: var key } && (seen ??= new HashSet<Node>()).Add(key) && Shrunk(to, seen)) return true;
+            }
+            return false;
+        }
 
         /// <summary>The statement an expression is evaluated for its effect in, or null when its value is used.</summary>
         private Node? StatementOf(Node e) => _parent.TryGetValue(e, out var p) && p is ExpressionStatement ? p : null;
 
         /// <summary>`if (a.length &lt; K) a.push(…)`: K (for `&lt;=`, K + 1), when that is the only addition to the array in the if.</summary>
-        private int? Guarded(Node stmt, Identifier decl)
+        private int? Guarded(Node stmt, Holder h)
         {
             var up = _parent[stmt];
             if (up is BlockStatement b)
             {
-                var adds = b.Body.Count(x => x is ExpressionStatement { Expression: CallExpression { Callee: MemberExpression { Computed: false, Object: Identifier o, Property: Identifier { Name: "push" or "unshift" or "splice" } } } } && Decl(o) == decl);
+                var adds = b.Body.Count(x => x is ExpressionStatement { Expression: CallExpression { Callee: MemberExpression { Computed: false, Object: var o, Property: Identifier { Name: "push" or "unshift" or "splice" } } } } && Is(h, o));
                 if (adds != 1) return null;
                 stmt = b;
                 up = _parent[b];
             }
             if (up is not IfStatement ifs || ifs.Consequent != stmt) return null;
-            if (Length(ifs.Test, decl) is not var (op, k)) return null;
+            if (Length(ifs.Test, h) is not var (op, k)) return null;
             return op switch { "<" => k, "<=" => k + 1, _ => null };
         }
 
         /// <summary>A statement that holds the array to K: `if (a.length &gt; K) a.shift()` (or pop, splice(0, 1), `a.length = K`), `while (a.length &gt; K) a.shift()`, `a.splice(K)`, `a.splice(0, a.length - K)`, `a.length = Math.min(a.length, K)`.</summary>
-        private int? Trim(Node? s, Identifier decl)
+        private int? Trim(Node? s, Holder h)
         {
             switch (s)
             {
-                case IfStatement { Alternate: null } ifs when Length(ifs.Test, decl) is var (op, k) && op is ">" or ">=":
-                    return Shrinks(ifs.Consequent, decl, op == ">" ? k : k - 1);
-                case WhileStatement ws when Length(ws.Test, decl) is var (op, k) && op is ">" or ">=":
-                    return Shrinks(ws.Body, decl, op == ">" ? k : k - 1);
+                case IfStatement { Alternate: null } ifs when Length(ifs.Test, h) is var (op, k) && op is ">" or ">=":
+                    return Shrinks(ifs.Consequent, h, op == ">" ? k : k - 1);
+                case WhileStatement ws when Length(ws.Test, h) is var (op, k) && op is ">" or ">=":
+                    return Shrinks(ws.Body, h, op == ">" ? k : k - 1);
                 case ExpressionStatement { Expression: var e }:
-                    if (e is CallExpression { Callee: MemberExpression { Computed: false, Object: Identifier o, Property: Identifier { Name: "splice" } } } sp && Decl(o) == decl)
+                    if (e is CallExpression { Callee: MemberExpression { Computed: false, Object: var o, Property: Identifier { Name: "splice" } } } sp && Is(h, o))
                     {
                         if (sp.Arguments.Count == 1 && Finite((Expression)sp.Arguments[0]) is [double k1] && k1 >= 0) return (int)k1;
                         if (sp.Arguments.Count == 2 && sp.Arguments[0] is NumericLiteral { Value: 0 }
-                            && sp.Arguments[1] is NonLogicalBinaryExpression { Operator: Operator.Subtraction, Left: MemberExpression { Computed: false, Object: Identifier o2, Property: Identifier { Name: "length" } } } sub
-                            && Decl(o2) == decl && Finite(sub.Right) is [double k2] && k2 >= 0)
+                            && sp.Arguments[1] is NonLogicalBinaryExpression { Operator: Operator.Subtraction, Left: MemberExpression { Computed: false, Object: var o2, Property: Identifier { Name: "length" } } } sub
+                            && Is(h, o2) && Finite(sub.Right) is [double k2] && k2 >= 0)
                             return (int)k2;
                     }
-                    if (e is AssignmentExpression { Operator: Operator.Assignment, Left: MemberExpression { Computed: false, Object: Identifier o3, Property: Identifier { Name: "length" } } } la && Decl(o3) == decl
+                    if (e is AssignmentExpression { Operator: Operator.Assignment, Left: MemberExpression { Computed: false, Object: var o3, Property: Identifier { Name: "length" } } } la && Is(h, o3)
                         && la.Right is CallExpression { Callee: MemberExpression { Object: Identifier { Name: "Math" }, Property: Identifier { Name: "min" } } } min
                         && min.Arguments.Select(x => x as Expression).Where(x => x != null).Select(x => Finite(x!)).FirstOrDefault(f => f is [double]) is [double k3])
                         return (int)k3;
@@ -1045,24 +1257,24 @@ internal static partial class PlainTranslator
         private static bool OneAtATime(Node s) => s is IfStatement;
 
         /// <summary>A body that takes items off the array: shift, pop, splice(0, 1), or `a.length = K`.</summary>
-        private int? Shrinks(Statement body, Identifier decl, int k)
+        private int? Shrinks(Statement body, Holder h, int k)
         {
             var s = body is BlockStatement { Body.Count: 1 } b ? b.Body[0] : body;
             if (s is not ExpressionStatement { Expression: var e }) return null;
-            if (e is CallExpression { Callee: MemberExpression { Computed: false, Object: Identifier o, Property: Identifier { Name: var n } } } c && Decl(o) == decl
+            if (e is CallExpression { Callee: MemberExpression { Computed: false, Object: var o, Property: Identifier { Name: var n } } } c && Is(h, o)
                 && (n is "shift" or "pop" && c.Arguments.Count == 0 || n == "splice" && c.Arguments.Count == 2 && c.Arguments[1] is NumericLiteral { Value: >= 1 }))
                 return k;
-            if (e is AssignmentExpression { Operator: Operator.Assignment, Left: MemberExpression { Computed: false, Object: Identifier o2, Property: Identifier { Name: "length" } } } la
-                && Decl(o2) == decl && Finite(la.Right) is [double v] && v <= k)
+            if (e is AssignmentExpression { Operator: Operator.Assignment, Left: MemberExpression { Computed: false, Object: var o2, Property: Identifier { Name: "length" } } } la
+                && Is(h, o2) && Finite(la.Right) is [double v] && v <= k)
                 return k;
             return null;
         }
 
         /// <summary>`a.length OP K` (or `K OP a.length`, turned round) with K a fixed number.</summary>
-        private (string Op, int K)? Length(Expression test, Identifier decl)
+        private (string Op, int K)? Length(Expression test, Holder h)
         {
             if (test is not NonLogicalBinaryExpression b) return null;
-            bool Len(Expression x) => x is MemberExpression { Computed: false, Object: Identifier o, Property: Identifier { Name: "length" } } && Decl(o) == decl;
+            bool Len(Expression x) => x is MemberExpression { Computed: false, Object: var o, Property: Identifier { Name: "length" } } && Is(h, o);
             string? op = b.Operator switch
             {
                 Operator.LessThan => "<", Operator.LessThanOrEqual => "<=", Operator.GreaterThan => ">", Operator.GreaterThanOrEqual => ">=",
@@ -1080,7 +1292,7 @@ internal static partial class PlainTranslator
         /// loops over bounded lists: how many times it can run. Null when it runs in some other function, or in a
         /// loop the compile cannot bound.
         /// </summary>
-        private int? Fresh(Identifier decl, Node at, int depth, HashSet<Identifier> seen)
+        private int? Fresh(Identifier decl, Node at, int depth, HashSet<Node> seen)
         {
             if (_parent[decl] is not VariableDeclarator { Init: ArrayExpression } vd || !_parent.TryGetValue(vd, out var dd) || !_parent.TryGetValue(dd, out var scope)) return null;
             var times = 1;

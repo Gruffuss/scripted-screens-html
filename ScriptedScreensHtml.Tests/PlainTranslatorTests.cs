@@ -688,6 +688,107 @@ internal static class PlainTranslatorTests
               "setInterval(() => { t++; devices[t % 3].alarm = !devices[t % 3].alarm; draw(); }, 500);"),
          Ticks(4), new[] { 0, 1, 2, 4 }),
 
+        ("a log kept in a state object: newest first with concat, trimmed by a slice, the object patched through Object.assign and read back through the values a helper returns",
+         Page(".line { display: flex; width: 300px; padding: 2px 6px; background: #1a2130; margin-bottom: 2px; } .t { width: 40px; color: #888; } .m { width: 220px; }",
+              "<div id=\"log\"></div><p id=\"note\">-</p>",
+              "const state = { tick: 0, mode: 'auto', log: [{ t: 0, msg: 'armed', warn: false }] };" +
+              "function set(patch) { Object.assign(state, patch); render(); }" +
+              "function add(msg, warn) { state.log = [{ t: state.tick, msg, warn }].concat(state.log).slice(0, 4); }" +
+              "function values() { return { log: state.log, note: state.log.length + ' kept', mode: state.mode }; }" +
+              "function render() {" +
+              "  const v = values();" +
+              "  document.getElementById('log').innerHTML = v.log.map((e) => `<div class=\"line\"><span class=\"t\">${e.t}</span><span class=\"m\" style=\"color:${e.warn ? '#fc6' : '#6cf'}\">${e.msg}</span></div>`).join('');" +
+              "  document.getElementById('note').textContent = v.note + ' / ' + v.mode;" +
+              "}" +
+              "setInterval(() => {" +
+              "  state.tick++;" +
+              "  add('event ' + state.tick, state.tick % 2 === 1);" +
+              "  if (state.tick % 3 === 0) set({ mode: state.mode === 'auto' ? 'manual' : 'auto' }); else render();" +
+              "}, 500);" +
+              "render();"),
+         Ticks(6), new[] { 0, 1, 2, 3, 4, 6 }),
+
+        ("a list in a state object's field: pushed under a length test, filtered back into the field, an item's field flipped",
+         Page(".on { color: #6c6; margin: 1px 0; } .off { color: #777; margin: 1px 0; }",
+              "<div id=\"list\"></div><p id=\"count\">-</p><button id=\"add\">Add</button><button id=\"prune\">Prune</button><button id=\"flip\">Flip</button>",
+              "const state = { items: [{ name: 'Pump', on: true }, { name: 'Fan', on: false }] };" +
+              "const names = ['Vent', 'Heater', 'Light'];" +
+              "function draw() {" +
+              "  document.getElementById('list').innerHTML = state.items.map((d) => `<p class=\"${d.on ? 'on' : 'off'}\">${d.name}</p>`).join('');" +
+              "  document.getElementById('count').textContent = state.items.length + ' devices';" +
+              "}" +
+              "document.getElementById('add').addEventListener('click', () => { if (state.items.length < 5) state.items.push({ name: names[state.items.length % 3], on: state.items.length % 2 === 0 }); draw(); });" +
+              "document.getElementById('prune').addEventListener('click', () => { state.items = state.items.filter((d) => d.on); draw(); });" +
+              "document.getElementById('flip').addEventListener('click', () => { if (state.items.length) state.items[0].on = !state.items[0].on; draw(); });" +
+              "draw();"),
+         Steps("add", "add", "prune", "flip", "add", "add", "add", "add", "flip", "prune"), new[] { 0, 1, 2, 3, 4, 7, 8, 9, 10 }),
+
+        ("a list a helper takes items from: the rows it drops hidden, what follows moving up",
+         Page(".it { margin: 1px 0; color: #9cf; }",
+              "<div id=\"l\"></div><p>after</p>",
+              "const xs = ['a', 'b', 'c', 'd'];" +
+              "function drop(a) { if (a.length > 1) a.pop(); }" +
+              "function show() { document.getElementById('l').innerHTML = xs.map((x) => '<p class=\"it\">' + x + '</p>').join(''); }" +
+              "setInterval(() => { drop(xs); show(); }, 500);" +
+              "show();"),
+         Ticks(4), new[] { 0, 1, 2, 4 }),
+
+        ("rows with more than 8 shapes: an icon of three, a badge and a note chosen independently, a status colour, fields changed in a forEach and a row pushed under a cap",
+         Page(".dev { display: flex; width: 330px; height: 22px; margin-bottom: 2px; background: #1b2230; } .ic { width: 20px; } .fan { color: #6cf; } .valve { color: #fc6; } .bolt { color: #f66; }" +
+              ".name { width: 110px; } .badge { width: 40px; color: #111; background: #fc6; } .note { width: 100px; margin: 0; color: #888; }",
+              "<div id=\"devs\"></div><p>end of list</p>",
+              "const icons = ['fan', 'valve', 'bolt'];" +
+              "const badges = ['', 'NEW', 'HOT'];" +
+              "const devices = [" +
+              "  { name: 'Pump', state: 'ok', badge: '', icon: 'fan', note: 'main loop' }," +
+              "  { name: 'Vent', state: 'warn', badge: 'NEW', icon: 'valve', note: '' }];" +
+              "let t = 0;" +
+              "function row(d) {" +
+              "  return '<div class=\"dev\">'" +
+              "    + (d.icon === 'fan' ? '<span class=\"ic fan\">F</span>' : d.icon === 'valve' ? '<span class=\"ic valve\">V</span>' : '<span class=\"ic bolt\">B</span>')" +
+              "    + '<span class=\"name\" style=\"color:' + (d.state === 'trip' ? '#f55' : d.state === 'warn' ? '#fc6' : '#6c6') + '\">' + d.name + '</span>'" +
+              "    + (d.badge ? '<span class=\"badge\">' + d.badge + '</span>' : '')" +
+              "    + (d.note ? '<p class=\"note\">' + d.note + '</p>' : '')" +
+              "    + '</div>';" +
+              "}" +
+              "function draw() { document.getElementById('devs').innerHTML = devices.map(row).join(''); }" +
+              "setInterval(() => {" +
+              "  t++;" +
+              "  devices.forEach((d, i) => {" +
+              "    d.icon = icons[(t + i) % 3];" +
+              "    d.badge = badges[(t * 2 + i) % 3];" +
+              "    d.note = (t + i) % 2 ? '' : 'note ' + t;" +
+              "    d.state = ['ok', 'warn', 'trip'][(t + 2 * i) % 3];" +
+              "  });" +
+              "  if (devices.length < 3) devices.push({ name: 'Heater', state: 'trip', badge: 'HOT', icon: 'bolt', note: 'check fuse' });" +
+              "  draw();" +
+              "}, 500);" +
+              "draw();"),
+         Ticks(7), new[] { 0, 1, 2, 3, 4, 5, 6, 7 }),
+
+        ("rows with more than 8 shapes whose note draws nothing at rest (written `!note ? '' : …`), after a badge that changes the row's size; a separator on every row but the first",
+         Page(".dev { display: flex; width: 330px; height: 22px; margin-bottom: 2px; background: #1b2230; } .ic { width: 20px; } .fan { color: #6cf; } .valve { color: #fc6; } .bolt { color: #f66; }" +
+              ".name { width: 110px; } .badge { width: 40px; color: #111; background: #fc6; } .note { width: 100px; margin: 0; color: #888; } .sep { height: 2px; width: 330px; background: #345; margin-bottom: 2px; }",
+              "<div id=\"devs\"></div><p>end of list</p>",
+              "const icons = ['fan', 'valve', 'bolt'];" +
+              "const devices = [{ icon: 'fan', badge: 'NEW', note: '' }, { icon: 'bolt', badge: '', note: 'x' }, { icon: 'valve', badge: 'HOT', note: 'y' }];" +
+              "let t = 0;" +
+              "function draw() {" +
+              "  document.getElementById('devs').innerHTML = devices.map((d, i) => (i > 0 ? '<div class=\"sep\"></div>' : '') + '<div class=\"dev\">'" +
+              "    + (d.icon === 'fan' ? '<span class=\"ic fan\">F</span>' : d.icon === 'valve' ? '<span class=\"ic valve\">V</span>' : '<span class=\"ic bolt\">B</span>')" +
+              "    + '<span class=\"name\">dev ' + i + '</span>'" +
+              "    + (d.badge ? '<span class=\"badge\">' + d.badge + '</span>' : '')" +
+              "    + (!d.note ? '' : '<p class=\"note\">' + d.note + '</p>')" +
+              "    + '</div>').join('');" +
+              "}" +
+              "setInterval(() => {" +
+              "  t++;" +
+              "  devices.forEach((d, i) => { d.icon = icons[(t + i) % 3]; d.badge = (t + i) % 2 ? '' : 'B' + t; d.note = (t + 2 * i) % 3 ? 'n' + t : ''; });" +
+              "  draw();" +
+              "}, 500);" +
+              "draw();"),
+         Ticks(4), new[] { 0, 1, 2, 3, 4 }),
+
         ("a loop over a count from a fixed set, and a list filtered by a test that reads its index",
          Page("#meter { display: flex; } .bar { width: 12px; height: 20px; background: #3a7; margin-right: 3px; } .odd { color: #fc6; }",
               "<div id=\"meter\"></div><div id=\"odd\"></div><p>meter end</p>",
@@ -711,11 +812,19 @@ internal static class PlainTranslatorTests
     {
         ("requestAnimationFrame", Page("", "<p id=\"a\">x</p>", "requestAnimationFrame(() => { document.getElementById('a').textContent = 'y'; });"), "requestAnimationFrame"),
         ("a list whose array grows with nothing holding it", Page("", "<div id=\"a\"></div>", "const log = []; setInterval(() => { log.push('x'); document.getElementById('a').innerHTML = log.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "a list whose length the compile cannot bound: \"log\".push() with nothing holding it to a length"),
+        ("a list in an object's field that grows with nothing holding it", Page("", "<div id=\"a\"></div><p>end</p>", "const st = { log: ['a'] }; setInterval(() => { st.log.push('x'); document.getElementById('a').innerHTML = st.log.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "a list whose length the compile cannot bound: \"log\".push() with nothing holding it to a length"),
+        ("a list in a field of an object handed where the compile cannot follow it", Page("", "<div id=\"a\"></div>", "const st = { log: ['a'] }; const fs = [function (o) { o.log.push('b'); }]; setInterval(() => { fs[0](st); document.getElementById('a').innerHTML = st.log.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "a list read from the field \"log\" of an object handed where the compile cannot follow what is done to it"),
+        ("a list stored in another object's field, where it is added to", Page("", "<div id=\"a\"></div>", "const st = { log: ['a'] }; const view = { rows: st.log }; setInterval(() => { view.rows.push('x'); document.getElementById('a').innerHTML = st.log.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "is stored in the field \"rows\", which adds to it"),
+        ("an array copied into an object's field by Object.assign, then added to there", Page("", "<div id=\"a\"></div><p>end</p>", "const st = { log: [] }; const a = ['x']; Object.assign(st, { log: a }); setInterval(() => { st.log.push('y'); document.getElementById('a').innerHTML = a.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "\"a\" is stored in the field \"log\", which adds to it"),
         ("markup added with += outside a loop", Page("", "<ul id=\"a\"></ul>", "setInterval(() => { document.getElementById('a').innerHTML += '<li>x</li>'; }, 10);"), "with += outside a list the compile can bound"),
         ("a list of elements joined with text between them", Page("", "<div id=\"a\"></div>", "const xs = ['a', 'b']; setTimeout(() => { document.getElementById('a').innerHTML = xs.map((x) => '<p>' + x + '</p>').join(', '); }, 10);"), "a list joined with \", \" between its elements"),
         ("a list of text-level markup", Page("", "<p id=\"a\">-</p>", "const xs = ['a', 'b']; document.getElementById('a').innerHTML = xs.map((x) => '<b>' + x + '</b>').join(' ');"), "a list of text and text-level markup"),
         ("a list inside a list's rows", Page("", "<div id=\"a\"></div>", "const xs = [[1, 2], [3]]; setTimeout(() => { document.getElementById('a').innerHTML = xs.map((r) => '<div>' + r.map((x) => '<p>' + x + '</p>').join('') + '</div>').join(''); }, 10);"), "a list inside a row of another list"),
         ("CSS picking a list's rows by their place", Page(".row:last-child { color: #f00; }", "<div id=\"a\"></div>", "const xs = []; setInterval(() => { if (xs.length < 3) xs.push('x'); document.getElementById('a').innerHTML = xs.map((x) => '<p class=\"row\">' + x + '</p>').join(''); }, 10);"), "picking elements by their place among their siblings"),
+        ("rows whose many choices all move each other", Page(".r { display: flex; } .s { margin-right: 4px; }", "<div id=\"a\"></div>",
+            "const xs = [{ a: true, b: true, c: true, d: true }]; setInterval(() => { const x = xs[0]; x.a = !x.a; x.b = !x.b; x.c = !x.c; x.d = !x.d;" +
+            " document.getElementById('a').innerHTML = xs.map((x) => '<div class=\"r\">' + (x.a ? '<span class=\"s\">aa</span>' : '') + (x.b ? '<span class=\"s\">bb</span>' : '') + (x.c ? '<span class=\"s\">cc</span>' : '') + (x.d ? '<span class=\"s\">dd</span>' : '') + '</div>').join(''); }, 10);"),
+            "has choices that move the same things, in 16 combinations"),
         ("rows whose shapes are different sizes", Page("", "<div id=\"a\"></div>", "const xs = [{ big: true }, { big: false }]; setInterval(() => { xs[0].big = !xs[0].big; document.getElementById('a').innerHTML = xs.map((x) => x.big ? '<p>a</p><p>b</p>' : '<p>a</p>').join(''); }, 10);"), "is another size in its shape"),
         ("a list inside an attribute", Page("", "<div id=\"a\"></div>", "const xs = ['a', 'b']; document.getElementById('a').innerHTML = '<p title=\"' + xs.map((x) => '<b>' + x + '</b>').join('') + '\">t</p>';"), "a list inside an attribute's value"),
         ("a loop over a count only known at run time", Page("", "<div id=\"a\"></div>", "let n = 1; setInterval(() => { n = n * 2; let h = ''; for (let i = 0; i < n; i++) h += '<p>x</p>'; document.getElementById('a').innerHTML = h; }, 10);"), "a loop over a count only known at run time"),
@@ -767,6 +876,8 @@ internal static class PlainTranslatorTests
         // innerHTML part 2: not yet seen in game
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-list.lua"), Steps(0.5, 0.5, 0.5, 0.5, "gas0", 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, "menu", "gas2", 0.5),
          new[] { 0, 1, 3, 5, 8, 11, 13, 14 }),
+        // a list in a reassigned object field, patched through Object.assign by a helper: not yet seen in game
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-fields.lua"), Ticks(8), new[] { 0, 1, 2, 3, 4, 5, 8 }),
     };
 
     internal static void Run(Action<bool, string> check)

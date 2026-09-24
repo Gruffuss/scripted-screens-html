@@ -2343,8 +2343,21 @@ internal static partial class PlainTranslator
                     {
                         if (Decl(id) is not { } decl) return null;
                         if (bind != null && bind.TryGetValue(decl, out var arg)) return Objects(arg.Expr, arg.Env, depth + 1);
-                        if (Given(decl) is not { } given) return null;
                         var all = new List<(ObjectExpression, Inlined?)>();
+                        // a parameter never given another value: every argument its function is called with (none: undefined)
+                        if (ParamOf(decl) is { } param)
+                        {
+                            if (_writes.ContainsKey(decl) || NameOf(param.Fn) is not { } fname || !_refs.TryGetValue(fname, out var calls)) return null;
+                            foreach (var c in calls)
+                            {
+                                if (_parent[c] is not CallExpression call || call.Callee != c || call.Arguments.Take(param.Index + 1).Any(a => a is SpreadElement)) return null;
+                                if (param.Index >= call.Arguments.Count) continue;
+                                if (Objects((Expression)call.Arguments[param.Index], null, depth + 1) is not { } some) return null;
+                                all.AddRange(some);
+                            }
+                            return all;
+                        }
+                        if (Given(decl) is not { } given) return null;
                         foreach (var v in given)
                             if (v == null || Objects(v, null, depth + 1) is not { } some) return null;
                             else all.AddRange(some);
@@ -2383,13 +2396,34 @@ internal static partial class PlainTranslator
         /// another object, passed to a function the compile cannot follow) it is taken as written.
         /// </summary>
         private bool FieldWritten(string name, ObjectExpression o)
+            => FieldUses(name, o) is not { } flow || flow.Uses.Any(WrittenTo) || flow.Assigned.Count > 0;
+
+        /// <summary>Where the script reaches one field of one object literal (see <see cref="FieldUses"/>).</summary>
+        private sealed class FieldFlow
         {
-            if (_fieldWritten.TryGetValue((name, o), out var known)) return known;
+            /// <summary>`x.name`, or `x[key]` with a key only known at run time - and, where the object is a source of `Object.assign`, the target's.</summary>
+            public readonly List<MemberExpression> Uses = new();
+            /// <summary>Each object literal `Object.assign(x, …)` copies this field onto it from, with that field's value there.</summary>
+            public readonly List<(ObjectExpression From, Expression Value, Inlined? Env)> Assigned = new();
+        }
+
+        /// <summary>
+        /// Every place the script reaches this field of this object literal, following the object as
+        /// <see cref="FieldWritten"/> does: its uses, and what `Object.assign` copies onto it. Null when the object
+        /// goes where its fields could be reached unseen.
+        /// </summary>
+        private FieldFlow? FieldUses(string name, ObjectExpression o)
+        {
+            if (_fieldUses.TryGetValue((name, o), out var known)) return known;
+            // met again while it is worked out (objects copied into each other): taken as unfollowable
+            _fieldUses[(name, o)] = null;
             var written = false;
+            var flow = new FieldFlow();
+            var uses = flow.Uses;
             var holders = new HashSet<Identifier>();
             var functions = new HashSet<IFunction>();
             Value(o);
-            return _fieldWritten[(name, o)] = written;
+            return _fieldUses[(name, o)] = written ? null : flow;
 
             // an expression whose value can be the object
             void Value(Expression e)
@@ -2487,20 +2521,47 @@ internal static partial class PlainTranslator
                     else { written = true; return; }
             }
 
-            // `x.key` of it: a write of this field (or of a field only known at run time) writes it
+            // `x.key` of it: this field, or a field only known at run time, which may be it
             void Member(MemberExpression m)
             {
                 var key = m.Computed ? (m.Property as StringLiteral)?.Value : (m.Property as Identifier)?.Name;
-                if (WrittenTo(m) && (key == null || key == name)) written = true;
+                if (key == null || key == name) uses.Add(m);
             }
 
             void Passed(CallExpression call, Expression arg)
             {
-                if (call.Callee is MemberExpression { Computed: false, Object: Identifier { Name: "Object" }, Property: Identifier { Name: "assign" } } && call.Arguments[0] == arg)
+                if (call.Callee is MemberExpression { Computed: false, Object: Identifier { Name: "Object" } assign, Property: Identifier { Name: "assign" } } && !Declared(assign.Name)
+                    && call.Arguments.Count > 0 && !call.Arguments.Any(a => a is SpreadElement))
                 {
-                    foreach (var src in call.Arguments.Skip(1))
-                        if (src is not ObjectExpression so || Field(so, name) != null) { written = true; return; }
-                    Value(call);
+                    if (call.Arguments[0] == arg)
+                    {
+                        // the target: every object each source can be, each field of which is plain; this one's value copied on
+                        foreach (var src in call.Arguments.Skip(1))
+                        {
+                            if (Objects((Expression)src, null, 0) is not { } objs) { written = true; return; }
+                            foreach (var (from, env) in objs)
+                                foreach (var p in from.Properties)
+                                {
+                                    if (p is not Property { Computed: false, Kind: PropertyKind.Init, Method: false, Value: Expression v } prop
+                                        || (prop.Key is Identifier k ? k.Name : (prop.Key as StringLiteral)?.Value) is not { } key)
+                                    {
+                                        written = true;
+                                        return;
+                                    }
+                                    if (key == name) flow.Assigned.Add((from, v, env));
+                                }
+                        }
+                        // what it gives back is the target
+                        Value(call);
+                        return;
+                    }
+                    // a source: only read, but this field's value is the target's field now too - wherever that is reached
+                    if (Objects((Expression)call.Arguments[0], null, 0) is not { } targets) { written = true; return; }
+                    foreach (var (target, _) in targets)
+                    {
+                        if (FieldUses(name, target) is not { } there) { written = true; return; }
+                        uses.AddRange(there.Uses);
+                    }
                     return;
                 }
                 var index = call.Arguments.ToList().IndexOf(arg);
@@ -2514,7 +2575,7 @@ internal static partial class PlainTranslator
             }
         }
 
-        private readonly Dictionary<(string, ObjectExpression), bool> _fieldWritten = new();
+        private readonly Dictionary<(string, ObjectExpression), FieldFlow?> _fieldUses = new();
 
         /// <summary>
         /// A written text as literal pieces and values. `a + b + ' kPa'` is one value then a literal,
@@ -4219,7 +4280,7 @@ internal static partial class PlainTranslator
                 sb.Append("local function v_reset(t, t0)\n  for k in pairs(t) do t[k] = nil end\n  for k, v in pairs(t0) do t[k] = v end\nend\n");
             }
 
-            if (states.Count > 0 || _reps.Any(r => r.RowPlans.Count > 0))
+            if (states.Count > 0 || _reps.Any(r => r.RowPlans.Count > 0 || r.GatePlans.Count > 0))
             {
                 sb.Append("local function v_state(s, value)\n  local st = s[value]\n  if st == nil then return end\n");
                 sb.Append("  for k, v in pairs(st) do v_set(k, v) end\nend\n");

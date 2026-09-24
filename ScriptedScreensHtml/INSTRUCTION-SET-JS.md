@@ -188,7 +188,7 @@ Rules and columns: see INSTRUCTION-SET.md.
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
 | Object() (constructor) | | | | |
-| Object.assign | | | | |
+| Object.assign | ✅ | the prelude's `Object.assign`: each source's own fields copied onto the target, which it returns (sources that are not tables skipped). A list held in a field of the target is followed through it: each object a source can be (a helper's `patch` parameter, an object written inline at the call) gives that field its value | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a log kept in a state object: newest first with concat, trimmed by a slice, the object patched through Object.assign and read back through the values a helper returns"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: plain-fields.lua (the in-game page, not yet seen in game) | |
 | Object.create | | | | |
 | Object.defineProperties | | | | |
 | Object.defineProperty | | | | |
@@ -555,7 +555,7 @@ Each subtype's `.prototype` fully inherits `Error.prototype` (name/message/cause
 | Array.prototype.constructor | | | | |
 | Array.prototype[Symbol.unscopables] | | | | |
 | Array.prototype.at | | | | |
-| Array.prototype.concat | ✅ | the prelude's `ArrayMethods.concat`; for a list of markup, as long as its parts together, `[x].concat(a).slice(0, N)` holding it to N | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "lists bounded other ways: a splice trim, and concat then slice" | |
+| Array.prototype.concat | ✅ | the prelude's `ArrayMethods.concat`; for a list of markup, as long as its parts together (an array read from a name, a call or an object's field), `[x].concat(a).slice(0, N)` holding it to N | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "lists bounded other ways: a splice trim, and concat then slice"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a log kept in a state object: newest first with concat, trimmed by a slice, the object patched through Object.assign and read back through the values a helper returns" | |
 | Array.prototype.slice | ✅ | before `.map` in markup: bounds of the rows (`v_slice`), a slice of fixed size bounding an array nothing else bounds; elsewhere the prelude's `ArrayMethods.slice` | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "markup added to the element with += in a for...of, a string built in a forEach with a class from the index, and a slice of a list that is never held to a length" | |
 | Array.prototype.copyWithin | | | | |
 | Array.prototype.fill | | | | |

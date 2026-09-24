@@ -509,14 +509,26 @@ internal static partial class PlainTranslator
                                 sb.Append('<').Append(RowTag).Append(" r=\"").Append(r.ToString(CultureInfo.InvariantCulture))
                                   .Append("\" k=\"").Append(row.ToString(CultureInfo.InvariantCulture)).Append("\" c=\"").Append(c.ToString(CultureInfo.InvariantCulture)).Append("\">");
                                 foreach (var x in rep.Copies[row][c])
-                                    if (x is MkLit rl) sb.Append(rl.Text);
-                                    else sb.Append(value(k++, (MkVal)x));
+                                {
+                                    if (x is not MkGate gate) { Put(x); continue; }
+                                    // a gated choice's shape: its elements, marked with the row and the copy key they answer to
+                                    sb.Append('<').Append(GateTag).Append(" r=\"").Append(r.ToString(CultureInfo.InvariantCulture))
+                                      .Append("\" k=\"").Append(row.ToString(CultureInfo.InvariantCulture)).Append("\" c=\"").Append(gate.Key.ToString(CultureInfo.InvariantCulture)).Append("\">");
+                                    foreach (var y in gate.Body) Put(y);
+                                    sb.Append("</").Append(GateTag).Append('>');
+                                }
                                 sb.Append("</").Append(RowTag).Append('>');
                             }
                         r++;
                         break;
                 }
             return sb.ToString();
+
+            void Put(Mk x)
+            {
+                if (x is MkLit rl) sb.Append(rl.Text);
+                else sb.Append(value(k++, (MkVal)x));
+            }
         }
 
         /// <summary>A shape's values in the order <see cref="Render"/> marks them.</summary>
@@ -527,7 +539,10 @@ internal static partial class PlainTranslator
                 if (m is MkVal v) vals.Add(v);
                 else if (m is MkRep rep)
                     foreach (var copies in rep.Copies)
-                        foreach (var copy in copies) vals.AddRange(copy.OfType<MkVal>());
+                        foreach (var copy in copies)
+                            foreach (var x in copy)
+                                if (x is MkVal cv) vals.Add(cv);
+                                else if (x is MkGate gate) vals.AddRange(gate.Body.OfType<MkVal>());
             return vals;
         }
 
@@ -547,7 +562,12 @@ internal static partial class PlainTranslator
                     Refuse(at, "a list inside an attribute's value (not translated yet)");
                     return false;
                 }
-                if (c.Tag != RowTag)
+                if (c.AttributeCount > 0 && c.Attributes.Values.Any(v => v.Contains("<" + GateTag, StringComparison.Ordinal)))
+                {
+                    Refuse(at, $"a list whose rows have more than {MostRowShapes} shapes each, with a choice inside an attribute's value (not translated yet: choices of elements are)");
+                    return false;
+                }
+                if (c.Tag != RowTag && c.Tag != GateTag)
                 {
                     if (!Unrow(c, rows, reps, at)) return false;
                     continue;
@@ -556,12 +576,19 @@ internal static partial class PlainTranslator
                 var kids = c.Children.ToList();
                 n.Children.RemoveAt(i);
                 n.Children.InsertRange(i, kids);
+                // a gate at the top of its row was taken for one of the row's elements: its own elements are, under its key
+                rows?.Remove(c);
                 foreach (var g in kids)
                 {
                     g.Parent = c.Parent;
                     if (rows == null) continue;
                     if (!g.IsText) { rows[g] = key; continue; }
                     if (g.Text.Trim().Length == 0) continue;
+                    if (c.Tag == GateTag)
+                    {
+                        Refuse(at, $"a list whose rows have more than {MostRowShapes} shapes each, with a choice of text rather than of elements (not translated yet: choices of elements are)");
+                        return false;
+                    }
                     var sep = reps[key.Item1].Sep;
                     Refuse(at, sep.Trim().Length > 0 && g.Text.Trim() == sep.Trim()
                         ? $"a list joined with \"{sep}\" between its elements: text between them, which a list of elements does not hold (not translated yet)"
@@ -677,7 +704,7 @@ internal static partial class PlainTranslator
         private static string Text(object v) => v is double d ? JsToLuaNumber(d) : (string)v;
         private static Expression Literal(object v) => v is double d ? new NumericLiteral(d, JsToLuaNumber(d)) : new StringLiteral((string)v, (string)v);
 
-        private static List<Mk> Replace(List<Mk> tpl, Dictionary<MkVal, Mk> map)
+        private List<Mk> Replace(List<Mk> tpl, Dictionary<MkVal, Mk> map)
             => tpl.Select(m => m switch
             {
                 MkVal v when map.TryGetValue(v, out var c) => c,
@@ -687,12 +714,12 @@ internal static partial class PlainTranslator
             }).ToList();
 
         /// <summary>A list's rows with values replaced, and each row's shapes worked out again.</summary>
-        private static MkRep Replaced(MkRep rep, Dictionary<MkVal, Mk> map)
+        private MkRep Replaced(MkRep rep, Dictionary<MkVal, Mk> map)
         {
             for (var k = 0; k < rep.Rows.Count; k++)
             {
                 rep.Rows[k] = Replace(rep.Rows[k], map);
-                rep.Copies[k] = Shapes(rep.Rows[k]);
+                ShapeRow(rep, k, rep.At);
             }
             return rep;
         }
@@ -843,7 +870,9 @@ internal static partial class PlainTranslator
                     foreach (var d in Below(pairRow.Key)) copyOf[d] = key;
                     if (Ve(pairRow.Key) is not { } rowVe)
                     {
-                        Refuse(b.W.At, "a list of text and text-level markup, drawn as part of one text (not translated yet: a list of elements is)");
+                        Refuse(b.W.At, key.Item1.Gates.ContainsKey(key.Item2) && key.Item3 > 0
+                            ? $"a list whose rows have more than {MostRowShapes} shapes each, with a choice drawn as part of a text (not translated yet: choices of elements of their own are)"
+                            : "a list of text and text-level markup, drawn as part of one text (not translated yet: a list of elements is)");
                         return;
                     }
                     if (!o.RowTops.TryGetValue(key, out var tops)) o.RowTops[key] = tops = new List<Target>();
@@ -894,7 +923,12 @@ internal static partial class PlainTranslator
                     {
                         var length = o.Reps[r].Max - rest % radix[r];
                         rest /= radix[r];
-                        for (var k = 0; k < length; k++) shown.UnionWith(o.TopsOf(o.Reps[r], k, 0));
+                        for (var k = 0; k < length; k++)
+                        {
+                            shown.UnionWith(o.TopsOf(o.Reps[r], k, 0));
+                            // a gated row's choices, each in its shape at rest
+                            if (o.Reps[r].Gates.TryGetValue(k, out var gates)) foreach (var (_, keys) in gates) shown.UnionWith(o.TopsOf(o.Reps[r], k, keys[0]));
+                        }
                     }
                     of.States.Add(shown);
                 }
@@ -911,7 +945,7 @@ internal static partial class PlainTranslator
 
         /// <summary>Whether an element's markup shows and hides what it makes: more than one state, or a row whose shape changes with its item.</summary>
         private static bool Varies(MarkupOf of)
-            => !of.Inline && (of.States.Count > 1 || of.Shapes.Any(o => o.Reps.Any(r => r.Copies.Any(c => c.Count > 1))));
+            => !of.Inline && (of.States.Count > 1 || of.Shapes.Any(o => o.Reps.Any(r => r.Copies.Any(c => c.Count > 1) || r.Gates.Count > 0)));
 
         /// <summary>One state's display: what it shows of the elements states show and hide, and none of the rest.</summary>
         private static void Show(MarkupOf of, HashSet<Target> shown)
@@ -1264,7 +1298,7 @@ internal static partial class PlainTranslator
                 foreach (var o in of.Shapes)
                     foreach (var rep in o.Reps)
                         for (var k = 0; k < rep.Max; k++)
-                            if (rep.Copies[k].Count > 1 && !RowFacet(of, o, rep, k, of.Facet!, back)) return;
+                            if (rep.Gates.ContainsKey(k) ? !GateFacets(of, o, rep, k, of.Facet!, back) : rep.Copies[k].Count > 1 && !RowFacet(of, o, rep, k, of.Facet!, back)) return;
         }
 
         /// <summary>A state, as a refusal names it.</summary>
@@ -1337,6 +1371,140 @@ internal static partial class PlainTranslator
         }
 
         /// <summary>
+        /// A gated row (<see cref="Gate"/>): each choice's shapes drawn with every other choice at rest, the list at its
+        /// longest and every other row at rest, nothing outside the row allowed to move. A choice is a state of its own;
+        /// choices whose shapes move a slot in common are laid out together, every combination of their shapes, as
+        /// elements whose states move the same things are (<see cref="MarkupStates"/>). So is a choice drawing nothing at
+        /// rest but something in another shape, with every choice that changes size or moves the rest of the row: nothing
+        /// at rest shows where those put it.
+        /// </summary>
+        private bool GateFacets(MarkupOf of, ShapeOut o, MkRep rep, int k, string facet, Action back)
+        {
+            var at = rep.At;
+            var full = of.States[o.Base];
+            var choices = rep.Gates[k];
+            var mine = o.TopsOf(rep, k, 0).Concat(choices.SelectMany(ch => ch.Keys.SelectMany(key => o.TopsOf(rep, k, key)))).ToList();
+            var inside = new HashSet<VisualElement>(mine.SelectMany(m => Subtree(m.Ve)));
+            var outside = Subtree(_built.Root).Where(v => !inside.Contains(v)).ToList();
+            var rest = new Dictionary<VisualElement, UnityEngine.Rect>();
+            // the size each choice's shape at rest takes; per choice, whether another of its shapes takes another size or moves the rest of the row
+            var restSize = new UnityEngine.Vector2[choices.Count];
+            var shifts = new bool[choices.Count];
+            var baseline = Variant(() => Show(of, full), back, () =>
+            {
+                foreach (var v in outside.Concat(inside)) rest[v] = v.layout;
+                for (var g = 0; g < choices.Count; g++) restSize[g] = Size(o.TopsOf(rep, k, choices[g].Keys[0]));
+            });
+            if (baseline == null) { Refuse(at, $"the list written into \"{of.T.Name}\" changes the scene's structure ({_reshaped})"); return false; }
+            var ownOf = choices.Select(ch => new HashSet<VisualElement>(ch.Keys.SelectMany(key => o.TopsOf(rep, k, key)).SelectMany(t => Subtree(t.Ve)))).ToList();
+
+            // some of the row's choices in the given shapes, the rest at rest
+            Dictionary<string, SceneSlots.Value>? Draw(List<int> members, int[] shapes)
+            {
+                var shown = new HashSet<Target>(full);
+                for (var i = 0; i < members.Count; i++)
+                {
+                    var keys = choices[members[i]].Keys;
+                    shown.ExceptWith(o.TopsOf(rep, k, keys[0]));
+                    shown.UnionWith(o.TopsOf(rep, k, keys[shapes[i]]));
+                }
+                var what = string.Join(" and ", members.Select((m, i) => $"its choice {m + 1} in shape {shapes[i] + 1}"));
+                if (Positional(of, shown) is { } why) { Refuse(at, why); return null; }
+                VisualElement? shifted = null;
+                var drawn = Variant(() => Show(of, shown), back, () =>
+                {
+                    shifted = outside.FirstOrDefault(v => Apart(v.layout, rest[v]));
+                    if (members.Count != 1) return;
+                    var g = members[0];
+                    var size = Size(o.TopsOf(rep, k, choices[g].Keys[shapes[0]]));
+                    if (Math.Abs(size.x - restSize[g].x) >= Noise || Math.Abs(size.y - restSize[g].y) >= Noise
+                        || inside.Any(v => !ownOf[g].Contains(v) && Apart(v.layout, rest[v])))
+                        shifts[g] = true;
+                });
+                if (drawn == null) { Refuse(at, $"row {k + 1} of the list written into \"{of.T.Name}\", {what}, changes the scene's structure ({_reshaped})"); return null; }
+                if (shifted != null)
+                {
+                    Refuse(at, $"row {k + 1} of the list written into \"{of.T.Name}\" is another size with {what}, which moves what is around it (not translated yet: rows whose shapes are one size are)");
+                    return null;
+                }
+                return drawn;
+            }
+            HashSet<string> MovedFrom(Dictionary<string, SceneSlots.Value> drawn)
+                => new(drawn.Where(p => !baseline.TryGetValue(p.Key, out var b) || !Near(b, p.Value)).Select(p => p.Key), StringComparer.Ordinal);
+
+            // each choice alone
+            var alone = new List<List<Dictionary<string, SceneSlots.Value>>>();
+            var moves = new List<HashSet<string>>();
+            for (var g = 0; g < choices.Count; g++)
+            {
+                var states = new List<Dictionary<string, SceneSlots.Value>> { baseline };
+                var moved = new HashSet<string>(StringComparer.Ordinal);
+                for (var c = 1; c < choices[g].Keys.Count; c++)
+                {
+                    if (Draw(new List<int> { g }, new[] { c }) is not { } drawn) return false;
+                    states.Add(drawn);
+                    moved.UnionWith(MovedFrom(drawn));
+                }
+                foreach (var key in choices[g].Keys)
+                    foreach (var top in o.TopsOf(rep, k, key)) moved.Add(DomSlots.Slot(top.Name) + "_v");
+                alone.Add(states);
+                moves.Add(moved);
+            }
+
+            // laid out together: choices moving a slot in common, and one drawing nothing at rest with every other
+            var root = Enumerable.Range(0, choices.Count).ToArray();
+            int Find(int x) => root[x] == x ? x : root[x] = Find(root[x]);
+            bool Unseen(int g) => o.TopsOf(rep, k, choices[g].Keys[0]).Count == 0 && choices[g].Keys.Any(key => o.TopsOf(rep, k, key).Count > 0);
+            for (var i = 0; i < choices.Count; i++)
+                for (var j = i + 1; j < choices.Count; j++)
+                    if (moves[i].Overlaps(moves[j]) || Unseen(i) && shifts[j] || Unseen(j) && shifts[i]) root[Find(j)] = Find(i);
+
+            foreach (var members in Enumerable.Range(0, choices.Count).GroupBy(Find).Select(x => x.ToList()))
+            {
+                var plan = new StylePlan { Var = rep.Var + ".g[" + (rep.GatePlans.Count + 1).ToString(CultureInfo.InvariantCulture) + "]", States = new Dictionary<object, Dictionary<string, SceneSlots.Value>>() };
+                var moved = new HashSet<string>(members.SelectMany(m => moves[m]), StringComparer.Ordinal);
+                var total = members.Aggregate(1L, (a, m) => a * choices[m].Keys.Count);
+                if (total > MostRowShapes)
+                {
+                    Refuse(at, $"row {k + 1} of the list written into \"{of.T.Name}\" has choices that move the same things, in {total} combinations, more than the {MostRowShapes} laid out (not translated yet)");
+                    return false;
+                }
+                // each combination by its place as the Lua counts them (Choose): the first member's shape the slowest
+                for (var leaf = 0; leaf < total; leaf++)
+                {
+                    var shapes = new int[members.Count];
+                    var r = leaf;
+                    for (var i = members.Count - 1; i >= 0; i--) { shapes[i] = r % choices[members[i]].Keys.Count; r /= choices[members[i]].Keys.Count; }
+                    var changed = Enumerable.Range(0, members.Count).Where(i => shapes[i] > 0).ToList();
+                    Dictionary<string, SceneSlots.Value>? drawn = changed.Count switch
+                    {
+                        0 => baseline,
+                        1 => alone[members[changed[0]]][shapes[changed[0]]],
+                        _ => Draw(members, shapes),
+                    };
+                    if (drawn == null) return false;
+                    plan.States[(double)(leaf + 1)] = new Dictionary<string, SceneSlots.Value>(drawn, StringComparer.Ordinal);
+                    moved.UnionWith(MovedFrom(drawn));
+                }
+                Complete(plan.States.Values, moved);
+                foreach (var slot in moved) if (!Claim(slot, facet, at)) return false;
+                rep.GatePlans.Add((k, members, plan));
+            }
+            return true;
+
+            static bool Apart(UnityEngine.Rect a, UnityEngine.Rect b)
+                => Math.Abs(a.x - b.x) >= Noise || Math.Abs(a.y - b.y) >= Noise || Math.Abs(a.width - b.width) >= Noise || Math.Abs(a.height - b.height) >= Noise;
+            static bool Near(SceneSlots.Value a, SceneSlots.Value b) => a.Equals(b) || a.IsNumber && b.IsNumber && Math.Abs(a.Number - b.Number) < Noise;
+            // what some elements span together, laid out as they stand (none: nothing)
+            static UnityEngine.Vector2 Size(List<Target> tops)
+            {
+                if (tops.Count == 0) return default;
+                var laid = tops.Select(x => x.Ve.layout).ToList();
+                return new UnityEngine.Vector2(laid.Max(r => r.xMax) - laid.Min(r => r.xMin), laid.Max(r => r.yMax) - laid.Min(r => r.yMin));
+            }
+        }
+
+        /// <summary>
         /// Whether CSS picks elements by their place among their siblings in a way a state changes: laid out once
         /// with every row and shape in the page, `:last-child`, `:nth-child`, `:empty` and the like would match
         /// otherwise than with only what the state shows there, as a browser has it.
@@ -1398,7 +1566,7 @@ internal static partial class PlainTranslator
                 {
                     var o = of.Shapes[s];
                     var atRest = !of.KeepOwn && s == 0;
-                    var most = o.Reps.SelectMany(r => r.Copies.Select(x => x.Count)).DefaultIfEmpty(1).Max();
+                    var most = o.Reps.SelectMany(r => r.Copies.Select(x => x.Count).Concat(r.Gates.Values.SelectMany(g => g.Select(x => x.Keys.Count)))).DefaultIfEmpty(1).Max();
                     for (var c = 0; c < most; c++)
                     {
                         if (atRest && c == 0) continue;
@@ -1407,6 +1575,20 @@ internal static partial class PlainTranslator
                         foreach (var rep in o.Reps)
                             for (var k = 0; k < rep.Max; k++)
                             {
+                                // a gated row: its elements outside its choices at rest, and each choice's shape c
+                                if (rep.Gates.TryGetValue(k, out var gates))
+                                {
+                                    if (c == 0 && o.RowMade.TryGetValue((rep, k, 0), out var own)) made.UnionWith(own);
+                                    foreach (var (_, keys) in gates)
+                                    {
+                                        if (c >= keys.Count) continue;
+                                        if (o.RowMade.TryGetValue((rep, k, keys[c]), out var gm)) made.UnionWith(gm);
+                                        if (c == 0) continue;
+                                        shown.ExceptWith(o.TopsOf(rep, k, keys[0]));
+                                        shown.UnionWith(o.TopsOf(rep, k, keys[c]));
+                                    }
+                                    continue;
+                                }
                                 if (c >= rep.Copies[k].Count) continue;
                                 if (o.RowMade.TryGetValue((rep, k, c), out var m)) made.UnionWith(m);
                                 if (c == 0) continue;
@@ -1457,6 +1639,11 @@ internal static partial class PlainTranslator
                 foreach (var rep in o.Reps)
                     for (var k = 0; k < rep.Max; k++)
                     {
+                        if (rep.Gates.TryGetValue(k, out var gates))
+                        {
+                            Gated(o, rep, k, gates, pad);
+                            continue;
+                        }
                         var copies = rep.Copies[k].Count;
                         if (copies == 1 && !o.RowOps.ContainsKey((rep, k, 0))) continue;
                         var row = k.ToString(CultureInfo.InvariantCulture);
@@ -1486,6 +1673,30 @@ internal static partial class PlainTranslator
                     if (_lua.TryGetValue(op, out var own)) { lua.Emit(pad + own(lua)); continue; }
                     foreach (var line in EmitOp(op, _ops[op][0], lua.Translate, early: true)) lua.Emit(pad + line);
                 }
+            }
+
+            // A gated row: its own values, then per group of its choices the combination the script makes, its state
+            // picked and each member's shape given its values.
+            void Gated(ShapeOut o, MkRep rep, int k, List<(MkAlt Alt, List<int> Keys)> gates, string pad)
+            {
+                var row = k.ToString(CultureInfo.InvariantCulture);
+                lua.Emit(pad + "if " + rep.Var + ".n > " + row + " then");
+                if (o.RowOps.TryGetValue((rep, k, 0), out var own)) Ops(own, pad + "  ");
+                foreach (var (_, members, plan) in rep.GatePlans.Where(p => p.K == k))
+                {
+                    var leaf = 0;
+                    Choose(lua, members.Select(m => (Mk)gates[m].Alt).ToList(), pad + "  ", inner =>
+                    {
+                        lua.Emit(inner + "v_state(" + plan.Var + ", " + (leaf + 1).ToString(CultureInfo.InvariantCulture) + ")");
+                        var shapes = new int[members.Count];
+                        var r = leaf;
+                        for (var i = members.Count - 1; i >= 0; i--) { shapes[i] = r % gates[members[i]].Keys.Count; r /= gates[members[i]].Keys.Count; }
+                        for (var i = 0; i < members.Count; i++)
+                            if (o.RowOps.TryGetValue((rep, k, gates[members[i]].Keys[shapes[i]]), out var ops)) Ops(ops, inner);
+                        leaf++;
+                    });
+                }
+                lua.Emit(pad + "end");
             }
         }
 
@@ -1611,6 +1822,20 @@ internal static partial class PlainTranslator
                     {
                         sb.Append("\n  [").Append(pair.Key.ToString(CultureInfo.InvariantCulture)).Append("] = {");
                         foreach (var state in pair.Value.States!.OrderBy(x => (double)x.Key))
+                            sb.Append("\n    [").Append(JsToLuaNumber((double)state.Key)).Append("] = ")
+                              .Append(Table(state.Value.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => (x.Key, Value(x.Value))))).Append(',');
+                        sb.Append("\n  },");
+                    }
+                    sb.Append("\n}");
+                }
+                if (rep.GatePlans.Count > 0)
+                {
+                    // per choice of a gated row (or choices laid out together): what each shape draws
+                    sb.Append(", g = {");
+                    for (var i = 0; i < rep.GatePlans.Count; i++)
+                    {
+                        sb.Append("\n  [").Append((i + 1).ToString(CultureInfo.InvariantCulture)).Append("] = {");
+                        foreach (var state in rep.GatePlans[i].Plan.States!.OrderBy(x => (double)x.Key))
                             sb.Append("\n    [").Append(JsToLuaNumber((double)state.Key)).Append("] = ")
                               .Append(Table(state.Value.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => (x.Key, Value(x.Value))))).Append(',');
                         sb.Append("\n  },");

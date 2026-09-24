@@ -35,6 +35,21 @@ Newest first. The workshop page is a short overview; this file has the full hist
   looked up afterwards (`querySelectorAll`), each given a listener, or reached from one listener through
   `e.target`, `closest()`, `dataset`, `matches()`, `id` and `tagName`. A list whose length the compile
   cannot bound is refused, and the log says why.
+- A list kept in a field of an object compiles too, followed as a list in a name is: `state.log =
+  [line].concat(state.log).slice(0, 5)`, `state.items = state.items.filter(...)`, a push under a length
+  test, the object passed to helpers, patched with `Object.assign` (`set({ log: [...].concat(state.log)
+  .slice(0, 3) })` in a `set(patch)` helper included) or read back through another object.
+  A list in a field that grows with nothing holding it is now refused by name; before, a `push` into such
+  a list went unseen and it was drawn one row long.
+- Rows with many choices compile: an icon, a badge and a note each chosen on their own make each its own
+  state instead of every combination of them, and only choices that move the same things are combined.
+  A choice the row's own index or item decides (`i > 0 ? '<div class="sep"></div>' : ''`) is made once,
+  when the page is compiled.
+- `Object.assign(target, ...)` in a compiled script changes its target, as in a browser; it made a new
+  object and left the target as it was.
+- `[x].concat(obj.list)` adds the items of `obj.list`; it was counted as one item.
+- A list passed to a helper that takes items from it (`a.pop()` there) shows fewer rows as it shrinks;
+  the rows it dropped stayed drawn.
 - `array.length = n` works (it clears or shortens an array as JavaScript does).
 - A compiled page sends only what changed since its last send: a value set and set back in one go is no
   longer sent again.

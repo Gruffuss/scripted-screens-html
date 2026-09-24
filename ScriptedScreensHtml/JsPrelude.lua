@@ -2493,7 +2493,14 @@ Object = {
     for k in pairs(t) do if k ~= "length" then out[n] = k n = n + 1 end end
     return js_array(out, n)
   end,
-  assign = js_merge,
+  -- each source's own fields copied onto the target, which it returns (js_merge would make a new table)
+  assign = function(target, ...)
+    for i = 1, select("#", ...) do
+      local t = select(i, ...)
+      if type(t) == "table" then for k, v in pairs(t) do target[k] = v end end
+    end
+    return target
+  end,
   entries = function(t)
     local out, n = {}, 0
     for k, v in pairs(t) do
