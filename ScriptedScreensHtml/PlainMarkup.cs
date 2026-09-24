@@ -242,17 +242,12 @@ internal static partial class PlainTranslator
                                 last = consumed[^1];
                             }
                         }
-                        if (!_markupOf.TryGetValue(t, out var of)) _markupOf[t] = of = new MarkupOf { T = t };
+                        if (!_markupOf.TryGetValue(t, out var of)) { _markupOf[t] = of = new MarkupOf { T = t }; of.Of = of; }
                         var w = new MarkupWrite { At = a, Of = of, Template = tpl };
                         of.Writes.Add(w);
                         laid.Add(w);
                         if (last != null) _markupAt[last] = w;
                     }
-                    if (!_markupOf.TryGetValue(t, out var of)) { _markupOf[t] = of = new MarkupOf { T = t }; of.Of = of; }
-                    var w = new MarkupWrite { At = a, Of = of, Template = tpl };
-                    of.Writes.Add(w);
-                    _markup[a] = w;
-                    if (last != null) _markupAt[last] = w;
                     if (laid == null) continue;
                     if (pick) _markupPick[a] = (m.Object, laid);
                     else _markup[a] = laid[0];
@@ -2114,9 +2109,9 @@ internal static partial class PlainTranslator
                 }
                 else if (part.Plan != null) lua.Emit(pad + "v_state(" + part.Plan.Var + ", " + Key(o) + ")");
                 // the elements a write makes are new ones: what listened on the old ones is gone
-                if (part == of) foreach (var made in of.Made.Where(m => m.Listens)) lua.Emit(pad + "v_unlisten(" + Q(made.Name) + ")");
-                foreach (var made in of.Made.Where(m => m.Listens))
-                    foreach (var key in made.Presses.Select(p => made.Name + " " + p).Prepend(made.Name)) lua.Emit(pad + "v_unlisten(" + Q(key) + ")");
+                if (part == of)
+                    foreach (var made in of.Made.Where(m => m.Listens))
+                        foreach (var key in made.Presses.Select(p => made.Name + " " + p).Prepend(made.Name)) lua.Emit(pad + "v_unlisten(" + Q(key) + ")");
                 Ops(o.Ops, pad);
                 foreach (var rep in o.Reps)
                     for (var k = 0; k < rep.Max; k++)
