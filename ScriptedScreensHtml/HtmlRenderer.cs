@@ -507,6 +507,18 @@ internal static class HtmlRenderer
         ApplyGap(parent, result.CssOf(parent), result);
     }
 
+    /// <summary>As <see cref="AppendFragment"/>, for nodes already parsed: appended under a live element and cascaded like the page.</summary>
+    internal static void AppendNodes(VisualElement parent, HtmlNode parentNode, IEnumerable<HtmlNode> nodes, Result result)
+    {
+        foreach (var child in nodes)
+        {
+            child.Parent = parentNode;
+            parentNode.Children.Add(child);
+            Append(parent, child, result.Rules, result);
+        }
+        ApplyGap(parent, result.CssOf(parent), result);
+    }
+
     /// <summary>
     /// Script insertBefore: the fragment's nodes go before `beforeId` in both trees. With no
     /// such child it appends. Text nodes are labels without ids, so only elements move.

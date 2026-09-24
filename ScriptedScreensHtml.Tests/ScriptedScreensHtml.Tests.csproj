@@ -47,6 +47,7 @@
              its bool states are read from the laid-out, emitted page, as a surface does it. -->
         <Compile Include="..\ScriptedScreensHtml\PageCompiler.cs" />
         <Compile Include="..\ScriptedScreensHtml\PlainTranslator.cs" />
+        <Compile Include="..\ScriptedScreensHtml\PlainMarkup.cs" />
         <Compile Include="..\ScriptedScreensHtml\MarkupSlots.cs" />
         <!-- The data fast path: its own file stands in for the three ScriptedScreens value types it reads. -->
         <Compile Include="..\ScriptedScreensHtml\DataSlots.cs" />

@@ -407,11 +407,79 @@ internal static class PlainTranslatorTests
          Steps(0.5), new[] { 0, 1 }),
     };
 
+    /// <summary>
+    /// innerHTML, part 1: markup built from literals, concatenation, templates, ternaries and helper functions,
+    /// written into an element the script names. Each compiled for every console shape.
+    /// </summary>
+    private static readonly (string Feature, string Page, List<(double, string?)> Steps, int[] Checkpoints)[] Markups =
+    {
+        ("innerHTML as rich text: a value in bold, a word shown by a ternary, a colour from a fixed set",
+         Page("", "<p id=\"status\">loading</p><button id=\"b\">More</button>",
+              "let n = 0;" +
+              "function show() {" +
+              "  const colour = n > 1 ? '#fa0' : '#8c8';" +
+              "  document.getElementById('status').innerHTML = 'Pressure <b style=\"color:' + colour + '\">' + (n * 12.5).toFixed(1) + '</b> kPa' + (n > 2 ? ' <i>HIGH</i>' : '');" +
+              "}" +
+              "show();" +
+              "document.getElementById('b').addEventListener('click', () => { n++; show(); });"),
+         Steps("b", "b", "b", "b"), new[] { 0, 1, 3, 4 }),
+
+        ("innerHTML of elements from a helper function: text, a class and a style width from values",
+         Page(".panel { width: 260px; background: #222; padding: 4px; } .row { padding: 2px 4px; background: #1a1a1a; } .row.warn { color: #f55; background: #311; }" +
+              ".bar { width: 200px; height: 8px; background: #333; margin-top: 4px; } .fill { height: 8px; background: #3a7; }",
+              "<div id=\"panel\" class=\"panel\"></div><button id=\"up\">Up</button>",
+              "let p = 95;" +
+              "function row(label, value, unit) {" +
+              "  unit = unit || 'kPa';" +
+              "  const warn = value > 100;" +
+              "  return '<div class=\"row' + (warn ? ' warn' : '') + '\"><span>' + label + '</span> <b>' + value.toFixed(1) + '</b> ' + unit + '</div>';" +
+              "}" +
+              "function render() {" +
+              "  document.getElementById('panel').innerHTML =" +
+              "    '<h3>Pressures</h3>' + row('Room', p) + row('Tank', p / 2, 'bar') +" +
+              "    `<div class=\"bar\"><div class=\"fill\" style=\"width:${Math.min(100, p)}%\"></div></div>`;" +
+              "}" +
+              "render();" +
+              "document.getElementById('up').addEventListener('click', () => { p += 3; render(); });"),
+         Steps("up", "up", "up"), new[] { 0, 1, 2, 3 }),
+
+        ("innerHTML choosing between two shapes, with listeners on the buttons each one makes",
+         Page(".card { background: #234; padding: 6px; } .big { font-size: 22px; } .hint { color: #888; }",
+              "<div id=\"box\"></div><p id=\"log\">-</p>",
+              "let open = false, count = 0;" +
+              "function render() {" +
+              "  document.getElementById('box').innerHTML = open" +
+              "    ? '<div class=\"card\"><p class=\"big\">Open ' + count + '</p><button id=\"close\">Close</button></div>'" +
+              "    : '<p class=\"hint\">Closed</p><button id=\"open\">Open</button>';" +
+              "  if (open) document.getElementById('close').addEventListener('click', () => { open = false; render(); });" +
+              "  else document.getElementById('open').addEventListener('click', () => { open = true; count++; render(); document.getElementById('log').textContent = 'opened ' + count; });" +
+              "}" +
+              "render();"),
+         Steps("open", "close", "open", "close", "open"), new[] { 0, 1, 2, 3, 5 }),
+
+        ("innerHTML written by a timer, the list as the page wrote it shown until then",
+         Page(".item { color: #ccc; padding: 2px; } .item.ok { color: #3e5; }",
+              "<div id=\"list\"><div class=\"item\">waiting</div></div><p id=\"after\">below</p>",
+              "let n = 0;" +
+              "setInterval(() => {" +
+              "  n++;" +
+              "  document.getElementById('list').innerHTML = `<div class=\"item ok\">${n} ready</div>` + (n > 1 ? '<div class=\"item\">second</div>' : '');" +
+              "}, 1000);"),
+         Ticks(6), new[] { 0, 1, 2, 4, 6 }),
+    };
+
     /// <summary>Features outside what is translated, each refused by name - the page keeps its old path.</summary>
     private static readonly (string Feature, string Page, string Reason)[] Refusals =
     {
         ("requestAnimationFrame", Page("", "<p id=\"a\">x</p>", "requestAnimationFrame(() => { document.getElementById('a').textContent = 'y'; });"), "requestAnimationFrame"),
-        ("innerHTML", Page("", "<div id=\"a\"><p>x</p></div>", "setTimeout(() => { document.getElementById('a').innerHTML = '<b>y</b>'; }, 10);"), ".innerHTML of \"a\""),
+        ("a list of markup (innerHTML part 2)", Page("", "<ul id=\"a\"></ul>", "const xs = [1, 2]; setTimeout(() => { document.getElementById('a').innerHTML = xs.map((x) => '<li>' + x + '</li>').join(''); }, 10);"), "a list of markup, repeated over an array"),
+        ("markup added with += (innerHTML part 2)", Page("", "<ul id=\"a\"></ul>", "setTimeout(() => { document.getElementById('a').innerHTML += '<li>x</li>'; }, 10);"), "with += (innerHTML part 2)"),
+        ("markup built up in steps", Page("", "<ul id=\"a\"></ul>", "setTimeout(() => { let s = ''; for (let i = 0; i < 3; i++) s += '<li>' + i + '</li>'; document.getElementById('a').innerHTML = s; }, 10);"), "text built up in steps, is part 2"),
+        ("markup chosen with &&", Page("", "<div id=\"a\"></div>", "let on = true; setTimeout(() => { document.getElementById('a').innerHTML = on && '<b>on</b>'; }, 10);"), "chosen with && or ||"),
+        ("markup whose tag is a value", Page("", "<div id=\"a\"></div>", "let t = 'b' + Math.random(); setTimeout(() => { document.getElementById('a').innerHTML = '<' + t + '>x</' + t + '>'; }, 10);"), "whose tag is a value"),
+        ("reading innerHTML", Page("", "<div id=\"a\"><b>x</b></div><p id=\"o\">-</p>", "setTimeout(() => { document.getElementById('o').textContent = document.getElementById('a').innerHTML; }, 10);"), "reading .innerHTML"),
+        ("a list over markup that has more than one shape", Page("", "<div id=\"a\"></div>", "let on = false; setInterval(() => { on = !on; document.getElementById('a').innerHTML = on ? '<p class=\"x\">1</p>' : '<p class=\"x\">2</p><p class=\"x\">3</p>'; document.querySelectorAll('.x').forEach((e) => e.classList.add('y')); }, 10);"), "in only some of its shapes"),
+        ("a write to an element markup makes", Page("", "<div id=\"a\"></div>", "setTimeout(() => { document.getElementById('a').innerHTML = '<p id=\"m\">1</p>'; document.getElementById('m').style.color = '#f00'; }, 10);"), "the next markup write would undo it"),
         ("an element chosen by an id the compile cannot bound", Page("", "<p id=\"a1\">x</p>", "setTimeout(() => { document.getElementById(localStorage.getItem('which')).textContent = 'y'; }, 10);"), "from ids the compile cannot bound"),
         ("an element stored in an object", Page("", "<p id=\"a\">x</p>", "const o = { el: document.getElementById('a') }; setTimeout(() => { o.el.textContent = 'y'; }, 10);"), "used as a value this way"),
         ("an element passed to a function the compile cannot follow", Page("", "<p id=\"a\">x</p>", "const fs = [function (el) { el.textContent = 'y'; }]; fs[0](document.getElementById('a'));"), "passed to a function the compile cannot follow"),
@@ -450,6 +518,8 @@ internal static class PlainTranslatorTests
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-counter.lua"), Ticks(12), new[] { 1, 4, 12 }),
         // refused in game at first (a padded row read as two lines once "row 0" had a space in it); not yet seen compiled there
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-select.lua"), Ticks(8), new[] { 0, 1, 4, 8 }),
+        // innerHTML part 1 in game: refused offline at first (a style width whose unit is a parameter's default)
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-markup.lua"), Ticks(12), new[] { 0, 1, 2, 3, 4, 6, 12 }),
     };
 
     internal static void Run(Action<bool, string> check)
@@ -460,6 +530,13 @@ internal static class PlainTranslatorTests
             catch (Exception ex) { check(false, $"plain [{feature}]: threw - {ex.Message.Split('\n')[0]}"); }
         }
         foreach (var (feature, page, steps, checkpoints) in Browser)
+            foreach (var console in Consoles)
+            {
+                var name = $"{feature} on a {console.W:0}x{console.H:0} console";
+                try { One(name, page, steps, checkpoints, check, console); }
+                catch (Exception ex) { check(false, $"plain [{name}]: threw - {ex.Message.Split('\n')[0]}"); }
+            }
+        foreach (var (feature, page, steps, checkpoints) in Markups)
             foreach (var console in Consoles)
             {
                 var name = $"{feature} on a {console.W:0}x{console.H:0} console";
@@ -488,6 +565,7 @@ internal static class PlainTranslatorTests
                 catch (Exception ex) { check(false, $"plain [{name}]: threw - {ex.Message.Split('\n')[0]}"); }
             }
         ScriptRanFirst(root, check);
+        OldPathSurvives(check);
         Retired(check);
         Eligibility(root, check);
         Sizes(check);
@@ -564,6 +642,26 @@ internal static class PlainTranslatorTests
     }
 
     /// <summary>
+    /// A page the plain translator refuses falls back to the old path, which must never take the compile
+    /// down: innerHTML with elements into a text-only element is left to the interpreter, said, and the
+    /// plain translator's own reason is kept whatever the old path does.
+    /// </summary>
+    private static void OldPathSurvives(Action<bool, string> check)
+    {
+        var page = Page("", "<div id=\"status\">starting</div>",
+                        "setTimeout(() => { document.getElementById('status').innerHTML = '<div class=\"x\">a</div><div>b</div>'; }, 10);" +
+                        "requestAnimationFrame(() => {});");
+        CompiledPage.Result compiled;
+        try { compiled = Probe4.Headless(page).Compiled; }
+        catch (Exception ex) { check(false, "plain fallback: the old path took the compile down - " + ex.Message.Split('\n')[0]); return; }
+        var said = compiled.Warnings.FirstOrDefault(w => w.StartsWith("not translated to plain Lua:", StringComparison.Ordinal)) ?? "";
+        var threw = compiled.Problems.FirstOrDefault(p => p.Contains("threw", StringComparison.Ordinal));
+        check(!compiled.Plain && said.Contains("requestAnimationFrame", StringComparison.Ordinal) && threw == null,
+              "plain fallback: markup with elements into a text-only element leaves the page on the old path, its plain reason said"
+              + (threw != null ? " (" + threw + ")" : said.Length == 0 ? " (no plain reason)" : ""));
+    }
+
+    /// <summary>
     /// A page replaced after its hand-over (ChipHost.Retire sets its V_LIVE false): its timers stop,
     /// nothing more is sent, a click on its scene does nothing, and the tick it chained after still
     /// runs every time.
@@ -636,6 +734,7 @@ internal static class PlainTranslatorTests
     private static void One(string feature, string page, List<(double, string?)> steps, int[] checkpoints, Action<bool, string> check,
                             (float W, float H)? console = null)
     {
+        var script = Regex.Match(page, "<script>(.*?)</script>", RegexOptions.Singleline).Groups[1].Value;
         var (compiled, _) = Probe4.Headless(page, out var built, out var panel, out var size, console: console);
         if (!compiled.Plain || compiled.Lua == null || compiled.Structure == null)
         {
@@ -643,12 +742,21 @@ internal static class PlainTranslatorTests
             return;
         }
         SpecTests.PlainLua(feature, compiled.Lua, check);
+        // markup is structure: what a write sends is a value or a state picked by one, never a string built for it
+        if (script.Contains("innerHTML", StringComparison.Ordinal))
+        {
+            // and the compile lays it into the page only for as long as it compiles: the page is as it was built
+            var fresh = HtmlRenderer.Build(page, FontLibrary.Default());
+            var same = HtmlRenderer.ToHtml(built.Document!, outer: false, keepIds: true) == HtmlRenderer.ToHtml(fresh.Document!, outer: false, keepIds: true)
+                       && built.ById.Keys.OrderBy(k => k, StringComparer.Ordinal).SequenceEqual(fresh.ById.Keys.OrderBy(k => k, StringComparer.Ordinal));
+            check(same, $"plain [{feature}]: the page is put back as it was built after its markup compiles");
+            var built2 = compiled.Lua.Split('\n').FirstOrDefault(l => Regex.IsMatch(l, @"v_(classname|state|setattr|set)\(.*js_add\("));
+            check(built2 == null, $"plain [{feature}]: markup writes send values, building no string" + (built2 == null ? "" : " (" + built2.Trim() + ")"));
+        }
         // `PLAIN_DUMP=<words of a feature> PLAIN_DUMP_TO=<file>`: that case's Lua and scene, to read
         if (Environment.GetEnvironmentVariable("PLAIN_DUMP") is { Length: > 0 } dump && feature.Contains(dump, StringComparison.Ordinal)
             && Environment.GetEnvironmentVariable("PLAIN_DUMP_TO") is { Length: > 0 } to)
             System.IO.File.WriteAllText(to, compiled.Lua + "\n---- scene\n" + compiled.Structure);
-        var script = Regex.Match(page, "<script>(.*?)</script>", RegexOptions.Singleline).Groups[1].Value;
-
         foreach (var at in checkpoints)
         {
             var prefix = steps.Take(at).ToList();
@@ -660,7 +768,12 @@ internal static class PlainTranslatorTests
             }
             var mine = Render(compiled.Structure, data);
             var theirs = Oracle(built, panel, size, page, script, prefix, out _);
-            var diff = Compare(mine, theirs);
+            // markup the script writes: the browser's page is built again from its markup, so what names
+            // and wraps the compile gave its elements is not compared, only what is drawn
+            var diff = script.Contains("innerHTML", StringComparison.Ordinal) ? Compare(Drawn(mine), Drawn(theirs)) : Compare(mine, theirs);
+            if (Environment.GetEnvironmentVariable("PLAIN_DUMP") is { Length: > 0 } d2 && feature.Contains(d2, StringComparison.Ordinal)
+                && Environment.GetEnvironmentVariable("PLAIN_DUMP_TO") is { Length: > 0 } to2)
+                System.IO.File.WriteAllText(to2 + "." + at.ToString(CultureInfo.InvariantCulture), mine + "\n---- browser\n" + theirs);
             check(diff == null, $"plain [{feature}]: after {at} step(s) the scene matches the page run as JavaScript and laid out"
                                 + (diff == null ? "" : " - " + diff));
             if (diff != null) return;
@@ -716,9 +829,27 @@ internal static class PlainTranslatorTests
         HtmlRenderer.SurfaceAspect = size.y / size.x;
         (CssParser.ViewportWidth, CssParser.ViewportHeight) = (size.x, size.y);
         var carry = (Frag: "null", Local: JsonSerializer.Serialize((local ?? new()).Select(p => new[] { p.Key, p.Value })), Session: "[]", Now: 0.0);
+        // A script writing markup: the browser's document is kept as a tree of its own, from the page's
+        // source, that the markup is parsed into; lookups search it, and the page is built again from it.
+        var doc = script.Contains("innerHTML", StringComparison.Ordinal) ? new Doc(page) : null;
         Jint.Engine Load()
         {
             var engine = new Jint.Engine();
+            if (doc != null)
+            {
+                doc = new Doc(page);
+                engine.SetValue("__exists", new Func<string, bool>(id => doc.ById.ContainsKey(id)));
+                engine.SetValue("__initialClass", new Func<string, string>(id => doc.ById[id].Attr("class") ?? ""));
+                engine.SetValue("__initialText", new Func<string, string>(id => NodeText(doc.ById[id])));
+                engine.SetValue("__initialAttrs", new Func<string, string>(id => JsonSerializer.Serialize(doc.Attributes(id))));
+                engine.SetValue("__select", new Func<string, string?, string[]>((selector, under) => doc.Select(selector, under)));
+                engine.SetValue("__rendered", new Func<string, string?, string>((id, text) => Rendered(built, page, id, text)));
+                engine.SetValue("__chain", new Func<string, string[]>(id => doc.Chain(id)));
+                engine.SetValue("__setHtml", new Func<string, string, string[]>((id, html) => doc.SetHtml(id, html)));
+            }
+            else
+            {
+            engine.SetValue("__setHtml", new Func<string, string, string[]>((_, _) => throw new InvalidOperationException("innerHTML outside a markup page")));
             engine.SetValue("__exists", new Func<string, bool>(id => built.ById.ContainsKey(id)));
             engine.SetValue("__initialClass", new Func<string, string>(id => built.NodeOf[built.ById[id]].Attr("class") ?? ""));
             engine.SetValue("__initialText", new Func<string, string>(id => SourceElement(page, id).Tag.Length > 0 ? SourceText(page, id) : NodeText(built.NodeOf[built.ById[id]])));
@@ -731,6 +862,7 @@ internal static class PlainTranslatorTests
                 for (var ve = built.ById[id]; ve != null; ve = ve.parent) if (!string.IsNullOrEmpty(ve.name)) chain.Add(ve.name);
                 return chain.ToArray();
             }));
+            }
             engine.SetValue("__w", Math.Floor(size.x));
             engine.SetValue("__h", Math.Floor(size.y));
             engine.SetValue("__carryFrag", carry.Frag);
@@ -757,6 +889,7 @@ internal static class PlainTranslatorTests
         localAfter = JsonSerializer.Deserialize<string[][]>(engine.Evaluate("JSON.stringify(localStorage.__dump())").AsString())!
             .Select(p => new KeyValuePair<string, string>(p[0], p[1])).ToList();
         var final = JsonDocument.Parse(engine.Evaluate("JSON.stringify(__final())").AsString()).RootElement;
+        if (doc != null) return doc.Drawn(final, size);
 
         var undo = new List<Action>();
         lock (PageCompiler.Gate)
@@ -817,6 +950,140 @@ internal static class PlainTranslatorTests
                 panel.Layout(size.x, size.y);
             }
         }
+    }
+
+    /// <summary>
+    /// The browser's document for a page whose script writes markup: parsed from the page's source, every
+    /// element given an id (the page's own, or one of its own making), the markup parsed into it as it is
+    /// written; at the end the script's final state applied to it and the whole page built again from it,
+    /// laid out and emitted by the real engine.
+    /// </summary>
+    private sealed class Doc
+    {
+        public readonly HtmlNode Root;
+        public readonly Dictionary<string, HtmlNode> ById = new(StringComparer.Ordinal);
+        private int _made;
+
+        public Doc(string page)
+        {
+            Root = HtmlParser.Parse(page, _ => { });
+            Name(Root);
+        }
+
+        /// <summary>Names for the elements the page gives no id, kept off the nodes: an id changes how the renderer builds an inline element.</summary>
+        private readonly Dictionary<HtmlNode, string> _names = new();
+
+        private string? IdOf(HtmlNode n) => n.Attr("id") ?? (_names.TryGetValue(n, out var name) ? name : null);
+
+        private void Name(HtmlNode n)
+        {
+            foreach (var c in n.Children)
+            {
+                if (c.IsText) continue;
+                var id = c.Attr("id");
+                if (id == null || ById.ContainsKey(id)) _names[c] = id = "__doc" + (++_made).ToString(CultureInfo.InvariantCulture);
+                ById[id] = c;
+                Name(c);
+            }
+        }
+
+        public Dictionary<string, string> Attributes(string id) => NodeAttributes(ById[id]);
+
+        public string[] Chain(string id)
+        {
+            var chain = new List<string>();
+            for (var n = ById[id]; n != null; n = n.Parent) if (IdOf(n) is { } name) chain.Add(name);
+            return chain.ToArray();
+        }
+
+        public string[] Select(string selector, string? under)
+        {
+            var parsed = CssParser.SplitTopLevel(selector, ',').Select(p => CssParser.ParseSelector(p.Trim(), _ => { })).Where(p => p != null).ToList();
+            var found = new List<string>();
+            void Walk(HtmlNode n)
+            {
+                foreach (var c in n.Children)
+                {
+                    if (!c.IsText && parsed.Any(p => p!.Matches(c)) && IdOf(c) is { } name) found.Add(name);
+                    Walk(c);
+                }
+            }
+            Walk(under != null ? ById[under] : Root);
+            return found.ToArray();
+        }
+
+        /// <summary>innerHTML: the element's children replaced by the parsed markup. Returns the ids that went, whose listeners go with them.</summary>
+        public string[] SetHtml(string id, string html)
+        {
+            var node = ById[id];
+            var gone = new List<string>();
+            void Forget(HtmlNode n) { foreach (var c in n.Children) { if (IdOf(c) is { } cid) { ById.Remove(cid); gone.Add(cid); } Forget(c); } }
+            Forget(node);
+            node.Children.Clear();
+            foreach (var c in HtmlParser.Parse(html, _ => { }).Children) { c.Parent = node; node.Children.Add(c); }
+            Name(node);
+            return gone.ToArray();
+        }
+
+        /// <summary>The script's final state on the document, the page built again from it, laid out and emitted.</summary>
+        public string Drawn(JsonElement final, Vector2 size)
+        {
+            foreach (var el in final.EnumerateObject())
+            {
+                if (!ById.TryGetValue(el.Name, out var node)) continue;
+                if (el.Value.TryGetProperty("text", out var text))
+                {
+                    node.Children.Clear();
+                    node.Children.Add(new HtmlNode { Text = text.GetString()!, Parent = node });
+                }
+                var declarations = el.Value.GetProperty("style").EnumerateObject().Select(p => DomSlots.Dashed(p.Name) + ":" + p.Value.GetString()).ToList();
+                if (declarations.Count > 0) node.Attributes["style"] = (node.Attr("style") ?? "") + ";" + string.Join(";", declarations);
+                if (el.Value.TryGetProperty("className", out var c)) node.Attributes["class"] = c.GetString()!;
+                if (el.Value.TryGetProperty("attrs", out var attrs))
+                {
+                    var want = attrs.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString()!);
+                    foreach (var name in node.Attributes.Keys.Where(k => k is not ("id" or "class" or "style")).Union(want.Keys).ToList())
+                        if (want.TryGetValue(name, out var v)) node.Attributes[name] = v; else node.Attributes.Remove(name);
+                }
+                // what a click lands on: the renderer's hit region, as the compile gives an element with a listener
+                if (el.Value.TryGetProperty("listens", out var l) && l.GetBoolean() && node.Tag != "button") node.Attributes["data-click"] = "1";
+            }
+            var html = HtmlRenderer.ToHtml(Root, outer: false, keepIds: true);
+            ResolvedStyle.DefaultFace = FontLibrary.Default();
+            var built = HtmlRenderer.Build(html, FontLibrary.Default());
+            HtmlRenderer.NameDrivenGroups(built);
+            var panel = new Panel(built.Root);
+            foreach (var grid in built.Grids)
+                if (built.LayoutAttached.Add(grid)) GridLayout.Attach(grid, built);
+            PostLayout.Attach(built);
+            // [hidden] { display: none }, as the renderer builds it
+            foreach (var pair in built.NodeOf) if (pair.Value.Attr("hidden") != null) pair.Key.style.display = DisplayStyle.None;
+            panel.Layout(size.x, size.y);
+            var values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
+            var template = PageCompiler.Emitted(built, panel, values);
+            return PlainTranslator.Literal(template, values, new List<string>());
+        }
+    }
+
+    /// <summary>A scene as it draws: no element names, and no group that only carries one (a name at full opacity).</summary>
+    private static string Drawn(string scene)
+    {
+        // a zero radius is no radius: the compile keeps it for elements a script writes
+        var lines = scene.Split('\n').Select(l => Regex.Replace(Regex.Replace(l, @" id=\S+", ""), @" rx=0(?= )", "")).ToList();
+        for (var i = 0; i < lines.Count; i++)
+        {
+            // a group that draws nothing different: full opacity, or a transform at identity
+            if (!Regex.IsMatch(lines[i], @"^\s*G( o=1| a=\[[^\]]*\] t=\[0,0\] r=0 s=\[1,1\])? \{$")) continue;
+            var depth = 0;
+            for (var end = i; end < lines.Count; end++)
+            {
+                if (lines[end].TrimEnd().EndsWith("{", StringComparison.Ordinal)) depth++;
+                if (lines[end].Trim() == "}" && --depth == 0) { lines.RemoveAt(end); break; }
+            }
+            lines.RemoveAt(i);
+            i--;
+        }
+        return string.Join("\n", lines);
     }
 
     /// <summary>
@@ -961,7 +1228,8 @@ internal static class PlainTranslatorTests
     /// <summary>Null when the two scenes draw the same: line by line, numbers within half a pixel, text exact.</summary>
     private static string? Compare(string mine, string theirs)
     {
-        static string Clean(string s) => s.Replace("<noparse>", "").Replace("</noparse>", "");
+        // a guard the emitter puts round a number is not compared; a tag guarded to print as text is
+        static string Clean(string s) => s.Replace("<noparse><</noparse>", "&lt;").Replace("<noparse>", "").Replace("</noparse>", "");
         var a = Clean(mine).Split('\n');
         var b = Clean(theirs).Split('\n');
         if (a.Length != b.Length) return $"{a.Length} lines against {b.Length}";
@@ -1048,6 +1316,11 @@ function __el(id) {
     get hidden() { return 'hidden' in st.attrs; }, set hidden(v) { if (v) st.attrs[attr('hidden')] = ''; else delete st.attrs[attr('hidden')]; },
     get textContent() { return st.text !== undefined ? st.text : __initialText(id); }, set textContent(v) { st.text = String(v); },
     get innerText() { return __rendered(id, st.text !== undefined ? st.text : null); }, set innerText(v) { st.text = String(v); },
+    set innerHTML(v) {
+      delete st.text;
+      var gone = __setHtml(id, String(v));
+      for (var gi = 0; gi < gone.length; gi++) { var g = gone[gi]; delete __els[g]; delete __state[g]; delete __listeners[g]; delete __onclick[g]; }
+    },
     querySelector: function (s) { var ids = __select(s, id); return ids.length ? __el(ids[0]) : null; },
     querySelectorAll: function (s) { return __list(__select(s, id), false); },
     getElementsByClassName: function (c) { return __list(__select(__classes(c), id), true); },
@@ -1155,6 +1428,7 @@ function __final() {
     if (st.text !== undefined) o.text = st.text;
     if (st.classWritten) o.className = st.className;
     if (st.attrWritten) o.attrs = st.attrs;
+    if ((__listeners[id] && __listeners[id].length) || __onclick[id]) o.listens = true;
     out[id] = o;
   }
   return out;

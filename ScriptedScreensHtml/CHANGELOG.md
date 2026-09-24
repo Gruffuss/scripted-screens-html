@@ -23,6 +23,15 @@ Newest first. The workshop page is a short overview; this file has the full hist
 - A one-line label with padding is no longer taken for a wrapping one: a 22px text with 4px of padding
   above and below, holding a space, was drawn wrapped at its box's width depending on how its position
   rounded, and a script writing such a text was not compiled.
+- `innerHTML` compiles too, when the markup's shape comes from the page's own text: literals, `+`,
+  template literals, ternaries and helper functions returning markup. The markup is laid out once; the
+  console then only writes the values in it and picks which shape shows. Lists repeated over an array
+  (`.map(...).join('')`) and `+=` come later.
+- Markup with elements written into an element that only held text no longer stops a page from
+  compiling on the older path; it runs as before, and the log says why it was not compiled plainly.
+- An element whose class is set with `className` from a fixed set lays out only the class sets it can
+  be given, so a class that removes the element's background in some other combination no longer
+  stops the page compiling.
 - `null` now prints as "null" where a page turns it into text (`'x' + el.getAttribute('y')`, a template,
   `String()`), and a method called on an array written in place (`[1, 2].forEach(f)`) works.
 - A console in a room with no player compiles and runs its page too; before, it waited until someone

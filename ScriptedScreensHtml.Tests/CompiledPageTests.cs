@@ -733,7 +733,9 @@ setInterval(step, 500);
         CompiledPage.Result toned;
         try { (toned, _) = Probe4.Headless(tones); }
         catch (Exception ex) { check(false, "gauges: compiling the tone page threw - " + ex.Message.Split('\n')[0]); return; }
-        check(toned.Lua != null && toned.Lua.Contains("[\"var(--live)\"] = \"#8899AA\"", StringComparison.Ordinal),
+        // compiled to plain Lua since innerHTML part 1: the colour is a state of the markup, laid out as the hex it ends at
+        check(toned.Lua != null && (toned.Plain ? toned.Lua.Contains("[\"var(--live)\"] = { div1_f = \"#8899AA\" }", StringComparison.Ordinal)
+                                                : toned.Lua.Contains("[\"var(--live)\"] = \"#8899AA\"", StringComparison.Ordinal)),
             "gauges: a var() naming another var() is in the colour table as the hex it ends at");
     }
 

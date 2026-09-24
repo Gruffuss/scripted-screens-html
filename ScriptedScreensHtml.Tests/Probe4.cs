@@ -19,6 +19,8 @@ internal static class Probe4
     internal static void Run(string path, bool verbose = false)
     {
         verbose |= Environment.GetEnvironmentVariable("WHY_VERBOSE") is { Length: > 0 };
+        // what the pipeline logs in game (a warning, a caught exception) is printed here too
+        ScriptedScreensHtmlPlugin.Log ??= new BenchLogger();
         RunOne(path, verbose);
     }
 

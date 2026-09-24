@@ -36,7 +36,7 @@ namespace ScriptedScreensHtml;
 /// that resizes a box, recolours a label or moves a sibling is exactly the numbers that moved.
 /// Anything else the script does with the DOM is refused by name, and the page keeps the path it had.
 /// </remarks>
-internal static class PlainTranslator
+internal static partial class PlainTranslator
 {
     /// <summary>The page's own vector elements: its scene, and the 1x1 element its values go through.</summary>
     internal const string SceneSuffix = "_s", DataSuffix = "_d";
@@ -97,7 +97,17 @@ internal static class PlainTranslator
     {
         if (Analysed(built, refused) is not { } analysed) return null;
         var (page, ast) = analysed;
+        try { return Compiled(page, ast, built, panel, size, target, refused); }
+        catch (OperationCanceledException)
+        {
+            refused.Add("the page stopped wanting its compile");
+            return null;
+        }
+    }
 
+    private static CompiledPage.Result? Compiled(Page page, Script ast, HtmlRenderer.Result built, Panel panel, Vector2 size,
+                                                 (string Surface, string Element, string Scene)? target, List<string> refused)
+    {
         string template;
         var rest = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
         lock (PageCompiler.Gate)
@@ -109,6 +119,7 @@ internal static class PlainTranslator
             finally
             {
                 page.Restore();
+                page.Unlay();
                 panel.Layout(size.x, size.y);
             }
         }
@@ -135,11 +146,17 @@ internal static class PlainTranslator
     /// <summary>
     /// Whether the page's script uses only the translated features, read from its source alone (no
     /// layout): what decides that a page is compiled before its script runs at all. Game thread, at
-    /// build, so it is an AST walk and nothing more.
+    /// build, so it is an AST walk - and, for markup a script writes with innerHTML, that markup parsed
+    /// and built into the page and taken out again, since what it makes can be looked up.
     /// </summary>
     internal static bool Eligible(HtmlRenderer.Result built)
     {
-        try { return Analysed(built, new List<string>()) != null; }
+        try
+        {
+            if (Analysed(built, new List<string>()) is not { } analysed) return false;
+            analysed.Page.Unlay();
+            return true;
+        }
         catch (Exception) { return false; }
     }
 
@@ -165,8 +182,11 @@ internal static class PlainTranslator
                     return null;
                 }
         var page = new Page(built, ast, refused);
-        page.Analyse();
-        return refused.Count > 0 ? null : (page, ast);
+        try { page.Analyse(); }
+        catch { page.Unlay(); throw; }
+        if (refused.Count == 0) return (page, ast);
+        page.Unlay();
+        return null;
     }
 
     /// <summary>
@@ -190,8 +210,8 @@ internal static class PlainTranslator
     /// <summary>One element the script writes to, found at compile time.</summary>
     private sealed class Target
     {
-        public readonly VisualElement Ve;
-        public readonly HtmlNode Node;
+        public VisualElement Ve;
+        public HtmlNode Node;
         public string Name;
         /// <summary>What the element is in the Lua when the script holds it as a value: a number, from 1.</summary>
         public readonly int Number;
@@ -219,8 +239,10 @@ internal static class PlainTranslator
         /// <summary>The Lua table holding this element's attributes, when the script changes or looks them up by a run-time name.</summary>
         public string? AttrTable;
 
+        /// <summary>A top element of markup a script writes with innerHTML, shown and hidden as that markup's shape changes.</summary>
+        public bool Top;
         /// <summary>Whether the script changes what this element draws, so the scene has to name it.</summary>
-        public bool Written => Texts.Count > 0 || Styles.Count > 0 || ClassOps.Count > 0 || ClassNames.Count > 0 || Listens || AttrOps.Any(o => o.Facet);
+        public bool Written => Texts.Count > 0 || Styles.Count > 0 || ClassOps.Count > 0 || ClassNames.Count > 0 || Listens || Top || AttrOps.Any(o => o.Facet);
         public bool Facets => ClassOps.Count > 0 || ClassNames.Count > 0 || AttrOps.Any(o => o.Facet);
     }
 
@@ -243,6 +265,8 @@ internal static class PlainTranslator
         public string Format = "%g";
         /// <summary>The n of `x.toFixed(n)`: the value is rounded as JavaScript rounds it, then printed with `%.nf`.</summary>
         public int? Digits;
+        /// <summary>A literal that is already TextMeshPro rich text (markup written with innerHTML), put in the scene as it is.</summary>
+        public bool Raw;
     }
 
     private sealed class TextPlan
@@ -253,6 +277,8 @@ internal static class PlainTranslator
         public readonly Dictionary<Expression, List<(string Slot, string? Literal, Piece? Hole)>> Writes = new();
         /// <summary>The text as textContent reads it back: literals, and slots printed as JavaScript prints them.</summary>
         public readonly List<(string? Literal, string? Slot, Piece? Hole)> Read = new();
+        /// <summary>Written as markup (innerHTML): its literals are rich text, which textContent does not read back as they are.</summary>
+        public bool Rich;
     }
 
     private sealed class StylePlan
@@ -289,7 +315,7 @@ internal static class PlainTranslator
         public List<string>? Order;
     }
 
-    private sealed class Page
+    private sealed partial class Page
     {
         private readonly HtmlRenderer.Result _built;
         private readonly Script _ast;
@@ -344,6 +370,8 @@ internal static class PlainTranslator
 
         private void Refuse(Node at, string what)
         {
+            // a node the compile made (a write standing for markup) is reported where its source is
+            while (_origin.TryGetValue(at, out var from)) at = from;
             var line = "line " + at.Location.Start.Line.ToString(CultureInfo.InvariantCulture) + ": " + what;
             if (!_refused.Contains(line)) _refused.Add(line);
         }
@@ -355,6 +383,9 @@ internal static class PlainTranslator
             Link(_ast);
             foreach (var n in Markup.Everything(_ast)) Bind(n);
             Index();
+            // innerHTML first: the elements markup makes are elements of the page for everything after
+            Markups();
+            _els.Clear();
 
             foreach (var n in Markup.Everything(_ast))
                 if (n is VariableDeclarator { Id: Identifier id, Init: { } init } && Lookup(init) is { } t
@@ -366,6 +397,7 @@ internal static class PlainTranslator
 
             foreach (var n in Markup.Everything(_ast)) Visit(n);
             Selectors();
+            MarkupChecks();
         }
 
         // ---- names: each reference's declaration, scoped as JavaScript scopes it ------------------------
@@ -681,7 +713,7 @@ internal static class PlainTranslator
         /// The elements an expression yields, or null when it yields none (a number, a string, an object).
         /// <paramref name="bind"/> gives the parameters of a function inlined at one call its arguments there.
         /// </summary>
-        private Els? Elems(Expression e, Dictionary<Identifier, Expression>? bind = null)
+        private Els? Elems(Expression e, Inlined? bind = null)
         {
             if (bind == null && _els.TryGetValue(e, out var cached)) return cached;
             if (!_elsBusy.Add(e)) return Els.Nothing(false);
@@ -692,10 +724,13 @@ internal static class PlainTranslator
             return found;
         }
 
-        private Els? ElemsOf(Expression e, Dictionary<Identifier, Expression>? bind)
+        private Els? ElemsOf(Expression e, Inlined? bind)
         {
             switch (e)
             {
+                case ParenthesizedExpression w when _bindOf.TryGetValue(w, out var within):
+                    return Elems(w.Expression, within);
+
                 case CallExpression c when DomCall(c) is { } q:
                     return Looked(c, q.Kind, q.Under, q.Arg, bind);
 
@@ -716,7 +751,7 @@ internal static class PlainTranslator
                     {
                         if (_vars.TryGetValue(id.Name, out var held)) return Els.Of(held);
                         if (Decl(id) is not { } decl) return null;
-                        if (bind != null && bind.TryGetValue(decl, out var arg)) return Elems(arg);
+                        if (bind != null && bind.TryGetValue(decl, out var arg)) return Elems(arg.Expr, arg.Env);
                         return Named(decl);
                     }
 
@@ -750,10 +785,7 @@ internal static class PlainTranslator
 
                 case CallExpression { Callee: Identifier f } call when Function(f) is { } fn:
                     {
-                        var inner = new Dictionary<Identifier, Expression>();
-                        for (var i = 0; i < fn.Params.Count; i++)
-                            if (fn.Params[i] is Identifier p)
-                                inner[p] = i < call.Arguments.Count && call.Arguments[i] is Expression ae and not SpreadElement ? ae : new Identifier("undefined");
+                        var inner = Inlined.Of(fn, call, bind);
                         var returned = Returns(fn).Select(r => r == null ? Els.Nothing(true) : Elems(r, inner)).ToList();
                         return returned.Any(r => r is { Neutral: false } || r?.Bad != null) ? Els.Choice(returned) : null;
                     }
@@ -840,7 +872,7 @@ internal static class PlainTranslator
         }
 
         /// <summary>What a DOM lookup yields, resolved against the page as written.</summary>
-        private Els Looked(CallExpression c, string kind, Expression? under, Expression? arg, Dictionary<Identifier, Expression>? bind)
+        private Els Looked(CallExpression c, string kind, Expression? under, Expression? arg, Inlined? bind)
         {
             if (kind == "getElementById") return ById(arg, bind).Els;
             Target? scope = null;
@@ -929,7 +961,7 @@ internal static class PlainTranslator
         /// <see cref="IdKey.Hole"/> is what the Lua looks the element up by: the value itself, never the id built
         /// as a string.
         /// </summary>
-        private (Els Els, IdKey? Key) ById(Expression? arg, Dictionary<Identifier, Expression>? bind)
+        private (Els Els, IdKey? Key) ById(Expression? arg, Inlined? bind)
         {
             if (arg is StringLiteral lit)
                 return (_built.ById.TryGetValue(lit.Value, out var ve) && ve != null && _built.NodeOf.TryGetValue(ve, out var node)
@@ -1019,6 +1051,7 @@ internal static class PlainTranslator
             if (Elems(n) is not { } els) return;
             if (els.Bad != null) { Refuse(n, els.Bad); return; }
             if (els.Neutral) return;
+            if (Transient(n, els) is { } transient) { Refuse(n, transient); return; }
             // A lookup that finds nothing, used as an element: a browser throws there, so it is refused by name.
             // A member of a list the page as written leaves empty is not: a loop over it does nothing, and the Lua
             // throws as a browser does if it is reached.
@@ -1308,6 +1341,12 @@ internal static class PlainTranslator
             var gp = _parent[m];
             switch (prop.Name)
             {
+                case "innerHTML":
+                    if (_parent[m] is AssignmentExpression mw && _markupSeen.Contains(mw)) return;
+                    Refuse(m, _parent[m] is AssignmentExpression { Operator: Operator.AdditionAssignment } ? $"markup added to {r.Name} with += (innerHTML part 2)"
+                        : WrittenTo(m) ? $"this write to .innerHTML of {r.Name}" : $"reading .innerHTML of {r.Name} (not translated yet)");
+                    return;
+
                 // a lookup under this element: a source of elements of its own
                 case "querySelector" or "querySelectorAll" or "getElementsByClassName" or "getElementsByTagName" when gp is CallExpression qc && qc.Callee == m:
                     return;
@@ -1834,11 +1873,14 @@ internal static class PlainTranslator
         /// every call's argument, a loop counter over a fixed range, a field of a constant table, and a field
         /// of an object literal a function returns. Null when any of it is only known at run time.
         /// </summary>
-        private List<object>? Finite(Expression e, HashSet<Identifier>? seen = null, Dictionary<Identifier, Expression>? bind = null)
+        private List<object>? Finite(Expression e, HashSet<Identifier>? seen = null, Inlined? bind = null)
         {
             const int Most = 256;
             switch (e)
             {
+                // a value of markup, read in the scope of the function it was written in
+                case ParenthesizedExpression w when _bindOf.TryGetValue(w, out var within):
+                    return Finite(w.Expression, seen, within);
                 case StringLiteral s: return new List<object> { s.Value };
                 case NumericLiteral n: return new List<object> { n.Value };
                 case TemplateLiteral tl:
@@ -1854,6 +1896,9 @@ internal static class PlainTranslator
                         return all;
                     }
                 case ConditionalExpression c: return Union(Finite(c.Consequent, seen, bind), Finite(c.Alternate, seen, bind));
+                // `x || 'default'`, `x ?? 'default'` with x null or undefined (an argument not passed): the default
+                case LogicalExpression { Operator: Operator.LogicalOr or Operator.NullishCoalescing } dl when Nullish(dl.Left, bind):
+                    return Finite(dl.Right, seen, bind);
                 case LogicalExpression l: return Union(Finite(l.Left, seen, bind), Finite(l.Right, seen, bind));
                 case NonLogicalBinaryExpression { Operator: Operator.Addition or Operator.Subtraction or Operator.Multiplication } b:
                     return Finite(b.Left, seen, bind) is { } left && Finite(b.Right, seen, bind) is { } right ? Product(left, right, b.Operator) : null;
@@ -1883,13 +1928,16 @@ internal static class PlainTranslator
                 case Identifier id when !id.Name.Equals("undefined", StringComparison.Ordinal):
                     {
                         if (Decl(id) is not { } decl) return null;
-                        if (bind != null && bind.TryGetValue(decl, out var arg)) return Finite(arg, seen);
+                        if (bind != null && bind.TryGetValue(decl, out var arg)) return Finite(arg.Expr, seen, arg.Env);
                         seen ??= new HashSet<Identifier>();
-                        if (!seen.Add(decl)) return new List<object>();
+                        // Met again while its own values are worked out: `x = cond ? 'b' : x` keeps the values it
+                        // has (a mark its own frame drops), but `n = n + 1` counts for ever (the mark in a sum,
+                        // Product, is no fixed set at all).
+                        if (!seen.Add(decl)) return new List<object> { new Again(decl) };
                         try
                         {
                             if (LoopRange(decl) is { } range) return range;
-                            if (ParamOf(decl) is { } param) return ParamValues(param.Fn, param.Index, seen);
+                            if (ParamOf(decl) is { } param) return ParamValues(param.Fn, param.Index, seen)?.Where(x => x is not Again a || a.Decl != decl).ToList();
                             if (Given(decl) is not { } given) return null;
                             List<object>? all = new();
                             foreach (var v in given)
@@ -1899,7 +1947,7 @@ internal static class PlainTranslator
                                 all = Union(all, Finite(v, seen));
                                 if (all == null) return null;
                             }
-                            return all;
+                            return all.Where(x => x is not Again a || a.Decl != decl).ToList();
                         }
                         finally { seen.Remove(decl); }
                     }
@@ -1943,7 +1991,7 @@ internal static class PlainTranslator
             // Each value of the left with each of the right, as JavaScript's `+ - *` give them
             static List<object>? Product(List<object> a, List<object> b, Operator op)
             {
-                if (a.Count * b.Count > Most) return null;
+                if (a.Count * b.Count > Most || a.Concat(b).Any(x => x is Again)) return null;
                 var u = new List<object>();
                 foreach (var x in a)
                     foreach (var y in b)
@@ -1959,12 +2007,38 @@ internal static class PlainTranslator
             }
         }
 
+        /// <summary>Whether an expression is null or undefined in every run: written so, or a name bound to that.</summary>
+        private bool Nullish(Expression e, Inlined? bind, int depth = 0)
+        {
+            if (depth > 16) return false;
+            switch (e)
+            {
+                case NullLiteral:
+                    return true;
+                case Identifier { Name: "undefined" } u when Decl(u) == null:
+                    return true;
+                case ParenthesizedExpression w when _bindOf.TryGetValue(w, out var within):
+                    return Nullish(w.Expression, within, depth + 1);
+                case Identifier id when Decl(id) is { } d && bind != null && bind.TryGetValue(d, out var arg):
+                    return Nullish(arg.Expr, arg.Env, depth + 1);
+                default:
+                    return false;
+            }
+        }
+
         /// <summary>White space as String.prototype.trim takes it off: the ASCII kinds, no-break and the Unicode spaces.</summary>
         private static readonly char[] JsSpace =
         {
             ' ', '\t', '\n', '\v', '\f', '\r', '\u00A0', '\u1680', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006',
             '\u2007', '\u2008', '\u2009', '\u200A', '\u2028', '\u2029', '\u202F', '\u205F', '\u3000', '\uFEFF',
         };
+
+        /// <summary>A name met again while its own values are worked out (see <see cref="Finite"/>).</summary>
+        private sealed class Again
+        {
+            public readonly Identifier Decl;
+            public Again(Identifier decl) { Decl = decl; }
+        }
 
         /// <summary>
         /// A loop counter's values: <c>for (let i = A; i &lt; B; i++)</c> with A and B fixed numbers (B may be a
@@ -2085,7 +2159,7 @@ internal static class PlainTranslator
         /// the literal itself, a name given one, a named function's return. Empty for a value that is none (an
         /// array, a number, a text, a function); null when it can be anything else.
         /// </summary>
-        private List<(ObjectExpression, Dictionary<Identifier, Expression>?)>? Objects(Expression e, Dictionary<Identifier, Expression>? bind, int depth)
+        private List<(ObjectExpression, Inlined?)>? Objects(Expression e, Inlined? bind, int depth)
         {
             if (depth > 6) return null;
             switch (e)
@@ -2099,9 +2173,9 @@ internal static class PlainTranslator
                 case Identifier id:
                     {
                         if (Decl(id) is not { } decl) return null;
-                        if (bind != null && bind.TryGetValue(decl, out var arg)) return Objects(arg, null, depth + 1);
+                        if (bind != null && bind.TryGetValue(decl, out var arg)) return Objects(arg.Expr, arg.Env, depth + 1);
                         if (Given(decl) is not { } given) return null;
-                        var all = new List<(ObjectExpression, Dictionary<Identifier, Expression>?)>();
+                        var all = new List<(ObjectExpression, Inlined?)>();
                         foreach (var v in given)
                             if (v == null || Objects(v, null, depth + 1) is not { } some) return null;
                             else all.AddRange(some);
@@ -2109,11 +2183,8 @@ internal static class PlainTranslator
                     }
                 case CallExpression { Callee: Identifier f } call when Function(f) is { } fn:
                     {
-                        var inner = new Dictionary<Identifier, Expression>();
-                        for (var i = 0; i < fn.Params.Count; i++)
-                            if (fn.Params[i] is Identifier p)
-                                inner[p] = i < call.Arguments.Count && call.Arguments[i] is Expression ae and not SpreadElement ? ae : new Identifier("undefined");
-                        var all = new List<(ObjectExpression, Dictionary<Identifier, Expression>?)>();
+                        var inner = Inlined.Of(fn, call, bind);
+                        var all = new List<(ObjectExpression, Inlined?)>();
                         foreach (var r in Returns(fn))
                             if (r == null || Objects(r, inner, depth + 1) is not { } some) return null;
                             else all.AddRange(some);
@@ -2226,7 +2297,9 @@ internal static class PlainTranslator
         /// because JavaScript adds `a + b` before anything is a string; a template or a chain after its
         /// first string literal is a value per hole. `x.toFixed(n)` is x, printed with `%.nf`.
         /// </summary>
-        private static List<Piece> Pieces(Expression e)
+        private List<Piece> Pieces(Expression e) => _givenPieces.TryGetValue(e, out var given) ? given : PiecesOf(e);
+
+        private static List<Piece> PiecesOf(Expression e)
         {
             var pieces = new List<Piece>();
             Add(e);
@@ -2361,7 +2434,7 @@ internal static class PlainTranslator
                     if (css is "opacity" or "visibility" or "transform") _built.NamedGroups.Add(t.Name);
                 if (t.Listens && !Clickable(t.Node)) t.Node.Attributes["data-click"] = "1";
                 // hidden takes the element out of the layout; the scene keeps its shapes and a `v` to show them
-                if (t.AttrOps.Any(o => o.Name == "hidden")) { _hide.Add(t); _built.NamedGroups.Add(t.Name); }
+                if (t.Top || t.AttrOps.Any(o => o.Name == "hidden")) { _hide.Add(t); _built.NamedGroups.Add(t.Name); }
                 // An empty label draws nothing, so a text written into it later has nowhere to go: it is
                 // laid out holding a line of text from the start, and opens empty.
                 if (t.Texts.Count > 0 && t.Ve is Label label && label.text.Length == 0)
@@ -2383,22 +2456,52 @@ internal static class PlainTranslator
             _baseline = Variant(() => { }, () => { }) ?? rest;
             if (!ReferenceEquals(_baseline, rest)) foreach (var pair in _baseline) rest[pair.Key] = pair.Value;
             var available = new HashSet<string>(rest.Keys, StringComparer.Ordinal);
-            var absolute = PageCompiler.Absolute(_built);
 
-            Texts();
-            foreach (var t in _order)
+            MarkupStates();
+            if (_refused.Count > 0) return _template;
+            // What the script writes is worked out on the page as it draws it: an element markup makes in
+            // a shape not shown at rest, with that shape shown - its box, its text, what its writes move.
+            foreach (var (group, show) in Groups())
             {
-                foreach (var pair in t.Styles)
+                var rest0 = _baseline;
+                try
                 {
-                    Style(t, pair.Key, pair.Value, available, absolute);
+                    if (show != null)
+                    {
+                        show(true);
+                        _panel.Layout(_size.x, _size.y);
+                        foreach (var t in group) if (t.Texts.Count > 0) _restHeight[t] = t.Ve.layout.height;
+                        _baseline = Variant(() => { }, () => { }) ?? _baseline;
+                    }
+                    var absolute = PageCompiler.Absolute(_built);
+                    Texts(group);
                     if (_refused.Count > 0) return _template;
+                    foreach (var t in group)
+                    {
+                        foreach (var pair in t.Styles)
+                        {
+                            Style(t, pair.Key, pair.Value, available, absolute);
+                            if (_refused.Count > 0) return _template;
+                        }
+                        if (t.Facets) Classes(t);
+                        if (_refused.Count > 0) return _template;
+                    }
                 }
-                if (t.Facets) Classes(t);
-                if (_refused.Count > 0) return _template;
+                finally
+                {
+                    if (show != null) { show(false); _panel.Layout(_size.x, _size.y); }
+                    _baseline = rest0;
+                }
             }
             Reads();
+            // what the program needs of the page as laid out, before markup laid into it is taken out again
+            _chains = Chains().ToList();
+            foreach (var slot in Written)
+                if (!_ease.ContainsKey(slot) && Opening.TryGetValue(slot, out var v) && v.IsNumber) _ease[slot] = Ease(slot);
             return _template;
         }
+
+        private List<(string, string)> _chains = new();
 
         /// <summary>
         /// Puts every element the script writes back as the page's source wrote it, for the length of
@@ -2554,6 +2657,9 @@ internal static class PlainTranslator
         /// </summary>
         private Dictionary<string, SceneSlots.Value>? Variant(Action apply, Action undo, Action? laidOut = null)
         {
+            // a compile its page no longer wants ends at its next layout (PageCompiler.Cancelled)
+            if (PageCompiler.Cancelled?.Invoke() == true) throw new OperationCanceledException();
+            MarkupSlots.Emits++;
             try
             {
                 apply();
@@ -2643,9 +2749,9 @@ internal static class PlainTranslator
         /// Every written label's text as placeholders. The emitter wraps a label's text in its own tags
         /// (italic, small caps), so a marker is emitted in each label and the tags read off around it.
         /// </summary>
-        private void Texts()
+        private void Texts(ICollection<Target> group)
         {
-            var texts = _order.Where(t => t.Texts.Count > 0).ToList();
+            var texts = _order.Where(t => t.Texts.Count > 0 && group.Contains(t)).ToList();
             if (texts.Count == 0) return;
             const string Marker = "\u00A7ph\u00A7";
             var was = new List<(Label, string, List<HtmlNode>)>();
@@ -2709,6 +2815,7 @@ internal static class PlainTranslator
 
                 var plan = new TextPlan();
                 var writes = t.Texts.Select(w => (w.At, Parts: Pieces(w.Value))).ToList();
+                plan.Rich = writes.Any(w => w.Parts.Any(p => p.Raw));
                 string Signature(List<Piece> ps) => string.Join("|", ps.Select(p => p.Literal != null ? "L" + p.Literal : "H" + p.Format));
                 var one = writes.Select(w => Signature(w.Parts)).Distinct().ToList();
                 var body = new StringBuilder();
@@ -2721,7 +2828,7 @@ internal static class PlainTranslator
                     var k = 0;
                     foreach (var piece in writes[0].Parts)
                     {
-                        if (piece.Literal != null) { body.Append(Tmp(piece.Literal)); plan.Read.Add((piece.Literal, null, null)); continue; }
+                        if (piece.Literal != null) { body.Append(Tmp(piece)); plan.Read.Add((piece.Literal, null, null)); continue; }
                         var name = Unique(slot + "_p" + k.ToString(CultureInfo.InvariantCulture));
                         body.Append("{$").Append(name).Append(':').Append(piece.Format).Append('}');
                         plan.Read.Add((null, name, piece));
@@ -2744,7 +2851,7 @@ internal static class PlainTranslator
                     {
                         if (parts.All(p => p.Literal != null))
                         {
-                            Add(plan, w, whole, Tmp(string.Concat(parts.Select(p => p.Literal))), null);
+                            Add(plan, w, whole, string.Concat(parts.Select(Tmp)), null);
                             continue;
                         }
                         var sig = string.Join("|", parts.Select(p => p.Literal != null ? "L" : "H" + p.Format));
@@ -2766,7 +2873,7 @@ internal static class PlainTranslator
                         }
                         Add(plan, w, whole, string.Empty, null);
                         for (var i = 0; i < parts.Count; i++)
-                            Add(plan, w, run.Slots[i], parts[i].Literal != null ? Tmp(parts[i].Literal!) : null, parts[i].Literal != null ? null : parts[i]);
+                            Add(plan, w, run.Slots[i], parts[i].Literal != null ? Tmp(parts[i]) : null, parts[i].Literal != null ? null : parts[i]);
                         foreach (var other in runs)
                             if (other.Sig != sig)
                                 foreach (var s in other.Slots) Add(plan, w, s, string.Empty, null);
@@ -2916,6 +3023,9 @@ internal static class PlainTranslator
 
         /// <summary>Plain text as TextMeshPro prints it literally: a `&lt;` is not a tag, as the emitter guards it.</summary>
         private static string Tmp(string text) => text.Replace("<", "<noparse><</noparse>");
+
+        /// <summary>A literal piece as the scene prints it: plain text guarded, rich text (markup) as it is.</summary>
+        private static string Tmp(Piece p) => p.Raw ? p.Literal! : Tmp(p.Literal!);
 
         private string Unique(string name)
         {
@@ -3093,9 +3203,19 @@ internal static class PlainTranslator
                 plan.Attrs.Add((group.Key, options, index));
             }
             var total = (1 << plan.Names.Count) * plan.Attrs.Aggregate(1, (a, x) => a * x.Options.Count);
-            if (plan.Names.Count > 6 || total > 64)
+            // Only className changing them: the class sets it is given (and the page's own) are the only
+            // ones the element can have, not every combination of their names.
+            HashSet<int>? reachable = null;
+            if (t.ClassOps.Count == 0 && plan.Names.Count <= 16)
             {
-                Refuse(at, $"the script changes {plan.Names.Count} classes and {plan.Attrs.Count} attributes of \"{t.Name}\", {total} combinations, more than the 64 that are laid out");
+                int Mask(IEnumerable<string> on) => plan.Names.Select((n, i) => on.Contains(n) ? 1 << i : 0).Sum();
+                reachable = new HashSet<int> { Mask(initial) };
+                foreach (var set in plan.Sets.Values) reachable.Add(Mask(set));
+            }
+            var laid = reachable != null ? reachable.Count * (total >> plan.Names.Count) : total;
+            if (reachable == null && plan.Names.Count > 6 || laid > 64)
+            {
+                Refuse(at, $"the script changes {plan.Names.Count} classes and {plan.Attrs.Count} attributes of \"{t.Name}\", {laid} combinations, more than the 64 that are laid out");
                 return;
             }
 
@@ -3117,6 +3237,7 @@ internal static class PlainTranslator
             var facet = $"the classes and attributes of \"{t.Name}\"";
             for (var key = 0; key < total; key++)
             {
+                if (reachable != null && !reachable.Contains(key & ((1 << plan.Names.Count) - 1))) continue;
                 var on = new List<string>(fixedClasses);
                 for (var i = 0; i < plan.Names.Count; i++) if ((key & (1 << i)) != 0) on.Add(plan.Names[i]);
                 var cls = string.Join(" ", on);
@@ -3188,6 +3309,11 @@ internal static class PlainTranslator
         {
             if (t.Text is { } plan)
             {
+                if (plan.Rich)
+                {
+                    lua.Refuse(at, $"reading the text of \"{t.Name}\", which the script writes as markup (not translated yet)");
+                    return "nil";
+                }
                 if (plan.Read.Count == 0) return "\"\"";
                 var escaped = plan.Template.Contains("<noparse>", StringComparison.Ordinal) || _rest.Values.Any(v => v.Text?.Contains("<noparse>") == true);
                 var parts = new List<string>();
@@ -3466,6 +3592,11 @@ internal static class PlainTranslator
             if (s is VariableDeclaration && _elementDeclarations.Contains(s)) return true;
             if (s is ExpressionStatement es) s = es.Expression;
             if (s is not Expression e) return false;
+            if (e is AssignmentExpression ma && _markup.TryGetValue(ma, out var markup))
+            {
+                EmitMarkup(lua, markup);
+                return true;
+            }
             if (_lua.TryGetValue(e, out var own))
             {
                 // A concise arrow's body is its return value: only a write, which yields nothing, is a statement there.
@@ -3642,6 +3773,7 @@ internal static class PlainTranslator
         public string? Expression(JsToLua lua, Node e)
         {
             if (_lua.TryGetValue(e, out var own)) return own(lua);
+            if (MarkupExpression(lua, e) is { } inMarkup) return inMarkup;
             if (e is CallExpression { Callee: Identifier callee } call && TimerNames.Contains(callee.Name) && !Declared(callee.Name))
             {
                 string Arg(int i) => i < call.Arguments.Count ? lua.Translate(call.Arguments[i]) : "nil";
@@ -3727,16 +3859,17 @@ internal static class PlainTranslator
         private string HoleLua(Func<Node, string> tr, Piece hole)
         {
             // null as written prints as the word; Lua's nil would be undefined
-            if (hole.Hole is NullLiteral) return Q("null");
+            if (Unwrap(hole.Hole!) is NullLiteral) return Q("null");
             var v = tr(hole.Hole!);
             if (hole.Digits is { } n)
             {
                 _fixed = true;
                 return "v_fixed(" + v + ", " + n.ToString(CultureInfo.InvariantCulture) + ")";
             }
-            if (Boolean(hole.Hole!) || _bool.Contains(hole.Hole!)) return "js_str(" + v + ")";
+            var inner = Unwrap(hole.Hole!);
+            if (Boolean(inner) || _bool.Contains(inner)) return "js_str(" + v + ")";
             // a read that can be null prints "null", as JavaScript's string conversion does
-            return _null.TryGetValue(hole.Hole!, out var none) ? "(" + v + " or " + Q(none) + ")" : v;
+            return _null.TryGetValue(inner, out var none) ? "(" + v + " or " + Q(none) + ")" : v;
         }
 
         /// <summary>Whether the program rounds a toFixed value, so the chunk carries v_fixed.</summary>
@@ -3759,9 +3892,8 @@ internal static class PlainTranslator
             var (surface, element, sceneId) = target ?? ("main", "page", "html:page");
             var listens = _order.Any(t => t.Listens);
             var classes = _order.Where(t => t.Class != null).ToList();
-            var states = _order.SelectMany(t => t.StylePlans.Values).Where(p => p.States != null).ToList();
-            foreach (var slot in Written)
-                if (!_ease.ContainsKey(slot) && Opening.TryGetValue(slot, out var v) && v.IsNumber) _ease[slot] = Ease(slot);
+            var states = _order.SelectMany(t => t.StylePlans.Values).Where(p => p.States != null)
+                .Concat(_markupOf.Values.Select(m => m.Plan).OfType<StylePlan>()).ToList();
 
             var sb = new StringBuilder(scene.Length + page.Length + 4096);
             sb.Append("-- Compiled once by ScriptedScreens Html. The scene is the page; this program is its script,\n");
@@ -3914,9 +4046,12 @@ internal static class PlainTranslator
                 sb.Append("-- click listeners per element, and which elements a click on each hit region reaches, innermost first\n");
                 sb.Append("local V_ON = ").Append(Table(_order.Where(t => t.Listens).Select(t => (t.Name, "{}")))).Append('\n');
                 sb.Append("local V_ONCLICK = {}\n");
-                sb.Append("local V_CHAIN = ").Append(Table(Chains())).Append('\n');
+                sb.Append("local V_CHAIN = ").Append(Table(_chains)).Append('\n');
                 sb.Append("local function v_listen(key, fn)\n  local list = V_ON[key]\n  for i = 1, #list do if list[i] == fn then return end end\n");
                 sb.Append("  list[#list + 1] = fn\nend\n");
+                if (_madeBy.Keys.Any(t => t.Listens))
+                    sb.Append("-- markup written again makes new elements: what listened on the old ones is gone\n")
+                      .Append("local function v_unlisten(key)\n  local list = V_ON[key]\n  for i = #list, 1, -1 do list[i] = nil end\n  V_ONCLICK[key] = nil\nend\n");
                 sb.Append("local function v_click(nodeId)\n  local chain = V_LIVE and V_CHAIN[nodeId]\n  if not chain then return end\n");
                 sb.Append("  for c = 1, #chain do\n    local list = V_ON[chain[c]]\n    for i = 1, #list do list[i]() end\n");
                 sb.Append("    local f = V_ONCLICK[chain[c]]\n    if f then f() end\n  end\n");

@@ -188,6 +188,15 @@ setInterval(step, 500);
         try { whole = Probe4.Headless(page).Compiled; placed = Probe4.Headless(page).Compiled; }
         catch (Exception ex) { check(false, "placed labels: compiling the page threw - " + First(ex.Message)); return; }
         if (!whole.Ok || whole.Structure == null) { check(false, "placed labels: the page does not compile - " + string.Join("; ", whole.Problems.Take(2))); return; }
+        // innerHTML of a fixed shape compiles to plain Lua now (PlainTranslator): the old path's label
+        // placing is never reached by this page, and what it compiles to is checked as plain Lua instead
+        if (whole.Plain)
+        {
+            var log = Probe4.DrivePlain(whole.Lua!, 1, 0.5);
+            var plainOk = !log.Any(l => l.StartsWith("FAILED", StringComparison.Ordinal)) && whole.Structure.Contains("Count {$", StringComparison.Ordinal);
+            check(plainOk, "placed labels: the page compiles to plain Lua, its labels placeholders in the scene" + (plainOk ? "" : " - " + string.Join(" | ", log.Take(3))));
+            return;
+        }
 
         // the compiler places labels itself now, so the unplaced chunk is the same chunk told so
         whole.Lua = whole.Lua!.Replace("LABELS_PLACED = true -- placed: yes", "LABELS_PLACED = false -- placed: no", StringComparison.Ordinal);

@@ -185,15 +185,40 @@ internal static class PageCompiler
                                                   (string Surface, string Element, string Scene)? target,
                                                   out MarkupSlots.Result? markup)
     {
+        markup = null;
+        // A script whose every DOM use is a translated feature becomes a scene and plain Lua on the
+        // chip's own tick, with nothing of this mod behind it (THE SPEC). Anything else keeps the path
+        // below, and says which feature kept it there - whatever becomes of the rest of the compile.
+        var refused = new List<string>();
+        if (PlainTranslator.Compile(built, panel, size, target, refused) is { } plain) return plain;
+        var because = refused.Count > 0
+            ? "not translated to plain Lua: " + string.Join("; ", refused.GetRange(0, Math.Min(3, refused.Count)))
+              + (refused.Count > 3 ? $" (+{refused.Count - 3} more)" : string.Empty)
+            : null;
+        if (Cancelled?.Invoke() == true) return Stopped();
+        CompiledPage.Result result;
+        try { result = OldPath(built, panel, size, slots, target, out markup); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The old path is a fallback: whatever it cannot do leaves the page on the interpreter, said, never a crash.
+            result = new CompiledPage.Result();
+            result.Problems.Add("the compile's old path threw - " + ex.Message);
+            ScriptedScreensHtmlPlugin.Log?.LogWarning("html: the compile's old path threw, so the page runs interpreted - " + ex);
+        }
+        if (because != null) result.Warnings.Insert(0, because);
+        return result;
+    }
+
+    /// <summary>The path before the plain translator: markup compiled by probing, and the script on the prelude's DOM.</summary>
+    private static CompiledPage.Result OldPath(HtmlRenderer.Result built, Panel panel, Vector2 size,
+                                               IReadOnlyDictionary<string, SceneSlots.Value> slots,
+                                               (string Surface, string Element, string Scene)? target,
+                                               out MarkupSlots.Result? markup)
+    {
         // Every innerHTML write first, because the translation depends on it: a write whose markup
         // is structure becomes a handful of slot writes instead of a document - and the structure it
         // compiles to, with every alternative in it, is the scene the rest of the page is bound to.
         markup = null;
-        // A script whose every DOM use is a translated feature becomes a scene and plain Lua on the
-        // chip's own tick, with nothing of this mod behind it (THE SPEC). Anything else keeps the path
-        // below, and says which feature kept it there.
-        var refused = new List<string>();
-        if (PlainTranslator.Compile(built, panel, size, target, refused) is { } plain) return plain;
         var plans = new Dictionary<string, JsToLua.MarkupPlan>(StringComparer.Ordinal);
         var bindings = new List<CompiledPage.Binding>();
         if (built.Script is { } script && script.Contains(".innerHTML", StringComparison.Ordinal))
@@ -239,9 +264,6 @@ internal static class PageCompiler
             // A style property with no slot, drawn as the few values the script assigns it.
             styleOf: (id, css, value) => StateOf(id, string.Empty, built, panel, size, table, css + ":" + value));
 
-        if (refused.Count > 0)
-            result.Warnings.Add("not translated to plain Lua: " + string.Join("; ", refused.GetRange(0, Math.Min(3, refused.Count)))
-                                + (refused.Count > 3 ? $" (+{refused.Count - 3} more)" : string.Empty));
         if (markup?.Template != null)
         {
             result.Structure = markup.Template;

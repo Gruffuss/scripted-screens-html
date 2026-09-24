@@ -161,6 +161,14 @@ internal static class MarkupSlots
                     continue;
                 }
                 if (result.Targets.Exists(t => t.Id == id)) continue;          // one plan per element
+                // A text-only element is built as a label, which cannot hold the elements markup makes;
+                // it would have to be built again as a container, which this path does not do (the
+                // plain translator does). Left to the interpreter, and said.
+                if (ve is ScriptedScreensHtml.Label)
+                {
+                    result.Problems.Add($"\"{id}\" holds only text as the page wrote it, and markup written into it is not compiled on this path");
+                    continue;
+                }
                 pristine.Add((ve, node, HtmlRenderer.ToHtml(node, outer: false, keepIds: true)));
                 result.Targets.Add(new Target { Id = id, Markup = markup, Drive = markup.Driver() });
             }
