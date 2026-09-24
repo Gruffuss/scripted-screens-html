@@ -423,6 +423,26 @@ internal static class PlainTranslatorTests
               "});"),
          Steps("go", "go", "go", "go", "go", "go"), new[] { 1, 2, 4, 6 }),
 
+        ("an element found by an id built at run time: through a `$` helper, from a getter reading this.id of objects pushed in a loop, and each button markup makes found by 'pad' + i",
+         Page(".lamp { width: 30px; height: 12px; background: #333; margin: 2px; } .lamp.on { background: #3e5; } .pad { width: 80px; height: 24px; background: #2b3a55; margin: 2px; }",
+              "<div class=\"lamp\" id=\"lamp0\"></div><div class=\"lamp\" id=\"lamp1\"></div><div class=\"lamp\" id=\"lamp2\"></div><div id=\"pads\"></div><p id=\"log\">-</p>",
+              "const $ = (id) => document.getElementById(id);" +
+              "const lamps = [];" +
+              "for (let i = 0; i < 3; i++) lamps.push({ id: 'lamp' + i, on: false, get el() { return $(this.id); } });" +
+              "let h = '';" +
+              "for (let i = 0; i < 3; i++) h += '<div class=\"pad\" id=\"pad' + i + '\">' + (i + 1) + '</div>';" +
+              "$('pads').innerHTML = h;" +
+              "let presses = 0;" +
+              "[0, 1, 2].forEach((i) => $('pad' + i).addEventListener('click', () => {" +
+              "  presses++;" +
+              "  const lamp = lamps[i];" +
+              "  lamp.on = !lamp.on;" +
+              "  lamp.el.classList.toggle('on', lamp.on);" +
+              "  for (const l of lamps) if (l.on) l.el.style.opacity = presses % 2 ? 0.5 : 1;" +
+              "  $('log').textContent = 'pad ' + i + ', ' + presses + ' presses';" +
+              "}));"),
+         Steps("pad0", "pad2", "pad0", "pad1"), new[] { 0, 1, 2, 4 }),
+
         ("values from a fixed set through a function's returned object: an attribute CSS selects on and a text",
          Page(".panel { padding: 6px; background: #eee; color: #222; } .panel[data-theme=\"dim\"] { background: #222; } .panel[data-theme=\"dim\"] p { color: #ccc; } .base.dark { font-size: 20px; }",
               "<div id=\"panel\" class=\"panel\" data-theme=\"lit\"><p id=\"t\">lit</p></div><button id=\"b\">Dim</button>",
@@ -627,6 +647,41 @@ internal static class PlainTranslatorTests
               "}" +
               "render();"),
          Steps("go", "go", "go", "go", "go"), new[] { 0, 1, 2, 3, 4, 5 }),
+        ("innerHTML written into an element chosen at run time: a lookup by a ternary id, and an element of a list passed to a function",
+         Page(".panel { background: #222; padding: 4px; margin: 4px 0; } .v { color: #8c8; } .hi { color: #f55; }",
+              "<p id=\"ta\">-</p><p id=\"tb\">-</p><div id=\"left\" class=\"panel\"></div><div id=\"right\" class=\"panel\"></div><p>end</p><button id=\"go\">Go</button>",
+              "let n = 0;" +
+              "const panels = [document.getElementById('left'), document.getElementById('right')];" +
+              "function fill(el, v) {" +
+              "  el.innerHTML = '<p class=\"v\">' + v + ' kPa</p>' + (v > 2 ? '<p class=\"hi\">HIGH</p>' : '');" +
+              "}" +
+              "function render() {" +
+              "  const el = document.getElementById(n % 2 ? 'ta' : 'tb');" +
+              "  el.innerHTML = 'count <b>' + n + '</b>';" +
+              "  fill(panels[n % 2], n * 1.5);" +
+              "}" +
+              "render();" +
+              "document.getElementById('go').addEventListener('click', () => { n++; render(); });"),
+         Steps("go", "go", "go", "go"), new[] { 0, 1, 2, 4 }),
+
+        ("innerHTML written into an element found by an id a helper is given: a loop's rows, their count and colour from the call",
+         Page(".strip { background: #1a1a1a; padding: 2px; } .seg { height: 8px; margin: 2px; }",
+              "<div id=\"s1\" class=\"strip\"></div><div id=\"s2\" class=\"strip\"></div><p id=\"end\">end</p>",
+              "const $ = (id) => document.getElementById(id);" +
+              "const counts = [2, 4, 3];" +
+              "function strip(id, count, colour) {" +
+              "  let h = '';" +
+              "  for (let i = 0; i < count; i++) h += '<div class=\"seg\" style=\"width:' + (20 + i * 15) + 'px;background:' + colour + '\"></div>';" +
+              "  $(id).innerHTML = h;" +
+              "}" +
+              "let k = 0;" +
+              "function draw() {" +
+              "  strip('s1', counts[k % 3], '#3a7');" +
+              "  strip(k % 2 ? 's2' : 's1', 5 - counts[(k + 1) % 3], k % 2 ? '#a73' : '#37a');" +
+              "}" +
+              "draw();" +
+              "setInterval(() => { k++; draw(); }, 500);"),
+         Ticks(5), new[] { 0, 1, 2, 3, 5 }),
     };
 
     /// <summary>
@@ -1221,7 +1276,9 @@ internal static class PlainTranslatorTests
         ("a first match among what markup makes in only some of its shapes", Page("", "<div id=\"a\"></div><p id=\"n\">-</p>", "let on = false; setInterval(() => { on = !on; document.getElementById('a').innerHTML = on ? '<p class=\"x\">1</p>' : '<p class=\"x\">2</p><p class=\"x\">3</p>'; document.getElementById('n').textContent = document.querySelector('.x') ? 'y' : 'n'; }, 10);"), "in only some of its shapes"),
         ("a write to an element markup makes", Page("", "<div id=\"a\"></div>", "setTimeout(() => { document.getElementById('a').innerHTML = '<p id=\"m\">1</p>'; document.getElementById('m').style.color = '#f00'; }, 10);"), "the next markup write would undo it"),
         ("an element chosen by an id the compile cannot bound", Page("", "<p id=\"a1\">x</p>", "setTimeout(() => { document.getElementById(localStorage.getItem('which')).textContent = 'y'; }, 10);"), "from ids the compile cannot bound"),
-        ("an element stored in an object", Page("", "<p id=\"a\">x</p>", "const o = { el: document.getElementById('a') }; setTimeout(() => { o.el.textContent = 'y'; }, 10);"), "used as a value this way"),
+        ("markup written into an element chosen by an id the compile cannot bound", Page("", "<div id=\"a1\"></div>", "setTimeout(() => { document.getElementById(localStorage.getItem('which')).innerHTML = '<b>y</b>'; }, 10);"), "from ids the compile cannot bound"),
+        ("markup with an id written into an element chosen at run time", Page("", "<div id=\"a\"></div><div id=\"b\"></div>", "let k = 0; setInterval(() => { k++; document.getElementById(k % 2 ? 'a' : 'b').innerHTML = '<p id=\"m\">' + k + '</p>'; }, 10);"), "the id \"m\" in markup"),
+        ("an element stored in an object",Page("", "<p id=\"a\">x</p>", "const o = { el: document.getElementById('a') }; setTimeout(() => { o.el.textContent = 'y'; }, 10);"), "used as a value this way"),
         ("an element passed to a function the compile cannot follow", Page("", "<p id=\"a\">x</p>", "const fs = [function (el) { el.textContent = 'y'; }]; fs[0](document.getElementById('a'));"), "passed to a function the compile cannot follow"),
         ("a selector testing a class the script changes", Page(".on { color: red; }", "<p id=\"a\" class=\"x\">x</p><p id=\"b\" class=\"on\">y</p>",
             "const lit = document.querySelectorAll('.on'); setTimeout(() => { document.getElementById('a').classList.add('on'); lit.forEach((e) => { e.textContent = 'z'; }); }, 10);"), "tests the class \"on\", which the script changes"),
@@ -1307,6 +1364,8 @@ internal static class PlainTranslatorTests
         // a theme on document.documentElement, list callbacks reading the array they walk, scrollTop of a box that does not scroll: not yet seen in game
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-apple.lua"), Steps(0.5, "theme", 0.5, "add", "add", 0.5, "add", "add", "theme", 0.5),
          new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10 }),
+        // innerHTML into an element chosen at run time, getElementById with an id built at run time: not yet seen in game
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-runtime-el.lua"), Steps("pad0", "pad2", "pad1", "pad0"), new[] { 0, 1, 2, 3, 4 }),
     };
 
     internal static void Run(Action<bool, string> check)
@@ -1593,6 +1652,8 @@ internal static class PlainTranslatorTests
     private static void One(string feature, string page, List<(double, string?)> steps, int[] checkpoints, Action<bool, string> check,
                             (float W, float H)? console = null)
     {
+        // `PLAIN_ONLY=<words of a feature>`: that case alone
+        if (Environment.GetEnvironmentVariable("PLAIN_ONLY") is { Length: > 0 } only && !feature.Contains(only, StringComparison.Ordinal)) return;
         var script = Regex.Match(page, "<script>(.*?)</script>", RegexOptions.Singleline).Groups[1].Value;
         var (compiled, _) = Probe4.Headless(page, out var built, out var panel, out var size, console: console);
         if (!compiled.Plain || compiled.Lua == null || compiled.Structure == null)

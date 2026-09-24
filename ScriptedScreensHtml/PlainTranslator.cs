@@ -442,6 +442,7 @@ internal static partial class PlainTranslator
             // innerHTML first: the elements markup makes are elements of the page for everything after
             Markups();
             _els.Clear();
+            _byId.Clear();
 
             foreach (var n in Markup.Everything(_ast))
                 if (n is VariableDeclarator { Id: Identifier id, Init: { } init } && Lookup(init) is { } t
@@ -879,9 +880,34 @@ internal static partial class PlainTranslator
                         return returned.Any(r => r is { Neutral: false } || r?.Bad != null) ? Els.Choice(returned) : null;
                     }
 
+                // `o.el` read through a getter of every object o can be: what the getters return
+                case MemberExpression { Computed: false, Property: Identifier gname } gm when Getters(gm.Object, gname.Name, bind) is { } getters:
+                    {
+                        var returned = getters.SelectMany(g => Returns(g.Fn).Select(r => r == null ? Els.Nothing(true) : Elems(r, g.Env))).ToList();
+                        return returned.Any(r => r is { Neutral: false } || r?.Bad != null) ? Els.Choice(returned) : null;
+                    }
+
                 default:
                     return null;
             }
+        }
+
+        private bool? _anyGetter;
+
+        /// <summary>The getter of this name on every object literal an expression can be; null when one of them has none (or the script has no getter).</summary>
+        private List<(IFunction Fn, Inlined? Env)>? Getters(Expression holder, string name, Inlined? bind)
+        {
+            _anyGetter ??= Markup.Everything(_ast).Any(n => n is Property { Kind: PropertyKind.Get });
+            if (_anyGetter == false || Objects(holder, bind, 0) is not { Count: > 0 } objects) return null;
+            var found = new List<(IFunction, Inlined?)>();
+            foreach (var (o, env) in objects)
+            {
+                if (o.Properties.FirstOrDefault(p => p is Property { Computed: false, Kind: PropertyKind.Get } g
+                        && (g.Key is Identifier k ? k.Name : (g.Key as StringLiteral)?.Value) == name) is not Property { Value: FunctionExpression fn })
+                    return null;
+                found.Add((fn, env));
+            }
+            return found;
         }
 
         /// <summary>A declared name's elements: what it is given, the list it walks (for...of), or what its function is called with.</summary>
@@ -1044,6 +1070,16 @@ internal static partial class PlainTranslator
         /// </summary>
         private (Els Els, IdKey? Key) ById(Expression? arg, Inlined? bind)
         {
+            // what the analysis found stands for the Lua, which is written after the markup is taken out of the page again
+            if (bind != null || arg == null) return ByIdOf(arg, bind);
+            if (!_byId.TryGetValue(arg, out var known)) _byId[arg] = known = ByIdOf(arg, bind);
+            return known;
+        }
+
+        private readonly Dictionary<Expression, (Els, IdKey?)> _byId = new();
+
+        private (Els Els, IdKey? Key) ByIdOf(Expression? arg, Inlined? bind)
+        {
             if (arg is StringLiteral lit)
                 return (_built.ById.TryGetValue(lit.Value, out var ve) && ve != null && _built.NodeOf.TryGetValue(ve, out var node)
                     ? Els.Of(TargetOf(ve, node)) : Els.Nothing(true), null);
@@ -1067,7 +1103,7 @@ internal static partial class PlainTranslator
                 {
                     // any value: every id of the page with that text around it
                     // ponytail: a value the page's ids never take reads as null, as the browser's lookup does
-                    middles = Source().Keys.Where(id => id.Length >= prefix.Length + suffix.Length && id.StartsWith(prefix, StringComparison.Ordinal)
+                    middles = Source().Keys.Concat(_markupIds).Where(id => id.Length >= prefix.Length + suffix.Length && id.StartsWith(prefix, StringComparison.Ordinal)
                                                         && id.EndsWith(suffix, StringComparison.Ordinal))
                                               .Select(id => id.Substring(prefix.Length, id.Length - prefix.Length - suffix.Length)).ToList();
                     e.Null = true;
@@ -1090,8 +1126,9 @@ internal static partial class PlainTranslator
             }
             return (Els.Refused("an element chosen at run time from ids the compile cannot bound (getElementById with an id computed at run time)"), null);
 
+            // an id the page's source or its markup gives, never one the build made up for an element without
             Target? Named(string id)
-                => Source().ContainsKey(id) && _built.ById.TryGetValue(id, out var v) && v != null && _built.NodeOf.TryGetValue(v, out var n) ? TargetOf(v, n) : null;
+                => (Source().ContainsKey(id) || _markupIds.Contains(id)) && _built.ById.TryGetValue(id, out var v) && v != null && _built.NodeOf.TryGetValue(v, out var n) ? TargetOf(v, n) : null;
 
             static void Flat(Expression x, List<Expression> into)
             {
@@ -1184,6 +1221,13 @@ internal static partial class PlainTranslator
                         while (fnNode != null && fnNode is not IFunction) fnNode = _parent.TryGetValue(fnNode, out var up) ? up : null;
                         if (fnNode is IFunction owner && NameOf(owner) is { } oname && _refs.TryGetValue(oname, out var orefs)
                             && orefs.All(r => _parent[r] is CallExpression rc && rc.Callee == r))
+                            return;
+                        // a getter's, every read of which is followed through the getter
+                        if (fnNode is FunctionExpression getter && _parent.TryGetValue(getter, out var gp) && gp is Property { Computed: false, Kind: PropertyKind.Get } gprop
+                            && _parent.TryGetValue(gprop, out var go) && go is ObjectExpression gobj
+                            && (gprop.Key is Identifier gk ? gk.Name : (gprop.Key as StringLiteral)?.Value) is { } gname
+                            && FieldUses(gname, gobj) is { Assigned.Count: 0 } gflow
+                            && gflow.Uses.All(u => !u.Computed && !WrittenTo(u) && Getters(u.Object, gname, null) != null))
                             return;
                         Refuse(n, $"{what} returned from a function the compile cannot follow (one called only by its name is followed)");
                         return;
@@ -1340,6 +1384,9 @@ internal static partial class PlainTranslator
                     return;
                 case MemberExpression { Computed: false, Property: Identifier { Name: "target" or "currentTarget" } } et when Elems(et) is { Neutral: false }:
                     Source(et);
+                    return;
+                case MemberExpression { Computed: false, Property: Identifier gn } gm when Getters(gm.Object, gn.Name, null) != null && Elems(gm) is { Neutral: false }:
+                    Source(gm);
                     return;
                 case ThisExpression th when Elems(th) is { Neutral: false }:
                     Source(th);
@@ -2546,6 +2593,9 @@ internal static partial class PlainTranslator
                     return Each(items);
                 case ArrayExpression or Acornima.Ast.Literal or TemplateLiteral or NonLogicalBinaryExpression or NonUpdateUnaryExpression or IFunction:
                     return new();
+                // `this` in a getter or setter of an object literal: that object
+                case ThisExpression th when AccessorOf(th) is { } self:
+                    return new() { (self, null) };
                 case ConditionalExpression c:
                     return Objects(c.Consequent, bind, depth + 1) is { } a && Objects(c.Alternate, bind, depth + 1) is { } b ? a.Concat(b).ToList() : null;
                 // `found || fallback`, `found ?? fallback`: either (the fallback alone when there is nothing on the left)
@@ -2582,6 +2632,10 @@ internal static partial class PlainTranslator
                             }
                             return all;
                         }
+                        // a for...of loop's name, never given another value: each item of the list it walks
+                        if (_parent.TryGetValue(decl, out var dp) && dp is VariableDeclarator dv && dv.Id == decl && _parent.TryGetValue(dv, out var dd)
+                            && _parent.TryGetValue(dd, out var loop) && loop is ForOfStatement fo && fo.Left == dd)
+                            return _writes.ContainsKey(decl) ? null : Each(ItemsOf(fo.Right, null));
                         if (Given(decl) is not { } given) return null;
                         foreach (var v in given)
                             if (v == null || Objects(v, null, depth + 1) is not { } some) return null;
@@ -2627,12 +2681,25 @@ internal static partial class PlainTranslator
             }
         }
 
+        /// <summary>The object literal `this` is in a getter or setter of it (an arrow function keeps the `this` around it); null anywhere else.</summary>
+        private ObjectExpression? AccessorOf(ThisExpression th)
+        {
+            Node n = th;
+            while (_parent.TryGetValue(n, out var p) && (n is not IFunction || n is ArrowFunctionExpression)) n = p;
+            return n is FunctionExpression fn && _parent.TryGetValue(fn, out var prop) && prop is Property { Kind: PropertyKind.Get or PropertyKind.Set } accessor
+                   && accessor.Value == fn && _parent.TryGetValue(accessor, out var o) ? o as ObjectExpression : null;
+        }
+
         /// <summary>A field of an object literal as written: `key: value`, or `key` for `key: key`; null when absent or not plain.</summary>
         private static Expression? Field(ObjectExpression o, string name)
         {
             Expression? found = null;
             foreach (var p in o.Properties)
             {
+                // a getter, setter or method of another name leaves this field as written (what one writes through `this` is FieldWritten's)
+                if (p is Property { Computed: false } other && (other.Kind != PropertyKind.Init || other.Method)
+                    && (other.Key is Identifier ok ? ok.Name : (other.Key as StringLiteral)?.Value) is { } okey && okey != name)
+                    continue;
                 if (p is not Property { Computed: false, Kind: PropertyKind.Init, Method: false, Value: Expression v } prop) return null;
                 if ((prop.Key is Identifier k ? k.Name : prop.Key is StringLiteral s ? s.Value : null) == name) found = v;
             }
@@ -2674,6 +2741,9 @@ internal static partial class PlainTranslator
             var arrays = new HashSet<Node>();
             var functions = new HashSet<(IFunction, bool)>();
             Value(o);
+            // `this` in the object's own getters and setters is the object
+            foreach (var th in Markup.Everything(o).OfType<ThisExpression>())
+                if (AccessorOf(th) == o) Value(th);
             return _fieldUses[(name, o)] = written ? null : flow;
 
             // an expression whose value can be the object
@@ -2876,6 +2946,12 @@ internal static partial class PlainTranslator
 
             void Passed(CallExpression call, Expression arg)
             {
+                // pushed into an array a name holds: wherever that array hands out its items
+                if (call.Callee is MemberExpression { Computed: false, Object: Identifier held, Property: Identifier { Name: "push" or "unshift" } } && Decl(held) is { } array)
+                {
+                    Items(array);
+                    return;
+                }
                 if (call.Callee is MemberExpression { Computed: false, Object: Identifier { Name: "Object" } assign, Property: Identifier { Name: "assign" } } && !Declared(assign.Name)
                     && call.Arguments.Count > 0 && !call.Arguments.Any(a => a is SpreadElement))
                 {
@@ -4321,6 +4397,21 @@ internal static partial class PlainTranslator
             if (e is AssignmentExpression ma && _markup.TryGetValue(ma, out var markup))
             {
                 EmitMarkup(lua, markup);
+                return true;
+            }
+            if (e is AssignmentExpression mp && _markupPick.TryGetValue(mp, out var picked))
+            {
+                // an element chosen at run time: its number picks the write laid out into it; none is the browser's TypeError on null
+                _nullref = true;
+                lua.Emit("do");
+                lua.Emit("  local V_el = " + lua.Translate(picked.Recv));
+                for (var i = 0; i < picked.Writes.Count; i++)
+                {
+                    lua.Emit((i == 0 ? "  if" : "  elseif") + " V_el == " + picked.Writes[i].Of.T.Number.ToString(CultureInfo.InvariantCulture) + " then");
+                    EmitMarkup(lua, picked.Writes[i]);
+                }
+                lua.Emit("  else v_nullref() end");
+                lua.Emit("end");
                 return true;
             }
             if (_lua.TryGetValue(e, out var own))
