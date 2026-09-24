@@ -56,6 +56,18 @@ function js_len(v)
   return 0
 end
 
+-- `a.length = n`: the array cut to n items, or made longer with holes (undefined), as JavaScript does.
+-- A string's length cannot be set, so nothing happens to one.
+function js_setlen(a, n)
+  if type(a) ~= "table" then return end
+  n = js_num(n)
+  if n ~= n or n < 0 or n ~= math.floor(n) then
+    error({ name = "RangeError", message = "Invalid array length", stack = "", __error = true }, 0)
+  end
+  for i = n, (a.length or 0) - 1 do a[i] = nil end
+  a.length = n
+end
+
 -- ---- values -------------------------------------------------------------------------------------
 
 function js_num(v)

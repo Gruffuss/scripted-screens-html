@@ -551,23 +551,23 @@ Each subtype's `.prototype` fully inherits `Error.prototype` (name/message/cause
 | Array.isArray | | | | |
 | Array.of | | | | |
 | Array[Symbol.species] | | | | |
-| Array.prototype.length | | | | |
+| Array.prototype.length | ✅ | read: `js_len`; written: `js_setlen`, which drops the items past the new length (or leaves holes, undefined, when longer) and throws RangeError for a length that is not a whole number, as JavaScript does | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a todo list from .map().join(''): template literals, the index in the markup, a class from each item, a listener per row found by [data-act], a push held to a cap, filter and splice; the rows found again by a class every row keeps"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a list inside a box that shows only while the list has rows, built by a helper that adds markup in steps; rows kept by a ternary that reads the index" | |
 | Array.prototype.constructor | | | | |
 | Array.prototype[Symbol.unscopables] | | | | |
 | Array.prototype.at | | | | |
-| Array.prototype.concat | | | | |
-| Array.prototype.slice | | | | |
+| Array.prototype.concat | ✅ | the prelude's `ArrayMethods.concat`; for a list of markup, as long as its parts together, `[x].concat(a).slice(0, N)` holding it to N | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "lists bounded other ways: a splice trim, and concat then slice" | |
+| Array.prototype.slice | ✅ | before `.map` in markup: bounds of the rows (`v_slice`), a slice of fixed size bounding an array nothing else bounds; elsewhere the prelude's `ArrayMethods.slice` | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "markup added to the element with += in a for...of, a string built in a forEach with a class from the index, and a slice of a list that is never held to a length" | |
 | Array.prototype.copyWithin | | | | |
 | Array.prototype.fill | | | | |
-| Array.prototype.pop | | | | |
-| Array.prototype.push | | | | |
+| Array.prototype.pop | ✅ | the prelude's `ArrayMethods.pop`; after an addition, `if (a.length > N) a.pop()` holds a list to N | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a log that grows to a cap, newest first, with a message while it is empty and a paragraph after it that moves"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: plain-list.lua (the in-game page, not yet seen in game) | |
+| Array.prototype.push | ✅ | the prelude's `ArrayMethods.push`; for a list of markup, an addition held by an `if (a.length < N)` before it or a trim after it, or made in loops over bounded lists into an array made fresh each time (anything else leaves the list unbounded, refused by name) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a todo list from .map().join(''): template literals, the index in the markup, a class from each item, a listener per row found by [data-act], a push held to a cap, filter and splice; the rows found again by a class every row keeps"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a list inside a box that shows only while the list has rows, built by a helper that adds markup in steps; rows kept by a ternary that reads the index"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "lists bounded other ways: an array made fresh and filled in a loop over a bounded list, and a while trim"; PlainTranslatorTests refusals: "a list whose array grows with nothing holding it" | |
 | Array.prototype.reverse | | | | |
-| Array.prototype.shift | | | | |
+| Array.prototype.shift | ✅ | the prelude's `ArrayMethods.shift`; after an addition, `if (a.length > N) a.shift()` or `while (a.length > N) a.shift()` holds a list to N | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a list inside a box that shows only while the list has rows, built by a helper that adds markup in steps; rows kept by a ternary that reads the index"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "lists bounded other ways: an array made fresh and filled in a loop over a bounded list, and a while trim" | |
 | Array.prototype.sort | | | | |
-| Array.prototype.splice | | | | |
-| Array.prototype.unshift | | | | |
+| Array.prototype.splice | ✅ | the prelude's `ArrayMethods.splice`; taking items out leaves a list's bound as it was, and `a.splice(0, a.length - N)` after an addition holds it to N | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a todo list from .map().join(''): template literals, the index in the markup, a class from each item, a listener per row found by [data-act], a push held to a cap, filter and splice; the rows found again by a class every row keeps"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "lists bounded other ways: a splice trim, and concat then slice" | |
+| Array.prototype.unshift | ✅ | the prelude's `ArrayMethods.unshift`; for a list of markup, held to a length as push is | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a log that grows to a cap, newest first, with a message while it is empty and a paragraph after it that moves"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "markup added to the element with += in a for...of, a string built in a forEach with a class from the index, and a slice of a list that is never held to a length"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: plain-list.lua (the in-game page, not yet seen in game) | |
 | Array.prototype.every | | | | |
-| Array.prototype.filter | | | | |
+| Array.prototype.filter | ✅ | before `.map` in markup: a test run item by item as the rows are counted, its item and index bound (`Boolean` too); elsewhere the prelude's `ArrayMethods.filter`; for a list's bound, as long as what it filters, and `a = a.filter(…)` adds nothing | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a todo list from .map().join(''): template literals, the index in the markup, a class from each item, a listener per row found by [data-act], a push held to a cap, filter and splice; the rows found again by a class every row keeps"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "rows whose markup depends on their item, after a filter: each row its own shape, the rows after a filtered one moving up"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a loop over a count from a fixed set, and a list filtered by a test that reads its index" | |
 | Array.prototype.find | | | | |
 | Array.prototype.findIndex | | | | |
 | Array.prototype.findLast | | | | |
@@ -575,14 +575,14 @@ Each subtype's `.prototype` fully inherits `Error.prototype` (name/message/cause
 | Array.prototype.flat | | | | |
 | Array.prototype.flatMap | | | | |
 | Array.prototype.forEach | ✅ | the prelude's `ArrayMethods.forEach` through `js_m`, carried into the chunk when the script calls it - on a name or on an array written in place (`[1, 2].forEach(f)`) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a method called on a literal array, and null as text in a larger expression, a template and String()"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "querySelector and querySelectorAll: a list's length, item(), an index and forEach" | |
-| Array.prototype.map | | | | |
+| Array.prototype.map | ✅ | in markup written with innerHTML, `.map(cb).join(sep)` is a list of rows compiled away (see Element.innerHTML — a list repeated over an array in INSTRUCTION-SET-DOM.md); elsewhere the prelude's `ArrayMethods.map` through `js_m`, which makes the array it returns as JavaScript does | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a todo list from .map().join(''): template literals, the index in the markup, a class from each item, a listener per row found by [data-act], a push held to a cap, filter and splice; the rows found again by a class every row keeps"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a log that grows to a cap, newest first, with a message while it is empty and a paragraph after it that moves"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "one listener on a list for every row: e.target, closest() and dataset pick the row a click lands in, the rows rewritten each time"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a list read from a field of an object, and a helper's list given as an argument or left to its default with ||" | |
 | Array.prototype.reduce | | | | |
 | Array.prototype.reduceRight | | | | |
 | Array.prototype.some | | | | |
 | Array.prototype.includes | | | | |
 | Array.prototype.indexOf | | | | |
 | Array.prototype.lastIndexOf | | | | |
-| Array.prototype.join | | | | |
+| Array.prototype.join | ✅ | after `.map` in markup: the text between rows, part of each row after the first (white space only between elements); elsewhere the prelude's `ArrayMethods.join` | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a todo list from .map().join(''): template literals, the index in the markup, a class from each item, a listener per row found by [data-act], a push held to a cap, filter and splice; the rows found again by a class every row keeps"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "markup added to the element with += in a for...of, a string built in a forEach with a class from the index, and a slice of a list that is never held to a length" | |
 | Array.prototype.toLocaleString | | | | |
 | Array.prototype.toString | | | | |
 | Array.prototype.toReversed | | | | |

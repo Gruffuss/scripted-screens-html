@@ -468,13 +468,257 @@ internal static class PlainTranslatorTests
          Ticks(6), new[] { 0, 1, 2, 4, 6 }),
     };
 
+    /// <summary>
+    /// innerHTML, part 2: markup repeated over a list - .map(…).join(…), a loop adding markup to a name or to the
+    /// element - laid out at the most rows the list can have. Author-style pages, each compiled for every console shape.
+    /// </summary>
+    private static readonly (string Feature, string Page, List<(double, string?)> Steps, int[] Checkpoints)[] Lists =
+    {
+        ("a todo list from .map().join(''): template literals, the index in the markup, a class from each item, a listener per row found by [data-act], a push held to a cap, filter and splice; the rows found again by a class every row keeps",
+         Page(".list { width: 300px; margin: 0; padding: 0; } .item { padding: 4px 8px; background: #1b2230; margin-bottom: 4px; list-style: none; }" +
+              ".item.done { color: #6b7; background: #132; }",
+              "<ul id=\"list\" class=\"list\"></ul><p id=\"count\">-</p><button id=\"add\">Add</button><button id=\"clear\">Clear done</button><button id=\"drop\">Drop first</button>",
+              "let todos = [{ text: 'Check O2', done: false }, { text: 'Refill tank', done: true }];" +
+              "const ideas = ['Fix airlock', 'Charge batteries', 'Sort ore'];" +
+              "let next = 0;" +
+              "function render() {" +
+              "  document.getElementById('list').innerHTML = todos.map((t, i) => `<li id=\"todo${i}\" data-act=\"${i}\" class=\"item${t.done ? ' done' : ''}\">${i + 1}. ${t.text}</li>`).join('');" +
+              "  const rows = document.querySelectorAll('#list [data-act]');" +
+              "  document.getElementById('count').textContent = rows.length + ' items (' + todos.map((t) => t.done ? 'x' : 'o').join('') + ') ' + document.querySelectorAll('#list .item').length;" +
+              "  rows.forEach((li) => li.addEventListener('click', () => { const k = Number(li.dataset.act); todos[k].done = !todos[k].done; render(); }));" +
+              "}" +
+              "document.getElementById('add').addEventListener('click', () => { if (todos.length < 5) { todos.push({ text: ideas[next % 3], done: false }); next++; } render(); });" +
+              "document.getElementById('clear').addEventListener('click', () => { todos = todos.filter((t) => !t.done); render(); });" +
+              "document.getElementById('drop').addEventListener('click', () => { todos.splice(0, 1); render(); });" +
+              "render();"),
+         Steps("add", "todo0", "add", "add", "todo3", "add", "todo4", "clear", "drop", "add", "add", "todo1"), new[] { 0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 12 }),
+
+        ("a table of readings built in a for loop with +=: a constant per row, a colour from each value, text from a fixed array",
+         Page(".row { display: flex; width: 300px; padding: 3px 6px; } .name { width: 140px; } .val { width: 130px; } .head { color: #888; }",
+              "<div id=\"table\"></div><p>below the table</p>",
+              "const sensors = [{ name: 'Room', unit: 'kPa' }, { name: 'Tank', unit: 'kPa' }, { name: 'Pipe', unit: 'C' }];" +
+              "const base = [101.3, 88.4, 21.5];" +
+              "let tick = 0;" +
+              "function render() {" +
+              "  let html = '<div class=\"row head\"><span class=\"name\">Sensor</span><span class=\"val\">Value</span></div>';" +
+              "  for (let i = 0; i < sensors.length; i++) {" +
+              "    const v = base[i] + tick * (i + 1) * 1.5;" +
+              "    html += '<div class=\"row\"><span class=\"name\">' + sensors[i].name + '</span><span class=\"val\" style=\"color:' + (v > 100 ? '#f66' : '#6c6') + '\">' + v.toFixed(1) + ' ' + sensors[i].unit + '</span></div>';" +
+              "  }" +
+              "  document.getElementById('table').innerHTML = html;" +
+              "}" +
+              "setInterval(() => { tick++; render(); }, 1000);" +
+              "render();"),
+         Ticks(8), new[] { 0, 2, 4, 8 }),
+
+        ("a log that grows to a cap, newest first, with a message while it is empty and a paragraph after it that moves",
+         Page(".line { padding: 2px 6px; background: #1a2130; margin-bottom: 2px; width: 280px; } .empty { color: #777; }",
+              "<div id=\"log\"></div><p id=\"after\">end of log</p>",
+              "const log = [];" +
+              "let n = 0;" +
+              "function show() {" +
+              "  document.getElementById('log').innerHTML = log.length" +
+              "    ? log.map((e) => '<div class=\"line\">' + e + '</div>').join('')" +
+              "    : '<p class=\"empty\">No events yet</p>';" +
+              "}" +
+              "show();" +
+              "setInterval(() => {" +
+              "  n++;" +
+              "  log.unshift('event ' + n + ' at ' + (n * 0.5).toFixed(1) + ' s');" +
+              "  if (log.length > 4) log.pop();" +
+              "  show();" +
+              "}, 500);"),
+         Ticks(7), new[] { 0, 1, 2, 4, 5, 7 }),
+
+        ("rows whose markup depends on their item, after a filter: each row its own shape, the rows after a filtered one moving up",
+         Page(".dev { display: flex; width: 260px; padding: 3px 6px; background: #1b2230; margin-bottom: 3px; } .name { width: 150px; }" +
+              ".tag { width: 80px; color: #6c6; } .alarm .tag { color: #f55; } .alarm { background: #311; }",
+              "<div id=\"devs\"></div><p>devices end</p>",
+              "const devices = [" +
+              "  { name: 'Pump', on: true, alarm: false }, { name: 'Fan', on: true, alarm: true }," +
+              "  { name: 'Heater', on: false, alarm: false }, { name: 'Vent', on: true, alarm: false }];" +
+              "let t = 0;" +
+              "function draw() {" +
+              "  document.getElementById('devs').innerHTML = devices.filter((d) => d.on).map((d) => d.alarm" +
+              "    ? `<div class=\"dev alarm\"><span class=\"name\">${d.name}</span><span class=\"tag\">ALARM</span></div>`" +
+              "    : `<div class=\"dev\"><span class=\"name\">${d.name}</span><span class=\"tag\">ok</span></div>`).join('');" +
+              "}" +
+              "draw();" +
+              "setInterval(() => { t++; devices[t % 4].alarm = !devices[t % 4].alarm; devices[(t + 1) % 4].on = !devices[(t + 1) % 4].on; draw(); }, 500);"),
+         Ticks(6), new[] { 0, 1, 2, 3, 6 }),
+
+        ("markup added to the element with += in a for...of, a string built in a forEach with a class from the index, and a slice of a list that is never held to a length",
+         Page("#steps { display: flex; } .step { padding: 2px 8px; background: #223; margin-right: 4px; } #dots { display: flex; }" +
+              ".dot { width: 16px; height: 16px; background: #333; margin-right: 4px; } .dot.done { background: #3a7; } .h { color: #aaa; }",
+              "<div id=\"steps\"></div><div id=\"dots\"></div><div id=\"hist\"></div><p id=\"recent\">-</p><button id=\"next\">Next</button>",
+              "const steps = ['Seal', 'Pump', 'Open'];" +
+              "const seen = [];" +
+              "let at = 0;" +
+              "function show() {" +
+              "  const box = document.getElementById('steps');" +
+              "  box.innerHTML = '';" +
+              "  for (const s of steps) box.innerHTML += '<span class=\"step\">' + s + '</span>';" +
+              "  let h = '';" +
+              "  steps.forEach((s, i) => { h += '<div class=\"dot' + (i < at ? ' done' : '') + '\"></div>'; });" +
+              "  document.getElementById('dots').innerHTML = h;" +
+              "  document.getElementById('hist').innerHTML = seen.slice(0, 3).map(histRow).join('');" +
+              "  document.getElementById('recent').textContent = 'recent [' + seen.slice(0, 2).join(',') + ']';" +
+              "}" +
+              "function histRow(x, i) { return '<p class=\"h\">step ' + x + (i === 0 ? ' (last)' : '') + '</p>'; }" +
+              "document.getElementById('next').addEventListener('click', () => { at = at < 3 ? at + 1 : 0; seen.unshift(at); show(); });" +
+              "show();"),
+         Steps("next", "next", "next", "next", "next"), new[] { 0, 1, 2, 4, 5 }),
+
+        ("one listener on a list for every row: e.target, closest() and dataset pick the row a click lands in, the rows rewritten each time",
+         Page(".menu { width: 280px; margin: 0; padding: 4px; background: #151a24; } .menu li { list-style: none; padding: 4px 8px; margin-bottom: 3px; background: #1d2433; }" +
+              ".menu li.on { background: #2b4a7a; } .lbl { color: #cde; } .n { color: #789; margin-left: 12px; }",
+              "<ul id=\"menu\" class=\"menu\"></ul><p id=\"picked\">none</p>",
+              "const gases = [{ key: 'o2', label: 'Oxygen' }, { key: 'n2', label: 'Nitrogen' }, { key: 'co2', label: 'Carbon dioxide' }];" +
+              "let chosen = '';" +
+              "let picks = 0;" +
+              "function draw() {" +
+              "  document.getElementById('menu').innerHTML = gases.map((g, i) =>" +
+              "    `<li id=\"m${i}\" data-key=\"${g.key}\" class=\"${g.key === chosen ? 'on' : ''}\"><span id=\"l${i}\" class=\"lbl\">${g.label}</span><span class=\"n\">#${i + 1}</span></li>`).join('');" +
+              "}" +
+              "document.getElementById('menu').addEventListener('click', (e) => {" +
+              "  const li = e.target.closest('li');" +
+              "  if (!li) return;" +
+              "  chosen = li.dataset.key;" +
+              "  picks++;" +
+              "  document.getElementById('picked').textContent = 'picked ' + chosen + ' (' + e.target.tagName + ' ' + e.target.id + (e.target.matches('.lbl') ? ' label' : '') + ' in ' + e.currentTarget.id + ', ' + picks + ')';" +
+              "  draw();" +
+              "});" +
+              "draw();"),
+         Steps("l1", "m2", "l0", "menu", "m0"), new[] { 0, 1, 2, 3, 4, 5 }),
+
+        ("a list inside a box that shows only while the list has rows, built by a helper that adds markup in steps; rows kept by a ternary that reads the index",
+         Page(".box { background: #1a1a2a; padding: 4px; width: 260px; } .al { color: #f77; margin: 2px 0; } .ok { color: #7c7; } .odd { color: #fc6; margin: 1px 0; }",
+              "<div id=\"al\"></div><div id=\"sk\"></div><p>end</p>",
+              "const alarms = [];" +
+              "const names = ['a', 'b', 'c', 'd'];" +
+              "let t = 0;" +
+              "function lines(list) {" +
+              "  let h = '';" +
+              "  for (const a of list) h += `<p class=\"al\">${a}</p>`;" +
+              "  return h;" +
+              "}" +
+              "function show() {" +
+              "  document.getElementById('al').innerHTML = alarms.length" +
+              "    ? '<div class=\"box\"><b>Alarms</b>' + lines(alarms) + '</div>'" +
+              "    : '<p class=\"ok\">all clear</p>';" +
+              "  document.getElementById('sk').innerHTML = names.map((x, i) => i % 3 === t % 3 ? '' : `<p class=\"odd\">${i} ${x}</p>`).join('');" +
+              "}" +
+              "show();" +
+              "setInterval(() => {" +
+              "  t++;" +
+              "  if (t % 4 !== 0) { alarms.push('alarm ' + t); if (alarms.length > 3) alarms.shift(); }" +
+              "  else alarms.length = 0;" +
+              "  show();" +
+              "}, 500);"),
+         Ticks(9), new[] { 0, 1, 2, 3, 4, 5, 7, 9 }),
+
+        ("a list read from a field of an object, and a helper's list given as an argument or left to its default with ||",
+         Page(".it { margin: 1px 0; } #m { display: flex; } .mk { width: 30px; margin-right: 4px; background: #234; }",
+              "<div id=\"f\"></div><div id=\"m\"></div><p>after</p>",
+              "const panel = { title: 'Pumps', items: ['P1', 'P2', 'P3'] };" +
+              "function marks(corners) { return (corners || ['tl', 'br']).map((c) => `<span class=\"mk\">${c}</span>`).join(''); }" +
+              "let t = 0;" +
+              "function show() {" +
+              "  document.getElementById('f').innerHTML = panel.items.map((x, i) => `<p class=\"it\">${panel.title} ${i}: ${x}</p>`).join('');" +
+              "  document.getElementById('m').innerHTML = t % 2 ? marks(['a', 'b', 'c']) : marks();" +
+              "}" +
+              "show();" +
+              "setInterval(() => { t++; show(); }, 500);"),
+         Ticks(3), new[] { 0, 1, 2, 3 }),
+
+        ("lists bounded other ways: an array made fresh and filled in a loop over a bounded list, and a while trim",
+         Page(".hi { color: #fc6; margin: 1px 0; } .hs { color: #6cf; margin: 1px 0; }",
+              "<div id=\"hi\"></div><div id=\"hist\"></div><p>end</p>",
+              "const readings = [3, 8, 1, 9, 4];" +
+              "const hist = [];" +
+              "let t = 0;" +
+              "function show() {" +
+              "  const high = [];" +
+              "  for (const r of readings) if (r + t % 3 > 4) high.push(r + t % 3);" +
+              "  let h = '';" +
+              "  for (const v of high) h += `<p class=\"hi\">${v}</p>`;" +
+              "  document.getElementById('hi').innerHTML = h;" +
+              "  document.getElementById('hist').innerHTML = hist.map((x) => `<p class=\"hs\">${x}</p>`).join('');" +
+              "}" +
+              "setInterval(() => {" +
+              "  t++;" +
+              "  hist.push('t' + t);" +
+              "  while (hist.length > 3) hist.shift();" +
+              "  show();" +
+              "}, 500);" +
+              "show();"),
+         Ticks(5), new[] { 0, 1, 2, 3, 5 }),
+
+        ("lists bounded other ways: a splice trim, and concat then slice",
+         Page(".rc { color: #cf6; margin: 1px 0; } .ev { color: #f9c; margin: 1px 0; }",
+              "<div id=\"rec\"></div><div id=\"ev\"></div><p>end</p>",
+              "const ev = [];" +
+              "let recent = [];" +
+              "let t = 0;" +
+              "function show() {" +
+              "  document.getElementById('rec').innerHTML = recent.map((x) => `<p class=\"rc\">${x}</p>`).join('');" +
+              "  document.getElementById('ev').innerHTML = ev.map((x) => `<p class=\"ev\">${x}</p>`).join('');" +
+              "}" +
+              "setInterval(() => {" +
+              "  t++;" +
+              "  ev.push('e' + t);" +
+              "  ev.splice(0, ev.length - 2);" +
+              "  recent = ['r' + t].concat(recent).slice(0, 2);" +
+              "  show();" +
+              "}, 500);" +
+              "show();"),
+         Ticks(4), new[] { 0, 1, 2, 4 }),
+
+        ("rows of a list of fixed length, each changing its shape with its item",
+         Page(".dev { display: flex; width: 240px; } .name { width: 120px; } .tag { width: 80px; color: #6c6; } .al .tag { color: #f55; }",
+              "<div id=\"devs\"></div><p>end</p>",
+              "const devices = [{ name: 'Pump', alarm: false }, { name: 'Fan', alarm: true }, { name: 'Vent', alarm: false }];" +
+              "let t = 0;" +
+              "function draw() {" +
+              "  document.getElementById('devs').innerHTML = devices.map((d) => d.alarm" +
+              "    ? `<div class=\"dev al\"><span class=\"name\">${d.name}</span><span class=\"tag\">ALARM</span></div>`" +
+              "    : `<div class=\"dev\"><span class=\"name\">${d.name}</span><span class=\"tag\">ok</span></div>`).join('');" +
+              "}" +
+              "draw();" +
+              "setInterval(() => { t++; devices[t % 3].alarm = !devices[t % 3].alarm; draw(); }, 500);"),
+         Ticks(4), new[] { 0, 1, 2, 4 }),
+
+        ("a loop over a count from a fixed set, and a list filtered by a test that reads its index",
+         Page("#meter { display: flex; } .bar { width: 12px; height: 20px; background: #3a7; margin-right: 3px; } .odd { color: #fc6; }",
+              "<div id=\"meter\"></div><div id=\"odd\"></div><p>meter end</p>",
+              "const levels = [1, 3, 5, 2];" +
+              "const names = ['a', 'b', 'c', 'd', 'e', 'f'];" +
+              "let k = 0;" +
+              "function show() {" +
+              "  const level = levels[k % 4];" +
+              "  let h = '';" +
+              "  for (let i = 0; i < level; i++) h += '<div class=\"bar\"></div>';" +
+              "  document.getElementById('meter').innerHTML = h;" +
+              "  document.getElementById('odd').innerHTML = names.filter((x, i) => i % 2 === k % 2).map((x, i) => `<p class=\"odd\">${i}: ${x}</p>`).join('');" +
+              "}" +
+              "setInterval(() => { k++; show(); }, 500);" +
+              "show();"),
+         Ticks(5), new[] { 0, 1, 2, 3, 5 }),
+    };
+
     /// <summary>Features outside what is translated, each refused by name - the page keeps its old path.</summary>
     private static readonly (string Feature, string Page, string Reason)[] Refusals =
     {
         ("requestAnimationFrame", Page("", "<p id=\"a\">x</p>", "requestAnimationFrame(() => { document.getElementById('a').textContent = 'y'; });"), "requestAnimationFrame"),
-        ("a list of markup (innerHTML part 2)", Page("", "<ul id=\"a\"></ul>", "const xs = [1, 2]; setTimeout(() => { document.getElementById('a').innerHTML = xs.map((x) => '<li>' + x + '</li>').join(''); }, 10);"), "a list of markup, repeated over an array"),
-        ("markup added with += (innerHTML part 2)", Page("", "<ul id=\"a\"></ul>", "setTimeout(() => { document.getElementById('a').innerHTML += '<li>x</li>'; }, 10);"), "with += (innerHTML part 2)"),
-        ("markup built up in steps", Page("", "<ul id=\"a\"></ul>", "setTimeout(() => { let s = ''; for (let i = 0; i < 3; i++) s += '<li>' + i + '</li>'; document.getElementById('a').innerHTML = s; }, 10);"), "text built up in steps, is part 2"),
+        ("a list whose array grows with nothing holding it", Page("", "<div id=\"a\"></div>", "const log = []; setInterval(() => { log.push('x'); document.getElementById('a').innerHTML = log.map((x) => '<p>' + x + '</p>').join(''); }, 10);"), "a list whose length the compile cannot bound: \"log\".push() with nothing holding it to a length"),
+        ("markup added with += outside a loop", Page("", "<ul id=\"a\"></ul>", "setInterval(() => { document.getElementById('a').innerHTML += '<li>x</li>'; }, 10);"), "with += outside a list the compile can bound"),
+        ("a list of elements joined with text between them", Page("", "<div id=\"a\"></div>", "const xs = ['a', 'b']; setTimeout(() => { document.getElementById('a').innerHTML = xs.map((x) => '<p>' + x + '</p>').join(', '); }, 10);"), "a list joined with \", \" between its elements"),
+        ("a list of text-level markup", Page("", "<p id=\"a\">-</p>", "const xs = ['a', 'b']; document.getElementById('a').innerHTML = xs.map((x) => '<b>' + x + '</b>').join(' ');"), "a list of text and text-level markup"),
+        ("a list inside a list's rows", Page("", "<div id=\"a\"></div>", "const xs = [[1, 2], [3]]; setTimeout(() => { document.getElementById('a').innerHTML = xs.map((r) => '<div>' + r.map((x) => '<p>' + x + '</p>').join('') + '</div>').join(''); }, 10);"), "a list inside a row of another list"),
+        ("CSS picking a list's rows by their place", Page(".row:last-child { color: #f00; }", "<div id=\"a\"></div>", "const xs = []; setInterval(() => { if (xs.length < 3) xs.push('x'); document.getElementById('a').innerHTML = xs.map((x) => '<p class=\"row\">' + x + '</p>').join(''); }, 10);"), "picking elements by their place among their siblings"),
+        ("rows whose shapes are different sizes", Page("", "<div id=\"a\"></div>", "const xs = [{ big: true }, { big: false }]; setInterval(() => { xs[0].big = !xs[0].big; document.getElementById('a').innerHTML = xs.map((x) => x.big ? '<p>a</p><p>b</p>' : '<p>a</p>').join(''); }, 10);"), "is another size in its shape"),
+        ("a list inside an attribute", Page("", "<div id=\"a\"></div>", "const xs = ['a', 'b']; document.getElementById('a').innerHTML = '<p title=\"' + xs.map((x) => '<b>' + x + '</b>').join('') + '\">t</p>';"), "a list inside an attribute's value"),
+        ("a loop over a count only known at run time", Page("", "<div id=\"a\"></div>", "let n = 1; setInterval(() => { n = n * 2; let h = ''; for (let i = 0; i < n; i++) h += '<p>x</p>'; document.getElementById('a').innerHTML = h; }, 10);"), "a loop over a count only known at run time"),
         ("markup chosen with &&", Page("", "<div id=\"a\"></div>", "let on = true; setTimeout(() => { document.getElementById('a').innerHTML = on && '<b>on</b>'; }, 10);"), "chosen with && or ||"),
         ("markup whose tag is a value", Page("", "<div id=\"a\"></div>", "let t = 'b' + Math.random(); setTimeout(() => { document.getElementById('a').innerHTML = '<' + t + '>x</' + t + '>'; }, 10);"), "whose tag is a value"),
         ("reading innerHTML", Page("", "<div id=\"a\"><b>x</b></div><p id=\"o\">-</p>", "setTimeout(() => { document.getElementById('o').textContent = document.getElementById('a').innerHTML; }, 10);"), "reading .innerHTML"),
@@ -520,6 +764,9 @@ internal static class PlainTranslatorTests
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-select.lua"), Ticks(8), new[] { 0, 1, 4, 8 }),
         // innerHTML part 1 in game: refused offline at first (a style width whose unit is a parameter's default)
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-markup.lua"), Ticks(12), new[] { 0, 1, 2, 3, 4, 6, 12 }),
+        // innerHTML part 2: not yet seen in game
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-list.lua"), Steps(0.5, 0.5, 0.5, 0.5, "gas0", 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, "menu", "gas2", 0.5),
+         new[] { 0, 1, 3, 5, 8, 11, 13, 14 }),
     };
 
     internal static void Run(Action<bool, string> check)
@@ -536,7 +783,7 @@ internal static class PlainTranslatorTests
                 try { One(name, page, steps, checkpoints, check, console); }
                 catch (Exception ex) { check(false, $"plain [{name}]: threw - {ex.Message.Split('\n')[0]}"); }
             }
-        foreach (var (feature, page, steps, checkpoints) in Markups)
+        foreach (var (feature, page, steps, checkpoints) in Markups.Concat(Lists))
             foreach (var console in Consoles)
             {
                 var name = $"{feature} on a {console.W:0}x{console.H:0} console";
@@ -567,6 +814,7 @@ internal static class PlainTranslatorTests
         ScriptRanFirst(root, check);
         OldPathSurvives(check);
         Retired(check);
+        Quiet(check);
         Eligibility(root, check);
         Sizes(check);
         foreach (var (feature, page, reason) in Refusals)
@@ -666,6 +914,30 @@ internal static class PlainTranslatorTests
     /// nothing more is sent, a click on its scene does nothing, and the tick it chained after still
     /// runs every time.
     /// </summary>
+    /// <summary>
+    /// A list written again with nothing changed sends nothing: rows whose shape depends on their item are
+    /// hidden by the list's state and shown by their own within one write, which must not send them again.
+    /// </summary>
+    private static void Quiet(Action<bool, string> check)
+    {
+        var page = Page(".dev { display: flex; width: 240px; } .name { width: 120px; } .tag { width: 80px; }",
+                        "<div id=\"devs\"></div><p>end</p>",
+                        "const devices = [{ name: 'Pump', alarm: false, on: true }, { name: 'Fan', alarm: true, on: true }];" +
+                        "function draw() {" +
+                        "  document.getElementById('devs').innerHTML = devices.filter((d) => d.on).map((d) => d.alarm" +
+                        "    ? `<div class=\"dev\"><span class=\"name\">${d.name}</span><span class=\"tag\">ALARM</span></div>`" +
+                        "    : `<div class=\"dev\"><span class=\"name\">${d.name}</span><span class=\"tag\">ok</span></div>`).join('');" +
+                        "}" +
+                        "draw();" +
+                        "setInterval(draw, 500);");
+        var compiled = Probe4.Headless(page).Compiled;
+        if (!compiled.Plain || compiled.Lua == null) { check(false, "plain quiet: the page does not compile plainly - " + string.Join("; ", compiled.Warnings.Take(2))); return; }
+        var log = Probe4.DrivePlain(compiled.Lua, Ticks(3), out _);
+        var sent = log.Where(l => l.StartsWith("set_props", StringComparison.Ordinal)).ToList();
+        check(!log.Any(l => l.StartsWith("FAILED", StringComparison.Ordinal)) && sent.Count == 0,
+              "plain quiet: a list written again with nothing changed sends nothing" + (sent.Count == 0 ? "" : " (" + sent[0] + ")"));
+    }
+
     private static void Retired(Action<bool, string> check)
     {
         var page = Page(".lamp { width: 40px; height: 40px; background: #522; } .lamp.on { background: #2e5; }",
@@ -750,7 +1022,7 @@ internal static class PlainTranslatorTests
             var same = HtmlRenderer.ToHtml(built.Document!, outer: false, keepIds: true) == HtmlRenderer.ToHtml(fresh.Document!, outer: false, keepIds: true)
                        && built.ById.Keys.OrderBy(k => k, StringComparer.Ordinal).SequenceEqual(fresh.ById.Keys.OrderBy(k => k, StringComparer.Ordinal));
             check(same, $"plain [{feature}]: the page is put back as it was built after its markup compiles");
-            var built2 = compiled.Lua.Split('\n').FirstOrDefault(l => Regex.IsMatch(l, @"v_(classname|state|setattr|set)\(.*js_add\("));
+            var built2 = compiled.Lua.Split('\n').FirstOrDefault(l => Regex.IsMatch(l, @"v_(classname|state|setattr|set)\(.*(js_add\(\s*""|js_add\([^()]*,\s*""|\s\.\.\s)"));
             check(built2 == null, $"plain [{feature}]: markup writes send values, building no string" + (built2 == null ? "" : " (" + built2.Trim() + ")"));
         }
         // `PLAIN_DUMP=<words of a feature> PLAIN_DUMP_TO=<file>`: that case's Lua and scene, to read
@@ -846,10 +1118,22 @@ internal static class PlainTranslatorTests
                 engine.SetValue("__rendered", new Func<string, string?, string>((id, text) => Rendered(built, page, id, text)));
                 engine.SetValue("__chain", new Func<string, string[]>(id => doc.Chain(id)));
                 engine.SetValue("__setHtml", new Func<string, string, string[]>((id, html) => doc.SetHtml(id, html)));
+                engine.SetValue("__getHtml", new Func<string, string>(id => HtmlRenderer.ToHtml(doc.ById[id], outer: false, keepIds: true)));
+                engine.SetValue("__closest", new Func<string, string, string?>((id, sel) => doc.Closest(id, sel)));
+                engine.SetValue("__matches", new Func<string, string, bool>((id, sel) => Matches(doc.ById[id], sel)));
+                engine.SetValue("__tag", new Func<string, string>(id => doc.ById[id].Tag!.ToUpperInvariant()));
             }
             else
             {
             engine.SetValue("__setHtml", new Func<string, string, string[]>((_, _) => throw new InvalidOperationException("innerHTML outside a markup page")));
+            engine.SetValue("__getHtml", new Func<string, string>(_ => throw new InvalidOperationException("innerHTML outside a markup page")));
+            engine.SetValue("__closest", new Func<string, string, string?>((id, sel) =>
+            {
+                for (var n = built.NodeOf[built.ById[id]]; n != null; n = n.Parent) if (!n.IsText && Matches(n, sel)) return n.Attr("id");
+                return null;
+            }));
+            engine.SetValue("__matches", new Func<string, string, bool>((id, sel) => Matches(built.NodeOf[built.ById[id]], sel)));
+            engine.SetValue("__tag", new Func<string, string>(id => built.NodeOf[built.ById[id]].Tag!.ToUpperInvariant()));
             engine.SetValue("__exists", new Func<string, bool>(id => built.ById.ContainsKey(id)));
             engine.SetValue("__initialClass", new Func<string, string>(id => built.NodeOf[built.ById[id]].Attr("class") ?? ""));
             engine.SetValue("__initialText", new Func<string, string>(id => SourceElement(page, id).Tag.Length > 0 ? SourceText(page, id) : NodeText(built.NodeOf[built.ById[id]])));
@@ -989,6 +1273,14 @@ internal static class PlainTranslatorTests
 
         public Dictionary<string, string> Attributes(string id) => NodeAttributes(ById[id]);
 
+        /// <summary>element.closest(): the element or its nearest ancestor the selector matches, by id; null for none.</summary>
+        public string? Closest(string id, string selector)
+        {
+            for (var n = ById[id]; n != null && n != Root; n = n.Parent)
+                if (!n.IsText && Matches(n, selector)) return IdOf(n);
+            return null;
+        }
+
         public string[] Chain(string id)
         {
             var chain = new List<string>();
@@ -1065,11 +1357,18 @@ internal static class PlainTranslatorTests
         }
     }
 
+    /// <summary>Whether a selector matches a node, by the renderer's own selector engine.</summary>
+    private static bool Matches(HtmlNode n, string selector)
+        => CssParser.SplitTopLevel(selector, ',').Select(p => CssParser.ParseSelector(p.Trim(), _ => { })).Any(p => p != null && p.Matches(n));
+
     /// <summary>A scene as it draws: no element names, and no group that only carries one (a name at full opacity).</summary>
     private static string Drawn(string scene)
     {
-        // a zero radius is no radius: the compile keeps it for elements a script writes
-        var lines = scene.Split('\n').Select(l => Regex.Replace(Regex.Replace(l, @" id=\S+", ""), @" rx=0(?= )", "")).ToList();
+        // a zero radius is no radius: the compile keeps it for elements a script writes; and a hit region draws
+        // nothing (what a click reaches is checked by clicking): an invisible box made to take clicks is not drawn
+        var lines = scene.Split('\n')
+            .Where(l => !Regex.IsMatch(l, @"^\s*R .* f=#00000001 .*click=1"))
+            .Select(l => Regex.Replace(Regex.Replace(Regex.Replace(l, @" id=\S+", ""), @" rx=0(?= )", ""), @" click=1\b", "")).ToList();
         for (var i = 0; i < lines.Count; i++)
         {
             // a group that draws nothing different: full opacity, or a transform at identity
@@ -1316,12 +1615,16 @@ function __el(id) {
     get hidden() { return 'hidden' in st.attrs; }, set hidden(v) { if (v) st.attrs[attr('hidden')] = ''; else delete st.attrs[attr('hidden')]; },
     get textContent() { return st.text !== undefined ? st.text : __initialText(id); }, set textContent(v) { st.text = String(v); },
     get innerText() { return __rendered(id, st.text !== undefined ? st.text : null); }, set innerText(v) { st.text = String(v); },
+    get innerHTML() { return __getHtml(id); },
     set innerHTML(v) {
       delete st.text;
       var gone = __setHtml(id, String(v));
       for (var gi = 0; gi < gone.length; gi++) { var g = gone[gi]; delete __els[g]; delete __state[g]; delete __listeners[g]; delete __onclick[g]; }
     },
     querySelector: function (s) { var ids = __select(s, id); return ids.length ? __el(ids[0]) : null; },
+    closest: function (s) { var r = __closest(id, s); return r === null ? null : __el(r); },
+    matches: function (s) { return __matches(id, s); },
+    get tagName() { return __tag(id); },
     querySelectorAll: function (s) { return __list(__select(s, id), false); },
     getElementsByClassName: function (c) { return __list(__select(__classes(c), id), true); },
     getElementsByTagName: function (t) { return __list(__select(t, id), true); },
@@ -1415,10 +1718,12 @@ function __advance(to) {
 }
 function __click(id) {
   var chain = __chain(id);
+  var ev = { target: __el(id), currentTarget: null };
   for (var c = 0; c < chain.length; c++) {
+    ev.currentTarget = __el(chain[c]);
     var l = (__listeners[chain[c]] || []).slice();
-    for (var i = 0; i < l.length; i++) l[i]();
-    if (__onclick[chain[c]]) __onclick[chain[c]]();
+    for (var i = 0; i < l.length; i++) l[i](ev);
+    if (__onclick[chain[c]]) __onclick[chain[c]](ev);
   }
 }
 function __final() {

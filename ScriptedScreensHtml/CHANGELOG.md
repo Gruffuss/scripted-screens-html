@@ -25,8 +25,23 @@ Newest first. The workshop page is a short overview; this file has the full hist
   rounded, and a script writing such a text was not compiled.
 - `innerHTML` compiles too, when the markup's shape comes from the page's own text: literals, `+`,
   template literals, ternaries and helper functions returning markup. The markup is laid out once; the
-  console then only writes the values in it and picks which shape shows. Lists repeated over an array
-  (`.map(...).join('')`) and `+=` come later.
+  console then only writes the values in it and picks which shape shows.
+- Lists of markup compile too: `.map(...).join('')` (with `slice` and `filter` before it), a loop adding
+  markup to a name (`h += ...`) or to the element (`el.innerHTML += ...` after `el.innerHTML = ...`), and
+  `forEach`. A list is laid out once at the most rows its array can hold - read from the page's own code:
+  a fixed array, an array held to a length (`if (log.length > 4) log.pop()` after a push, and similar), a
+  slice of fixed size - and the console shows as many rows as the array has, what follows moving up as a
+  browser would lay it out. A row whose markup depends on its item picks its own shape. The rows can be
+  looked up afterwards (`querySelectorAll`), each given a listener, or reached from one listener through
+  `e.target`, `closest()`, `dataset`, `matches()`, `id` and `tagName`. A list whose length the compile
+  cannot bound is refused, and the log says why.
+- `array.length = n` works (it clears or shortens an array as JavaScript does).
+- A compiled page sends only what changed since its last send: a value set and set back in one go is no
+  longer sent again.
+- A value in markup that is a whole number the compile knows (`${i + 1}` in a row) is added as a number,
+  not joined as text ("1", not "01").
+- A name given markup in steps with template literals (`` h += `<li>${x}</li>` ``) is markup: its text was
+  written as plain text, tags and all.
 - Markup with elements written into an element that only held text no longer stops a page from
   compiling on the older path; it runs as before, and the log says why it was not compiled plainly.
 - An element whose class is set with `className` from a fixed set lays out only the class sets it can

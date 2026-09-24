@@ -1220,12 +1220,12 @@ internal sealed class JsToLua
     {
         if (InnerHtml(a)) return;
         // `arr.length = 0` is how JavaScript clears an array, and `.length` reads as js_len(), which
-        // is a call and cannot be assigned to. Reported rather than emitted: truncating an array
-        // properly means dropping the elements past the new length too, and a page that grows one
-        // this way expects holes, so this is not a one-liner to guess at.
-        if (a.Left is MemberExpression { Computed: false, Property: Identifier { Name: "length" } })
+        // is a call and cannot be assigned to: js_setlen drops the items past the new length, or
+        // leaves holes when it is longer, as JavaScript does.
+        if (a.Left is MemberExpression { Computed: false, Property: Identifier { Name: "length" } } lm)
         {
-            Unsupported(a, "assigning to .length");
+            if (a.Operator != Operator.Assignment) { Unsupported(a, "assigning to .length with " + a.Operator); return; }
+            Line("js_setlen(" + Expr(lm.Object) + ", " + Expr(a.Right) + ")");
             return;
         }
         // A CSS write the page builds as a string, emitted as the numbers it is made of.

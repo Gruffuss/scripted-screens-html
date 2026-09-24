@@ -241,8 +241,12 @@ internal static partial class PlainTranslator
 
         /// <summary>A top element of markup a script writes with innerHTML, shown and hidden as that markup's shape changes.</summary>
         public bool Top;
+        /// <summary>What a click can land on inside an element whose click listener reads its event's target: a hit region of its own.</summary>
+        public bool Hit;
+        /// <summary>The page gave it no id: the compile named it, and `el.id` reads "".</summary>
+        public bool Unnamed;
         /// <summary>Whether the script changes what this element draws, so the scene has to name it.</summary>
-        public bool Written => Texts.Count > 0 || Styles.Count > 0 || ClassOps.Count > 0 || ClassNames.Count > 0 || Listens || Top || AttrOps.Any(o => o.Facet);
+        public bool Written => Texts.Count > 0 || Styles.Count > 0 || ClassOps.Count > 0 || ClassNames.Count > 0 || Listens || Top || Hit || AttrOps.Any(o => o.Facet);
         public bool Facets => ClassOps.Count > 0 || ClassNames.Count > 0 || AttrOps.Any(o => o.Facet);
     }
 
@@ -395,6 +399,7 @@ internal static partial class PlainTranslator
                 if (n is VariableDeclaration vd && vd.Declarations.All(d => d.Id is Identifier i && _vars.ContainsKey(i.Name) && d.Init != null && Lookup(d.Init) != null))
                     _elementDeclarations.Add(vd);
 
+            Handlers();
             foreach (var n in Markup.Everything(_ast)) Visit(n);
             Selectors();
             MarkupChecks();
@@ -668,6 +673,8 @@ internal static partial class PlainTranslator
             public string? Bad;
             /// <summary>Contributes nothing: null, undefined, or a name met again while it is being worked out.</summary>
             public bool Neutral;
+            /// <summary>A list that is one list of markup's rows (after <c>Prefix</c> elements always there): as long as the rows shown.</summary>
+            public (MkRep Rep, int Prefix)? Rows;
             public bool One => !List && Bad == null && !Null && !Neutral && Ts.Count == 1;
 
             public static Els Nothing(bool isNull) => new() { Neutral = true, Null = isNull };
@@ -702,6 +709,9 @@ internal static partial class PlainTranslator
                     foreach (var t in x.Ts) if (!u.Ts.Contains(t)) u.Ts.Add(t);
                     foreach (var l in x.Lists) if (!u.Lists.Any(y => y.SequenceEqual(l))) u.Lists.Add(l);
                 }
+                var rows = all.Where(x => x is { Neutral: false }).Select(x => x!.Rows).Distinct().ToList();
+                if (rows.Count > 1) return Refused("a list of a list's rows at one time and other elements at another");
+                u.Rows = rows.Count == 1 ? rows[0] : null;
                 return u;
             }
         }
@@ -740,6 +750,14 @@ internal static partial class PlainTranslator
                 case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "item" } } im } ic
                     when Elems(im.Object, bind) is { List: true } items:
                     return Pick(items, ic.Arguments.Count > 0 ? ic.Arguments[0] as Expression : null);
+
+                case MemberExpression { Computed: false, Object: Identifier ev, Property: Identifier { Name: "target" or "currentTarget" } which }
+                    when Decl(ev) is { } evd && _eventOf.ContainsKey(evd):
+                    return EventElems(evd, which.Name == "currentTarget");
+
+                case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "closest" } } cm } cc
+                    when Elems(cm.Object, bind) is { List: false, Neutral: false } from:
+                    return from.Bad != null ? from : Closest(cc, from, bind);
 
                 case NullLiteral:
                     return Els.Nothing(true);
@@ -849,6 +867,8 @@ internal static partial class PlainTranslator
                 foreach (var l in list.Lists)
                     if (k < l.Count) { if (!e.Ts.Contains(l[(int)k])) e.Ts.Add(l[(int)k]); }
                     else e.Null = true;
+                // a row may not be shown
+                if (list.Rows != null) e.Null = true;
                 return e;
             }
             e.Ts.AddRange(list.Ts);
@@ -895,7 +915,9 @@ internal static partial class PlainTranslator
             if (Select(selector, scope, out var why) is not { } found) return Els.Refused(why!);
             if (!_selectors.Any(s => s.Selector == selector && s.At == c)) _selectors.Add((selector, c));
             if (kind == "querySelector") return found.Count > 0 ? Els.Of(found[0]) : Els.Nothing(true);
-            return Els.ListOf(found, kind == "querySelectorAll" ? "NodeList" : "HTMLCollection");
+            var list = Els.ListOf(found, kind == "querySelectorAll" ? "NodeList" : "HTMLCollection");
+            list.Rows = RowsOf(found);
+            return list;
         }
 
         /// <summary>Selectors the script looks elements up by, each where it is used; checked against what the script changes.</summary>
@@ -908,25 +930,12 @@ internal static partial class PlainTranslator
         /// </summary>
         private List<Target>? Select(string selector, Target? under, out string? why)
         {
-            why = null;
-            if (selector.Contains("::", StringComparison.Ordinal) || Regex.IsMatch(selector, @":(hover|active|focus|focus-within|focus-visible|visited|link|any-link|target|checked|indeterminate|placeholder-shown|default|valid|invalid|in-range|out-of-range|autofill|user-invalid|user-valid|defined|scope|has)\b"))
-            {
-                why = $"the selector \"{selector}\", which asks about a state or a part the page does not keep (not translated yet)";
-                return null;
-            }
-            var parsed = new List<CssSelector>();
-            var warned = new List<string>();
-            foreach (var part in CssParser.SplitTopLevel(selector, ','))
-            {
-                var s = part.Trim().Length == 0 ? null : CssParser.ParseSelector(part.Trim(), warned.Add);
-                if (s == null || warned.Count > 0) { why = $"the selector \"{selector}\", which does not parse as a supported selector{(warned.Count > 0 ? " (" + warned[0] + ")" : string.Empty)}"; return null; }
-                parsed.Add(s);
-            }
+            if (Matcher(selector, out why) is not { } match) return null;
             var top = under?.Node ?? Document();
             var found = new List<Target>();
             foreach (var node in Below(top))
             {
-                if (node.IsText || !parsed.Any(s => s.Matches(node))) continue;
+                if (node.IsText || !match(node)) continue;
                 if (node.Attr("id") is not { } id || !_built.ById.TryGetValue(id, out var ve) || ve == null
                     || !_built.NodeOf.TryGetValue(ve, out var own) || own != node)
                 {
@@ -1188,12 +1197,18 @@ internal static partial class PlainTranslator
             if (_selectors.Count == 0) return;
             var classes = new HashSet<string>(StringComparer.Ordinal);
             var attrs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            static string[] Words(string v) => v.Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries);
             foreach (var t in _order)
             {
                 foreach (var op in t.ClassOps) classes.UnionWith(op.Names);
-                foreach (var (_, values) in t.ClassNames)
-                    foreach (var v in values.OfType<string>()) classes.UnionWith(v.Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries));
-                if (t.ClassNames.Count > 0) classes.UnionWith((t.Node.Attr("class") ?? string.Empty).Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries));
+                if (t.ClassNames.Count > 0)
+                {
+                    // className given only sets that all hold a class (and so does the page): that class never changes
+                    var sets = t.ClassNames.SelectMany(n => n.Values.OfType<string>()).Append(t.Node.Attr("class") ?? string.Empty).Select(Words).ToList();
+                    var always = new HashSet<string>(sets[0], StringComparer.Ordinal);
+                    foreach (var set in sets) always.IntersectWith(set);
+                    foreach (var set in sets) classes.UnionWith(set.Where(c => !always.Contains(c)));
+                }
                 foreach (var op in t.AttrOps) attrs.Add(op.Name);
             }
             foreach (var (selector, at) in _selectors)
@@ -1231,6 +1246,12 @@ internal static partial class PlainTranslator
                     return;
                 case CallExpression { Callee: Identifier } uc when Elems(uc) is { Neutral: false }:
                     Source(uc);
+                    return;
+                case MemberExpression { Computed: false, Property: Identifier { Name: "target" or "currentTarget" } } et when Elems(et) is { Neutral: false }:
+                    Source(et);
+                    return;
+                case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "closest" } } } cl when Elems(cl) is { Neutral: false }:
+                    Source(cl);
                     return;
                 case Identifier id when Reference(id) && (_vars.ContainsKey(id.Name)
                                             ? !(_parent.TryGetValue(id, out var decl) && decl is VariableDeclarator vd && vd.Id == id)
@@ -1343,12 +1364,29 @@ internal static partial class PlainTranslator
             {
                 case "innerHTML":
                     if (_parent[m] is AssignmentExpression mw && _markupSeen.Contains(mw)) return;
-                    Refuse(m, _parent[m] is AssignmentExpression { Operator: Operator.AdditionAssignment } ? $"markup added to {r.Name} with += (innerHTML part 2)"
+                    Refuse(m, _parent[m] is AssignmentExpression { Operator: Operator.AdditionAssignment } ? $"markup added to {r.Name} with += outside a list the compile can bound (`el.innerHTML = …` then += in loops, in one block, is followed)"
                         : WrittenTo(m) ? $"this write to .innerHTML of {r.Name}" : $"reading .innerHTML of {r.Name} (not translated yet)");
                     return;
 
                 // a lookup under this element: a source of elements of its own
-                case "querySelector" or "querySelectorAll" or "getElementsByClassName" or "getElementsByTagName" when gp is CallExpression qc && qc.Callee == m:
+                case "querySelector" or "querySelectorAll" or "getElementsByClassName" or "getElementsByTagName" or "closest" when gp is CallExpression qc && qc.Callee == m:
+                    return;
+
+                case "matches" when gp is CallExpression mc && mc.Callee == m:
+                    {
+                        if (mc.Arguments.Count != 1 || mc.Arguments[0] is not Expression ma || Finite(ma) is not [string sel]) { Refuse(mc, "matches with a selector only known at run time"); return; }
+                        if (Matcher(sel, out var why) is not { } match) { Refuse(mc, why!); return; }
+                        _bool.Add(mc);
+                        Read(r, mc, (_, x, _) => match(x.Node) ? "true" : "false");
+                        return;
+                    }
+
+                case "id" when !WrittenTo(m):
+                    Read(r, m, (_, x, _) => Q(x.Unnamed ? string.Empty : x.Node.Attr("id") ?? string.Empty));
+                    return;
+
+                case "tagName" when !WrittenTo(m):
+                    Read(r, m, (_, x, _) => Q((x.Node.Tag ?? string.Empty).ToUpperInvariant()));
                     return;
 
                 case "textContent" or "innerText":
@@ -1545,27 +1583,136 @@ internal static partial class PlainTranslator
         private bool Effect(Expression e)
             => _parent.TryGetValue(e, out var p) && (p is ExpressionStatement || p is ArrowFunctionExpression a && a.Body == e);
 
-        /// <summary>A click handler that reads its event object, which the vector mod does not deliver: refused.</summary>
+        /// <summary>
+        /// A click handler that reads its event object other than as `e.target` and `e.currentTarget` - the element a
+        /// click landed on and the element listening, which the Lua hands it as element numbers: refused.
+        /// </summary>
         private bool ReadsEvent(Node handler)
         {
-            NodeList<Node> ps;
-            Node body;
-            switch (handler)
+            if (Callback(handler) is not { } fn) return false;
+            var body = (Node)fn.Body;
+            for (var k = 0; k < fn.Params.Count; k++)
             {
-                case FunctionExpression f: ps = f.Params; body = f.Body; break;
-                case ArrowFunctionExpression a: ps = a.Params; body = a.Body; break;
-                default: return false;
-            }
-            foreach (var p in ps)
-            {
+                var p = fn.Params[k];
                 if (p is not Identifier pid) { Refuse(p, "a click handler that unpacks its event"); return true; }
-                if (Markup.Everything(body).Any(x => x is Identifier i && i.Name == pid.Name && Reference(i)))
+                foreach (var x in Markup.Everything(body))
                 {
-                    Refuse(handler, $"a click handler that reads its event object ({pid.Name}), which is not translated yet");
+                    if (x is not Identifier i || i.Name != pid.Name || !Reference(i) || Decl(i) != pid) continue;
+                    if (k == 0 && _parent[i] is MemberExpression { Computed: false, Property: Identifier { Name: "target" or "currentTarget" } } m && m.Object == i && !WrittenTo(m))
+                    {
+                        _events = true;
+                        continue;
+                    }
+                    Refuse(handler, $"a click handler that reads its event object ({pid.Name}) other than its target and currentTarget, which is not translated yet");
                     return true;
                 }
             }
             return false;
+        }
+
+        /// <summary>Each click handler's event parameter, and the elements it listens on: what `e.target` can be is worked out from them.</summary>
+        private readonly Dictionary<Identifier, List<Expression>> _eventOf = new();
+        private bool _events;
+
+        private void Handlers()
+        {
+            foreach (var n in Markup.Everything(_ast))
+            {
+                Node? handler = null;
+                Expression? on = null;
+                if (n is CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "addEventListener" } } am } ac
+                    && ac.Arguments.Count == 2 && ac.Arguments[0] is StringLiteral { Value: "click" })
+                    (handler, on) = (ac.Arguments[1], am.Object);
+                else if (n is AssignmentExpression { Operator: Operator.Assignment, Left: MemberExpression { Computed: false, Property: Identifier { Name: "onclick" } } om } oa)
+                    (handler, on) = (oa.Right, om.Object);
+                if (handler == null || Callback(handler) is not { } fn || fn.Params.Count == 0 || fn.Params[0] is not Identifier ev) continue;
+                if (!_eventOf.TryGetValue(ev, out var list)) _eventOf[ev] = list = new List<Expression>();
+                list.Add(on!);
+            }
+        }
+
+        /// <summary>
+        /// `e.target` of a click listener: the listening element and every element in it with a box of its own, each
+        /// made a hit region so the click names it; `e.currentTarget`: the listening element.
+        /// </summary>
+        private Els? EventElems(Identifier decl, bool current)
+        {
+            var listening = Els.Choice(_eventOf[decl].Select(o => Elems(o)));
+            if (listening == null || listening.Bad != null) return listening;
+            if (listening.List) return Els.Refused("a click listener's event on a list of elements");
+            if (current) return listening;
+            var e = new Els { Null = listening.Null };
+            foreach (var l in listening.Ts)
+                foreach (var ve in Subtree(l.Ve))
+                    if (!string.IsNullOrEmpty(ve.name) && _built.NodeOf.TryGetValue(ve, out var node) && _built.ById.TryGetValue(ve.name, out var named) && named == ve)
+                    {
+                        var t = TargetOf(ve, node);
+                        t.Hit = true;
+                        if (!e.Ts.Contains(t)) e.Ts.Add(t);
+                    }
+            return e;
+        }
+
+        /// <summary>`el.closest(selector)` with a selector the compile knows: for each element it can be, the nearest of it and its ancestors matching.</summary>
+        private Els Closest(CallExpression c, Els from, Inlined? bind)
+        {
+            if (c.Arguments.Count != 1 || c.Arguments[0] is not Expression a || Finite(a, null, bind) is not [string sel]) return Els.Refused("closest with a selector only known at run time");
+            if (Matcher(sel, out var why) is not { } match) return Els.Refused(why!);
+            var e = new Els();
+            var table = new Dictionary<Target, Target?>();
+            foreach (var t in from.Ts)
+            {
+                Target? found = null;
+                for (var n = t.Node; n != null; n = n.Parent)
+                {
+                    if (n.IsText || !match(n)) continue;
+                    if (n.Attr("id") is not { } id || !_built.ById.TryGetValue(id, out var ve) || ve == null || !_built.NodeOf.TryGetValue(ve, out var own) || own != n)
+                        return Els.Refused($"closest(\"{sel}\") finds a <{n.Tag}> with no box of its own (it is drawn as part of its parent)");
+                    found = TargetOf(ve, n);
+                    break;
+                }
+                table[t] = found;
+                if (found == null) e.Null = true;
+                else if (!e.Ts.Contains(found)) e.Ts.Add(found);
+            }
+            _closestOf[c] = table;
+            return e;
+        }
+
+        private readonly Dictionary<CallExpression, Dictionary<Target, Target?>> _closestOf = new();
+        private readonly Dictionary<CallExpression, string> _closestTable = new();
+
+        /// <summary>A selector as a test of one node, as the page's own CSS is matched; null, with the reason, for one the compile cannot match as a browser does.</summary>
+        private static Func<HtmlNode, bool>? Matcher(string selector, out string? why)
+        {
+            why = null;
+            if (selector.Contains("::", StringComparison.Ordinal) || Regex.IsMatch(selector, @":(hover|active|focus|focus-within|focus-visible|visited|link|any-link|target|checked|indeterminate|placeholder-shown|default|valid|invalid|in-range|out-of-range|autofill|user-invalid|user-valid|defined|scope|has)\b"))
+            {
+                why = $"the selector \"{selector}\", which asks about a state or a part the page does not keep (not translated yet)";
+                return null;
+            }
+            var parsed = new List<CssSelector>();
+            var warned = new List<string>();
+            foreach (var part in CssParser.SplitTopLevel(selector, ','))
+            {
+                var s = part.Trim().Length == 0 ? null : CssParser.ParseSelector(part.Trim(), warned.Add);
+                if (s == null || warned.Count > 0) { why = $"the selector \"{selector}\", which does not parse as a supported selector{(warned.Count > 0 ? " (" + warned[0] + ")" : string.Empty)}"; return null; }
+                parsed.Add(s);
+            }
+            return n => parsed.Any(s => s.Matches(n));
+        }
+
+        /// <summary>The Lua of closest(): from the element's number to what it finds, a table made once.</summary>
+        private string ClosestLua(CallExpression c, JsToLua lua)
+        {
+            if (!_closestTable.TryGetValue(c, out var name))
+            {
+                name = "V_CL" + (_tables.Count + 1).ToString(CultureInfo.InvariantCulture);
+                var entries = _closestOf[c].Where(p => p.Value != null).Select(p => "[" + p.Key.Number.ToString(CultureInfo.InvariantCulture) + "] = " + p.Value!.Number.ToString(CultureInfo.InvariantCulture));
+                _tables.Add("local " + name + " = { " + string.Join(", ", entries) + " } -- what closest() finds from each element\n");
+                _closestTable[c] = name;
+            }
+            return name + "[" + lua.Translate(((MemberExpression)c.Callee).Object) + "]";
         }
 
         /// <summary>Whether an expression is written to rather than read: assigned, updated or deleted.</summary>
@@ -1881,6 +2028,18 @@ internal static partial class PlainTranslator
                 // a value of markup, read in the scope of the function it was written in
                 case ParenthesizedExpression w when _bindOf.TryGetValue(w, out var within):
                     return Finite(w.Expression, seen, within);
+                // a list's row item: every value the list's items can be
+                case Identifier row when _itemOf.TryGetValue(row, out var items):
+                    {
+                        if (items == null) return null;
+                        List<object>? all = new();
+                        foreach (var (item, env) in items)
+                        {
+                            all = Union(all, Finite(item, seen, env));
+                            if (all == null) return null;
+                        }
+                        return all;
+                    }
                 case StringLiteral s: return new List<object> { s.Value };
                 case NumericLiteral n: return new List<object> { n.Value };
                 case TemplateLiteral tl:
@@ -1961,7 +2120,8 @@ internal static partial class PlainTranslator
                         return each;
                     }
                 case MemberExpression { Computed: false, Property: Identifier { Name: "length" } } len when Elems(len.Object, bind) is { List: true } list:
-                    return list.Lists.Select(l => (object)(double)l.Count).Distinct().ToList();
+                    // a list of a list's rows is as long as the rows shown, which only the run knows
+                    return list.Rows != null ? null : list.Lists.Select(l => (object)(double)l.Count).Distinct().ToList();
                 case MemberExpression m when !m.Computed && m.Property is Identifier || m.Computed && m.Property is StringLiteral:
                     {
                         // a field of an object literal: every object the expression can be, and that field of each
@@ -2166,6 +2326,15 @@ internal static partial class PlainTranslator
             {
                 case ObjectExpression o:
                     return new() { (o, bind) };
+                case Identifier row when _itemOf.TryGetValue(row, out var items):
+                    {
+                        if (items == null) return null;
+                        var all = new List<(ObjectExpression, Inlined?)>();
+                        foreach (var (item, env) in items)
+                            if (Objects(item, env, depth + 1) is not { } some) return null;
+                            else all.AddRange(some);
+                        return all;
+                    }
                 case ArrayExpression or Acornima.Ast.Literal or TemplateLiteral or NonLogicalBinaryExpression or NonUpdateUnaryExpression or IFunction:
                     return new();
                 case ConditionalExpression c:
@@ -2237,6 +2406,10 @@ internal static partial class PlainTranslator
                     case LogicalExpression l2: Value(l2); return;
                     case MemberExpression m when m.Object == e: Member(m); return;
                     case CallExpression c2 when c2.Arguments.Contains(e): Passed(c2, e); return;
+                    // an item of an array written in place into a name: wherever the array hands out its items
+                    case ArrayExpression arr when arr.Elements.Contains(e) && _parent.TryGetValue(arr, out var ap) && ap is VariableDeclarator { Id: Identifier aid } avd && avd.Init == arr && Decl(aid) is { } ad:
+                        Items(ad);
+                        return;
                     case ExpressionStatement or IfStatement or NonUpdateUnaryExpression { Operator: Operator.LogicalNot }
                         or NonLogicalBinaryExpression { Operator: Operator.StrictEquality or Operator.StrictInequality or Operator.Equality or Operator.Inequality }:
                         return;
@@ -2249,6 +2422,57 @@ internal static partial class PlainTranslator
             {
                 if (!holders.Add(decl) || !_refs.TryGetValue(decl, out var refs)) return;
                 foreach (var r in refs) Value(r);
+            }
+
+            // An array holding it among its items, the array never given another value: the object goes where an
+            // item is read (`a[i]`), into each callback walking the array (`a.map(x => …)`) and each for...of's
+            // name; the array handed anywhere else, or given another value, could hand it on unseen.
+            void Items(Identifier array)
+            {
+                if (_writes.ContainsKey(array)) { written = true; return; }
+                if (!holders.Add(array) || !_refs.TryGetValue(array, out var refs)) return;
+                foreach (var r in refs) ItemsAt(r);
+            }
+
+            // an expression whose value is an array holding the object among its items
+            void ItemsAt(Expression r)
+            {
+                if (written) return;
+                switch (_parent[r])
+                {
+                    case MemberExpression { Computed: true } ix when ix.Object == r:
+                        if (WrittenTo(ix)) { written = true; return; }
+                        Value(ix);
+                        return;
+                    case MemberExpression { Computed: false, Property: Identifier { Name: var method } } mm when mm.Object == r:
+                        if (method == "length" && !WrittenTo(mm)) return;
+                        if (_parent[mm] is CallExpression call && call.Callee == mm)
+                        {
+                            if (method is "map" or "forEach" or "filter" or "some" or "every" or "find" or "findIndex" or "findLast" or "findLastIndex" or "flatMap"
+                                && call.Arguments.Count > 0 && Callback(call.Arguments[0]) is { } cb)
+                            {
+                                if (cb.Params.Count > 0)
+                                {
+                                    if (cb.Params[0] is Identifier item) Holder(item);
+                                    else { written = true; return; }
+                                }
+                                // what filter gives back is an array of them, what find gives back one of them
+                                if (method == "filter") ItemsAt(call);
+                                else if (method is "find" or "findLast") Value(call);
+                                return;
+                            }
+                            if (method is "indexOf" or "lastIndexOf" or "includes" or "join") return;
+                            if (method is "slice" or "concat") { ItemsAt(call); return; }
+                        }
+                        written = true;
+                        return;
+                    case ForOfStatement { Left: VariableDeclaration { Declarations: [{ Id: Identifier x }] } } fo when fo.Right == r:
+                        Holder(x);
+                        return;
+                    default:
+                        written = true;
+                        return;
+                }
             }
 
             void Returned(Node from)
@@ -2421,6 +2645,7 @@ internal static partial class PlainTranslator
                 // HtmlRenderer.Nameable names what a class moves.
                 if (t.Ve.name.StartsWith("__", StringComparison.Ordinal))
                 {
+                    t.Unnamed = true;
                     var name = t.Ve.name.Substring(2);
                     for (var k = 2; _built.ById.ContainsKey(name); k++) name = t.Ve.name.Substring(2) + "_" + k.ToString(CultureInfo.InvariantCulture);
                     _built.ById.Remove(t.Ve.name);
@@ -2432,7 +2657,7 @@ internal static partial class PlainTranslator
                 _built.Driven.Add(t.Name);
                 foreach (var css in t.Styles.Keys)
                     if (css is "opacity" or "visibility" or "transform") _built.NamedGroups.Add(t.Name);
-                if (t.Listens && !Clickable(t.Node)) t.Node.Attributes["data-click"] = "1";
+                if ((t.Listens || t.Hit) && !Clickable(t.Node)) t.Node.Attributes["data-click"] = "1";
                 // hidden takes the element out of the layout; the scene keeps its shapes and a `v` to show them
                 if (t.Top || t.AttrOps.Any(o => o.Name == "hidden")) { _hide.Add(t); _built.NamedGroups.Add(t.Name); }
                 // An empty label draws nothing, so a text written into it later has nowhere to go: it is
@@ -2618,19 +2843,72 @@ internal static partial class PlainTranslator
             var text = PageCompiler.Emitted(_built, _panel, values, boxes =>
             {
                 for (var i = 0; i < _hide.Count; i++) shown[i] = _hide[i].Ve.resolvedStyle.display != DisplayStyle.None;
+                var done = new bool[_hide.Count];
+                // Another shape of a row that is shown: laid out in that row's place, the shape shown swapped for it, so
+                // a row's shapes share their boxes and picking one only shows it. One layout per shape of a row.
+                var rows = new Dictionary<(MkRep, int), List<int>>();
+                for (var i = 0; i < _hide.Count; i++)
+                    if (_rowOf.TryGetValue(_hide[i], out var at))
+                    {
+                        if (!rows.TryGetValue((at.Rep, at.K), out var list)) rows[(at.Rep, at.K)] = list = new List<int>();
+                        list.Add(i);
+                    }
+                var swaps = new SortedDictionary<int, (List<int> Show, List<int> Hide)>();
+                foreach (var list in rows.Values)
+                {
+                    var on = list.Where(i => shown[i]).ToList();
+                    if (on.Count == 0) continue;
+                    foreach (var i in list.Where(i => !shown[i]))
+                    {
+                        var c = _rowOf[_hide[i]].C;
+                        if (!swaps.TryGetValue(c, out var swap)) swaps[c] = swap = (new List<int>(), new List<int>());
+                        swap.Show.Add(i);
+                        foreach (var j in on) if (!swap.Hide.Contains(j)) swap.Hide.Add(j);
+                        done[i] = true;
+                    }
+                }
+                foreach (var (show, hide) in swaps.Values) Lay(show, hide);
                 for (var i = 0; i < _hide.Count; i++)
                 {
-                    if (shown[i]) continue;
-                    var ve = _hide[i].Ve;
-                    var was = ve.style.display;
-                    ve.style.display = StyleKeyword.Null;
-                    _panel.Layout(_size.x, _size.y);
-                    var open = PageCompiler.Captured(_built);
-                    foreach (var d in Subtree(ve))
-                        if (open.TryGetValue(d, out var b)) boxes[d] = b;
-                    ve.style.display = was;
+                    if (shown[i] || done[i]) continue;
+                    // a list's rows not shown are laid out together, where the list at its longest has them; anything else alone
+                    var batch = new List<int> { i };
+                    if (_rowOf.TryGetValue(_hide[i], out var row))
+                        for (var j = i + 1; j < _hide.Count; j++)
+                            if (!shown[j] && !done[j] && _rowOf.TryGetValue(_hide[j], out var other) && other.Rep == row.Rep) batch.Add(j);
+                    foreach (var b in batch) done[b] = true;
+                    Lay(batch, new List<int>());
                 }
                 if (shown.Any(x => !x)) _panel.Layout(_size.x, _size.y);
+
+                void Lay(List<int> show, List<int> hide)
+                {
+                    // the elements hidden in this layout, each laid out in a pass of its own
+                    var hidden = new HashSet<VisualElement>(Enumerable.Range(0, _hide.Count).Where(j => !shown[j]).Select(j => _hide[j].Ve));
+                    var opened = new List<(VisualElement Ve, StyleEnum<DisplayStyle> Was)>();
+                    foreach (var h in hide)
+                    {
+                        opened.Add((_hide[h].Ve, _hide[h].Ve.style.display));
+                        _hide[h].Ve.style.display = DisplayStyle.None;
+                    }
+                    foreach (var b in show)
+                    {
+                        opened.Add((_hide[b].Ve, _hide[b].Ve.style.display));
+                        _hide[b].Ve.style.display = StyleKeyword.Null;
+                    }
+                    _panel.Layout(_size.x, _size.y);
+                    var open = PageCompiler.Captured(_built);
+                    foreach (var b in show) Take(_hide[b].Ve, true);
+                    for (var o = opened.Count - 1; o >= 0; o--) opened[o].Ve.style.display = opened[o].Was;
+
+                    // its boxes, but for an element inside it that is shown and hidden on its own: that has a pass of its own
+                    void Take(VisualElement ve, bool top)
+                    {
+                        if (!top && hidden.Contains(ve)) return;
+                        if (open.TryGetValue(ve, out var box)) boxes[ve] = box;
+                        foreach (var child in ve.Children()) Take(child, false);
+                    }
+                }
             });
             var lines = text.Split('\n');
             for (var i = 0; i < _hide.Count; i++)
@@ -2641,7 +2919,9 @@ internal static partial class PlainTranslator
                 if (k < 0)
                 {
                     // with no group to carry its v, a hidden element would be drawn: never that
-                    Refuse(_hide[i].AttrOps.First(o => o.Name == "hidden").At, $"hidden on \"{name}\": its group in the scene carries no name");
+                    Node at = (Node?)_hide[i].AttrOps.FirstOrDefault(o => o.Name == "hidden")?.At
+                              ?? (_madeBy.TryGetValue(_hide[i], out var made) ? made.Writes[0].At : _ast);
+                    Refuse(at, $"\"{name}\", shown and hidden as the script runs: its group in the scene carries no name");
                     continue;
                 }
                 var slot = DomSlots.Slot(name) + "_v";
@@ -3589,8 +3869,13 @@ internal static partial class PlainTranslator
         /// <summary>The DOM writes and timers of the script, as the Lua that does them.</summary>
         public bool Statement(JsToLua lua, Node s)
         {
+            // markup built in steps: written after its last step, the steps themselves doing nothing
+            if (_markupAt.TryGetValue(s, out var steps)) { EmitMarkup(lua, steps); return true; }
+            if (_silenced.Contains(s)) return true;
             if (s is VariableDeclaration && _elementDeclarations.Contains(s)) return true;
             if (s is ExpressionStatement es) s = es.Expression;
+            if (_markupAt.TryGetValue(s, out steps)) { EmitMarkup(lua, steps); return true; }
+            if (_silenced.Contains(s)) return true;
             if (s is not Expression e) return false;
             if (e is AssignmentExpression ma && _markup.TryGetValue(ma, out var markup))
             {
@@ -3774,6 +4059,7 @@ internal static partial class PlainTranslator
         {
             if (_lua.TryGetValue(e, out var own)) return own(lua);
             if (MarkupExpression(lua, e) is { } inMarkup) return inMarkup;
+            if (e is CallExpression cl && _closestOf.ContainsKey(cl)) return ClosestLua(cl, lua);
             if (e is CallExpression { Callee: Identifier callee } call && TimerNames.Contains(callee.Name) && !Declared(callee.Name))
             {
                 string Arg(int i) => i < call.Arguments.Count ? lua.Translate(call.Arguments[i]) : "nil";
@@ -3849,6 +4135,12 @@ internal static partial class PlainTranslator
                 _tables.Add("local " + name + " = { " + string.Concat(items.Select((t, i) => "[" + i.ToString(CultureInfo.InvariantCulture) + "] = " + t.Number.ToString(CultureInfo.InvariantCulture) + ", "))
                             + "length = " + items.Count.ToString(CultureInfo.InvariantCulture) + " } -- " + q.Kind + "\n");
                 value = name;
+                if (els.Rows is { } rows)
+                {
+                    // as long as the rows shown when it is looked up, as a browser's list is
+                    _rowsList = true;
+                    value = "v_rows(" + name + ", " + rows.Prefix.ToString(CultureInfo.InvariantCulture) + ", " + rows.Rep.Var + ")";
+                }
             }
             else value = els.One ? els.Ts[0].Number.ToString(CultureInfo.InvariantCulture) : "nil";
             return _domValue[c] = value;
@@ -3893,7 +4185,7 @@ internal static partial class PlainTranslator
             var listens = _order.Any(t => t.Listens);
             var classes = _order.Where(t => t.Class != null).ToList();
             var states = _order.SelectMany(t => t.StylePlans.Values).Where(p => p.States != null)
-                .Concat(_markupOf.Values.Select(m => m.Plan).OfType<StylePlan>()).ToList();
+                .Concat(_markupOf.Values.Select(m => m.Plan).OfType<StylePlan>().Distinct()).ToList();
 
             var sb = new StringBuilder(scene.Length + page.Length + 4096);
             sb.Append("-- Compiled once by ScriptedScreens Html. The scene is the page; this program is its script,\n");
@@ -3908,13 +4200,16 @@ internal static partial class PlainTranslator
             sb.Append("V_LIVE = true\n");
             sb.Append("V_AUTHOR = tick\n");
             sb.Append("local V_D = ").Append(Table(Written.Select(s => (s, Value(Opening[s]))))).Append('\n');
+            // what the data element holds, as last sent: a value set and set back before the send is not sent
+            sb.Append("local V_F = ").Append(Table(Written.Select(s => (s, Value(Opening[s]))))).Append('\n');
             sb.Append("local V_EASE = ").Append(Table(Written.Where(_ease.ContainsKey).Select(s => (s, _ease[s])))).Append('\n');
             sb.Append("local V_P, V_E = {}, {}\n");
             sb.Append("local V_SEND = { data = V_P, ease = V_E }\n");
             sb.Append("local V_DATA\n");
-            sb.Append("local function v_set(k, v)\n  if V_D[k] ~= v then V_D[k] = v V_P[k] = v V_E[k] = V_EASE[k] end\nend\n");
+            sb.Append("local function v_set(k, v)\n  if V_D[k] == v then return end\n  V_D[k] = v\n");
+            sb.Append("  if V_F[k] ~= v then V_P[k] = v V_E[k] = V_EASE[k] else V_P[k] = nil V_E[k] = nil end\nend\n");
             sb.Append("local function v_flush()\n  if next(V_P) == nil then return end\n  V_DATA:set_props(V_SEND)\n  ui:commit()\n");
-            sb.Append("  for k in pairs(V_P) do V_P[k] = nil end\n  for k in pairs(V_E) do V_E[k] = nil end\nend\n");
+            sb.Append("  for k, v in pairs(V_P) do V_F[k] = v V_P[k] = nil end\n  for k in pairs(V_E) do V_E[k] = nil end\nend\n");
             if (_reload)
             {
                 sb.Append("-- location.reload(): the page starts again from its source once the script that asked has run\n");
@@ -3924,7 +4219,7 @@ internal static partial class PlainTranslator
                 sb.Append("local function v_reset(t, t0)\n  for k in pairs(t) do t[k] = nil end\n  for k, v in pairs(t0) do t[k] = v end\nend\n");
             }
 
-            if (states.Count > 0)
+            if (states.Count > 0 || _reps.Any(r => r.RowPlans.Count > 0))
             {
                 sb.Append("local function v_state(s, value)\n  local st = s[value]\n  if st == nil then return end\n");
                 sb.Append("  for k, v in pairs(st) do v_set(k, v) end\nend\n");
@@ -4020,6 +4315,7 @@ internal static partial class PlainTranslator
                     sb.Append("  },\n}\n");
                 }
             }
+            sb.Append(Lists());
             var browser = Browser();
             sb.Append(browser);
             if (_timers)
@@ -4052,9 +4348,19 @@ internal static partial class PlainTranslator
                 if (_madeBy.Keys.Any(t => t.Listens))
                     sb.Append("-- markup written again makes new elements: what listened on the old ones is gone\n")
                       .Append("local function v_unlisten(key)\n  local list = V_ON[key]\n  for i = #list, 1, -1 do list[i] = nil end\n  V_ONCLICK[key] = nil\nend\n");
+                if (_events)
+                {
+                    sb.Append("-- the click event a listener is handed: the element the click landed on and the one listening, by number (one table, reused)\n");
+                    sb.Append("local V_EV = {}\n");
+                    sb.Append("local V_NUM = ").Append(Table(_order.Where(t => t.Hit || t.Listens).Select(t => (t.Name, t.Number.ToString(CultureInfo.InvariantCulture))))).Append('\n');
+                }
+                var ev = _events ? "V_EV" : string.Empty;
                 sb.Append("local function v_click(nodeId)\n  local chain = V_LIVE and V_CHAIN[nodeId]\n  if not chain then return end\n");
-                sb.Append("  for c = 1, #chain do\n    local list = V_ON[chain[c]]\n    for i = 1, #list do list[i]() end\n");
-                sb.Append("    local f = V_ONCLICK[chain[c]]\n    if f then f() end\n  end\n");
+                if (_events) sb.Append("  V_EV.target = V_NUM[nodeId]\n");
+                sb.Append("  for c = 1, #chain do\n");
+                if (_events) sb.Append("    V_EV.currentTarget = V_NUM[chain[c]]\n");
+                sb.Append("    local list = V_ON[chain[c]]\n    for i = 1, #list do list[i](").Append(ev).Append(") end\n");
+                sb.Append("    local f = V_ONCLICK[chain[c]]\n    if f then f(").Append(ev).Append(") end\n  end\n");
                 if (_reload) sb.Append("  if V_RELOAD then v_reload() end\n");
                 sb.Append("  v_flush()\nend\n");
             }
@@ -4092,7 +4398,7 @@ internal static partial class PlainTranslator
             sb.Append("V_DATA = ui:element({ id = ELEMENT .. \"").Append(DataSuffix).Append("\", type = \"vector\",\n");
             sb.Append("  rect = { unit = \"px\", x = -4, y = -4, w = 1, h = 1 }, props = { scene = SCENE, keep = 1, data = V_D } })\n");
             sb.Append("ui:commit()\n");
-            sb.Append("for k in pairs(V_P) do V_P[k] = nil end\nfor k in pairs(V_E) do V_E[k] = nil end\n");
+            sb.Append("for k, v in pairs(V_D) do V_F[k] = v end\nfor k in pairs(V_P) do V_P[k] = nil end\nfor k in pairs(V_E) do V_E[k] = nil end\n");
             if (_timers || _reload)
             {
                 sb.Append("\nfunction tick(dt)\n  if V_LIVE then\n");
