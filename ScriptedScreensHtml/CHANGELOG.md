@@ -14,6 +14,17 @@ Newest first. The workshop page is a short overview; this file has the full hist
   survives), `sessionStorage`, `innerWidth`/`innerHeight`, attributes (including ones CSS selects on),
   `hidden`, `dataset`, and reading back what the script wrote. `console` calls are removed. Other pages
   still run as before, and the log says which feature kept a page from compiling.
+- Compiled that way too: `querySelector`, `querySelectorAll`, `getElementsByClassName` and
+  `getElementsByTagName` (on the document or on an element), the lists they give (`length`, `item()`,
+  `forEach`, an index, `for...of`), an element chosen while the page runs (`getElementById('row' + i)`,
+  an array of elements, an element passed to a function), a value from a fixed set that comes back in a
+  function's returned object, `innerText`, `textContent +=`, and `classList.item()`, `.length` and
+  `.value`.
+- A one-line label with padding is no longer taken for a wrapping one: a 22px text with 4px of padding
+  above and below, holding a space, was drawn wrapped at its box's width depending on how its position
+  rounded, and a script writing such a text was not compiled.
+- `null` now prints as "null" where a page turns it into text (`'x' + el.getAttribute('y')`, a template,
+  `String()`), and a method called on an array written in place (`[1, 2].forEach(f)`) works.
 - A console in a room with no player compiles and runs its page too; before, it waited until someone
   walked in.
 - `parseInt` and `parseFloat` read a leading number as JavaScript does: `parseInt("10px")` is 10, not

@@ -379,10 +379,10 @@ Rules and columns: see INSTRUCTION-SET.md.
 | Document.exitPictureInPicture() | | | | |
 | Document.exitPointerLock() | | | | |
 | Document.getAnimations() | | | | |
-| Document.getElementById() | ✅ | resolved at compile time (a literal id, or a name bound to one); the Lua holds no element. An id computed at run time is refused | PlainTranslatorTests: every case | |
-| Document.getElementsByClassName() | | | | |
+| Document.getElementById() | ✅ | resolved at compile time: a literal id is its element, and the Lua holds its number when the script keeps it as a value. An id from a fixed set (a constant, a ternary, a function's arguments at every call) or a fixed text around one value (`'row' + i`, `` `cell${i}` ``, the value from a loop counter's range or any value, matched against the page's ids) is looked up by that value in a table built once (`V_IDn[i]`, never an id built as a string); an operation on it picks the element's own code from a table (`V_Xn`). An id the compile cannot bound is refused | PlainTranslatorTests: every case; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "an element chosen at run time: an id built from a loop counter, an array of elements, an element passed to a function"; PlainTranslatorTests refusals: "an element chosen by an id the compile cannot bound" | |
+| Document.getElementsByClassName() | ✅ | an HTMLCollection (below), found at compile time in the page as written, with the renderer's own selector engine, in document order; in the Lua an element is its number and a list a table of those numbers built once (`V_Ln`), so a script's own loops, conditions and calls work on them unchanged. A selector that tests a class or attribute the script changes (what it finds would change as the page runs), a state pseudo-class or a pseudo-element, and one matching an element drawn as part of its parent's text are refused | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index"; PlainTranslatorTests refusals: "a selector testing a class the script changes", "forEach on an HTMLCollection" | |
 | Document.getElementsByName() | | | | |
-| Document.getElementsByTagName() | | | | |
+| Document.getElementsByTagName() | ✅ | an HTMLCollection (below), found at compile time in the page as written, with the renderer's own selector engine, in document order; in the Lua an element is its number and a list a table of those numbers built once (`V_Ln`), so a script's own loops, conditions and calls work on them unchanged. A selector that tests a class or attribute the script changes (what it finds would change as the page runs), a state pseudo-class or a pseudo-element, and one matching an element drawn as part of its parent's text are refused | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index" | |
 | Document.getElementsByTagNameNS() | | | | |
 | Document.getSelection() | | | | |
 | Document.hasFocus() | | | | |
@@ -398,8 +398,8 @@ Rules and columns: see INSTRUCTION-SET.md.
 | Document.queryCommandEnabled() (deprecated) | | | | |
 | Document.queryCommandState() (deprecated) | | | | |
 | Document.queryCommandSupported() (deprecated) | | | | |
-| Document.querySelector() | | | | |
-| Document.querySelectorAll() | | | | |
+| Document.querySelector() | ✅ | the first element the selector matches, found at compile time in the page as written, with the renderer's own selector engine, in document order; in the Lua an element is its number and a list a table of those numbers built once (`V_Ln`), so a script's own loops, conditions and calls work on them unchanged. A selector that tests a class or attribute the script changes (what it finds would change as the page runs), a state pseudo-class or a pseudo-element, and one matching an element drawn as part of its parent's text are refused; one that matches nothing, used as an element, is refused as a browser throws there | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "querySelector and querySelectorAll: a list's length, item(), an index and forEach"; PlainTranslatorTests refusals: "a selector matching text drawn inside its parent" | |
+| Document.querySelectorAll() | ✅ | a NodeList (below), found at compile time in the page as written, with the renderer's own selector engine, in document order; in the Lua an element is its number and a list a table of those numbers built once (`V_Ln`), so a script's own loops, conditions and calls work on them unchanged. A selector that tests a class or attribute the script changes (what it finds would change as the page runs), a state pseudo-class or a pseudo-element, and one matching an element drawn as part of its parent's text are refused | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "querySelector and querySelectorAll: a list's length, item(), an index and forEach"; PlainTranslatorTests refusals: "a selector testing a class the script changes" | |
 | Document.releaseCapture() (non-standard) | | | | |
 | Document.replaceChildren() | | | | |
 | Document.requestStorageAccess() | | | | |
@@ -425,7 +425,7 @@ Rules and columns: see INSTRUCTION-SET.md.
 | Node.parentElement | | | | |
 | Node.parentNode | | | | |
 | Node.previousSibling | | | | |
-| Node.textContent | ✅ | writes: a text placeholder `{$id_pN:%...}` (numbers) or a constant-string slot. Reads: a written label's text rebuilt from its slots as JavaScript prints them (`js_str`, toFixed); an element the script never writes, the constant text its source holds, whitespace as written. `+=` and reading an element whose inner labels the script writes are refused for now | PlainTranslatorTests: toFixed and a template literal; text written in two shapes; plain-counter in game; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: textContent, className, classList.contains and style answer what the script wrote" | |
+| Node.textContent | ✅ | writes: a text placeholder `{$id_pN:%...}` (numbers) or a constant-string slot. Reads: a written label's text rebuilt from its slots as JavaScript prints them (`js_str`, toFixed); an element the script never writes, the constant text its source holds, whitespace as written. `+=` (and the other compound writes) is the text read back and written, every value worked out before any slot is set. Reading an element whose inner labels the script writes is refused for now | PlainTranslatorTests: toFixed and a template literal; text written in two shapes; plain-counter in game; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: textContent, className, classList.contains and style answer what the script wrote"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "innerText read and written, textContent +=, and classList's item(), length and value" | |
 | Node.ELEMENT_NODE (constant = 1) | | | | |
 | Node.ATTRIBUTE_NODE (constant = 2) | | | | |
 | Node.TEXT_NODE (constant = 3) | | | | |
@@ -465,8 +465,8 @@ Note: MDN's dedicated `ParentNode` interface page returns HTTP 404 (confirmed in
 | ParentNode.prepend() | | | | |
 | ParentNode.replaceChildren() | | | | |
 | ParentNode.moveBefore() | | | | |
-| ParentNode.querySelector() | | | | |
-| ParentNode.querySelectorAll() | | | | |
+| ParentNode.querySelector() | ✅ | as Document.querySelector() and Element.querySelector() | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "querySelector and querySelectorAll: a list's length, item(), an index and forEach"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index" | |
+| ParentNode.querySelectorAll() | ✅ | as Document.querySelectorAll() and Element.querySelectorAll() | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "querySelector and querySelectorAll: a list's length, item(), an index and forEach"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index" | |
 
 #### ChildNode (mixin)
 
@@ -539,7 +539,7 @@ Note: same orphaned-page caveat as ParentNode above.
 | Element.attributes | | | | |
 | Element.childElementCount | | | | |
 | Element.children | | | | |
-| Element.classList | ✅ | class states, every combination laid out at compile time (up to 6 classes, 64 states with the attributes CSS selects on), `v_class`. `contains`: see DOMTokenList.contains(); item, value and the rest are refused for now | PlainTranslatorTests: addEventListener('click') ...; 09-transition in game; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: textContent, className, classList.contains and style answer what the script wrote" | |
+| Element.classList | ✅ | class states, every combination laid out at compile time (up to 6 classes, 64 states with the attributes CSS selects on), `v_class`. `contains`, `item`, `length`, `value`: see DOMTokenList; `replace`, `supports`, `forEach` and the iterators are refused for now | PlainTranslatorTests: addEventListener('click') ...; 09-transition in game; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: textContent, className, classList.contains and style answer what the script wrote"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "innerText read and written, textContent +=, and classList's item(), length and value" | |
 | Element.className | ✅ | writes from a fixed set: class states (`v_classname`). A value computed at run time is refused. Reads: the class attribute as the page wrote it until the script changes it, then its classes in the order a browser keeps them (`V_Cn.order`, `table.concat` at the read) | PlainTranslatorTests: a colour picked by a condition ... className; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: textContent, className, classList.contains and style answer what the script wrote" | |
 | Element.clientHeight | | | | |
 | Element.clientLeft | | | | |
@@ -587,8 +587,8 @@ Note: same orphaned-page caveat as ParentNode above.
 | Element.getBoundingClientRect() | | | | |
 | Element.getBoxQuads() (non-standard) | | | | |
 | Element.getClientRects() | | | | |
-| Element.getElementsByClassName() | | | | |
-| Element.getElementsByTagName() | | | | |
+| Element.getElementsByClassName() | ✅ | as the Document's, among the element's descendants; on an element chosen at run time (it would answer differently for each) refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index" | |
+| Element.getElementsByTagName() | ✅ | as the Document's, among the element's descendants; on an element chosen at run time (it would answer differently for each) refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index" | |
 | Element.getElementsByTagNameNS() | | | | |
 | Element.getHTML() | | | | |
 | Element.hasAttribute() | ✅ | as getAttribute: `(at[name] ~= nil)`, or a constant | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "setAttribute, removeAttribute, toggleAttribute and dataset on attributes CSS selects on"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "attributes nothing selects on: kept as the program's own values" | |
@@ -602,8 +602,8 @@ Note: same orphaned-page caveat as ParentNode above.
 | Element.moveBefore() | | | | |
 | Element.prepend() | | | | |
 | Element.pseudo() (experimental) | | | | |
-| Element.querySelector() | | | | |
-| Element.querySelectorAll() | | | | |
+| Element.querySelector() | ✅ | as the Document's, among the element's descendants; on an element chosen at run time (it would answer differently for each) refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index" | |
+| Element.querySelectorAll() | ✅ | as the Document's, among the element's descendants; on an element chosen at run time (it would answer differently for each) refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index" | |
 | Element.releasePointerCapture() | | | | |
 | Element.remove() | | | | |
 | Element.removeAttribute() | ✅ | as setAttribute: `v_rmattr`, absent being one of the laid-out values | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "setAttribute, removeAttribute, toggleAttribute and dataset on attributes CSS selects on"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "attributes nothing selects on: kept as the program's own values" | |
@@ -648,7 +648,7 @@ Note: same orphaned-page caveat as ParentNode above.
 | HTMLElement.enterKeyHint | | | | |
 | HTMLElement.hidden | ✅ | the browser's own `[hidden] { display: none }` as laid-out states: the element keeps its shapes in the scene inside `G v=$name_v` (0: not drawn and not clickable, as display: none), placed where each layout would put it shown, and what follows moves up as the browser moves it (`v_hidden`). Read: `(at.hidden ~= nil)`. Two elements whose hiding moves the same box (two toggled panels above one list) are refused for now, as two elements' classes are | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "hidden: the element leaves the layout and comes back, and one hidden from the start shows" | |
 | HTMLElement.inert | | | | |
-| HTMLElement.innerText | | | | |
+| HTMLElement.innerText | ✅ | reads: the text as laid out - each run of white space one space, a block's ends trimmed, `<br>` a line break, text-transform uppercase/lowercase applied: a constant for a text the script never writes, `v_collapse` (and `string.upper`/`lower`) over the text read back for one it does. Writes: as Node.textContent. An element holding other elements (the line breaks between its blocks), capitalize and the other transforms, and white-space that keeps spaces are refused for now | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "innerText read and written, textContent +=, and classList's item(), length and value" | |
 | HTMLElement.inputMode | | | | |
 | HTMLElement.isContentEditable | | | | |
 | HTMLElement.lang | | | | |
@@ -1388,9 +1388,9 @@ Note: this table covers the interface's own generic members only (indexed access
 
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
-| DOMTokenList.length | | | | |
-| DOMTokenList.value | | | | |
-| DOMTokenList.item() | | | | |
+| DOMTokenList.length | ✅ | the classes the element has now: `v_clscount(V_Cn.on)`, or a constant for one whose classes the script never changes | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "innerText read and written, textContent +=, and classList's item(), length and value" | |
+| DOMTokenList.value | ✅ | as Element.className: read, the class attribute in the order a browser keeps it; written, a value from a fixed set laid out as class states | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "innerText read and written, textContent +=, and classList's item(), length and value" | |
+| DOMTokenList.item() | ✅ | the class at that place in the order the attribute holds them (`v_clsitem(V_Cn.order, i)`, the order kept as classes change), or a constant; null past the end | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "innerText read and written, textContent +=, and classList's item(), length and value" | |
 | DOMTokenList.contains() | ✅ | as `Element.classList`: `(V_Cn.on[name] == true)`; an element whose classes the script never changes answers from the page's source (a constant for a literal name) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "reads: textContent, className, classList.contains and style answer what the script wrote" | |
 | DOMTokenList.add() | ✅ | as `Element.classList` | PlainTranslatorTests: 09-transition; the script's own logic ... | |
 | DOMTokenList.remove() | ✅ | as `Element.classList` | PlainTranslatorTests: the script's own logic ... | |
@@ -1402,6 +1402,29 @@ Note: this table covers the interface's own generic members only (indexed access
 | DOMTokenList.keys() | | | | |
 | DOMTokenList.toString() | | | | |
 | DOMTokenList.values() | | | | |
+
+#### NodeList
+
+| Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
+|---|---|---|---|---|
+| NodeList.length | ✅ | the list's `length` field (`js_len`), fixed at compile time | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "querySelector and querySelectorAll: a list's length, item(), an index and forEach" | |
+| NodeList.item() | ✅ | `v_item(list, i)`: i as a whole number, null past the end | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "querySelector and querySelectorAll: a list's length, item(), an index and forEach" | |
+| NodeList.forEach() | ✅ | the prelude's Array forEach over the table of element numbers; the callback's element is one of the list, and what it does with it is picked from a table (`V_Xn[el]`) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "querySelector and querySelectorAll: a list's length, item(), an index and forEach" | |
+| NodeList indexed access (`list[i]`) | ✅ | the table indexed as written: a literal index is that element, any other one of the list (or undefined past the end) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "querySelector and querySelectorAll: a list's length, item(), an index and forEach"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index" | |
+| NodeList iteration (`for...of`) | ✅ | a numeric loop over the table | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "querySelector and querySelectorAll: a list's length, item(), an index and forEach" | |
+| NodeList.entries() | | | | |
+| NodeList.keys() | | | | |
+| NodeList.values() | | | | |
+
+#### HTMLCollection
+
+| Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
+|---|---|---|---|---|
+| HTMLCollection.length | ✅ | as NodeList.length. A live collection: one whose selector tests a class or attribute the script changes is refused (see Document.getElementsByClassName) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index" | |
+| HTMLCollection.item() | ✅ | as NodeList.item() | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index" | |
+| HTMLCollection.namedItem() | | | | |
+| HTMLCollection indexed access (`coll[i]`) | ✅ | as NodeList | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index" | |
+| HTMLCollection iteration (`for...of`) | ✅ | as NodeList; forEach, which an HTMLCollection does not have in a browser either, is refused by name | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index"; PlainTranslatorTests refusals: "forEach on an HTMLCollection" | |
 
 #### DOMStringMap
 
@@ -2291,5 +2314,7 @@ All of the rows below are single grouped rows (interface family, not full member
 **Deduplication applied during assembly (per the coordinator's note on cross-file/in-file duplicates):** the original dom-b research draft carried its own "CSSOM View" section re-listing 18 Element/HTMLElement geometry members and 3 Window scroll methods that are already fully enumerated under 4.2 Element/HTMLElement and 4.1 Window above, plus its own one-row "Element.animate()" table duplicating the row already present in 4.2 Element. All four are removed from this merged file and replaced with cross-reference notes at their original heading, leaving only the CSSOM View members (Window.scrollX/scrollY/pageXOffset/pageYOffset/visualViewport) not covered elsewhere. The `aria-*`/`role` attribute (HTML content attribute, INSTRUCTION-SET-HTML.md 1b) versus `Element.aria*` (DOM IDL property, this file) and the HTML `on*` content attributes (INSTRUCTION-SET-HTML.md 1d) versus DOM event names/EventTarget (this file) are NOT duplicates — they are different languages' features (an HTML attribute vs. a DOM property/API) and each is listed once, in its own file, per the coordinator's instruction to keep both where the languages differ.
 
 ## Counts
+
+**NodeList and HTMLCollection** had no rows although every list-giving lookup returns one; their members were added in 4.4 on 2026-09-24 (13 rows, not in the count below).
 
 **1,715 total data rows** (verified by counting table rows in the assembled file — sub-agent self-reported subtotals below are approximate hand counts, kept for orientation): 4.1-4.4 (Window/globals ~212, Document/Node/ParentNode/ChildNode/Element/HTMLElement ~366, per-element HTML interfaces ~488, CharacterData/Text/CSSStyleDeclaration/DOMTokenList/DOMStringMap/NamedNodeMap/Attr ~54) plus 4.5 (events ~196, canvas ~92, SVG ~102, Web Animations ~34, CSSOM View 5, observers ~40, URL/text/binary ~71, grouped long tail 58 — after removing 22 rows duplicated against 4.1/4.2/4.3 during assembly).

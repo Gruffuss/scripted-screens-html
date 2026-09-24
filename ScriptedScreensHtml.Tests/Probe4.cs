@@ -484,10 +484,28 @@ ic = { persist = {
             Console.WriteLine($"  compile: {(compiled.Ok ? "COMPILED" : "REFUSED")} in {ms:0} ms - lua {compiled.Lua?.Length ?? 0} chars, "
                               + $"{compiled.Bindings.Count} binding(s), {compiled.Problems.Count} problem(s), {compiled.Unmapped.Count} unmapped, {compiled.Warnings.Count} warning(s)");
             foreach (var w in compiled.Warnings.Where(w => w.StartsWith("not translated to plain Lua", StringComparison.Ordinal))) Console.WriteLine("    " + w);
+            // every reason the plain translator gives, where the warning above shows three
+            if (verbose && compiled.Warnings.Any(w => w.StartsWith("not translated to plain Lua", StringComparison.Ordinal)))
+            {
+                Headless(page, out var built, out var panel, out var size);
+                // what deciding it costs the game thread at build, where it runs before the page's script
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                PlainTranslator.Eligible(built);
+                Console.WriteLine($"      eligibility read in {clock.Elapsed.TotalMilliseconds:0.0} ms");
+                var refused = new List<string>();
+                PlainTranslator.Compile(built, panel, size, ("main", "page", "html:page"), refused);
+                foreach (var r in refused) Console.WriteLine("      refused: " + r);
+            }
             foreach (var p in compiled.Problems.Take(verbose ? 200 : 25)) Console.WriteLine("    problem: " + p);
             foreach (var u in compiled.Unmapped.Take(verbose ? 200 : 25)) Console.WriteLine("    unmapped: " + u);
             if (Environment.GetEnvironmentVariable("WHY_LUA") is { Length: > 0 } luaPath && compiled.Lua != null) File.WriteAllText(luaPath, compiled.Lua);
-            if (Environment.GetEnvironmentVariable("WHY_STRUCTURE") is { Length: > 0 } structurePath && compiled.Structure != null) File.WriteAllText(structurePath, compiled.Structure);
+            if (Environment.GetEnvironmentVariable("WHY_STRUCTURE") is { Length: > 0 } structurePath && compiled.Structure != null)
+            {
+                File.WriteAllText(structurePath, compiled.Structure);
+                // and the scene as it opens, every value in place: what an in-game scene dump shows
+                if (compiled.StructureValues != null)
+                    File.WriteAllText(structurePath + ".opening", PlainTranslator.Literal(compiled.Structure, compiled.StructureValues, new List<string>()));
+            }
             // A name the structure reads with no opening value draws magenta until the chip writes it.
             if (compiled.Structure != null && compiled.StructureValues != null)
                 foreach (var name in System.Text.RegularExpressions.Regex.Matches(compiled.Structure, @"\$([A-Za-z_][A-Za-z0-9_]*)").Select(m => m.Groups[1].Value).Distinct())

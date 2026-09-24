@@ -300,22 +300,133 @@ internal static class PlainTranslatorTests
          Steps("b", "b"), new[] { 1, 2 }),
     };
 
+    /// <summary>
+    /// Group 3: elements found by selector, lists of them, an element chosen at run time, values from a
+    /// function's returned object, innerText and compound text writes, classList's reads - and a JavaScript
+    /// method on a literal array and null in text. Each compiled for every console shape.
+    /// </summary>
+    private static readonly (string Feature, string Page, List<(double, string?)> Steps, int[] Checkpoints)[] Lookups =
+    {
+        ("querySelector and querySelectorAll: a list's length, item(), an index and forEach",
+         Page(".row { color: #999; height: 22px; background: #111; } .row.lit { color: #fe4; background: #333; }",
+              "<p id=\"count\">-</p><div class=\"row\" id=\"r0\">a</div><div class=\"row\" id=\"r1\">b</div><div class=\"row\" id=\"r2\">c</div><button id=\"next\" class=\"go\">Next</button>",
+              "const rows = document.querySelectorAll('.row');" +
+              "const count = document.querySelector('#count');" +
+              "count.textContent = rows.length + ' rows';" +
+              "let k = 0;" +
+              "document.querySelector('button.go').addEventListener('click', () => {" +
+              "  rows.forEach((row, i) => row.classList.toggle('lit', i === k % rows.length));" +
+              "  document.querySelectorAll('.none').forEach((e) => { e.textContent = 'never'; });" +
+              "  rows[k % rows.length].textContent = 'row ' + k;" +
+              "  rows.item((k + 1) % rows.length).textContent = 'next';" +
+              "  k++;" +
+              "  let lit = 0;" +
+              "  for (const r of rows) if (r.classList.contains('lit')) lit++;" +
+              "  count.textContent = k + ' of ' + rows.length + ', lit ' + lit;" +
+              "});"),
+         Steps("next", "next", "next", "next"), new[] { 0, 1, 2, 4 }),
+
+        ("getElementsByClassName, getElementsByTagName and Element.querySelector, walked by for...of and an index",
+         Page("#panel { padding: 4px; background: #222; } .v { height: 20px; }",
+              "<div id=\"panel\"><h3 class=\"title\">Panel</h3><div class=\"v\" id=\"v1\">0</div><div class=\"v\" id=\"v2\">0</div></div><p class=\"note\" id=\"n1\">x</p><p class=\"note\" id=\"n2\">y</p>",
+              "const panel = document.getElementById('panel');" +
+              "const values = panel.getElementsByClassName('v');" +
+              "const title = panel.querySelector('.title');" +
+              "const heads = panel.getElementsByTagName('h3');" +
+              "const boxes = panel.querySelectorAll('div');" +
+              "const notes = document.getElementsByTagName('p');" +
+              "let n = 0;" +
+              "setInterval(() => {" +
+              "  n++;" +
+              "  for (const v of values) v.textContent = n * 10;" +
+              "  title.textContent = 'Panel ' + n + ' of ' + values.length + '/' + boxes.length + ' ' + values.item(1).textContent;" +
+              "  heads[0].style.opacity = n % 2 ? 0.5 : 1;" +
+              "  for (let i = 0; i < notes.length; i++) notes[i].style.opacity = i === n % 2 ? 1 : 0.4;" +
+              "}, 500);"),
+         Ticks(4), new[] { 0, 1, 2, 4 }),
+
+        ("an element chosen at run time: an id built from a loop counter, an array of elements, an element passed to a function",
+         Page(".led { width: 20px; height: 20px; background: #333; margin: 2px; } .led.on { background: #3e5; }",
+              "<div class=\"led\" id=\"led0\"></div><div class=\"led\" id=\"led1\"></div><div class=\"led\" id=\"led2\"></div><div class=\"led\" id=\"led3\"></div>" +
+              "<p id=\"a\">-</p><p id=\"b\">-</p><p id=\"cell0\">0</p><p id=\"cell1\">0</p><div id=\"cells\"><p>total</p></div><button id=\"go\">Go</button>",
+              "const labels = [document.getElementById('a'), document.getElementById('b')];" +
+              "function paint(el, text, colour) { el.textContent = text; el.style.color = colour; }" +
+              "let level = 0;" +
+              "document.getElementById('go').addEventListener('click', () => {" +
+              "  level = (level + 1) % 5;" +
+              "  for (let i = 0; i < 4; i++) document.getElementById('led' + i).classList.toggle('on', i < level);" +
+              "  for (let i = 0; i < 2; i++) document.getElementById(`cell${i}`).textContent = level * 10 + i;" +
+              "  ['cell0', 'cell1'].forEach((id, k) => { document.getElementById(id).style.color = k === level % 2 ? '#fe4' : '#999'; });" +
+              "  paint(labels[level % 2], 'level ' + level, level > 2 ? '#f55' : '#5f5');" +
+              "  if (level === 4) paint(document.getElementById('b'), 'b' + level, '#ccc');" +
+              "  if (level === 3) (level % 2 ? labels[0] : labels[1]).style.color = '#ff0';" +
+              "});"),
+         Steps("go", "go", "go", "go", "go", "go"), new[] { 1, 2, 4, 6 }),
+
+        ("values from a fixed set through a function's returned object: an attribute CSS selects on and a text",
+         Page(".panel { padding: 6px; background: #eee; color: #222; } .panel[data-theme=\"dim\"] { background: #222; } .panel[data-theme=\"dim\"] p { color: #ccc; } .base.dark { font-size: 20px; }",
+              "<div id=\"panel\" class=\"panel\" data-theme=\"lit\"><p id=\"t\">lit</p></div><button id=\"b\">Dim</button>",
+              "let dim = false;" +
+              "function values() { return { theme: dim ? 'dim' : 'lit', label: dim ? 'Dim' : 'Lit' }; }" +
+              "function render() {" +
+              "  const v = values();" +
+              "  document.getElementById('panel').setAttribute('data-theme', v.theme);" +
+              "  document.getElementById('t').textContent = v.label;" +
+              "  const cls = (dim ? 'dark' : '') + ' base';" +
+              "  document.getElementById('t').className = cls.trim();" +
+              "}" +
+              "document.getElementById('b').addEventListener('click', () => { dim = !dim; render(); });" +
+              "render();"),
+         Steps("b", "b", "b"), new[] { 0, 1, 2, 3 }),
+
+        ("innerText read and written, textContent +=, and classList's item(), length and value",
+         Page("#box { height: 10px; background: #444; } #box.y { width: 50px; } #tag { height: 8px; width: 20px; background: #a44; } #tag.t2 { width: 60px; }",
+              "<p id=\"log\">Log:</p><p id=\"up\" style=\"text-transform: uppercase\">  Mixed   case  </p><p id=\"cls\">-</p><div id=\"box\" class=\"x y z\"></div><div id=\"tag\" class=\"t1\"></div><button id=\"b\">B</button>",
+              "const log = document.getElementById('log');" +
+              "const box = document.getElementById('box');" +
+              "document.getElementById('cls').innerText = document.getElementById('up').innerText + '|' + box.classList.length + ' ' + box.classList.item(1) + ' ' + box.classList.item(5) + ' ' + box.classList.value;" +
+              "let n = 0;" +
+              "document.getElementById('b').addEventListener('click', () => {" +
+              "  n++;" +
+              "  document.getElementById('tag').classList.value = n % 2 ? 't1 t2' : 't1';" +
+              "  log.textContent += ' .';" +
+              "  box.classList.toggle('y');" +
+              "  document.getElementById('cls').innerText = box.classList.length + ' ' + box.classList.item(1) + ' ' + box.classList.value + ' ' + log.innerText.length;" +
+              "});"),
+         Steps("b", "b", "b"), new[] { 0, 1, 2, 3 }),
+
+        ("a method called on a literal array, and null as text in a larger expression, a template and String()",
+         Page("", "<p id=\"out\">-</p><p id=\"sum\">-</p><div id=\"d\" data-k=\"v\"></div>",
+              "const out = document.getElementById('out');" +
+              "let total = 0;" +
+              "[1, 2, 3].forEach((n) => { total += n; });" +
+              "const d = document.getElementById('d');" +
+              "const text = 'x' + d.getAttribute('missing') + '/' + `${d.getAttribute('data-k')}-${d.getAttribute('nope')}` + String(d.getAttribute('none'));" +
+              "out.textContent = text + ' ' + ['a', 'b'].map((s) => s + '!').join('') + ' ' + ('n' + null) + `${null}`;" +
+              "document.getElementById('sum').textContent = total + (d.getAttribute('nothing') + 1);"),
+         Steps(0.5), new[] { 0, 1 }),
+    };
+
     /// <summary>Features outside what is translated, each refused by name - the page keeps its old path.</summary>
     private static readonly (string Feature, string Page, string Reason)[] Refusals =
     {
         ("requestAnimationFrame", Page("", "<p id=\"a\">x</p>", "requestAnimationFrame(() => { document.getElementById('a').textContent = 'y'; });"), "requestAnimationFrame"),
         ("innerHTML", Page("", "<div id=\"a\"><p>x</p></div>", "setTimeout(() => { document.getElementById('a').innerHTML = '<b>y</b>'; }, 10);"), ".innerHTML of \"a\""),
-        ("reading innerText", Page("", "<p id=\"a\">1</p>", "setTimeout(() => { const el = document.getElementById('a'); el.textContent = el.innerText + '!'; }, 10);"), "reading or computing with .innerText"),
-        ("an element chosen at run time", Page("", "<p id=\"a1\">x</p>", "let i = 1; setTimeout(() => { document.getElementById('a' + i).textContent = 'y'; }, 10);"), "an element chosen at run time"),
-        ("an element used as a value", Page("", "<p id=\"a\">x</p>", "function paint(el) { el.textContent = 'y'; } paint(document.getElementById('a'));"), "used as a value"),
+        ("an element chosen by an id the compile cannot bound", Page("", "<p id=\"a1\">x</p>", "setTimeout(() => { document.getElementById(localStorage.getItem('which')).textContent = 'y'; }, 10);"), "from ids the compile cannot bound"),
+        ("an element stored in an object", Page("", "<p id=\"a\">x</p>", "const o = { el: document.getElementById('a') }; setTimeout(() => { o.el.textContent = 'y'; }, 10);"), "used as a value this way"),
+        ("an element passed to a function the compile cannot follow", Page("", "<p id=\"a\">x</p>", "const fs = [function (el) { el.textContent = 'y'; }]; fs[0](document.getElementById('a'));"), "passed to a function the compile cannot follow"),
+        ("a selector testing a class the script changes", Page(".on { color: red; }", "<p id=\"a\" class=\"x\">x</p><p id=\"b\" class=\"on\">y</p>",
+            "const lit = document.querySelectorAll('.on'); setTimeout(() => { document.getElementById('a').classList.add('on'); lit.forEach((e) => { e.textContent = 'z'; }); }, 10);"), "tests the class \"on\", which the script changes"),
+        ("forEach on an HTMLCollection", Page("", "<p class=\"a\" id=\"a\">x</p>", "document.getElementsByClassName('a').forEach((e) => { e.textContent = 'y'; });"), "forEach on an HTMLCollection"),
+        ("a list's member not translated", Page("", "<p id=\"a\">x</p>", "setTimeout(() => { for (const [i, e] of document.querySelectorAll('p').entries()) e.textContent = i; }, 10);"), ".entries of a list of elements"),
+        ("a selector matching text drawn inside its parent", Page("", "<p id=\"a\">a <b>b</b></p>", "setTimeout(() => { document.querySelector('p b').textContent = 'y'; }, 10);"), "no box of its own"),
         ("a non-click event", Page("", "<button id=\"b\">x</button>", "document.getElementById('b').addEventListener('mousedown', () => {});"), "delivers only clicks"),
         ("reading the event object", Page("", "<button id=\"b\">x</button><p id=\"a\">x</p>", "document.getElementById('b').addEventListener('click', (e) => { document.getElementById('a').textContent = e.type; });"), "reads its event object"),
-        ("querySelector", Page("", "<p class=\"a\">x</p>", "setTimeout(() => { document.querySelector('.a').textContent = 'y'; }, 10);"), "document.querySelector"),
         ("a size that moves its siblings", Page("#a { height: 10px; background: #fff; }", "<div id=\"a\"></div><p>below</p>", "setTimeout(() => { document.getElementById('a').style.height = 30 + 'px'; }, 10);"), "is in normal flow"),
-        ("classList.item (a read not translated)", Page("", "<p id=\"a\" class=\"x\">x</p>", "setTimeout(() => { const a = document.getElementById('a'); if (a.classList.item(0)) a.textContent = 'y'; }, 10);"), "classList.item"),
+        ("classList.replace (not translated)", Page("", "<p id=\"a\" class=\"x\">x</p>", "setTimeout(() => { document.getElementById('a').classList.replace('x', 'y'); }, 10);"), "classList.replace"),
         ("navigating to another document", Page("", "<button id=\"b\">x</button>", "document.getElementById('b').onclick = () => { location.href = 'https://example.com/'; };"), "has no network to fetch another"),
         ("changing location.search", Page("", "<button id=\"b\">x</button>", "document.getElementById('b').onclick = () => { location.search = '?a=1'; };"), "location.search = …, which loads another document"),
-        ("location.assign to a URL only known at run time", Page("", "<button id=\"b\">x</button>", "let u = 'page' + 2; document.getElementById('b').onclick = () => { location.assign(u); };"), "may be another document"),
+        ("location.assign to a URL only known at run time", Page("", "<button id=\"b\">x</button>", "document.getElementById('b').onclick = () => { location.assign(localStorage.getItem('u')); };"), "may be another document"),
         ("location used as a value", Page("", "<p id=\"a\">x</p>", "const l = location; setTimeout(() => { document.getElementById('a').textContent = l.hash; }, 10);"), "location used this way"),
         ("a named Storage property", Page("", "<p id=\"a\">x</p>", "localStorage.mode = 'x'; setTimeout(() => { document.getElementById('a').textContent = 'y'; }, 10);"), "named properties are not yet"),
         ("an attribute CSS selects on, set to a value known only at run time", Page("[data-v=\"1\"] { color: red; }", "<p id=\"a\">x</p>", "let v = 0; setInterval(() => { v++; document.getElementById('a').setAttribute('data-v', v); }, 10);"), "set to a value only known at run time"),
@@ -324,7 +435,9 @@ internal static class PlainTranslatorTests
         ("writing innerWidth", Page("", "<p id=\"a\">x</p>", "window.innerWidth = 5; setTimeout(() => { document.getElementById('a').textContent = 'y'; }, 10);"), "innerWidth written by the script"),
         ("a constant text that wraps at this console's size", Page("#a { width: 60px; }", "<p id=\"a\">ok</p><p>below</p>", "setTimeout(() => { document.getElementById('a').textContent = 'a message far too long for sixty pixels'; }, 10);"), "\"a message far too long for sixty pixels\" in \"a\""),
         ("a text that pushes the rest of its line along", Page("", "<p><span id=\"a\">1</span> then <span id=\"b\">2</span></p>", "setTimeout(() => { document.getElementById('a').textContent = 'one hundred'; }, 10);"), "moves the scene's"),
-        ("a class name computed at run time", Page("", "<p id=\"a\">x</p>", "let k = 'c' + 1; setTimeout(() => { document.getElementById('a').className = k; }, 10);"), "className of \"a\" set to a value only known at run time"),
+        ("a class that takes shapes away says what it changed", Page(".box { width: 40px; height: 20px; background: #a33; } .box.gone { display: none; }", "<div id=\"a\" class=\"box\"></div><p>below</p>",
+            "setTimeout(() => { document.getElementById('a').classList.add('gone'); }, 10);"), "scene lines at rest, "),
+        ("a class name computed at run time", Page("", "<p id=\"a\">x</p>", "let k = 'c' + Math.random(); setTimeout(() => { document.getElementById('a').className = k; }, 10);"), "className of \"a\" set to a value only known at run time"),
     };
 
     /// <summary>The console shapes a page is compiled for in game: square, wide and tall, in canvas units.</summary>
@@ -335,6 +448,8 @@ internal static class PlainTranslatorTests
     {
         (System.IO.Path.Combine("ScriptedScreensHtml", "examples", "09-transition.lua"), Ticks(8), new[] { 1, 2, 6, 8 }),
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-counter.lua"), Ticks(12), new[] { 1, 4, 12 }),
+        // refused in game at first (a padded row read as two lines once "row 0" had a space in it); not yet seen compiled there
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-select.lua"), Ticks(8), new[] { 0, 1, 4, 8 }),
     };
 
     internal static void Run(Action<bool, string> check)
@@ -345,6 +460,13 @@ internal static class PlainTranslatorTests
             catch (Exception ex) { check(false, $"plain [{feature}]: threw - {ex.Message.Split('\n')[0]}"); }
         }
         foreach (var (feature, page, steps, checkpoints) in Browser)
+            foreach (var console in Consoles)
+            {
+                var name = $"{feature} on a {console.W:0}x{console.H:0} console";
+                try { One(name, page, steps, checkpoints, check, console); }
+                catch (Exception ex) { check(false, $"plain [{name}]: threw - {ex.Message.Split('\n')[0]}"); }
+            }
+        foreach (var (feature, page, steps, checkpoints) in Lookups)
             foreach (var console in Consoles)
             {
                 var name = $"{feature} on a {console.W:0}x{console.H:0} console";
@@ -521,6 +643,10 @@ internal static class PlainTranslatorTests
             return;
         }
         SpecTests.PlainLua(feature, compiled.Lua, check);
+        // `PLAIN_DUMP=<words of a feature> PLAIN_DUMP_TO=<file>`: that case's Lua and scene, to read
+        if (Environment.GetEnvironmentVariable("PLAIN_DUMP") is { Length: > 0 } dump && feature.Contains(dump, StringComparison.Ordinal)
+            && Environment.GetEnvironmentVariable("PLAIN_DUMP_TO") is { Length: > 0 } to)
+            System.IO.File.WriteAllText(to, compiled.Lua + "\n---- scene\n" + compiled.Structure);
         var script = Regex.Match(page, "<script>(.*?)</script>", RegexOptions.Singleline).Groups[1].Value;
 
         foreach (var at in checkpoints)
@@ -595,8 +721,10 @@ internal static class PlainTranslatorTests
             var engine = new Jint.Engine();
             engine.SetValue("__exists", new Func<string, bool>(id => built.ById.ContainsKey(id)));
             engine.SetValue("__initialClass", new Func<string, string>(id => built.NodeOf[built.ById[id]].Attr("class") ?? ""));
-            engine.SetValue("__initialText", new Func<string, string>(id => SourceText(page, id)));
-            engine.SetValue("__initialAttrs", new Func<string, string>(id => JsonSerializer.Serialize(SourceAttributes(page, id))));
+            engine.SetValue("__initialText", new Func<string, string>(id => SourceElement(page, id).Tag.Length > 0 ? SourceText(page, id) : NodeText(built.NodeOf[built.ById[id]])));
+            engine.SetValue("__initialAttrs", new Func<string, string>(id => JsonSerializer.Serialize(SourceElement(page, id).Tag.Length > 0 ? SourceAttributes(page, id) : NodeAttributes(built.NodeOf[built.ById[id]]))));
+            engine.SetValue("__select", new Func<string, string?, string[]>((selector, under) => Selected(built, selector, under)));
+            engine.SetValue("__rendered", new Func<string, string?, string>((id, text) => Rendered(built, page, id, text)));
             engine.SetValue("__chain", new Func<string, string[]>(id =>
             {
                 var chain = new List<string>();
@@ -691,6 +819,61 @@ internal static class PlainTranslatorTests
         }
     }
 
+    /// <summary>
+    /// The ids of the elements a selector matches, in document order, among the descendants of one element or
+    /// the whole page. The match itself is the renderer's own selector engine: what is checked here is what the
+    /// compile does with the elements it finds.
+    /// </summary>
+    private static string[] Selected(HtmlRenderer.Result built, string selector, string? under)
+    {
+        var parsed = CssParser.SplitTopLevel(selector, ',').Select(p => CssParser.ParseSelector(p.Trim(), _ => { })).Where(p => p != null).ToList();
+        var top = under != null ? built.NodeOf[built.ById[under]] : built.NodeOf[built.Root];
+        if (under == null) while (top.Parent != null) top = top.Parent;
+        var found = new List<string>();
+        void Walk(HtmlNode n)
+        {
+            foreach (var c in n.Children)
+            {
+                if (!c.IsText && parsed.Any(p => p!.Matches(c)) && c.Attr("id") is { } id && built.ById.ContainsKey(id)) found.Add(id);
+                Walk(c);
+            }
+        }
+        Walk(top);
+        return found.ToArray();
+    }
+
+    /// <summary>innerText as a browser gives it: the text (as written, or the source's with `&lt;br&gt;` a line break), each run of white space one space, a block's ends trimmed, text-transform applied.</summary>
+    private static string Rendered(HtmlRenderer.Result built, string page, string id, string? text)
+    {
+        var ve = built.ById[id];
+        if (text == null)
+        {
+            var inner = SourceElement(page, id).Inner;
+            text = System.Net.WebUtility.HtmlDecode(Regex.Replace(Regex.Replace(inner, @"<br\s*/?>", "\u0001", RegexOptions.IgnoreCase), "<[^>]*>", ""));
+        }
+        text = Regex.Replace(text, "[ \t\n\r\f]+", " ");
+        text = Regex.Replace(text, " ?\u0001 ?", "\n");
+        var inline = built.NodeOf[ve].Tag is "span" or "b" or "i" or "em" or "strong" or "a" or "code" or "small";
+        if (!inline) text = text.Trim(' ');
+        var css = built.CssOf(ve);
+        var transform = css.TryGetValue("text-transform", out var t) ? t.Trim().ToLowerInvariant() : "none";
+        return transform == "uppercase" ? text.ToUpperInvariant() : transform == "lowercase" ? text.ToLowerInvariant() : text;
+    }
+
+    /// <summary>textContent of an element the source gives no id: every text under its node.</summary>
+    private static string NodeText(HtmlNode n) => n.IsText ? (n.Raw != null ? HtmlParser.DecodeEntities(n.Raw) : n.Text) : string.Concat(n.Children.Select(NodeText));
+
+    /// <summary>The attributes of an element the source gives no id, as its node holds them, but for id, class and style.</summary>
+    private static Dictionary<string, string> NodeAttributes(HtmlNode n)
+    {
+        var found = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (n.AttributeCount > 0)
+            foreach (var pair in n.Attributes)
+                if (pair.Key.ToLowerInvariant() is not ("id" or "class" or "style" or "data-click")) found[pair.Key.ToLowerInvariant()] = pair.Value;
+        if (n.Attr("style") is { } st) found["\u0001style"] = st;
+        return found;
+    }
+
     /// <summary>The element with this id in the page's source: its start tag and what is inside it, found by hand.</summary>
     private static (string Tag, string Inner) SourceElement(string page, string id)
     {
@@ -782,7 +965,8 @@ internal static class PlainTranslatorTests
         var a = Clean(mine).Split('\n');
         var b = Clean(theirs).Split('\n');
         if (a.Length != b.Length) return $"{a.Length} lines against {b.Length}";
-        var token = new Regex("\"(?:\\\\.|[^\"\\\\])*\"|[^ ]+");
+        // a quoted value (`text="a  b"`) is one token, spaces and all: a text that differs only in its spaces differs
+        var token = new Regex("[^ \"]*\"(?:\\\\.|[^\"\\\\])*\"|[^ ]+");
         for (var i = 0; i < a.Length; i++)
         {
             var ta = token.Matches(a[i]).Select(m => m.Value).ToList();
@@ -821,7 +1005,7 @@ function __el(id) {
   if (__els[id]) return __els[id];
   if (!__exists(id)) return null;
   var st = __state[id] = { className: __initialClass(id), style: {} };
-  function words() { return st.className.split(/\s+/).filter(function (w) { return w.length; }); }
+  function words() { return st.className.split(/\s+/).filter(function (w, i, all) { return w.length && all.indexOf(w) === i; }); }
   var cl = {
     add: function () { var w = words(); for (var i = 0; i < arguments.length; i++) if (w.indexOf(arguments[i]) < 0) w.push(arguments[i]); st.className = w.join(' '); st.classWritten = true; },
     remove: function () { var w = words(); for (var i = 0; i < arguments.length; i++) { var k = w.indexOf(arguments[i]); if (k >= 0) w.splice(k, 1); } st.className = w.join(' '); st.classWritten = true; },
@@ -829,6 +1013,9 @@ function __el(id) {
       if (want && !has) w.push(c); if (!want && has) w.splice(w.indexOf(c), 1); st.className = w.join(' '); st.classWritten = true; return want; }
   };
   cl.contains = function (c) { return words().indexOf(c) >= 0; };
+  cl.item = function (i) { var w = words(); i = Math.floor(Number(i)) || 0; return i >= 0 && i < w.length ? w[i] : null; };
+  Object.defineProperty(cl, 'length', { get: function () { return words().length; } });
+  Object.defineProperty(cl, 'value', { get: function () { return st.className; }, set: function (v) { st.className = String(v); st.classWritten = true; } });
   var own = JSON.parse(__initialAttrs(id)), inline = {};
   (own['\u0001style'] || '').split(';').forEach(function (d) { var i = d.indexOf(':'); if (i > 0) inline[d.slice(0, i).trim().toLowerCase()] = d.slice(i + 1).trim(); });
   delete own['\u0001style'];
@@ -860,7 +1047,11 @@ function __el(id) {
       if (want && !has) st.attrs[n] = ''; if (!want && has) delete st.attrs[n]; return want; },
     get hidden() { return 'hidden' in st.attrs; }, set hidden(v) { if (v) st.attrs[attr('hidden')] = ''; else delete st.attrs[attr('hidden')]; },
     get textContent() { return st.text !== undefined ? st.text : __initialText(id); }, set textContent(v) { st.text = String(v); },
-    get innerText() { return st.text; }, set innerText(v) { st.text = String(v); },
+    get innerText() { return __rendered(id, st.text !== undefined ? st.text : null); }, set innerText(v) { st.text = String(v); },
+    querySelector: function (s) { var ids = __select(s, id); return ids.length ? __el(ids[0]) : null; },
+    querySelectorAll: function (s) { return __list(__select(s, id), false); },
+    getElementsByClassName: function (c) { return __list(__select(__classes(c), id), true); },
+    getElementsByTagName: function (t) { return __list(__select(t, id), true); },
     get className() { return st.className; }, set className(v) { st.className = String(v); st.classWritten = true; },
     get onclick() { return __onclick[id] || null; }, set onclick(f) { __onclick[id] = f; },
     addEventListener: function (type, fn) { if (type !== 'click') return; var l = __listeners[id] || (__listeners[id] = []); if (l.indexOf(fn) < 0) l.push(fn); }
@@ -868,7 +1059,24 @@ function __el(id) {
   __els[id] = e;
   return e;
 }
-var document = { getElementById: __el };
+// what a lookup by selector gives: a NodeList (with forEach), or a live HTMLCollection (without)
+function __list(ids, collection) {
+  var a = ids.map(__el), l = {};
+  for (var i = 0; i < a.length; i++) l[i] = a[i];
+  l.length = a.length;
+  l.item = function (i) { i = Math.floor(Number(i)) || 0; return i >= 0 && i < a.length ? a[i] : null; };
+  if (!collection) l.forEach = function (f) { for (var i = 0; i < a.length; i++) f(a[i], i, l); };
+  l[Symbol.iterator] = function () { return a[Symbol.iterator](); };
+  return l;
+}
+function __classes(c) { return String(c).trim().split(/\s+/).map(function (n) { return '.' + n; }).join(''); }
+var document = {
+  getElementById: __el,
+  querySelector: function (s) { var ids = __select(s, null); return ids.length ? __el(ids[0]) : null; },
+  querySelectorAll: function (s) { return __list(__select(s, null), false); },
+  getElementsByClassName: function (c) { return __list(__select(__classes(c), null), true); },
+  getElementsByTagName: function (t) { return __list(__select(t, null), true); }
+};
 var console = new Proxy({}, { get: function () { return function () {}; } });
 // The window: a console is one, of the size the page is compiled for, at one canvas unit to a CSS pixel.
 var window = globalThis, innerWidth = __w, innerHeight = __h, devicePixelRatio = 1;

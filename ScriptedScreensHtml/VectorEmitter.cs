@@ -2353,7 +2353,11 @@ internal static class VectorEmitter
         // A label in a scrolling box is not clipped to a line: the container slides it.
         var clipped = (rs.overflow == Overflow.Hidden && !Scrolls(css))
                       || (label.parent != null && OffThread.Of(label.parent).overflow == Overflow.Hidden && !Scrolls(ctx.Built.CssOf(label.parent)));
-        var wraps = rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && h > rs.fontSize * 1.6f && (text.IndexOf(' ') >= 0 || text.IndexOf('​') >= 0);
+        // More than a line of text: the content box, not the box with its padding and borders - a
+        // 22px label with 4px of padding each side is 35 tall on one line, and whether its layout
+        // rounded to 35 or 36 decided whether a text with a space in it wrapped.
+        var contentH = h - rs.paddingTop - rs.paddingBottom - rs.borderTopWidth - rs.borderBottomWidth;
+        var wraps = rs.whiteSpace == WhiteSpace.Normal && rs.fontSize > 0f && contentH > rs.fontSize * 1.6f && (text.IndexOf(' ') >= 0 || text.IndexOf('​') >= 0);
         // text-overflow: ellipsis wants the exact box (the ellipsis sits at its edge); any other clipped
         // label is clipped by its container's CP, so its own rect can carry the slack too
         var ellipsis = clipped && css.TryGetValue("text-overflow", out var tov) && tov.Trim() == "ellipsis";

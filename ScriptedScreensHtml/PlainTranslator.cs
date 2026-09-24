@@ -20,7 +20,9 @@ namespace ScriptedScreensHtml;
 /// The script's language goes through <see cref="JsToLua"/> unchanged. What this adds is the DOM,
 /// translated by feature, every one resolved HERE, at compile time:
 ///
-/// <b>Lookup.</b> <c>document.getElementById('id')</c>, and a name bound once to one.
+/// <b>Lookup.</b> <c>getElementById</c>, <c>querySelector(All)</c> and <c>getElementsBy…</c>, resolved against the
+/// page as written. An element the script holds as a value is a number in the Lua, a list a table of them, and
+/// an operation on one chosen at run time picks that element's own code from a table built once.
 /// <b>Writes.</b> <c>textContent</c> becomes the label's text with a placeholder per value, so the Lua
 /// writes numbers and never builds a string; <c>style.&lt;property&gt;</c> becomes the slots
 /// <see cref="DomSlots"/> maps it to, as a scale and offset for a number and as one laid-out state per
@@ -191,7 +193,9 @@ internal static class PlainTranslator
         public readonly VisualElement Ve;
         public readonly HtmlNode Node;
         public string Name;
-        public Target(VisualElement ve, HtmlNode node) { Ve = ve; Node = node; Name = ve.name; }
+        /// <summary>What the element is in the Lua when the script holds it as a value: a number, from 1.</summary>
+        public readonly int Number;
+        public Target(VisualElement ve, HtmlNode node, int number) { Ve = ve; Node = node; Name = ve.name; Number = number; }
         public string Slot => DomSlots.Slot(Name);
 
         public readonly List<(Expression At, Expression Value)> Texts = new();
@@ -205,7 +209,7 @@ internal static class PlainTranslator
         public readonly List<AttrOp> AttrOps = new();
         /// <summary>The script reads attributes by a name only known at run time, so every one is kept.</summary>
         public bool AttrsByName;
-        /// <summary>What the script reads back of what it wrote: textContent, className, style.&lt;property&gt;.</summary>
+        /// <summary>What the script reads back of what it wrote: textContent, className (or classList.item), style.&lt;property&gt;.</summary>
         public bool TextRead, ClassRead;
         public readonly HashSet<string> StyleReads = new(StringComparer.Ordinal);
 
@@ -299,8 +303,10 @@ internal static class PlainTranslator
         private readonly List<Target> _order = new();
         /// <summary>Declarations the Lua drops: every name in them holds an element, which the Lua has no use for.</summary>
         private readonly HashSet<Node> _elementDeclarations = new();
-        /// <summary>Expressions evaluated for their effect that are DOM operations, and the element they act on.</summary>
-        private readonly Dictionary<Expression, Target> _ops = new();
+        /// <summary>Expressions evaluated for their effect that are DOM operations, and the elements they can act on.</summary>
+        private readonly Dictionary<Expression, List<Target>> _ops = new();
+        /// <summary>An operation whose element is chosen at run time: the expression that chooses it (its value is the element's number).</summary>
+        private readonly Dictionary<Expression, Expression> _recv = new();
         /// <summary>Expressions in <see cref="_lua"/> that are writes: their value is undefined, so they stand as statements anywhere.</summary>
         private readonly HashSet<Node> _effects = new();
         /// <summary>Reads that yield a boolean, and reads that yield null or undefined as Lua's nil, with the text JavaScript prints for it.</summary>
@@ -348,16 +354,199 @@ internal static class PlainTranslator
         {
             Link(_ast);
             foreach (var n in Markup.Everything(_ast)) Bind(n);
+            Index();
 
             foreach (var n in Markup.Everything(_ast))
-                if (n is VariableDeclarator { Id: Identifier id, Init: { } init } && Lookup(init, report: false) is { } t
+                if (n is VariableDeclarator { Id: Identifier id, Init: { } init } && Lookup(init) is { } t
                     && _bindings.TryGetValue(id.Name, out var count) && count == 1 && !_assigned.Contains(id.Name))
                     _vars[id.Name] = t;
             foreach (var n in Markup.Everything(_ast))
-                if (n is VariableDeclaration vd && vd.Declarations.All(d => d.Id is Identifier i && _vars.ContainsKey(i.Name) && d.Init != null && Lookup(d.Init, false) != null))
+                if (n is VariableDeclaration vd && vd.Declarations.All(d => d.Id is Identifier i && _vars.ContainsKey(i.Name) && d.Init != null && Lookup(d.Init) != null))
                     _elementDeclarations.Add(vd);
 
             foreach (var n in Markup.Everything(_ast)) Visit(n);
+            Selectors();
+        }
+
+        // ---- names: each reference's declaration, scoped as JavaScript scopes it ------------------------
+
+        private readonly Dictionary<Node, Dictionary<string, Identifier>> _scopes = new();
+        /// <summary>Every write to a declared name (`x = v`, `x++`, `x += v`, a loop's `for (x of …)`), by its declaration.</summary>
+        private readonly Dictionary<Identifier, List<Node>> _writes = new();
+        /// <summary>Every reference to a declared name, by its declaration.</summary>
+        private readonly Dictionary<Identifier, List<Identifier>> _refs = new();
+
+        private void Index()
+        {
+            foreach (var n in Markup.Everything(_ast))
+            {
+                switch (n)
+                {
+                    case Identifier id when Reference(id) && Decl(id) is { } d && d != id:
+                        if (!_refs.TryGetValue(d, out var refs)) _refs[d] = refs = new List<Identifier>();
+                        refs.Add(id);
+                        break;
+                    case AssignmentExpression { Left: Identifier al } a when Decl(al) is { } ad: Write(ad, a); break;
+                    case UpdateExpression { Argument: Identifier ul } u when Decl(ul) is { } ud: Write(ud, u); break;
+                    case ForInStatement { Left: Identifier fl } fi when Decl(fl) is { } fd: Write(fd, fi); break;
+                    case ForOfStatement { Left: Identifier ol } fo when Decl(ol) is { } od: Write(od, fo); break;
+                }
+            }
+
+            void Write(Identifier d, Node w)
+            {
+                if (!_writes.TryGetValue(d, out var list)) _writes[d] = list = new List<Node>();
+                list.Add(w);
+            }
+        }
+
+        /// <summary>The identifier that declares the name a reference reads, found scope by scope outwards; null for a global the script never declares.</summary>
+        private Identifier? Decl(Identifier id)
+        {
+            if (_declOf.TryGetValue(id, out var known)) return known;
+            for (Node n = id; _parent.TryGetValue(n, out var p); n = p)
+                if (Scope(p).TryGetValue(id.Name, out var binding)) return _declOf[id] = binding;
+            return _declOf[id] = null;
+        }
+
+        private readonly Dictionary<Identifier, Identifier?> _declOf = new();
+
+        /// <summary>The names a node declares for what is inside it: a function its parameters and vars, a block its let, const, class and functions.</summary>
+        private Dictionary<string, Identifier> Scope(Node p)
+        {
+            if (_scopes.TryGetValue(p, out var s)) return s;
+            s = new Dictionary<string, Identifier>(StringComparer.Ordinal);
+            switch (p)
+            {
+                case IFunction f:
+                    if (p is FunctionExpression { Id: { } self }) s[self.Name] = self;
+                    foreach (var param in f.Params) Patterns(param, s);
+                    Vars(f.Body, s);
+                    break;
+                case Script or BlockStatement or FunctionBody or StaticBlock or SwitchStatement:
+                    if (p is Script) Vars(p, s);
+                    foreach (var kid in p is SwitchStatement sw ? sw.Cases.SelectMany(c => c.Consequent).Cast<Node?>() : p.ChildNodes.Cast<Node?>())
+                        switch (kid)
+                        {
+                            case VariableDeclaration { Kind: not VariableDeclarationKind.Var } vd:
+                                foreach (var d in vd.Declarations) Patterns(d.Id, s);
+                                break;
+                            case FunctionDeclaration { Id: { } fid }: s[fid.Name] = fid; break;
+                            case ClassDeclaration { Id: { } cid }: s[cid.Name] = cid; break;
+                        }
+                    break;
+                case ForStatement { Init: VariableDeclaration { Kind: not VariableDeclarationKind.Var } fd }:
+                    foreach (var d in fd.Declarations) Patterns(d.Id, s);
+                    break;
+                case ForInStatement { Left: VariableDeclaration { Kind: not VariableDeclarationKind.Var } fi }:
+                    foreach (var d in fi.Declarations) Patterns(d.Id, s);
+                    break;
+                case ForOfStatement { Left: VariableDeclaration { Kind: not VariableDeclarationKind.Var } fo }:
+                    foreach (var d in fo.Declarations) Patterns(d.Id, s);
+                    break;
+                case CatchClause { Param: { } cp }:
+                    Patterns(cp, s);
+                    break;
+            }
+            _scopes[p] = s;
+            return s;
+
+            static void Patterns(Node pattern, Dictionary<string, Identifier> into)
+            {
+                switch (pattern)
+                {
+                    case Identifier i: into[i.Name] = i; break;
+                    case AssignmentPattern ap: Patterns(ap.Left, into); break;
+                    case RestElement re: Patterns(re.Argument, into); break;
+                    case ArrayPattern arr: foreach (var e in arr.Elements) if (e != null) Patterns(e, into); break;
+                    case ObjectPattern obj:
+                        foreach (var prop in obj.Properties)
+                            if (prop is Property pp) Patterns(pp.Value, into); else if (prop is RestElement r) Patterns(r.Argument, into);
+                        break;
+                }
+            }
+
+            // `var` belongs to the function (or the script) it is written in, from any block inside it
+            static void Vars(Node body, Dictionary<string, Identifier> into)
+            {
+                foreach (var kid in body.ChildNodes)
+                {
+                    if (kid == null || kid is IFunction) continue;
+                    if (kid is VariableDeclaration { Kind: VariableDeclarationKind.Var } vd)
+                        foreach (var d in vd.Declarations) Patterns(d.Id, into);
+                    Vars(kid, into);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Every value a declared variable is given in the source: its initialiser (null for none, which is
+        /// undefined) and each `name = value`. Null when it is not a plain variable, or is also changed in a
+        /// way the source does not show as a value (`++`, `+=`, a loop's element).
+        /// </summary>
+        private List<Expression?>? Given(Identifier decl)
+        {
+            if (!_parent.TryGetValue(decl, out var b) || b is not VariableDeclarator vd || vd.Id != decl) return null;
+            if (_parent.TryGetValue(vd, out var dd) && _parent.TryGetValue(dd, out var loop) && loop is ForInStatement or ForOfStatement) return null;
+            var list = new List<Expression?> { vd.Init };
+            if (_writes.TryGetValue(decl, out var ws))
+                foreach (var w in ws)
+                    if (w is AssignmentExpression { Operator: Operator.Assignment } a) list.Add(a.Right);
+                    else return null;
+            return list;
+        }
+
+        /// <summary>A function a name is bound to for good: a declaration, or a const/let given a function and never changed.</summary>
+        private IFunction? Function(Identifier callee)
+        {
+            if (Decl(callee) is not { } decl || !_parent.TryGetValue(decl, out var b)) return null;
+            if (b is FunctionDeclaration fd && fd.Id == decl) return _writes.ContainsKey(decl) ? null : fd;
+            if (b is VariableDeclarator { Init: IFunction fn } vd && vd.Id == decl && !_writes.ContainsKey(decl)) return fn;
+            return null;
+        }
+
+        /// <summary>The declaration of the name a function is bound to (see <see cref="Function"/>), or null for one with none.</summary>
+        private Identifier? NameOf(IFunction fn)
+        {
+            if (fn is FunctionDeclaration { Id: { } id }) return _writes.ContainsKey(id) ? null : id;
+            if (_parent.TryGetValue((Node)fn, out var p) && p is VariableDeclarator { Id: Identifier vid } vd && vd.Init == fn && !_writes.ContainsKey(vid)) return vid;
+            return null;
+        }
+
+        /// <summary>What a function returns: its concise body, or every `return`'s argument (null for a bare `return`), nested functions aside.</summary>
+        private static List<Expression?> Returns(IFunction fn)
+        {
+            var found = new List<Expression?>();
+            if (fn.Body is Expression concise) { found.Add(concise); return found; }
+            Walk(fn.Body);
+            return found;
+
+            void Walk(Node n)
+            {
+                foreach (var kid in n.ChildNodes)
+                {
+                    if (kid == null || kid is IFunction) continue;
+                    if (kid is ReturnStatement r) found.Add(r.Argument);
+                    Walk(kid);
+                }
+            }
+        }
+
+        /// <summary>A parameter's function and its place in the list, when it is a plain name there.</summary>
+        private (IFunction Fn, int Index)? ParamOf(Identifier decl)
+        {
+            if (!_parent.TryGetValue(decl, out var p) || p is not IFunction fn) return null;
+            for (var i = 0; i < fn.Params.Count; i++) if (fn.Params[i] == decl) return (fn, i);
+            return null;
+        }
+
+        /// <summary>The list a function is the forEach callback of, when it is one: <c>list.forEach(fn)</c> or <c>list.forEach(name)</c> for a function bound to a name.</summary>
+        private Els? ForEachOver(Node callback)
+        {
+            if (!_parent.TryGetValue(callback, out var p) || p is not CallExpression c || c.Arguments.Count == 0 || c.Arguments[0] != callback
+                || c.Callee is not MemberExpression { Computed: false, Property: Identifier { Name: "forEach" } } fm)
+                return null;
+            return Elems(fm.Object) is { List: true } list ? list : null;
         }
 
         private void Link(Node n)
@@ -407,28 +596,588 @@ internal static class PlainTranslator
 
         private bool Declared(string name) => _bindings.ContainsKey(name);
 
-        /// <summary><c>document.getElementById('id')</c>, as the element it names; null for anything else.</summary>
-        private Target? Lookup(Node e, bool report)
+        /// <summary><c>document.getElementById('id')</c> with a literal id, as the element it names; null for anything else.</summary>
+        private Target? Lookup(Node e)
         {
             if (e is not CallExpression { Callee: MemberExpression { Computed: false, Object: Identifier { Name: "document" }, Property: Identifier { Name: "getElementById" } } } call
-                || Declared("document"))
+                || Declared("document") || call.Arguments.Count != 1 || call.Arguments[0] is not StringLiteral lit
+                || !_built.ById.TryGetValue(lit.Value, out var ve) || ve == null || !_built.NodeOf.TryGetValue(ve, out var node))
                 return null;
-            if (call.Arguments.Count != 1 || call.Arguments[0] is not StringLiteral lit)
-            {
-                if (report) Refuse(call, "an element chosen at run time (getElementById with an id computed at run time)");
-                return null;
-            }
-            if (!_built.ById.TryGetValue(lit.Value, out var ve) || ve == null || !_built.NodeOf.TryGetValue(ve, out var node))
-            {
-                if (report) Refuse(call, $"getElementById('{lit.Value}') names no element of the page");
-                return null;
-            }
+            return TargetOf(ve, node);
+        }
+
+        private Target TargetOf(VisualElement ve, HtmlNode node)
+        {
             if (!_targets.TryGetValue(ve, out var t))
             {
-                _targets[ve] = t = new Target(ve, node);
+                _targets[ve] = t = new Target(ve, node, _order.Count + 1);
                 _order.Add(t);
             }
             return t;
+        }
+
+        // ---- elements as values: lookups, lists, and an element chosen at run time ------------------------
+
+        /// <summary>
+        /// The elements an expression can yield, as the compile knows them: an element (one of <see cref="Ts"/>,
+        /// or null), or a list of them (one of <see cref="Lists"/>, when it can be one of several). In the Lua an
+        /// element is its <see cref="Target.Number"/> and a list a table of those numbers, fixed at compile time.
+        /// </summary>
+        private sealed class Els
+        {
+            public readonly List<Target> Ts = new();
+            public bool List;
+            public readonly List<List<Target>> Lists = new();
+            /// <summary>For a list: "NodeList", "HTMLCollection" or "Array" - what a browser gives, and so which members it has.</summary>
+            public string Kind = string.Empty;
+            /// <summary>An element that can be null: a lookup matching nothing, an index past the end, a variable set to null.</summary>
+            public bool Null;
+            /// <summary>Why the compile cannot follow it; the script is refused where it is used.</summary>
+            public string? Bad;
+            /// <summary>Contributes nothing: null, undefined, or a name met again while it is being worked out.</summary>
+            public bool Neutral;
+            public bool One => !List && Bad == null && !Null && !Neutral && Ts.Count == 1;
+
+            public static Els Nothing(bool isNull) => new() { Neutral = true, Null = isNull };
+            public static Els Refused(string why) => new() { Bad = why };
+            public static Els Of(Target t) { var e = new Els(); e.Ts.Add(t); return e; }
+            public static Els ListOf(List<Target> items, string kind)
+            {
+                var e = new Els { List = true, Kind = kind };
+                e.Lists.Add(items);
+                foreach (var t in items) if (!e.Ts.Contains(t)) e.Ts.Add(t);
+                return e;
+            }
+
+            /// <summary>
+            /// A value that is one of several: their union. Null when none of them is an element; refused when
+            /// some are and some are other kinds of value, which the Lua could not tell apart from an element.
+            /// </summary>
+            public static Els? Choice(IEnumerable<Els?> values)
+            {
+                var all = values.ToList();
+                if (all.FirstOrDefault(x => x?.Bad != null) is { } bad) return bad;
+                if (!all.Any(x => x is { Neutral: false })) return all.Count > 0 && all.All(x => x != null) ? Nothing(all.Any(x => x!.Null)) : null;
+                if (all.Any(x => x == null)) return Refused("a value that is an element at one time and another kind of value at another");
+                var u = new Els { Neutral = true };
+                foreach (var x in all)
+                {
+                    if (x!.Neutral) { u.Null |= x.Null; continue; }
+                    if (!u.Neutral && u.List != x.List) return Refused("a value that is a list of elements at one time and a single element at another");
+                    if (u.Neutral) { u.Neutral = false; u.List = x.List; u.Kind = x.Kind; }
+                    else if (u.Kind != x.Kind) u.Kind = "Array";
+                    u.Null |= x.Null;
+                    foreach (var t in x.Ts) if (!u.Ts.Contains(t)) u.Ts.Add(t);
+                    foreach (var l in x.Lists) if (!u.Lists.Any(y => y.SequenceEqual(l))) u.Lists.Add(l);
+                }
+                return u;
+            }
+        }
+
+        private readonly Dictionary<Node, Els?> _els = new();
+        private readonly HashSet<Node> _elsBusy = new();
+
+        /// <summary>
+        /// The elements an expression yields, or null when it yields none (a number, a string, an object).
+        /// <paramref name="bind"/> gives the parameters of a function inlined at one call its arguments there.
+        /// </summary>
+        private Els? Elems(Expression e, Dictionary<Identifier, Expression>? bind = null)
+        {
+            if (bind == null && _els.TryGetValue(e, out var cached)) return cached;
+            if (!_elsBusy.Add(e)) return Els.Nothing(false);
+            Els? found;
+            try { found = ElemsOf(e, bind); }
+            finally { _elsBusy.Remove(e); }
+            if (bind == null) _els[e] = found;
+            return found;
+        }
+
+        private Els? ElemsOf(Expression e, Dictionary<Identifier, Expression>? bind)
+        {
+            switch (e)
+            {
+                case CallExpression c when DomCall(c) is { } q:
+                    return Looked(c, q.Kind, q.Under, q.Arg, bind);
+
+                case MemberExpression { Computed: true } ix when Elems(ix.Object, bind) is { List: true } list:
+                    return Pick(list, ix.Property);
+
+                case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "item" } } im } ic
+                    when Elems(im.Object, bind) is { List: true } items:
+                    return Pick(items, ic.Arguments.Count > 0 ? ic.Arguments[0] as Expression : null);
+
+                case NullLiteral:
+                    return Els.Nothing(true);
+
+                case Identifier { Name: "undefined" } u when Decl(u) == null:
+                    return Els.Nothing(true);
+
+                case Identifier id:
+                    {
+                        if (_vars.TryGetValue(id.Name, out var held)) return Els.Of(held);
+                        if (Decl(id) is not { } decl) return null;
+                        if (bind != null && bind.TryGetValue(decl, out var arg)) return Elems(arg);
+                        return Named(decl);
+                    }
+
+                case ConditionalExpression c:
+                    return Els.Choice(new[] { Elems(c.Consequent, bind), Elems(c.Alternate, bind) });
+
+                // `a && b` is a when a is falsy - an element only when it is null - and b otherwise
+                case LogicalExpression { Operator: Operator.LogicalAnd } la:
+                    {
+                        var left = Elems(la.Left, bind);
+                        return Els.Choice(new[] { left == null ? null : left.Bad != null ? left : Els.Nothing(true), Elems(la.Right, bind) });
+                    }
+
+                case LogicalExpression l:
+                    return Els.Choice(new[] { Elems(l.Left, bind), Elems(l.Right, bind) });
+
+                case ArrayExpression a:
+                    {
+                        var items = new List<Target>();
+                        var kinds = new List<Els?>();
+                        foreach (var x in a.Elements)
+                        {
+                            var one = x is Expression xe and not SpreadElement ? Elems(xe, bind) : null;
+                            kinds.Add(one);
+                            if (one is { Bad: null, Neutral: false }) { if (!one.One) return Els.Refused("an array of elements chosen at run time"); items.Add(one.Ts[0]); }
+                        }
+                        if (!kinds.Any(k => k is { Neutral: false })) return kinds.FirstOrDefault(k => k?.Bad != null);
+                        if (kinds.Any(k => k == null || k.Neutral || k.Bad != null)) return kinds.FirstOrDefault(k => k?.Bad != null) ?? Els.Refused("an array holding elements and other values");
+                        return Els.ListOf(items, "Array");
+                    }
+
+                case CallExpression { Callee: Identifier f } call when Function(f) is { } fn:
+                    {
+                        var inner = new Dictionary<Identifier, Expression>();
+                        for (var i = 0; i < fn.Params.Count; i++)
+                            if (fn.Params[i] is Identifier p)
+                                inner[p] = i < call.Arguments.Count && call.Arguments[i] is Expression ae and not SpreadElement ? ae : new Identifier("undefined");
+                        var returned = Returns(fn).Select(r => r == null ? Els.Nothing(true) : Elems(r, inner)).ToList();
+                        return returned.Any(r => r is { Neutral: false } || r?.Bad != null) ? Els.Choice(returned) : null;
+                    }
+
+                default:
+                    return null;
+            }
+        }
+
+        /// <summary>A declared name's elements: what it is given, the list it walks (for...of), or what its function is called with.</summary>
+        private Els? Named(Identifier decl)
+        {
+            if (!_parent.TryGetValue(decl, out var b)) return null;
+            if (b is VariableDeclarator vd && vd.Id == decl && _parent.TryGetValue(vd, out var dd) && _parent.TryGetValue(dd, out var loop))
+            {
+                if (loop is ForOfStatement fo && fo.Left == dd) return Elems(fo.Right) is { List: true } over ? Members(over) : null;
+                if (loop is ForInStatement) return null;
+            }
+            if (ParamOf(decl) is { } param) return ParamElems(param.Fn, param.Index);
+            if (Given(decl) is not { } given)
+            {
+                // changed in a way the source does not show as a value: an element in it could not be followed
+                var initial = b is VariableDeclarator { Init: { } init } ? Elems(init) : null;
+                return initial is { Neutral: false } ? Els.Refused($"\"{decl.Name}\", which holds an element and is changed in a way the compile cannot follow") : null;
+            }
+            var values = given.Select(v => v == null ? Els.Nothing(true) : Elems(v)).ToList();
+            return values.Any(v => v is { Neutral: false } || v?.Bad != null) ? Els.Choice(values) : null;
+        }
+
+        /// <summary>A parameter's elements: a forEach callback's first is each member of the list, and a named function's the arguments of every call.</summary>
+        private Els? ParamElems(IFunction fn, int index)
+        {
+            if (ForEachOver((Node)fn) is { } over) return index == 0 ? Members(over) : index == 2 ? over : null;
+            if (NameOf(fn) is not { } name || !_refs.TryGetValue(name, out var refs)) return null;
+            var values = new List<Els?>();
+            foreach (var r in refs)
+            {
+                if (_parent[r] is CallExpression call && call.Callee == r)
+                    values.Add(index < call.Arguments.Count && call.Arguments[index] is Expression a and not SpreadElement ? Elems(a) : Els.Nothing(true));
+                else if (ForEachOver(r) is { } list) values.Add(index == 0 ? Members(list) : index == 2 ? list : null);
+                // passed around: what it is called with is not in the source (Flow refuses an element passed to it)
+                else return null;
+            }
+            return values.Any(v => v is { Neutral: false } || v?.Bad != null) ? Els.Choice(values) : null;
+        }
+
+        /// <summary>Any member of a list, as an element.</summary>
+        private static Els Members(Els list)
+        {
+            var e = new Els();
+            e.Ts.AddRange(list.Ts);
+            return e;
+        }
+
+        /// <summary>A list's member at an index: the one there for a literal index, any member (or undefined) otherwise.</summary>
+        private static Els Pick(Els list, Expression? index)
+        {
+            var e = new Els();
+            if (index is NumericLiteral { Value: var k } && k >= 0 && k == Math.Floor(k))
+            {
+                foreach (var l in list.Lists)
+                    if (k < l.Count) { if (!e.Ts.Contains(l[(int)k])) e.Ts.Add(l[(int)k]); }
+                    else e.Null = true;
+                return e;
+            }
+            e.Ts.AddRange(list.Ts);
+            e.Null = true;
+            return e;
+        }
+
+        /// <summary>
+        /// A lookup the DOM answers: document.getElementById, and querySelector, querySelectorAll,
+        /// getElementsByClassName and getElementsByTagName on the document or on one element.
+        /// </summary>
+        private (string Kind, Expression? Under, Expression? Arg)? DomCall(CallExpression c)
+        {
+            if (c.Callee is not MemberExpression { Computed: false, Property: Identifier p } m
+                || p.Name is not ("getElementById" or "querySelector" or "querySelectorAll" or "getElementsByClassName" or "getElementsByTagName"))
+                return null;
+            var arg = c.Arguments.Count > 0 && c.Arguments[0] is Expression a and not SpreadElement ? a : null;
+            if (m.Object is Identifier { Name: "document" } && !Declared("document")) return (p.Name, null, arg);
+            if (p.Name == "getElementById") return null;
+            return Elems(m.Object) is { List: false, Neutral: false } ? (p.Name, m.Object, arg) : null;
+        }
+
+        /// <summary>What a DOM lookup yields, resolved against the page as written.</summary>
+        private Els Looked(CallExpression c, string kind, Expression? under, Expression? arg, Dictionary<Identifier, Expression>? bind)
+        {
+            if (kind == "getElementById") return ById(arg, bind).Els;
+            Target? scope = null;
+            if (under != null)
+            {
+                var u = Elems(under, bind)!;
+                if (u.Bad != null) return u;
+                if (!u.One) return Els.Refused($"{kind} on an element chosen at run time (it answers differently for each)");
+                scope = u.Ts[0];
+            }
+            if (arg == null || Finite(arg, null, bind) is not { Count: 1 } one || one[0] is not string text)
+                return Els.Refused($"{kind} with {(arg == null ? "no argument" : "an argument only known at run time")}");
+            var selector = kind switch
+            {
+                "getElementsByClassName" => string.Concat(text.Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(n => "." + n)),
+                "getElementsByTagName" => text.Trim(),
+                _ => text,
+            };
+            if (selector.Length == 0) return kind is "querySelector" ? Els.Nothing(true) : Els.ListOf(new List<Target>(), kind == "querySelectorAll" ? "NodeList" : "HTMLCollection");
+            if (Select(selector, scope, out var why) is not { } found) return Els.Refused(why!);
+            if (!_selectors.Any(s => s.Selector == selector && s.At == c)) _selectors.Add((selector, c));
+            if (kind == "querySelector") return found.Count > 0 ? Els.Of(found[0]) : Els.Nothing(true);
+            return Els.ListOf(found, kind == "querySelectorAll" ? "NodeList" : "HTMLCollection");
+        }
+
+        /// <summary>Selectors the script looks elements up by, each where it is used; checked against what the script changes.</summary>
+        private readonly List<(string Selector, Node At)> _selectors = new();
+
+        /// <summary>
+        /// The elements a selector matches in document order, among the descendants of one element or the whole
+        /// page. Null, with the reason, for a selector the compile cannot match as a browser does, or one that
+        /// matches an element with no box of its own (a `&lt;b&gt;` drawn as part of its paragraph's text).
+        /// </summary>
+        private List<Target>? Select(string selector, Target? under, out string? why)
+        {
+            why = null;
+            if (selector.Contains("::", StringComparison.Ordinal) || Regex.IsMatch(selector, @":(hover|active|focus|focus-within|focus-visible|visited|link|any-link|target|checked|indeterminate|placeholder-shown|default|valid|invalid|in-range|out-of-range|autofill|user-invalid|user-valid|defined|scope|has)\b"))
+            {
+                why = $"the selector \"{selector}\", which asks about a state or a part the page does not keep (not translated yet)";
+                return null;
+            }
+            var parsed = new List<CssSelector>();
+            var warned = new List<string>();
+            foreach (var part in CssParser.SplitTopLevel(selector, ','))
+            {
+                var s = part.Trim().Length == 0 ? null : CssParser.ParseSelector(part.Trim(), warned.Add);
+                if (s == null || warned.Count > 0) { why = $"the selector \"{selector}\", which does not parse as a supported selector{(warned.Count > 0 ? " (" + warned[0] + ")" : string.Empty)}"; return null; }
+                parsed.Add(s);
+            }
+            var top = under?.Node ?? Document();
+            var found = new List<Target>();
+            foreach (var node in Below(top))
+            {
+                if (node.IsText || !parsed.Any(s => s.Matches(node))) continue;
+                if (node.Attr("id") is not { } id || !_built.ById.TryGetValue(id, out var ve) || ve == null
+                    || !_built.NodeOf.TryGetValue(ve, out var own) || own != node)
+                {
+                    why = $"the selector \"{selector}\" matches a <{node.Tag}> with no box of its own (it is drawn as part of its parent, which nothing can change on its own)";
+                    return null;
+                }
+                found.Add(TargetOf(ve, node));
+            }
+            return found;
+
+            static IEnumerable<HtmlNode> Below(HtmlNode n)
+            {
+                foreach (var c in n.Children)
+                {
+                    yield return c;
+                    foreach (var d in Below(c)) yield return d;
+                }
+            }
+        }
+
+        /// <summary>The page's root node: the document a lookup on `document` searches.</summary>
+        private HtmlNode Document()
+        {
+            var n = _built.NodeOf[_built.Root];
+            while (n.Parent != null) n = n.Parent;
+            return n;
+        }
+
+        /// <summary>
+        /// getElementById with its id: a literal names one element; an id from a fixed set, or a fixed text
+        /// around one value (`'row' + i`), names the elements whose ids it can make; anything else is refused.
+        /// <see cref="IdKey.Hole"/> is what the Lua looks the element up by: the value itself, never the id built
+        /// as a string.
+        /// </summary>
+        private (Els Els, IdKey? Key) ById(Expression? arg, Dictionary<Identifier, Expression>? bind)
+        {
+            if (arg is StringLiteral lit)
+                return (_built.ById.TryGetValue(lit.Value, out var ve) && ve != null && _built.NodeOf.TryGetValue(ve, out var node)
+                    ? Els.Of(TargetOf(ve, node)) : Els.Nothing(true), null);
+            if (arg == null) return (Els.Refused("getElementById with no id"), null);
+            var key = new IdKey();
+            var e = new Els();
+            // a fixed text around one value: the value is the key
+            var parts = new List<Expression>();
+            Flat(arg, parts);
+            var holes = parts.Where(x => x is not StringLiteral).ToList();
+            if (holes.Count == 1 && parts.Count > 1)
+            {
+                static string Text(Expression x) => ((StringLiteral)x).Value;
+                var at = parts.IndexOf(holes[0]);
+                var prefix = string.Concat(parts.Take(at).Select(Text));
+                var suffix = string.Concat(parts.Skip(at + 1).Select(Text));
+                key.Hole = holes[0];
+                IEnumerable<string> middles;
+                if (Finite(holes[0], null, bind) is { } values) middles = values.Select(v => v is double d ? JsToLuaNumber(d) : (string)v);
+                else
+                {
+                    // any value: every id of the page with that text around it
+                    // ponytail: a value the page's ids never take reads as null, as the browser's lookup does
+                    middles = Source().Keys.Where(id => id.Length >= prefix.Length + suffix.Length && id.StartsWith(prefix, StringComparison.Ordinal)
+                                                        && id.EndsWith(suffix, StringComparison.Ordinal))
+                                              .Select(id => id.Substring(prefix.Length, id.Length - prefix.Length - suffix.Length)).ToList();
+                    e.Null = true;
+                }
+                foreach (var mid in middles.Distinct())
+                    if (Named(prefix + mid) is { } t) { key.Table[mid] = t; if (!e.Ts.Contains(t)) e.Ts.Add(t); }
+                    else e.Null = true;
+                return (e, key);
+            }
+            if (Finite(arg, null, bind) is { } ids)
+            {
+                key.Hole = arg;
+                foreach (var v in ids)
+                {
+                    var id = v is double d ? JsToLuaNumber(d) : (string)v;
+                    if (Named(id) is { } t) { key.Table[id] = t; if (!e.Ts.Contains(t)) e.Ts.Add(t); }
+                    else e.Null = true;
+                }
+                return (e, key);
+            }
+            return (Els.Refused("an element chosen at run time from ids the compile cannot bound (getElementById with an id computed at run time)"), null);
+
+            Target? Named(string id)
+                => Source().ContainsKey(id) && _built.ById.TryGetValue(id, out var v) && v != null && _built.NodeOf.TryGetValue(v, out var n) ? TargetOf(v, n) : null;
+
+            static void Flat(Expression x, List<Expression> into)
+            {
+                switch (x)
+                {
+                    case NonLogicalBinaryExpression { Operator: Operator.Addition } b when IsText(b.Left) || IsText(b.Right) || b.Left is NonLogicalBinaryExpression { Operator: Operator.Addition }:
+                        Flat(b.Left, into);
+                        Flat(b.Right, into);
+                        return;
+                    case TemplateLiteral t:
+                        for (var i = 0; i < t.Quasis.Count; i++)
+                        {
+                            if ((t.Quasis[i].Value.Cooked ?? string.Empty).Length > 0) into.Add(new StringLiteral(t.Quasis[i].Value.Cooked!, t.Quasis[i].Value.Raw ?? string.Empty));
+                            if (i < t.Expressions.Count) into.Add(t.Expressions[i]);
+                        }
+                        return;
+                    default: into.Add(x); return;
+                }
+            }
+
+            static bool IsText(Expression x) => x is StringLiteral or TemplateLiteral;
+        }
+
+        /// <summary>How the Lua finds an element by a value it holds: that value, and the element for each text it prints as.</summary>
+        private sealed class IdKey
+        {
+            public Expression Hole = null!;
+            public readonly Dictionary<string, Target> Table = new(StringComparer.Ordinal);
+        }
+
+        /// <summary>Expressions that yield elements, already checked where they stand.</summary>
+        private readonly HashSet<Node> _sourced = new();
+
+        /// <summary>An expression that yields elements, checked where it stands.</summary>
+        private void Source(Expression n)
+        {
+            if (!_sourced.Add(n)) return;
+            if (Elems(n) is not { } els) return;
+            if (els.Bad != null) { Refuse(n, els.Bad); return; }
+            if (els.Neutral) return;
+            // A lookup that finds nothing, used as an element: a browser throws there, so it is refused by name.
+            // A member of a list the page as written leaves empty is not: a loop over it does nothing, and the Lua
+            // throws as a browser does if it is reached.
+            if (!els.List && els.Ts.Count == 0 && n is CallExpression lookup && DomCall(lookup) != null
+                && _parent.TryGetValue(n, out var p) && p is MemberExpression pm && pm.Object == n)
+            {
+                Refuse(n, (lookup.Callee is MemberExpression { Property: Identifier { Name: "getElementById" } } && lookup.Arguments.Count > 0 && lookup.Arguments[0] is StringLiteral id
+                    ? $"getElementById('{id.Value}') names no element of the page" : "a lookup that finds no element of the page")
+                    + " (a browser throws on the property of null)");
+                return;
+            }
+            Flow(n, els);
+        }
+
+        /// <summary>
+        /// Where an element (or a list of them) goes. The compile follows it into a name, a function's
+        /// parameter, a return, an array and a comparison, and resolves what the script does with it there;
+        /// anything else would carry an element where the compile cannot see it, and is refused.
+        /// </summary>
+        private void Flow(Expression n, Els els)
+        {
+            if (!_parent.TryGetValue(n, out var p)) return;
+            var what = els.List ? "a list of elements" : ElementWord(els);
+            switch (p)
+            {
+                case MemberExpression m when m.Object == n:
+                    if (els.List) ListMember(m, els);
+                    else Use(n, els);
+                    return;
+                case VariableDeclarator vd when vd.Init == n:
+                    if (vd.Id is Identifier) return;
+                    break;
+                case AssignmentExpression { Operator: Operator.Assignment } a when a.Right == n && a.Left is Identifier:
+                    return;
+                case CallExpression c when c.Callee != n && c.Arguments.Contains(n):
+                    if (c.Callee is Identifier f && Function(f) is { } fn && NameOf(fn) is { } fname
+                        && _refs.TryGetValue(fname, out var refs) && refs.All(r => _parent[r] is CallExpression rc && rc.Callee == r || ForEachOver(r) != null))
+                        return;
+                    Refuse(n, $"{what} passed to a function the compile cannot follow (one called only by its name is followed)");
+                    return;
+                case ArrayExpression arr:
+                    if (Elems(arr) is { } whole && whole.Bad == null && !whole.Neutral) { Flow(arr, whole); return; }
+                    Refuse(n, $"{what} in an array with other values");
+                    return;
+                case ReturnStatement:
+                case ArrowFunctionExpression af when af.Body == n:
+                    {
+                        Node? fnNode = p;
+                        while (fnNode != null && fnNode is not IFunction) fnNode = _parent.TryGetValue(fnNode, out var up) ? up : null;
+                        if (fnNode is IFunction owner && NameOf(owner) is { } oname && _refs.TryGetValue(oname, out var orefs)
+                            && orefs.All(r => _parent[r] is CallExpression rc && rc.Callee == r))
+                            return;
+                        Refuse(n, $"{what} returned from a function the compile cannot follow (one called only by its name is followed)");
+                        return;
+                    }
+                case ConditionalExpression c when c.Test == n:
+                case IfStatement { Test: var it } when it == n:
+                case WhileStatement { Test: var wt } when wt == n:
+                case DoWhileStatement { Test: var dt } when dt == n:
+                case ForStatement { Test: var ft } when ft == n:
+                case NonUpdateUnaryExpression { Operator: Operator.LogicalNot }:
+                case ExpressionStatement:
+                    return;
+                case NonLogicalBinaryExpression { Operator: Operator.StrictEquality or Operator.StrictInequality or Operator.Equality or Operator.Inequality }:
+                    if (!els.List) return;
+                    break;
+                // `el && el.x`: only tested
+                case LogicalExpression { Operator: Operator.LogicalAnd } la when la.Left == n:
+                    return;
+                case ConditionalExpression or LogicalExpression:
+                    if (p is LogicalExpression && Tested(p)) return;
+                    if (Elems((Expression)p) is { } whole2 && whole2.Bad == null && !whole2.Neutral) { Flow((Expression)p, whole2); return; }
+                    if (Elems((Expression)p)?.Bad is { } bad) { Refuse(p, bad); return; }
+                    break;
+                case ForOfStatement fo when fo.Right == n && els.List:
+                    if (fo.Left is VariableDeclaration) return;
+                    break;
+            }
+            Refuse(n, $"{what} used as a value this way (the compile follows elements into names, calls, returns, arrays, loops and comparisons)");
+
+            bool Tested(Node x)
+            {
+                while (_parent.TryGetValue(x, out var up))
+                {
+                    switch (up)
+                    {
+                        case LogicalExpression: x = up; continue;
+                        case NonUpdateUnaryExpression { Operator: Operator.LogicalNot }: return true;
+                        case IfStatement i: return i.Test == x;
+                        case WhileStatement w: return w.Test == x;
+                        case DoWhileStatement d: return d.Test == x;
+                        case ForStatement f: return f.Test == x;
+                        case ConditionalExpression c: return c.Test == x;
+                        default: return false;
+                    }
+                }
+                return false;
+            }
+        }
+
+        private static string ElementWord(Els els)
+            => els.Ts.Count == 1 ? $"the element \"{els.Ts[0].Name}\"" : els.Ts.Count == 0 ? "an element the page as written does not have" : $"an element chosen at run time ({els.Ts.Count} candidates)";
+
+        /// <summary>What the script does with a list of elements: length, item(), forEach(), an index and for...of, as a browser's list has them.</summary>
+        private void ListMember(MemberExpression m, Els list)
+        {
+            if (m.Computed)
+            {
+                if (WrittenTo(m)) Refuse(m, "a list of elements written into (a browser's lists cannot be, and an array of elements is not followed once changed)");
+                return;
+            }
+            var name = m.Property is Identifier pid ? pid.Name : "…";
+            switch (name)
+            {
+                case "length" when !WrittenTo(m):
+                    return;
+                case "item" when list.Kind != "Array" && _parent[m] is CallExpression ic && ic.Callee == m:
+                    return;
+                case "forEach" when _parent[m] is CallExpression fc && fc.Callee == m:
+                    if (list.Kind == "HTMLCollection") { Refuse(m, "forEach on an HTMLCollection, which has none in a browser either (a for...of loop walks it)"); return; }
+                    if (fc.Arguments.Count == 0 || fc.Arguments[0] is not (IFunction or Identifier)) { Refuse(fc, "forEach on a list of elements with a callback the compile cannot follow"); return; }
+                    return;
+            }
+            Refuse(m, $".{name} of a list of elements (length, item(), forEach(), an index and for...of are translated)");
+        }
+
+        /// <summary>
+        /// The classes and attributes the selectors of lookups test, against what the script changes: a
+        /// list a browser works out while the page runs could then hold other elements than the page as
+        /// written gives, which one fixed at compile time cannot follow.
+        /// </summary>
+        private void Selectors()
+        {
+            if (_selectors.Count == 0) return;
+            var classes = new HashSet<string>(StringComparer.Ordinal);
+            var attrs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var t in _order)
+            {
+                foreach (var op in t.ClassOps) classes.UnionWith(op.Names);
+                foreach (var (_, values) in t.ClassNames)
+                    foreach (var v in values.OfType<string>()) classes.UnionWith(v.Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries));
+                if (t.ClassNames.Count > 0) classes.UnionWith((t.Node.Attr("class") ?? string.Empty).Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries));
+                foreach (var op in t.AttrOps) attrs.Add(op.Name);
+            }
+            foreach (var (selector, at) in _selectors)
+            {
+                foreach (Match c in Regex.Matches(selector, @"\.(-?[_a-zA-Z][\w-]*)"))
+                    if (classes.Contains(c.Groups[1].Value))
+                    {
+                        Refuse(at, $"the selector \"{selector}\" tests the class \"{c.Groups[1].Value}\", which the script changes, so what it finds changes as the page runs (not translated yet)");
+                        break;
+                    }
+                foreach (Match a in Regex.Matches(selector, @"\[\s*([\w-]+)"))
+                    if (attrs.Contains(a.Groups[1].Value))
+                    {
+                        Refuse(at, $"the selector \"{selector}\" tests the attribute \"{a.Groups[1].Value}\", which the script changes, so what it finds changes as the page runs (not translated yet)");
+                        break;
+                    }
+            }
         }
 
         /// <summary>One node of the script: an element reference, a timer, or a browser global, each checked where it stands.</summary>
@@ -437,18 +1186,29 @@ internal static class PlainTranslator
             if (_ignored.Contains(n)) return;
             switch (n)
             {
-                case CallExpression c when c.Callee is MemberExpression { Object: Identifier { Name: "document" }, Property: Identifier { Name: "getElementById" } }:
-                    if (Lookup(c, report: true) is { } t) Use(c, t);
+                // an expression that yields elements: a lookup, a list's member, a call that returns one, a name holding one
+                case CallExpression c when DomCall(c) != null:
+                    Source(c);
                     return;
-
-                case Identifier id when _vars.TryGetValue(id.Name, out var held) && Reference(id)
-                                        && !(_parent.TryGetValue(id, out var decl) && decl is VariableDeclarator vd && vd.Id == id):
-                    Use(id, held);
+                case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "item" } } im } ic when Elems(im.Object) is { List: true }:
+                    Source(ic);
+                    return;
+                case MemberExpression { Computed: true } ix when Elems(ix.Object) is { List: true }:
+                    Source(ix);
+                    return;
+                case CallExpression { Callee: Identifier } uc when Elems(uc) is { Neutral: false }:
+                    Source(uc);
+                    return;
+                case Identifier id when Reference(id) && (_vars.ContainsKey(id.Name)
+                                            ? !(_parent.TryGetValue(id, out var decl) && decl is VariableDeclarator vd && vd.Id == id)
+                                            : Decl(id) is { } d && d != id)
+                                        && Elems(id) is { Neutral: false }:
+                    Source(id);
                     return;
 
                 case Identifier { Name: "document" } doc when !Declared("document") && Reference(doc):
-                    if (!(_parent[doc] is MemberExpression { Property: Identifier { Name: "getElementById" } } dm && dm.Object == doc
-                          && _parent.TryGetValue(dm, out var dc) && dc is CallExpression cc && cc.Callee == dm))
+                    if (!(_parent[doc] is MemberExpression { Computed: false, Property: Identifier { Name: "getElementById" or "querySelector" or "querySelectorAll" or "getElementsByClassName" or "getElementsByTagName" } } dm
+                          && dm.Object == doc && _parent.TryGetValue(dm, out var dc) && dc is CallExpression cc && cc.Callee == dm))
                         Refuse(doc, "document." + (_parent[doc] is MemberExpression { Computed: false, Property: Identifier dp } ? dp.Name : "…")
                                     + ", which is outside the translated DOM features");
                     return;
@@ -491,33 +1251,83 @@ internal static class PlainTranslator
             };
         }
 
-        /// <summary>What the script does with an element, checked against the features translated here.</summary>
-        private void Use(Expression at, Target t)
+        /// <summary>The element(s) a DOM operation acts on, and whether the Lua picks one of them at run time.</summary>
+        private sealed class Recv
         {
+            public readonly Expression At;
+            public readonly List<Target> Ts;
+            public readonly bool Dyn;
+            public Recv(Expression at, List<Target> ts, bool dyn) { At = at; Ts = ts; Dyn = dyn; }
+            public string Name => Ts.Count == 0 ? "an element the page as written does not have"
+                : Ts.Count == 1 ? "\"" + Ts[0].Name + "\"" : $"one of {Ts.Count} elements chosen at run time (\"{Ts[0].Name}\", …)";
+        }
+
+        /// <summary>
+        /// Whether an expression that yields an element does nothing else - a lookup, a name, a list's member,
+        /// a function that only looks one up - so an operation on it needs no Lua to find it.
+        /// </summary>
+        private bool Lookupish(Expression e, int depth = 0) => depth < 4 && e switch
+        {
+            Identifier => true,
+            CallExpression c when DomCall(c) is { } q => (q.Under == null || Lookupish(q.Under, depth + 1)) && c.Arguments.All(a => a is Expression x && Pure(x)),
+            CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "item" } } im } ic
+                => Lookupish(im.Object, depth + 1) && ic.Arguments.All(a => a is Expression x && Pure(x)),
+            MemberExpression { Computed: true } ix => Lookupish(ix.Object, depth + 1) && Pure(ix.Property),
+            CallExpression { Callee: Identifier f } uc when Function(f) is { } fn
+                => uc.Arguments.All(a => a is Expression x && Pure(x))
+                   && (fn.Body is Expression || fn.Body is BlockStatement { Body.Count: 1 } b && b.Body[0] is ReturnStatement)
+                   && Returns(fn).All(r => r != null && Lookupish(r, depth + 1)),
+            _ => Pure(e),
+        };
+
+        private readonly HashSet<Expression> _used = new();
+
+        /// <summary>A DOM operation evaluated for its effect, on every element it can act on.</summary>
+        private void Op(Recv r, Expression at)
+        {
+            _ops[at] = r.Ts;
+            if (r.Dyn) _recv[at] = r.At;
+        }
+
+        /// <summary>A DOM read: the Lua for the one element, or a pick among the elements it can read.</summary>
+        private void Read(Recv r, Node at, Func<JsToLua, Target, Func<Node, string>, string> body)
+            => _lua[at] = lua => r.Dyn ? Dispatch(r.At, r.Ts, lua, (x, tr) => "return " + body(lua, x, tr)) : body(lua, r.Ts[0], lua.Translate);
+
+        /// <summary>What the script does with an element (or one of a set, chosen at run time), checked against the features translated here.</summary>
+        private void Use(Expression at, Els els)
+        {
+            // `(on ? a : b).textContent = …` is reached from a and from b: one operation
+            if (!_used.Add(at)) return;
+            var r = new Recv(at, els.Ts, !(els.One && Lookupish(at)));
             var p = _parent[at];
-            if (p is VariableDeclarator vd && vd.Init == at && vd.Id is Identifier vid && _vars.TryGetValue(vid.Name, out var held) && held == t)
-                return;
             if (p is not MemberExpression m || m.Object != at || m.Computed || m.Property is not Identifier prop)
             {
-                Refuse(at, $"the element \"{t.Name}\" used as a value (only its properties are translated)");
+                Refuse(at, $"{r.Name} used as a value (only its properties are translated)");
                 return;
             }
             var gp = _parent[m];
             switch (prop.Name)
             {
+                // a lookup under this element: a source of elements of its own
+                case "querySelector" or "querySelectorAll" or "getElementsByClassName" or "getElementsByTagName" when gp is CallExpression qc && qc.Callee == m:
+                    return;
+
                 case "textContent" or "innerText":
-                    if (Assigned(m) is { } text)
+                    if (Assigned(m) is { } text) Text(r, m, text.At, text.Value);
+                    else if (Compound(m) is { } more)
                     {
-                        if (t.Ve is not Label) Refuse(m, $"textContent of \"{t.Name}\", which holds elements rather than text, replaces them");
-                        else { t.Texts.Add((text.At, text.Value)); _ops[text.At] = t; }
+                        // `el.textContent += v` is `el.textContent = el.textContent + v`: the text read back, then written
+                        foreach (var x in r.Ts) x.TextRead = true;
+                        Read(r, m, (lua, x, _) => prop.Name == "textContent" ? TextRead(x, m, lua) : InnerTextRead(x, m, lua));
+                        Text(r, m, more.At, more.Value);
                     }
-                    else if (prop.Name == "textContent" && !WrittenTo(m))
+                    else if (!WrittenTo(m))
                     {
                         // what the program last wrote, or the page's own text: never a DOM
-                        t.TextRead = true;
-                        _lua[m] = lua => TextRead(t, m, lua);
+                        foreach (var x in r.Ts) x.TextRead = true;
+                        Read(r, m, (lua, x, _) => prop.Name == "textContent" ? TextRead(x, m, lua) : InnerTextRead(x, m, lua));
                     }
-                    else Refuse(m, $"reading or computing with .{prop.Name} of \"{t.Name}\" (element reads are not translated yet)");
+                    else Refuse(m, $"this write to .{prop.Name} of {r.Name}");
                     return;
 
                 case "style":
@@ -525,101 +1335,168 @@ internal static class PlainTranslator
                         && Assigned(s) is { } style)
                     {
                         var name = DomSlots.Dashed(s.Property is Identifier si ? si.Name : ((StringLiteral)s.Property).Value);
-                        if (!t.Styles.TryGetValue(name, out var list)) t.Styles[name] = list = new();
-                        list.Add((style.At, style.Value));
-                        _ops[style.At] = t;
+                        foreach (var x in r.Ts)
+                        {
+                            if (!x.Styles.TryGetValue(name, out var list)) x.Styles[name] = list = new();
+                            list.Add((style.At, style.Value));
+                        }
+                        Op(r, style.At);
                     }
-                    else if (gp is MemberExpression r && r.Object == m && (r.Computed ? r.Property is StringLiteral : r.Property is Identifier)
-                             && !WrittenTo(r) && !(_parent[r] is CallExpression rc && rc.Callee == r)
-                             && DomSlots.Dashed(r.Property is Identifier ri ? ri.Name : ((StringLiteral)r.Property).Value) is var read
+                    else if (gp is MemberExpression rs && rs.Object == m && (rs.Computed ? rs.Property is StringLiteral : rs.Property is Identifier)
+                             && !WrittenTo(rs) && !(_parent[rs] is CallExpression rc && rc.Callee == rs)
+                             && DomSlots.Dashed(rs.Property is Identifier ri ? ri.Name : ((StringLiteral)rs.Property).Value) is var read
                              && read is not ("css-text" or "length" or "parent-rule"))
                     {
-                        t.StyleReads.Add(read);
-                        _lua[r] = lua => StyleRead(t, read, r, lua);
+                        foreach (var x in r.Ts) x.StyleReads.Add(read);
+                        Read(r, rs, (lua, x, _) => StyleRead(x, read, rs, lua));
                     }
-                    else Refuse(m, $"this use of .style on \"{t.Name}\" (assigning and reading style.<property> are translated)");
+                    else Refuse(m, $"this use of .style on {r.Name} (assigning and reading style.<property> are translated)");
                     return;
 
                 case "className":
-                    if (Assigned(m) is { } cls)
-                    {
-                        if (Finite(cls.Value) is not { } values || values.Any(v => v is not string)) Refuse(cls.Value, $"className of \"{t.Name}\" set to a value only known at run time");
-                        else { t.ClassNames.Add((cls.At, values)); _ops[cls.At] = t; }
-                    }
+                    if (Assigned(m) is { } cls) ClassName(r, cls.At, cls.Value);
                     else if (!WrittenTo(m))
                     {
-                        t.ClassRead = true;
-                        _lua[m] = _ => ClassNameRead(t);
+                        foreach (var x in r.Ts) x.ClassRead = true;
+                        Read(r, m, (_, x, _) => ClassNameRead(x));
                     }
-                    else Refuse(m, $"this use of .className of \"{t.Name}\"");
+                    else Refuse(m, $"this use of .className of {r.Name} (a class added with += is classList.add)");
                     return;
 
                 case "getAttribute" or "hasAttribute" or "setAttribute" or "removeAttribute" or "toggleAttribute":
-                    if (gp is CallExpression ac && ac.Callee == m && !ac.Arguments.Any(a => a is SpreadElement)) Attribute(t, prop.Name, ac);
-                    else Refuse(m, $".{prop.Name} of \"{t.Name}\" used as a value");
+                    if (gp is CallExpression ac && ac.Callee == m && !ac.Arguments.Any(a => a is SpreadElement)) Attribute(r, prop.Name, ac);
+                    else Refuse(m, $".{prop.Name} of {r.Name} used as a value");
                     return;
 
                 case "hidden":
-                    if (Assigned(m) is { } hid) AttrWrite(t, hid.At, "hidden", "hidden", hid.Value);
-                    else if (!WrittenTo(m)) { _bool.Add(m); _lua[m] = lua => AttrRead(t, true, "hidden", null, lua); }
-                    else Refuse(m, $"this use of .hidden of \"{t.Name}\"");
+                    if (Assigned(m) is { } hid) AttrWrite(r, hid.At, "hidden", "hidden", hid.Value);
+                    else if (!WrittenTo(m)) { _bool.Add(m); Read(r, m, (_, x, tr) => AttrRead(x, true, "hidden", null, tr)); }
+                    else Refuse(m, $"this use of .hidden of {r.Name}");
                     return;
 
                 case "dataset":
-                    Dataset(t, m);
-                    return;
-
-                case "classList" when gp is MemberExpression { Computed: false, Property: Identifier { Name: "contains" } } has && has.Object == m
-                                       && _parent[has] is CallExpression hc && hc.Callee == has && hc.Arguments.Count == 1 && hc.Arguments[0] is Expression key:
-                    _bool.Add(hc);
-                    _lua[hc] = lua => Contains(t, key, lua);
+                    Dataset(r, m);
                     return;
 
                 case "classList":
-                    if (gp is MemberExpression { Computed: false, Property: Identifier verb } lm && lm.Object == m
-                        && verb.Name is "add" or "remove" or "toggle"
-                        && _parent[lm] is CallExpression call && call.Callee == lm && Effect(call))
-                    {
-                        var names = new List<string>();
-                        var args = verb.Name == "toggle" ? call.Arguments.Take(1) : call.Arguments;
-                        foreach (var a in args)
-                            if (a is StringLiteral { Value: { Length: > 0 } c } && c.IndexOfAny(new[] { ' ', '\t', '\n' }) < 0) names.Add(c);
-                            else { Refuse(a, $"classList.{verb.Name} on \"{t.Name}\" with a class only known at run time"); return; }
-                        if (names.Count == 0 || verb.Name == "toggle" && call.Arguments.Count > 2) { Refuse(call, $"classList.{verb.Name} on \"{t.Name}\" with these arguments"); return; }
-                        t.ClassOps.Add((call, verb.Name, names, verb.Name == "toggle" && call.Arguments.Count == 2 ? (Expression)call.Arguments[1] : null));
-                        _ops[call] = t;
-                    }
-                    else Refuse(m, $"classList.{(gp is MemberExpression { Property: Identifier vv } ? vv.Name : "…")} on \"{t.Name}\" (add, remove and toggle as statements are translated)");
+                    ClassList(r, m);
                     return;
 
                 case "onclick":
                     if (Assigned(m) is { } handler)
                     {
                         if (ReadsEvent(handler.Value)) return;
-                        t.Listens = true;
-                        _ops[handler.At] = t;
+                        foreach (var x in r.Ts) x.Listens = true;
+                        Op(r, handler.At);
                     }
-                    else Refuse(m, $"reading .onclick of \"{t.Name}\"");
+                    else Refuse(m, $"reading .onclick of {r.Name}");
                     return;
 
                 case "addEventListener":
                     if (gp is CallExpression ec && ec.Callee == m && Effect(ec))
                     {
-                        if (ec.Arguments.Count != 2 || ec.Arguments[0] is not StringLiteral kind) { Refuse(ec, $"addEventListener on \"{t.Name}\" with options or a computed event name"); return; }
-                        if (kind.Value != "click") { Refuse(ec, $"the \"{kind.Value}\" event on \"{t.Name}\": the vector mod delivers only clicks"); return; }
+                        if (ec.Arguments.Count != 2 || ec.Arguments[0] is not StringLiteral kind) { Refuse(ec, $"addEventListener on {r.Name} with options or a computed event name"); return; }
+                        if (kind.Value != "click") { Refuse(ec, $"the \"{kind.Value}\" event on {r.Name}: the vector mod delivers only clicks"); return; }
                         if (ReadsEvent(ec.Arguments[1])) return;
-                        t.Listens = true;
-                        _ops[ec] = t;
+                        foreach (var x in r.Ts) x.Listens = true;
+                        Op(r, ec);
                     }
-                    else Refuse(m, $"addEventListener on \"{t.Name}\" used as a value");
+                    else Refuse(m, $"addEventListener on {r.Name} used as a value");
                     return;
 
                 default:
-                    Refuse(m, $".{prop.Name} of \"{t.Name}\", which is outside the translated DOM features");
+                    Refuse(m, $".{prop.Name} of {r.Name}, which is outside the translated DOM features");
                     return;
             }
         }
 
+        /// <summary>A text written whole: each element it can go to must hold only text.</summary>
+        private void Text(Recv r, MemberExpression m, Expression at, Expression value)
+        {
+            foreach (var x in r.Ts)
+                if (x.Ve is not Label) { Refuse(m, $"textContent of \"{x.Name}\", which holds elements rather than text, replaces them"); return; }
+            foreach (var x in r.Ts) x.Texts.Add((at, value));
+            Op(r, at);
+        }
+
+        /// <summary>className (or classList.value) given a value from a fixed set: the class states it draws.</summary>
+        private void ClassName(Recv r, Expression at, Expression value)
+        {
+            if (Finite(value) is not { } values || values.Any(v => v is not string)) { Refuse(value, $"className of {r.Name} set to a value only known at run time"); return; }
+            foreach (var x in r.Ts) x.ClassNames.Add((at, values));
+            Op(r, at);
+        }
+
+        /// <summary>`el.x op= v` evaluated for its effect, as `el.x = el.x op v`: the write it stands for.</summary>
+        private (Expression At, Expression Value)? Compound(MemberExpression target)
+        {
+            if (_parent[target] is not AssignmentExpression a || a.Left != target || !Effect(a)) return null;
+            Operator? op = a.Operator switch
+            {
+                Operator.AdditionAssignment => Operator.Addition,
+                Operator.SubtractionAssignment => Operator.Subtraction,
+                Operator.MultiplicationAssignment => Operator.Multiplication,
+                Operator.DivisionAssignment => Operator.Division,
+                Operator.RemainderAssignment => Operator.Remainder,
+                Operator.ExponentiationAssignment => Operator.Exponentiation,
+                _ => null,
+            };
+            return op == null ? null : (a, new NonLogicalBinaryExpression(op.Value, target, a.Right));
+        }
+
+        /// <summary>classList: add, remove, toggle, contains, item, length and value.</summary>
+        private void ClassList(Recv r, MemberExpression m)
+        {
+            var gp = _parent[m];
+            if (gp is not MemberExpression { Computed: false, Property: Identifier verb } lm || lm.Object != m)
+            {
+                Refuse(m, $"classList of {r.Name} used as a value");
+                return;
+            }
+            var call = _parent[lm] is CallExpression c && c.Callee == lm ? c : null;
+            switch (verb.Name)
+            {
+                case "contains" when call is { Arguments.Count: 1 } && call.Arguments[0] is Expression key:
+                    _bool.Add(call);
+                    Read(r, call, (_, x, tr) => Contains(x, key, tr));
+                    return;
+
+                case "item" when call is { Arguments.Count: 1 } && call.Arguments[0] is Expression index:
+                    foreach (var x in r.Ts) x.ClassRead = true;
+                    _null[call] = "null";
+                    Read(r, call, (_, x, tr) => ClassItem(x, index, tr));
+                    return;
+
+                case "length" when call == null && !WrittenTo(lm):
+                    Read(r, lm, (_, x, _) => ClassCount(x));
+                    return;
+
+                case "value" when call == null:
+                    if (Assigned(lm) is { } set) ClassName(r, set.At, set.Value);
+                    else if (!WrittenTo(lm))
+                    {
+                        foreach (var x in r.Ts) x.ClassRead = true;
+                        Read(r, lm, (_, x, _) => ClassNameRead(x));
+                    }
+                    else Refuse(lm, $"this use of classList.value of {r.Name}");
+                    return;
+
+                case "add" or "remove" or "toggle" when call != null && Effect(call):
+                    {
+                        var names = new List<string>();
+                        var args = verb.Name == "toggle" ? call.Arguments.Take(1) : call.Arguments;
+                        foreach (var a in args)
+                            if (a is StringLiteral { Value: { Length: > 0 } cn } && cn.IndexOfAny(new[] { ' ', '\t', '\n' }) < 0) names.Add(cn);
+                            else { Refuse(a, $"classList.{verb.Name} on {r.Name} with a class only known at run time"); return; }
+                        if (names.Count == 0 || verb.Name == "toggle" && call.Arguments.Count > 2) { Refuse(call, $"classList.{verb.Name} on {r.Name} with these arguments"); return; }
+                        var force = verb.Name == "toggle" && call.Arguments.Count == 2 ? (Expression)call.Arguments[1] : null;
+                        foreach (var x in r.Ts) x.ClassOps.Add((call, verb.Name, names, force));
+                        Op(r, call);
+                        return;
+                    }
+            }
+            Refuse(m, $"classList.{verb.Name} on {r.Name} (add, remove and toggle as statements, contains, item, length and value are translated)");
+        }
         /// <summary>`target = value` evaluated for its effect: the only place a DOM write is translated.</summary>
         private (Expression At, Expression Value)? Assigned(MemberExpression target)
             => _parent[target] is AssignmentExpression { Operator: Operator.Assignment } a && a.Left == target && Effect(a)
@@ -869,34 +1746,34 @@ internal static class PlainTranslator
 
         // ---- attributes -----------------------------------------------------------------------------------
 
-        private void Attribute(Target t, string verb, CallExpression call)
+        private void Attribute(Recv r, string verb, CallExpression call)
         {
             var args = call.Arguments.Cast<Expression>().ToList();
-            if (args.Count < (verb == "setAttribute" ? 2 : 1)) { Refuse(call, $"{verb} on \"{t.Name}\" without its arguments"); return; }
+            if (args.Count < (verb == "setAttribute" ? 2 : 1)) { Refuse(call, $"{verb} on {r.Name} without its arguments"); return; }
             var read = verb is "getAttribute" or "hasAttribute";
             if (args[0] is not StringLiteral lit)
             {
                 if (read)
                 {
-                    t.AttrsByName = true;
+                    foreach (var x in r.Ts) x.AttrsByName = true;
                     if (verb == "hasAttribute") _bool.Add(call); else _null[call] = "null";
-                    _lua[call] = lua => AttrRead(t, verb == "hasAttribute", null, args[0], lua);
+                    Read(r, call, (_, x, tr) => AttrRead(x, verb == "hasAttribute", null, args[0], tr));
                 }
-                else Refuse(call, $"{verb} on \"{t.Name}\" with a name only known at run time");
+                else Refuse(call, $"{verb} on {r.Name} with a name only known at run time");
                 return;
             }
             var name = lit.Value.ToLowerInvariant();
             if (read)
             {
-                if (name is "class" or "style") Refuse(call, $"{verb}('{name}') on \"{t.Name}\" (className, classList and style are translated; the attribute itself is not yet)");
+                if (name is "class" or "style") Refuse(call, $"{verb}('{name}') on {r.Name} (className, classList and style are translated; the attribute itself is not yet)");
                 else
                 {
                     if (verb == "hasAttribute") _bool.Add(call); else _null[call] = "null";
-                    _lua[call] = lua => AttrRead(t, verb == "hasAttribute", name, null, lua);
+                    Read(r, call, (_, x, tr) => AttrRead(x, verb == "hasAttribute", name, null, tr));
                 }
                 return;
             }
-            AttrWrite(t, call, name, verb switch { "setAttribute" => "set", "removeAttribute" => "remove", _ => "toggle" },
+            AttrWrite(r, call, name, verb switch { "setAttribute" => "set", "removeAttribute" => "remove", _ => "toggle" },
                       verb == "removeAttribute" || args.Count < 2 ? null : args[1]);
         }
 
@@ -905,92 +1782,152 @@ internal static class PlainTranslator
         /// class is: a state per value it can hold. `hidden` is the browser's own `[hidden] {display: none}`.
         /// Any other is the program's own value, for the script to read back.
         /// </summary>
-        private void AttrWrite(Target t, Expression at, string name, string verb, Expression? value)
+        private void AttrWrite(Recv r, Expression at, string name, string verb, Expression? value)
         {
-            if (name is "class" or "style" or "id") { Refuse(at, $"the {name} attribute written by {verb} on \"{t.Name}\" (className, classList and style are translated; this is not yet)"); return; }
-            if (name.StartsWith("on", StringComparison.Ordinal)) { Refuse(at, $"an event handler attribute ({name}) written on \"{t.Name}\""); return; }
-            if (Drawn.Contains(name)) { Refuse(at, $"the {name} attribute of \"{t.Name}\", which the page draws from directly rather than through CSS (not translated yet)"); return; }
-            var op = new AttrOp { At = at, Name = name, Verb = verb, Value = value, Facet = name == "hidden" || _built.AttributeSelectors.Contains(name) };
-            if (op.Facet && verb == "set" && (Finite(value!) is not { } values || values.Any(v => v is not (string or double))))
+            if (name is "class" or "style" or "id") { Refuse(at, $"the {name} attribute written by {verb} on {r.Name} (className, classList and style are translated; this is not yet)"); return; }
+            if (name.StartsWith("on", StringComparison.Ordinal)) { Refuse(at, $"an event handler attribute ({name}) written on {r.Name}"); return; }
+            if (Drawn.Contains(name)) { Refuse(at, $"the {name} attribute of {r.Name}, which the page draws from directly rather than through CSS (not translated yet)"); return; }
+            var facet = name == "hidden" || _built.AttributeSelectors.Contains(name);
+            if (facet && verb == "set" && (Finite(value!) is not { } values || values.Any(v => v is not (string or double))))
             {
-                Refuse(value!, $"the {name} attribute of \"{t.Name}\", which CSS selects on, set to a value only known at run time");
+                Refuse(value!, $"the {name} attribute of {r.Name}, which CSS selects on, set to a value only known at run time");
                 return;
             }
-            t.AttrOps.Add(op);
+            var ops = new Dictionary<Target, AttrOp>();
+            foreach (var x in r.Ts)
+            {
+                ops[x] = new AttrOp { At = at, Name = name, Verb = verb, Value = value, Facet = facet };
+                x.AttrOps.Add(ops[x]);
+            }
             if (verb != "toggle") _effects.Add(at);
-            _lua[at] = lua => AttrLua(t, op, lua);
+            _lua[at] = lua => r.Dyn ? Dispatch(r.At, r.Ts, lua, (x, tr) => "return " + AttrLua(x, ops[x], tr)) : AttrLua(r.Ts[0], ops[r.Ts[0]], lua.Translate);
         }
 
         /// <summary><c>el.dataset.fooBar</c>: the attribute <c>data-foo-bar</c>, read, written, deleted or tested with `in`.</summary>
-        private void Dataset(Target t, MemberExpression ds)
+        private void Dataset(Recv r, MemberExpression ds)
         {
             static string Data(string key) => "data-" + Regex.Replace(key, "[A-Z]", c => "-" + c.Value.ToLowerInvariant());
             var gp = _parent[ds];
             if (gp is MemberExpression d && d.Object == ds && (d.Computed ? d.Property is StringLiteral : d.Property is Identifier))
             {
                 var name = Data(d.Property is Identifier k ? k.Name : ((StringLiteral)d.Property).Value);
-                if (Assigned(d) is { } w) { AttrWrite(t, w.At, name, "set", w.Value); return; }
-                if (_parent[d] is NonUpdateUnaryExpression { Operator: Operator.Delete } del) { AttrWrite(t, del, name, "remove", null); return; }
-                if (!WrittenTo(d) && !(_parent[d] is CallExpression dc && dc.Callee == d)) { _null[d] = "undefined"; _lua[d] = lua => AttrRead(t, false, name, null, lua); return; }
+                if (Assigned(d) is { } w) { AttrWrite(r, w.At, name, "set", w.Value); return; }
+                if (_parent[d] is NonUpdateUnaryExpression { Operator: Operator.Delete } del) { AttrWrite(r, del, name, "remove", null); return; }
+                if (!WrittenTo(d) && !(_parent[d] is CallExpression dc && dc.Callee == d)) { _null[d] = "undefined"; Read(r, d, (_, x, tr) => AttrRead(x, false, name, null, tr)); return; }
             }
             else if (gp is NonLogicalBinaryExpression { Operator: Operator.In, Left: StringLiteral key } test && test.Right == ds)
             {
                 var name = Data(key.Value);
                 _bool.Add(test);
-                _lua[test] = lua => AttrRead(t, true, name, null, lua);
+                Read(r, test, (_, x, tr) => AttrRead(x, true, name, null, tr));
                 return;
             }
-            Refuse(ds, $"this use of .dataset on \"{t.Name}\" (reading, writing, deleting and testing one named key are translated)");
+            Refuse(ds, $"this use of .dataset on {r.Name} (reading, writing, deleting and testing one named key are translated)");
         }
 
         // ---- values the script can write ---------------------------------------------------------------
 
         /// <summary>
         /// Every value an expression can take, when that is a fixed set known from the source: literals,
-        /// either side of a ternary or a logical operator, a name every binding of which is such a set,
-        /// or a field of a constant table of them. Null when any of it is only known at run time.
+        /// either side of a ternary or a logical operator, `+ - *` of such sets, a template of them, a name
+        /// every value of which is such a set (its own scope's, as JavaScript resolves it), a parameter from
+        /// every call's argument, a loop counter over a fixed range, a field of a constant table, and a field
+        /// of an object literal a function returns. Null when any of it is only known at run time.
         /// </summary>
-        private List<object>? Finite(Expression e, HashSet<string>? seen = null)
+        private List<object>? Finite(Expression e, HashSet<Identifier>? seen = null, Dictionary<Identifier, Expression>? bind = null)
         {
+            const int Most = 256;
             switch (e)
             {
                 case StringLiteral s: return new List<object> { s.Value };
                 case NumericLiteral n: return new List<object> { n.Value };
-                case TemplateLiteral { Expressions.Count: 0 } tl: return new List<object> { tl.Quasis[0].Value.Cooked ?? string.Empty };
-                case ConditionalExpression c: return Union(Finite(c.Consequent, seen), Finite(c.Alternate, seen));
-                case LogicalExpression l: return Union(Finite(l.Left, seen), Finite(l.Right, seen));
-                case Identifier id when !id.Name.Equals("undefined", StringComparison.Ordinal):
+                case TemplateLiteral tl:
                     {
-                        seen ??= new HashSet<string>(StringComparer.Ordinal);
-                        if (!seen.Add(id.Name)) return new List<object>();
-                        if (Parameter(id.Name) is { } fromCalls) return fromCalls(seen);
-                        List<object>? all = new();
-                        var any = false;
-                        foreach (var n in Markup.Everything(_ast))
+                        List<object>? all = new() { tl.Quasis[0].Value.Cooked ?? string.Empty };
+                        for (var i = 0; i < tl.Expressions.Count; i++)
                         {
-                            Expression? v = n switch
-                            {
-                                VariableDeclarator { Id: Identifier d } vd when d.Name == id.Name => vd.Init,
-                                AssignmentExpression { Operator: Operator.Assignment, Left: Identifier a } ae when a.Name == id.Name => ae.Right,
-                                _ => null,
-                            };
-                            if (n is VariableDeclarator { Id: Identifier dd, Init: null } && dd.Name == id.Name) return null;
-                            if (n is AssignmentExpression { Left: Identifier ca } cae && ca.Name == id.Name && cae.Operator != Operator.Assignment) return null;
-                            if (n is UpdateExpression { Argument: Identifier ua } && ua.Name == id.Name) return null;
-                            if (v == null) continue;
-                            any = true;
-                            all = Union(all, Finite(v, seen));
+                            if (Finite(tl.Expressions[i], seen, bind) is not { } part) return null;
+                            all = Product(all, part.Select(v => (object)(v is double d ? JsToLuaNumber(d) : (string)v)).ToList(), Operator.Addition);
+                            all = all == null ? null : Product(all, new List<object> { tl.Quasis[i + 1].Value.Cooked ?? string.Empty }, Operator.Addition);
                             if (all == null) return null;
                         }
-                        // a parameter, a loop variable or anything else bound without a value is not a set
-                        return any && _bindings.TryGetValue(id.Name, out var b) && b == Markup.Everything(_ast).Count(x => x is VariableDeclarator { Id: Identifier i } && i.Name == id.Name) ? all : null;
+                        return all;
                     }
-                case MemberExpression { Object: Identifier table } m when ConstTable(table.Name) is { } values:
+                case ConditionalExpression c: return Union(Finite(c.Consequent, seen, bind), Finite(c.Alternate, seen, bind));
+                case LogicalExpression l: return Union(Finite(l.Left, seen, bind), Finite(l.Right, seen, bind));
+                case NonLogicalBinaryExpression { Operator: Operator.Addition or Operator.Subtraction or Operator.Multiplication } b:
+                    return Finite(b.Left, seen, bind) is { } left && Finite(b.Right, seen, bind) is { } right ? Product(left, right, b.Operator) : null;
+                // a text method that gives one text for one text, and toFixed of a number
+                case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "trim" or "trimStart" or "trimEnd" or "toUpperCase" or "toLowerCase" or "toFixed" } method } on } call
+                    when (method.Name == "toFixed" ? call.Arguments.Count == 1 && call.Arguments[0] is NumericLiteral { Value: >= 0 and <= 20 } : call.Arguments.Count == 0)
+                         && Finite(on.Object, seen, bind) is { } inputs:
+                    {
+                        var outputs = new List<object>();
+                        foreach (var v in inputs)
+                        {
+                            object? r = (method.Name, v) switch
+                            {
+                                ("toFixed", double d) => JsNumber.ToFixed(d, (int)((NumericLiteral)call.Arguments[0]).Value),
+                                ("trim", string s) => s.Trim(JsSpace),
+                                ("trimStart", string s) => s.TrimStart(JsSpace),
+                                ("trimEnd", string s) => s.TrimEnd(JsSpace),
+                                ("toUpperCase", string s) => s.ToUpperInvariant(),
+                                ("toLowerCase", string s) => s.ToLowerInvariant(),
+                                _ => null,
+                            };
+                            if (r == null) return null;
+                            if (!outputs.Contains(r)) outputs.Add(r);
+                        }
+                        return outputs;
+                    }
+                case Identifier id when !id.Name.Equals("undefined", StringComparison.Ordinal):
+                    {
+                        if (Decl(id) is not { } decl) return null;
+                        if (bind != null && bind.TryGetValue(decl, out var arg)) return Finite(arg, seen);
+                        seen ??= new HashSet<Identifier>();
+                        if (!seen.Add(decl)) return new List<object>();
+                        try
+                        {
+                            if (LoopRange(decl) is { } range) return range;
+                            if (ParamOf(decl) is { } param) return ParamValues(param.Fn, param.Index, seen);
+                            if (Given(decl) is not { } given) return null;
+                            List<object>? all = new();
+                            foreach (var v in given)
+                            {
+                                // a declaration without a value is undefined, which is not a value a set holds
+                                if (v == null) return null;
+                                all = Union(all, Finite(v, seen));
+                                if (all == null) return null;
+                            }
+                            return all;
+                        }
+                        finally { seen.Remove(decl); }
+                    }
+                case MemberExpression { Object: Identifier table } m when ConstTable(table) is { } values:
                     if (!m.Computed && m.Property is Identifier key)
-                        return values.TryGetValue(key.Name, out var one) ? Finite(one, seen) : null;
-                    List<object>? each = new();
-                    foreach (var v in values.Values) { each = Union(each, Finite(v, seen)); if (each == null) return null; }
-                    return each;
+                        return key.Name == "length" && IsArrayTable(table) ? new List<object> { (double)values.Count }
+                            : values.TryGetValue(key.Name, out var one) ? Finite(one, seen, bind) : null;
+                    {
+                        List<object>? each = new();
+                        foreach (var v in values.Values) { each = Union(each, Finite(v, seen, bind)); if (each == null) return null; }
+                        return each;
+                    }
+                case MemberExpression { Computed: false, Property: Identifier { Name: "length" } } len when Elems(len.Object, bind) is { List: true } list:
+                    return list.Lists.Select(l => (object)(double)l.Count).Distinct().ToList();
+                case MemberExpression m when !m.Computed && m.Property is Identifier || m.Computed && m.Property is StringLiteral:
+                    {
+                        // a field of an object literal: every object the expression can be, and that field of each
+                        var field = m.Property is Identifier f ? f.Name : ((StringLiteral)m.Property).Value;
+                        if (Objects(m.Object, bind, 0) is not { Count: > 0 } objects) return null;
+                        List<object>? all = new();
+                        foreach (var (o, ob) in objects)
+                        {
+                            if (Field(o, field) is not { } v || FieldWritten(field, o)) return null;
+                            all = Union(all, Finite(v, seen, ob));
+                            if (all == null) return null;
+                        }
+                        return all;
+                    }
                 default:
                     return null;
             }
@@ -1002,77 +1939,287 @@ internal static class PlainTranslator
                 foreach (var x in b) if (!u.Contains(x)) u.Add(x);
                 return u;
             }
+
+            // Each value of the left with each of the right, as JavaScript's `+ - *` give them
+            static List<object>? Product(List<object> a, List<object> b, Operator op)
+            {
+                if (a.Count * b.Count > Most) return null;
+                var u = new List<object>();
+                foreach (var x in a)
+                    foreach (var y in b)
+                    {
+                        object v;
+                        if (op == Operator.Addition && (x is string || y is string))
+                            v = (x is double dx ? JsToLuaNumber(dx) : (string)x) + (y is double dy ? JsToLuaNumber(dy) : (string)y);
+                        else if (x is double nx && y is double ny) v = op switch { Operator.Addition => nx + ny, Operator.Subtraction => nx - ny, _ => nx * ny };
+                        else return null;
+                        if (!u.Contains(v)) u.Add(v);
+                    }
+                return u;
+            }
+        }
+
+        /// <summary>White space as String.prototype.trim takes it off: the ASCII kinds, no-break and the Unicode spaces.</summary>
+        private static readonly char[] JsSpace =
+        {
+            ' ', '\t', '\n', '\v', '\f', '\r', '\u00A0', '\u1680', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006',
+            '\u2007', '\u2008', '\u2009', '\u200A', '\u2028', '\u2029', '\u202F', '\u205F', '\u3000', '\uFEFF',
+        };
+
+        /// <summary>
+        /// A loop counter's values: <c>for (let i = A; i &lt; B; i++)</c> with A and B fixed numbers (B may be a
+        /// fixed list's length) and nothing else writing i - every whole number from A up to B. At most 256.
+        /// </summary>
+        private List<object>? LoopRange(Identifier decl)
+        {
+            if (!_parent.TryGetValue(decl, out var b) || b is not VariableDeclarator { Init: NumericLiteral start } vd || vd.Id != decl
+                || _parent[vd] is not VariableDeclaration dd || _parent[dd] is not ForStatement f || f.Init != dd
+                || !_writes.TryGetValue(decl, out var ws) || ws.Count != 1 || ws[0] != f.Update)
+                return null;
+            var step = f.Update switch
+            {
+                UpdateExpression { Operator: Operator.Increment } => 1,
+                AssignmentExpression { Operator: Operator.AdditionAssignment, Right: NumericLiteral { Value: 1 } } => 1,
+                _ => 0,
+            };
+            if (step == 0 || f.Test is not NonLogicalBinaryExpression { Operator: Operator.LessThan or Operator.LessThanOrEqual, Left: Identifier ti } test
+                || Decl(ti) != decl || Finite(test.Right) is not { Count: 1 } bound || bound[0] is not double end)
+                return null;
+            var values = new List<object>();
+            for (var v = start.Value; test.Operator == Operator.LessThan ? v < end : v <= end; v += step)
+            {
+                if (values.Count >= 256) return null;
+                values.Add(v);
+            }
+            return values;
         }
 
         /// <summary>
-        /// A name that is only ever a parameter of one named function, which is only ever called by name:
-        /// its values are the arguments every call passes in that place. Null for anything else.
+        /// The values a parameter takes: the argument every call passes in its place, when its function is only
+        /// ever called by its name; a forEach callback's index, 0 to the length less one. Null for anything else.
         /// </summary>
-        private Func<HashSet<string>, List<object>?>? Parameter(string name)
+        private List<object>? ParamValues(IFunction fn, int index, HashSet<Identifier> seen)
         {
-            if (!_bindings.TryGetValue(name, out var b) || b != 1 || _assigned.Contains(name)) return null;
-            foreach (var n in Markup.Everything(_ast))
+            if (ForEachOver((Node)fn) is { } over)
+                return index == 1 && over.Lists.Count == 1 ? Enumerable.Range(0, over.Lists[0].Count).Select(i => (object)(double)i).ToList() : null;
+            if (Walked((Node)fn) is { } items) return Item(items, index, seen);
+            if (NameOf(fn) is not { } name || !_refs.TryGetValue(name, out var refs)) return null;
+            List<object>? all = new();
+            foreach (var use in refs)
             {
-                (string? Fn, NodeList<Node> Ps) f = n switch
-                {
-                    FunctionDeclaration { Id: { } fid } fd => (fid.Name, fd.Params),
-                    VariableDeclarator { Id: Identifier vid, Init: FunctionExpression fe } => (vid.Name, fe.Params),
-                    VariableDeclarator { Id: Identifier aid, Init: ArrowFunctionExpression ae } => (aid.Name, ae.Params),
-                    _ => (null, default),
-                };
-                if (f.Fn == null) continue;
-                var index = -1;
-                for (var i = 0; i < f.Ps.Count; i++) if (f.Ps[i] is Identifier p && p.Name == name) index = i;
-                if (index < 0) continue;
-                var fn = f.Fn;
-                if (!_bindings.TryGetValue(fn, out var fb) || fb != 1 || _assigned.Contains(fn)) return null;
-                return seen =>
-                {
-                    List<object>? all = new();
-                    foreach (var use in Markup.Everything(_ast))
-                    {
-                        if (use is not Identifier u || u.Name != fn || !Reference(u)) continue;
-                        if (_parent[use] is VariableDeclarator { Id: var d } && d == use) continue;
-                        if (_parent[use] is FunctionDeclaration { Id: var fd2 } && fd2 == use) continue;
-                        // the function passed around rather than called: its arguments are not in the source
-                        if (_parent[use] is not CallExpression call || call.Callee != use || call.Arguments.Count <= index) return null;
-                        var one = Finite((Expression)call.Arguments[index], seen);
-                        if (one == null) return null;
-                        foreach (var v in one) if (!all.Contains(v)) all.Add(v);
-                    }
-                    return all;
-                };
+                List<object>? one;
+                if (_parent[use] is CallExpression call && call.Callee == use)
+                    one = index < call.Arguments.Count && call.Arguments[index] is Expression a and not SpreadElement ? Finite(a, seen) : null;
+                else if (ForEachOver(use) is { Lists.Count: 1 } list && index == 1)
+                    one = Enumerable.Range(0, list.Lists[0].Count).Select(i => (object)(double)i).ToList();
+                else if (Walked(use) is { } walked)
+                    one = Item(walked, index, seen);
+                // the function passed around rather than called: its arguments are not in the source
+                else return null;
+                if (one == null) return null;
+                foreach (var v in one) if (!all.Contains(v)) all.Add(v);
+            }
+            return all;
+        }
+
+        /// <summary>
+        /// The items of a fixed array a function is the callback of - <c>['a', 'b'].forEach(fn)</c>, or map, filter,
+        /// some, every, find and findIndex, on an array written in place or a constant one - in order.
+        /// </summary>
+        private List<Expression>? Walked(Node callback)
+        {
+            if (!_parent.TryGetValue(callback, out var p) || p is not CallExpression c || c.Arguments.Count == 0 || c.Arguments[0] != callback
+                || c.Callee is not MemberExpression { Computed: false, Property: Identifier { Name: "forEach" or "map" or "filter" or "some" or "every" or "find" or "findIndex" } } m)
+                return null;
+            if (m.Object is ArrayExpression arr)
+                return arr.Elements.All(x => x is Acornima.Ast.Expression and not SpreadElement) ? arr.Elements.Cast<Acornima.Ast.Expression>().ToList() : null;
+            if (m.Object is Identifier name && IsArrayTable(name) && ConstTable(name) is { } table)
+                return Enumerable.Range(0, table.Count).Select(i => table[i.ToString(CultureInfo.InvariantCulture)]).ToList();
+            return null;
+        }
+
+        /// <summary>What a callback over fixed items is given in a place: every item first, then its index.</summary>
+        private List<object>? Item(List<Expression> items, int index, HashSet<Identifier> seen)
+        {
+            if (index == 1) return Enumerable.Range(0, items.Count).Select(i => (object)(double)i).ToList();
+            if (index != 0) return null;
+            var all = new List<object>();
+            foreach (var x in items)
+            {
+                if (Finite(x, seen) is not { } one) return null;
+                foreach (var v in one) if (!all.Contains(v)) all.Add(v);
+            }
+            return all;
+        }
+
+        /// <summary>A `const` (or a name given one value and never changed) bound to an object or array literal that nothing writes into, by key.</summary>
+        private Dictionary<string, Expression>? ConstTable(Identifier name)
+        {
+            if (Decl(name) is not { } decl || Given(decl) is not [{ } init] || _writes.ContainsKey(decl)) return null;
+            if (_refs.TryGetValue(decl, out var refs))
+                foreach (var r in refs)
+                    if (_parent[r] is MemberExpression m && m.Object == r && (WrittenTo(m) || _parent[m] is CallExpression c && c.Callee == m && m.Property is Identifier { Name: "push" or "pop" or "shift" or "unshift" or "splice" or "sort" or "reverse" or "fill" or "copyWithin" }))
+                        return null;
+            var table = new Dictionary<string, Expression>(StringComparer.Ordinal);
+            if (init is ArrayExpression arr)
+            {
+                for (var i = 0; i < arr.Elements.Count; i++)
+                    if (arr.Elements[i] is Expression x and not SpreadElement) table[i.ToString(CultureInfo.InvariantCulture)] = x; else return null;
+                return table;
+            }
+            if (init is ObjectExpression obj)
+            {
+                foreach (var p in obj.Properties)
+                    if (p is Property { Computed: false, Value: Expression v } prop && prop.Key is Identifier or StringLiteral)
+                        table[prop.Key is Identifier k ? k.Name : ((StringLiteral)prop.Key).Value] = v;
+                    else return null;
+                return table;
             }
             return null;
         }
 
-        /// <summary>A `const` bound once to an object or array literal that nothing writes into, by key.</summary>
-        private Dictionary<string, Expression>? ConstTable(string name)
+        private bool IsArrayTable(Identifier name) => Decl(name) is { } decl && Given(decl) is [ArrayExpression];
+
+        /// <summary>
+        /// The object literals an expression can be, each with the arguments of the call it came back from:
+        /// the literal itself, a name given one, a named function's return. Empty for a value that is none (an
+        /// array, a number, a text, a function); null when it can be anything else.
+        /// </summary>
+        private List<(ObjectExpression, Dictionary<Identifier, Expression>?)>? Objects(Expression e, Dictionary<Identifier, Expression>? bind, int depth)
         {
-            if (!_bindings.TryGetValue(name, out var b) || b != 1 || _assigned.Contains(name)) return null;
-            foreach (var n in Markup.Everything(_ast))
-                if (n is AssignmentExpression { Left: MemberExpression { Object: Identifier o } } && o.Name == name) return null;
-            foreach (var n in Markup.Everything(_ast))
+            if (depth > 6) return null;
+            switch (e)
             {
-                if (n is not VariableDeclarator { Id: Identifier id, Init: { } init } || id.Name != name) continue;
-                var table = new Dictionary<string, Expression>(StringComparer.Ordinal);
-                if (init is ArrayExpression arr)
+                case ObjectExpression o:
+                    return new() { (o, bind) };
+                case ArrayExpression or Acornima.Ast.Literal or TemplateLiteral or NonLogicalBinaryExpression or NonUpdateUnaryExpression or IFunction:
+                    return new();
+                case ConditionalExpression c:
+                    return Objects(c.Consequent, bind, depth + 1) is { } a && Objects(c.Alternate, bind, depth + 1) is { } b ? a.Concat(b).ToList() : null;
+                case Identifier id:
+                    {
+                        if (Decl(id) is not { } decl) return null;
+                        if (bind != null && bind.TryGetValue(decl, out var arg)) return Objects(arg, null, depth + 1);
+                        if (Given(decl) is not { } given) return null;
+                        var all = new List<(ObjectExpression, Dictionary<Identifier, Expression>?)>();
+                        foreach (var v in given)
+                            if (v == null || Objects(v, null, depth + 1) is not { } some) return null;
+                            else all.AddRange(some);
+                        return all;
+                    }
+                case CallExpression { Callee: Identifier f } call when Function(f) is { } fn:
+                    {
+                        var inner = new Dictionary<Identifier, Expression>();
+                        for (var i = 0; i < fn.Params.Count; i++)
+                            if (fn.Params[i] is Identifier p)
+                                inner[p] = i < call.Arguments.Count && call.Arguments[i] is Expression ae and not SpreadElement ? ae : new Identifier("undefined");
+                        var all = new List<(ObjectExpression, Dictionary<Identifier, Expression>?)>();
+                        foreach (var r in Returns(fn))
+                            if (r == null || Objects(r, inner, depth + 1) is not { } some) return null;
+                            else all.AddRange(some);
+                        return all;
+                    }
+                default:
+                    return null;
+            }
+        }
+
+        /// <summary>A field of an object literal as written: `key: value`, or `key` for `key: key`; null when absent or not plain.</summary>
+        private static Expression? Field(ObjectExpression o, string name)
+        {
+            Expression? found = null;
+            foreach (var p in o.Properties)
+            {
+                if (p is not Property { Computed: false, Kind: PropertyKind.Init, Method: false, Value: Expression v } prop) return null;
+                if ((prop.Key is Identifier k ? k.Name : prop.Key is StringLiteral s ? s.Value : null) == name) found = v;
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// Whether the script can change this field of this object literal. The object is followed wherever it
+        /// goes - into names, a function's parameters, returns and comparisons - and every use of it there has to
+        /// be one that cannot write this field: reading a field, or writing another. Anywhere else (stored into
+        /// another object, passed to a function the compile cannot follow) it is taken as written.
+        /// </summary>
+        private bool FieldWritten(string name, ObjectExpression o)
+        {
+            if (_fieldWritten.TryGetValue((name, o), out var known)) return known;
+            var written = false;
+            var holders = new HashSet<Identifier>();
+            var functions = new HashSet<IFunction>();
+            Value(o);
+            return _fieldWritten[(name, o)] = written;
+
+            // an expression whose value can be the object
+            void Value(Expression e)
+            {
+                if (written) return;
+                if (!_parent.TryGetValue(e, out var p)) { written = true; return; }
+                switch (p)
                 {
-                    for (var i = 0; i < arr.Elements.Count; i++)
-                        if (arr.Elements[i] is Expression x) table[i.ToString(CultureInfo.InvariantCulture)] = x; else return null;
-                    return table;
-                }
-                if (init is ObjectExpression obj)
-                {
-                    foreach (var p in obj.Properties)
-                        if (p is Property { Computed: false, Value: Expression v } prop && prop.Key is Identifier or StringLiteral)
-                            table[prop.Key is Identifier k ? k.Name : ((StringLiteral)prop.Key).Value] = v;
-                        else return null;
-                    return table;
+                    case VariableDeclarator vd when vd.Init == e && vd.Id is Identifier id: Holder(id); return;
+                    case AssignmentExpression { Operator: Operator.Assignment } a when a.Right == e && a.Left is Identifier l && Decl(l) is { } d: Holder(d); return;
+                    case ReturnStatement: Returned(p); return;
+                    case ArrowFunctionExpression af when af.Body == e: Returned(p); return;
+                    case ConditionalExpression c when c.Test != e: Value(c); return;
+                    case LogicalExpression l2: Value(l2); return;
+                    case MemberExpression m when m.Object == e: Member(m); return;
+                    case CallExpression c2 when c2.Arguments.Contains(e): Passed(c2, e); return;
+                    case ExpressionStatement or IfStatement or NonUpdateUnaryExpression { Operator: Operator.LogicalNot }
+                        or NonLogicalBinaryExpression { Operator: Operator.StrictEquality or Operator.StrictInequality or Operator.Equality or Operator.Inequality }:
+                        return;
+                    default: written = true; return;
                 }
             }
-            return null;
+
+            // a name holding it: each of its references is where the object goes
+            void Holder(Identifier decl)
+            {
+                if (!holders.Add(decl) || !_refs.TryGetValue(decl, out var refs)) return;
+                foreach (var r in refs) Value(r);
+            }
+
+            void Returned(Node from)
+            {
+                Node? n = from;
+                while (n != null && n is not IFunction) n = _parent.TryGetValue(n, out var up) ? up : null;
+                if (n is not IFunction fn) { written = true; return; }
+                if (!functions.Add(fn)) return;
+                if (NameOf(fn) is not { } fname || !_refs.TryGetValue(fname, out var calls)) { written = true; return; }
+                foreach (var c in calls)
+                    if (_parent[c] is CallExpression call && call.Callee == c) Value(call);
+                    else { written = true; return; }
+            }
+
+            // `x.key` of it: a write of this field (or of a field only known at run time) writes it
+            void Member(MemberExpression m)
+            {
+                var key = m.Computed ? (m.Property as StringLiteral)?.Value : (m.Property as Identifier)?.Name;
+                if (WrittenTo(m) && (key == null || key == name)) written = true;
+            }
+
+            void Passed(CallExpression call, Expression arg)
+            {
+                if (call.Callee is MemberExpression { Computed: false, Object: Identifier { Name: "Object" }, Property: Identifier { Name: "assign" } } && call.Arguments[0] == arg)
+                {
+                    foreach (var src in call.Arguments.Skip(1))
+                        if (src is not ObjectExpression so || Field(so, name) != null) { written = true; return; }
+                    Value(call);
+                    return;
+                }
+                var index = call.Arguments.ToList().IndexOf(arg);
+                if (call.Callee is Identifier f && Function(f) is { } fn && NameOf(fn) is { } fname && _refs.TryGetValue(fname, out var calls)
+                    && calls.All(c => _parent[c] is CallExpression cc && cc.Callee == c))
+                {
+                    if (index < fn.Params.Count && fn.Params[index] is Identifier param) Holder(param);
+                    return;
+                }
+                written = true;
+            }
         }
+
+        private readonly Dictionary<(string, ObjectExpression), bool> _fieldWritten = new();
 
         /// <summary>
         /// A written text as literal pieces and values. `a + b + ' kPa'` is one value then a literal,
@@ -1413,12 +2560,33 @@ internal static class PlainTranslator
                 _panel.Layout(_size.x, _size.y);
                 laidOut?.Invoke();
                 var values = new Dictionary<string, SceneSlots.Value>(StringComparer.Ordinal);
-                return Emit(values) == _template ? values : null;
+                var emitted = Emit(values);
+                if (emitted == _template) return values;
+                _reshaped = Reshaped(_template, emitted);
+                return null;
             }
             finally
             {
                 undo();
             }
+        }
+
+        /// <summary>How the last state that changed the scene's structure changed it, for the refusal.</summary>
+        private string _reshaped = string.Empty;
+
+        /// <summary>
+        /// What a state did to the scene's structure, as the log can show it: the line counts, and the first
+        /// line that differs, at rest and in that state (with the scene's own slot names in it).
+        /// </summary>
+        internal static string Reshaped(string was, string now)
+        {
+            var a = was.Split('\n');
+            var b = now.Split('\n');
+            var i = 0;
+            while (i < a.Length && i < b.Length && a[i] == b[i]) i++;
+            static string Line(string[] lines, int at) => at < lines.Length ? "`" + Cut(lines[at].Trim()) + "`" : "(no line)";
+            static string Cut(string line) => line.Length > 200 ? line.Substring(0, 200) + "…" : line;
+            return $"{a.Length} scene lines at rest, {b.Length} in this state; line {i + 1} was {Line(a, i)}, is {Line(b, i)}";
         }
 
         /// <summary>The slots a state moved from the page at rest.</summary>
@@ -1690,7 +2858,7 @@ internal static class PlainTranslator
                 node.Children.Clear();
                 node.Children.AddRange(children);
             }, () => height = label.layout.height);
-            if (drawn == null) return "changes the scene's structure";
+            if (drawn == null) return "changes the scene's structure (" + _reshaped + ")";
             var rest = _restHeight.TryGetValue(t, out var h) ? h : height;
             var wraps = height - rest >= 0.5f * Math.Max(1f, label.resolvedStyle.fontSize);
             if (wraps) return "wraps onto another line";
@@ -1803,7 +2971,7 @@ internal static class PlainTranslator
                 {
                     var text = value is double d ? JsToLuaNumber(d) : (string)value;
                     var drawn = Drawn(text);
-                    if (drawn == null) { Refuse(at, $"{facet} = \"{text}\" changes the scene's structure, which is not a value"); return; }
+                    if (drawn == null) { Refuse(at, $"{facet} = \"{text}\" changes the scene's structure ({_reshaped}), which is not a value"); return; }
                     plan.States[value] = drawn;
                     moved.UnionWith(Moved(drawn));
                 }
@@ -1836,7 +3004,7 @@ internal static class PlainTranslator
             foreach (var sample in samples)
             {
                 var proof = Drawn(JsToLuaNumber(sample) + unit);
-                if (proof == null) { Refuse(at, $"{facet} changes the scene's structure at {JsToLuaNumber(sample)}{unit}"); return; }
+                if (proof == null) { Refuse(at, $"{facet} changes the scene's structure at {JsToLuaNumber(sample)}{unit} ({_reshaped})"); return; }
                 proofs.Add(proof);
             }
             for (var k = 0; k < proofs.Count; k++)
@@ -1959,7 +3127,7 @@ internal static class PlainTranslator
                 if (drawn == null)
                 {
                     var described = cls + string.Concat(plan.Attrs.Select((a, i) => attrs[i] == null ? string.Empty : $" [{a.Name}=\"{attrs[i]}\"]"));
-                    Refuse(at, $"class \"{described.Trim()}\" on \"{t.Name}\" changes the scene's structure, which is not a value");
+                    Refuse(at, $"class \"{described.Trim()}\" on \"{t.Name}\" changes the scene's structure ({_reshaped}), which is not a value");
                     return;
                 }
                 plan.States[key] = drawn;
@@ -2042,6 +3210,67 @@ internal static class PlainTranslator
             return Q(TextContent(SourceNode(t)));
         }
 
+        /// <summary>
+        /// innerText read: the text as laid out rather than as written - runs of white space one space, a
+        /// block's ends trimmed, `&lt;br&gt;` a line break, and text-transform applied - where textContent
+        /// gives the characters as the source or the script put them.
+        /// </summary>
+        private string InnerTextRead(Target t, Node at, JsToLua lua)
+        {
+            if (t.Ve is not Label)
+            {
+                lua.Refuse(at, $"reading innerText of \"{t.Name}\", which holds other elements (the line breaks a browser puts between blocks are not translated yet)");
+                return "nil";
+            }
+            var css = _built.CssOf(t.Ve);
+            var transform = css.TryGetValue("text-transform", out var tt) ? tt.Trim().ToLowerInvariant() : "none";
+            if (transform is not ("none" or "uppercase" or "lowercase"))
+            {
+                lua.Refuse(at, $"reading innerText of \"{t.Name}\", whose text-transform ({transform}) the program does not apply yet");
+                return "nil";
+            }
+            var ws = css.TryGetValue("white-space", out var w) ? w.Trim().ToLowerInvariant() : "normal";
+            if (ws is not ("normal" or "nowrap"))
+            {
+                lua.Refuse(at, $"reading innerText of \"{t.Name}\", whose white-space ({ws}) keeps its spaces (not translated yet)");
+                return "nil";
+            }
+            var block = !InlineTags.Contains(t.Node.Tag ?? string.Empty);
+            if (t.Text == null && !_order.Any(o => o != t && o.Texts.Count > 0 && Inside(o.Ve, t.Ve)))
+            {
+                // never written: the page's own text, laid out once here
+                var text = Collapse(Rendered(SourceNode(t)), block);
+                return Q(transform == "uppercase" ? text.ToUpperInvariant() : transform == "lowercase" ? text.ToLowerInvariant() : text);
+            }
+            _collapse = true;
+            var s = "v_collapse(" + TextRead(t, at, lua) + ", " + (block ? "true" : "false") + ")";
+            // ponytail: string.upper and string.lower change ASCII letters only
+            return transform == "uppercase" ? "string.upper(" + s + ")" : transform == "lowercase" ? "string.lower(" + s + ")" : s;
+
+            static string Rendered(HtmlNode n)
+            {
+                if (n.IsText) return n.Raw != null ? HtmlParser.DecodeEntities(n.Raw) : n.Text;
+                if (n.Tag == "br") return "\u0001";
+                var sb = new StringBuilder();
+                foreach (var c in n.Children) sb.Append(Rendered(c));
+                return sb.ToString();
+            }
+        }
+
+        /// <summary>Text as a browser lays it out with white-space normal: each run of white space one space, a block's ends trimmed, a `&lt;br&gt;` (\u0001) a line break.</summary>
+        internal static string Collapse(string text, bool block)
+        {
+            text = Regex.Replace(text, "[ \t\n\r\f]+", " ");
+            text = Regex.Replace(text, " ?\u0001 ?", "\n");
+            return block ? text.Trim(' ') : text;
+        }
+
+        /// <summary>Tags laid out inline: an inline element's innerText keeps a space at its ends, as its line does.</summary>
+        private static readonly HashSet<string> InlineTags = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "span", "b", "i", "u", "s", "small", "big", "sub", "sup", "mark", "code", "font", "em", "strong", "a", "abbr", "cite", "kbd", "q", "samp", "var", "time", "data", "label",
+        };
+
         private static bool Inside(VisualElement ve, VisualElement of)
         {
             for (var p = ve.parent; p != null; p = p.parent) if (p == of) return true;
@@ -2062,15 +3291,51 @@ internal static class PlainTranslator
                 ? "(" + c.Var + ".raw or table.concat(" + c.Var + ".order, \" \"))"
                 : Q(SourceNode(t).Attr("class") ?? string.Empty);
 
-        private string Contains(Target t, Expression key, JsToLua lua)
+        private string Contains(Target t, Expression key, Func<Node, string> tr)
         {
-            var k = key is StringLiteral s ? Q(s.Value) : "js_str(" + lua.Translate(key) + ")";
+            var k = key is StringLiteral s ? Q(s.Value) : "js_str(" + tr(key) + ")";
             if (t.Class != null) return "(" + t.Class.Var + ".on[" + k + "] == true)";
-            var classes = (SourceNode(t).Attr("class") ?? string.Empty).Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries).Distinct().ToList();
+            var classes = SourceClasses(t);
             if (key is StringLiteral lit) return classes.Contains(lit.Value) ? "true" : "false";
-            var name = "V_K" + (_consts.Count + 1).ToString(CultureInfo.InvariantCulture);
-            _consts.Add("local " + name + " = " + Table(classes.Select(c => (c, "true"))));
-            return "(" + name + "[" + k + "] == true)";
+            return "(" + Const(t, "set", () => Table(classes.Select(c => (c, "true")))) + "[" + k + "] == true)";
+        }
+
+        /// <summary>The classes the page's source gives an element, each once, in order.</summary>
+        private List<string> SourceClasses(Target t)
+            => (SourceNode(t).Attr("class") ?? string.Empty).Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries).Distinct().ToList();
+
+        private readonly Dictionary<(Target, string), string> _constOf = new();
+
+        /// <summary>A constant table the chunk declares once per element and use.</summary>
+        private string Const(Target t, string use, Func<string> value)
+        {
+            if (_constOf.TryGetValue((t, use), out var name)) return name;
+            name = "V_K" + (_consts.Count + 1).ToString(CultureInfo.InvariantCulture);
+            _consts.Add("local " + name + " = " + value());
+            return _constOf[(t, use)] = name;
+        }
+
+        /// <summary>classList.item(i): the class at that place, in the order the class attribute holds them; null past the end.</summary>
+        private string ClassItem(Target t, Expression index, Func<Node, string> tr)
+        {
+            if (t.Class == null && index is NumericLiteral { Value: var k } && k == Math.Floor(k))
+            {
+                var own = SourceClasses(t);
+                return k >= 0 && k < own.Count ? Q(own[(int)k]) : "nil";
+            }
+            _clsItem = true;
+            var i = tr(index);
+            if (t.Class != null) return "v_clsitem(" + t.Class.Var + ".order, " + i + ")";
+            var classes = SourceClasses(t);
+            return "v_clsitem(" + Const(t, "list", () => "{ " + string.Join(", ", classes.Select(Q)) + " }") + ", " + i + ")";
+        }
+
+        /// <summary>classList.length: how many classes the element has now.</summary>
+        private string ClassCount(Target t)
+        {
+            if (t.Class == null) return SourceClasses(t).Count.ToString(CultureInfo.InvariantCulture);
+            _clsCount = true;
+            return "v_clscount(" + t.Class.Var + ".on)";
         }
 
         /// <summary>
@@ -2153,28 +3418,28 @@ internal static class PlainTranslator
         /// An attribute read: from the program's table when the script changes this element's attributes
         /// (or reads them by a run-time name), else the constant the page's source gives it.
         /// </summary>
-        private string AttrRead(Target t, bool has, string? name, Expression? byName, JsToLua lua)
+        private string AttrRead(Target t, bool has, string? name, Expression? byName, Func<Node, string> tr)
         {
             if (t.AttrTable != null)
             {
-                var v = t.AttrTable + "[" + (name != null ? Q(name) : "string.lower(js_str(" + lua.Translate(byName!) + "))") + "]";
+                var v = t.AttrTable + "[" + (name != null ? Q(name) : "string.lower(js_str(" + tr(byName!) + "))") + "]";
                 return has ? "(" + v + " ~= nil)" : "v_attr(" + v + ")";
             }
             var own = SourceNode(t).Attr(name!);
             return has ? (own != null ? "true" : "false") : own != null ? Q(own) : "nil";
         }
 
-        private static string AttrLua(Target t, AttrOp op, JsToLua lua)
+        private static string AttrLua(Target t, AttrOp op, Func<Node, string> tr)
         {
             var at = t.AttrTable!;
             var c = op.Facet ? t.Class!.Var : "nil";
             var n = Q(op.Name);
             return op.Verb switch
             {
-                "set" => "v_setattr(" + at + ", " + n + ", " + lua.Translate(op.Value!) + ", " + c + ")",
+                "set" => "v_setattr(" + at + ", " + n + ", " + tr(op.Value!) + ", " + c + ")",
                 "remove" => "v_rmattr(" + at + ", " + n + ", " + c + ")",
-                "toggle" => "v_toggleattr(" + at + ", " + n + ", " + (op.Value != null ? lua.Translate(op.Value) : "nil") + ", " + c + ")",
-                _ => "v_hidden(" + at + ", " + lua.Translate(op.Value!) + ", " + c + ")",
+                "toggle" => "v_toggleattr(" + at + ", " + n + ", " + (op.Value != null ? tr(op.Value) : "nil") + ", " + c + ")",
+                _ => "v_hidden(" + at + ", " + tr(op.Value!) + ", " + c + ")",
             };
         }
 
@@ -2212,11 +3477,30 @@ internal static class PlainTranslator
                 }
                 var code = own(lua);
                 if (Call.IsMatch(code)) lua.Emit(code);
+                else if (_picks.TryGetValue(code, out var pick)) lua.Emit("do local __f = " + pick.Pick + " __f(" + pick.Args + ") end");
                 else if (code != "nil") lua.Emit("local __discard = " + code);
                 return true;
             }
-            if (!_ops.TryGetValue(e, out var t)) return false;
+            if (!_ops.TryGetValue(e, out var ts)) return false;
+            if (_recv.TryGetValue(e, out var recv))
+            {
+                // an element chosen at run time: the pick, then the operation on the one picked
+                var pick = _picks[Dispatch(recv, ts, lua, (t, tr) => string.Join("\n", EmitOp(e, t, tr, early: false)))];
+                lua.Emit("do local __f = " + pick.Pick + " __f(" + pick.Args + ") end");
+                return true;
+            }
+            foreach (var line in EmitOp(e, ts[0], lua.Translate, early: true)) lua.Emit(line);
+            return true;
+        }
 
+        /// <summary>
+        /// One DOM write on one element, as Lua lines; <paramref name="tr"/> gives each value the write needs.
+        /// <paramref name="early"/>: the values of a text written into several slots are worked out before
+        /// any is set, since a value can read the text being replaced (`el.textContent += '.'`).
+        /// </summary>
+        private List<string> EmitOp(Expression e, Target t, Func<Node, string> tr, bool early)
+        {
+            var lines = new List<string>();
             if (e is AssignmentExpression { Left: MemberExpression m } a)
             {
                 if (m.Object is MemberExpression { Computed: false, Property: Identifier { Name: "style" } })
@@ -2226,50 +3510,64 @@ internal static class PlainTranslator
                     if (plan.ReadVar != null)
                     {
                         // read back later: the value is kept as written, and printed only when read
-                        lua.Emit("do");
-                        lua.Emit("  local v = " + lua.Translate(plan.States != null ? a.Right : plan.Holes[e]));
-                        lua.Emit("  " + plan.ReadVar + " = v");
-                        if (plan.States != null) lua.Emit("  v_state(" + plan.Var + ", v)");
-                        else foreach (var (slot, sa, sb) in plan.Linear!) lua.Emit("  v_set(" + Q(slot) + ", " + Affine("v", sa, sb) + ")");
-                        lua.Emit("end");
-                        return true;
+                        lines.Add("do");
+                        lines.Add("  local v = " + tr(plan.States != null ? a.Right : plan.Holes[e]));
+                        lines.Add("  " + plan.ReadVar + " = v");
+                        if (plan.States != null) lines.Add("  v_state(" + plan.Var + ", v)");
+                        else foreach (var (slot, sa, sb) in plan.Linear!) lines.Add("  v_set(" + Q(slot) + ", " + Affine("v", sa, sb) + ")");
+                        lines.Add("end");
+                        return lines;
                     }
                     if (plan.States != null)
                     {
-                        lua.Emit("v_state(" + plan.Var + ", " + lua.Translate(a.Right) + ")");
-                        return true;
+                        lines.Add("v_state(" + plan.Var + ", " + tr(a.Right) + ")");
+                        return lines;
                     }
                     var hole = plan.Holes[e];
                     if (plan.Linear!.Length == 1)
                     {
-                        lua.Emit("v_set(" + Q(plan.Linear[0].Slot) + ", " + Affine(lua.Translate(hole), plan.Linear[0].A, plan.Linear[0].B) + ")");
-                        return true;
+                        lines.Add("v_set(" + Q(plan.Linear[0].Slot) + ", " + Affine(tr(hole), plan.Linear[0].A, plan.Linear[0].B) + ")");
+                        return lines;
                     }
-                    lua.Emit("do");
-                    lua.Emit("  local v = " + lua.Translate(hole));
-                    foreach (var (slot, sa, sb) in plan.Linear) lua.Emit("  v_set(" + Q(slot) + ", " + Affine("v", sa, sb) + ")");
-                    lua.Emit("end");
-                    return true;
+                    lines.Add("do");
+                    lines.Add("  local v = " + tr(hole));
+                    foreach (var (slot, sa, sb) in plan.Linear) lines.Add("  v_set(" + Q(slot) + ", " + Affine("v", sa, sb) + ")");
+                    lines.Add("end");
+                    return lines;
                 }
                 if (m.Property is Identifier { Name: "textContent" or "innerText" })
                 {
-                    foreach (var (slot, literal, hole) in t.Text!.Writes[e])
-                        lua.Emit("v_set(" + Q(slot) + ", " + (literal != null ? JsToLua.Quote(literal) : HoleLua(lua, hole!)) + ")");
-                    return true;
+                    var sets = t.Text!.Writes[e];
+                    var named = new Dictionary<Piece, string>();
+                    if (early && sets.Count > 1 && sets.Any(x => x.Hole != null))
+                    {
+                        lines.Add("do");
+                        foreach (var (_, _, hole) in sets)
+                            if (hole != null && !named.ContainsKey(hole))
+                            {
+                                named[hole] = "p" + (named.Count + 1).ToString(CultureInfo.InvariantCulture);
+                                lines.Add("  local " + named[hole] + " = " + HoleLua(tr, hole));
+                            }
+                    }
+                    var pad = named.Count > 0 ? "  " : string.Empty;
+                    foreach (var (slot, literal, hole) in sets)
+                        lines.Add(pad + "v_set(" + Q(slot) + ", " + (literal != null ? JsToLua.Quote(literal) : named.TryGetValue(hole!, out var n) ? n : HoleLua(tr, hole!)) + ")");
+                    if (named.Count > 0) lines.Add("end");
+                    return lines;
                 }
-                if (m.Property is Identifier { Name: "className" })
+                if (m.Property is Identifier { Name: "className" } || m is { Property: Identifier { Name: "value" }, Object: MemberExpression { Property: Identifier { Name: "classList" } } })
                 {
-                    lua.Emit("v_classname(" + t.Class!.Var + ", " + lua.Translate(a.Right) + ")");
-                    return true;
+                    lines.Add("v_classname(" + t.Class!.Var + ", " + tr(a.Right) + ")");
+                    return lines;
                 }
-                lua.Emit("V_ONCLICK[" + Q(t.Name) + "] = " + lua.Translate(a.Right));
-                return true;
+                lines.Add("V_ONCLICK[" + Q(t.Name) + "] = " + tr(a.Right));
+                return lines;
             }
 
             if (e is CallExpression { Callee: MemberExpression { Property: Identifier { Name: "addEventListener" } } } listen)
             {
-                lua.Emit("v_listen(" + Q(t.Name) + ", " + lua.Translate(listen.Arguments[1]) + ")");
-                return true;
+                lines.Add("v_listen(" + Q(t.Name) + ", " + tr(listen.Arguments[1]) + ")");
+                return lines;
             }
 
             // classList.add / remove / toggle
@@ -2282,14 +3580,57 @@ internal static class PlainTranslator
                 {
                     "add" => "true",
                     "remove" => "false",
-                    _ => op.Force != null ? "js_truthy(" + lua.Translate(op.Force) + ")" : "not " + on,
+                    _ => op.Force != null ? "js_truthy(" + tr(op.Force) + ")" : "not " + on,
                 };
                 // className is read back: the classes' order is kept as the attribute holds it
-                lua.Emit(t.Class.Order != null ? "v_classop(" + c + ", " + Q(name) + ", " + want + ")" : on + " = " + want);
+                lines.Add(t.Class.Order != null ? "v_classop(" + c + ", " + Q(name) + ", " + want + ")" : on + " = " + want);
             }
-            lua.Emit("v_class(" + c + ")");
-            return true;
+            lines.Add("v_class(" + c + ")");
+            return lines;
         }
+
+        /// <summary>
+        /// An operation on an element chosen at run time, as a hand-written console picks one: a table, built
+        /// once, from each element's number to a function doing the operation on that element, and the call
+        /// that picks from it by the number the script holds. The values the operation needs are worked out
+        /// where the script works them out, in its order, and passed in.
+        /// </summary>
+        private string Dispatch(Expression recv, List<Target> ts, JsToLua lua, Func<Target, Func<Node, string>, string> body)
+        {
+            var values = new List<Node>();
+            foreach (var t in ts)
+                body(t, x =>
+                {
+                    if (x is not Acornima.Ast.Literal && !values.Contains(x)) values.Add(x);
+                    return "nil";
+                });
+            values.Sort((x, y) => x.Range.Start.CompareTo(y.Range.Start));
+            var names = values.Select((_, i) => "a" + (i + 1).ToString(CultureInfo.InvariantCulture)).ToList();
+            var table = "V_X" + (++_dispatches).ToString(CultureInfo.InvariantCulture);
+            var sb = new StringBuilder("local ").Append(table).Append(" = {\n");
+            foreach (var t in ts)
+            {
+                sb.Append("  [").Append(t.Number.ToString(CultureInfo.InvariantCulture)).Append("] = function(").Append(string.Join(", ", names)).Append(")\n");
+                foreach (var line in body(t, x => x is Acornima.Ast.Literal ? lua.Translate(x) : names[values.IndexOf(x)]).Split('\n'))
+                    sb.Append("    ").Append(line).Append('\n');
+                sb.Append("  end,\n");
+            }
+            _tables.Add(sb.Append("}\n").ToString());
+            _nullref = true;
+            var pick = table + "[" + lua.Translate(recv) + "] or v_nullref";
+            var args = string.Join(", ", values.Select(lua.Translate));
+            var code = "(" + pick + ")(" + args + ")";
+            _picks[code] = (pick, args);
+            return code;
+        }
+
+        /// <summary>Each pick's call, and its two halves, for a statement that makes it: `do local __f = pick __f(args) end`.</summary>
+        private readonly Dictionary<string, (string Pick, string Args)> _picks = new(StringComparer.Ordinal);
+
+        private int _dispatches;
+        /// <summary>Tables the chunk builds once, before the page's script runs: the picks, element lists and id lookups.</summary>
+        private readonly List<string> _tables = new();
+        private bool _nullref, _item, _clsItem, _clsCount, _collapse, _nadd;
 
         /// <summary>A call, which Lua takes as a statement of its own.</summary>
         private static readonly Regex Call = new(@"^[A-Za-z_][A-Za-z0-9_.]*\(.*\)$", RegexOptions.Singleline);
@@ -2297,7 +3638,7 @@ internal static class PlainTranslator
         /// <summary>Whether an expression the Lua writes itself is a write, whose value (undefined) nothing needs.</summary>
         private bool Effectual(Expression e) => _effects.Contains(e) || e is AssignmentExpression;
 
-        /// <summary>Timers, and anything the analysis let through that must not reach the DOM-less Lua.</summary>
+        /// <summary>Timers, elements as the values the Lua holds for them, and a null read where it prints.</summary>
         public string? Expression(JsToLua lua, Node e)
         {
             if (_lua.TryGetValue(e, out var own)) return own(lua);
@@ -2311,13 +3652,83 @@ internal static class PlainTranslator
                     _ => "v_clear(" + Arg(0) + ")",
                 };
             }
-            if (e is CallExpression && Lookup(e, false) != null) return "nil";
+            switch (e)
+            {
+                // an element is its number, a list of them a table of numbers built once
+                case CallExpression c when DomCall(c) != null:
+                    return DomValue(c, lua);
+                case Identifier id when _vars.TryGetValue(id.Name, out var held):
+                    return held.Number.ToString(CultureInfo.InvariantCulture);
+                case CallExpression { Callee: MemberExpression { Computed: false, Property: Identifier { Name: "item" } } im } ic when Elems(im.Object) is { List: true }:
+                    _item = true;
+                    return "v_item(" + lua.Translate(im.Object) + ", " + (ic.Arguments.Count > 0 ? lua.Translate(ic.Arguments[0]) : "nil") + ")";
+
+                // A read that yields null prints "null" where JavaScript turns it into text; Lua's nil is undefined.
+                case NonLogicalBinaryExpression { Operator: Operator.Addition } add when IsNull(add.Left) || IsNull(add.Right):
+                    _nadd = true;
+                    return "v_nadd(" + lua.Translate(add.Left) + ", " + lua.Translate(add.Right) + ", " + (IsNull(add.Left) ? "true" : "false") + ", " + (IsNull(add.Right) ? "true" : "false") + ")";
+                case TemplateLiteral tl when tl.Expressions.Any(IsNull):
+                    {
+                        var parts = new List<string>();
+                        for (var i = 0; i < tl.Quasis.Count; i++)
+                        {
+                            var q = tl.Quasis[i].Value.Cooked ?? tl.Quasis[i].Value.Raw ?? string.Empty;
+                            if (q.Length > 0) parts.Add(Q(q));
+                            if (i < tl.Expressions.Count)
+                                parts.Add(IsNull(tl.Expressions[i]) ? "(" + lua.Translate(tl.Expressions[i]) + " or \"null\")" : "js_str(" + lua.Translate(tl.Expressions[i]) + ")");
+                        }
+                        return parts.Count == 1 ? parts[0] : "(" + string.Join(" .. ", parts) + ")";
+                    }
+                case CallExpression { Callee: Identifier { Name: "String" } str, Arguments.Count: 1 } sc when !Declared("String") && sc.Arguments[0] is Expression sa && IsNull(sa):
+                    return "(" + lua.Translate(sa) + " or \"null\")";
+            }
             return null;
+
+            // null as written, or a read that gives a string or null (getAttribute, getItem, key, item)
+            bool IsNull(Node x) => x is NullLiteral || _null.TryGetValue(x, out var none) && none == "null";
         }
 
-        private string HoleLua(JsToLua lua, Piece hole)
+        /// <summary>A DOM lookup as the Lua holds its result: an element's number, a list's table, or a table from the id's value to the element.</summary>
+        private string DomValue(CallExpression c, JsToLua lua)
         {
-            var v = lua.Translate(hole.Hole!);
+            if (_domValue.TryGetValue(c, out var known)) return known;
+            var q = DomCall(c)!.Value;
+            var els = Elems(c);
+            string value;
+            if (els == null || els.Bad != null) value = "nil";
+            else if (q.Kind == "getElementById" && !(els.One && q.Arg is { } pa && Pure(pa)) && ById(q.Arg, null).Key is { } key)
+            {
+                var name = "V_ID" + (_tables.Count + 1).ToString(CultureInfo.InvariantCulture);
+                var entries = new List<string>();
+                foreach (var pair in key.Table)
+                {
+                    entries.Add("[" + Q(pair.Key) + "] = " + pair.Value.Number.ToString(CultureInfo.InvariantCulture));
+                    // the value may be the number that prints as this text: `'row' + 3`
+                    if (double.TryParse(pair.Key, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) && JsToLuaNumber(d) == pair.Key)
+                        entries.Add("[" + pair.Key + "] = " + pair.Value.Number.ToString(CultureInfo.InvariantCulture));
+                }
+                _tables.Add("local " + name + " = { " + string.Join(", ", entries) + " } -- the element each id names\n");
+                value = name + "[" + lua.Translate(key.Hole) + "]";
+            }
+            else if (els.List)
+            {
+                var name = "V_L" + (_tables.Count + 1).ToString(CultureInfo.InvariantCulture);
+                var items = els.Lists[0];
+                _tables.Add("local " + name + " = { " + string.Concat(items.Select((t, i) => "[" + i.ToString(CultureInfo.InvariantCulture) + "] = " + t.Number.ToString(CultureInfo.InvariantCulture) + ", "))
+                            + "length = " + items.Count.ToString(CultureInfo.InvariantCulture) + " } -- " + q.Kind + "\n");
+                value = name;
+            }
+            else value = els.One ? els.Ts[0].Number.ToString(CultureInfo.InvariantCulture) : "nil";
+            return _domValue[c] = value;
+        }
+
+        private readonly Dictionary<CallExpression, string> _domValue = new();
+
+        private string HoleLua(Func<Node, string> tr, Piece hole)
+        {
+            // null as written prints as the word; Lua's nil would be undefined
+            if (hole.Hole is NullLiteral) return Q("null");
+            var v = tr(hole.Hole!);
             if (hole.Digits is { } n)
             {
                 _fixed = true;
@@ -2514,7 +3925,8 @@ internal static class PlainTranslator
             }
 
             var reads = Reading();
-            var helpers = Helpers(page + browser + reads + (_fixed ? " NumberMethods.toFixed" : string.Empty));
+            var tables = string.Concat(_tables);
+            var helpers = Helpers(page + browser + reads + tables + (_fixed ? " NumberMethods.toFixed" : string.Empty));
             if (helpers.Length > 0) sb.Append("-- the JavaScript behaviours the script relies on\n").Append(helpers);
             sb.Append(reads);
             if (_fixed)
@@ -2527,6 +3939,7 @@ internal static class PlainTranslator
                 sb.Append("  if r - s == 0.5 then return tonumber(NumberMethods.toFixed(v, n)) end\n");
                 sb.Append("  return (v < 0 and -r or r) / p\nend\n");
             }
+            if (tables.Length > 0) sb.Append("-- elements the script holds as values, by number: its lists, its lookups by id, and each operation on one chosen at run time\n").Append(tables);
 
             if (_reload)
             {
@@ -2636,6 +4049,21 @@ internal static class PlainTranslator
             if (_toFixedRead) sb.Append("local function v_tofixed(v, n)\n  if type(v) ~= \"number\" then return v end\n  return NumberMethods.toFixed(v, n)\nend\n");
             if (_untmp) sb.Append("local function v_untmp(v)\n  if type(v) ~= \"string\" then return js_str(v) end\n  return (string.gsub(v, \"<noparse><</noparse>\", \"<\"))\nend\n");
             if (_cssNum) sb.Append("local function v_cssnum(v, unit)\n  if v == nil then return \"\" end\n  return string.format(\"%.6g\", v) .. unit\nend\n");
+            if (_nullref)
+                sb.Append("-- an element chosen at run time that is not there: the browser's TypeError on null\n")
+                  .Append("local function v_nullref()\n  error({ name = \"TypeError\", message = \"Cannot read properties of null\", stack = \"\", __error = true }, 0)\nend\n");
+            if (_item) sb.Append("-- a list's item(i): i as a whole number, null past the end\nlocal function v_item(l, i)\n  i = js_num(i)\n  if i ~= i then i = 0 end\n  return l[math.floor(i)]\nend\n");
+            if (_clsItem) sb.Append("local function v_clsitem(order, i)\n  i = js_num(i)\n  if i ~= i then i = 0 end\n  return order[math.floor(i) + 1]\nend\n");
+            if (_clsCount) sb.Append("local function v_clscount(on)\n  local n = 0\n  for _, v in pairs(on) do if v then n = n + 1 end end\n  return n\nend\n");
+            if (_collapse)
+                sb.Append("-- text as laid out: each run of white space one space, a block's ends trimmed\n")
+                  .Append("local function v_collapse(s, block)\n  s = string.gsub(js_str(s), \"[ \\t\\n\\r\\f]+\", \" \")\n")
+                  .Append("  if block then s = string.gsub(s, \"^ \", \"\") s = string.gsub(s, \" $\", \"\") end\n  return s\nend\n");
+            if (_nadd)
+                sb.Append("-- `+` with a read that gives null: \"null\" in a text, 0 in a sum\n")
+                  .Append("local function v_nadd(a, b, an, bn)\n  if type(a) == \"string\" or type(b) == \"string\" then\n")
+                  .Append("    if a == nil and an then a = \"null\" end\n    if b == nil and bn then b = \"null\" end\n    return js_str(a) .. js_str(b)\n  end\n")
+                  .Append("  return js_add(a, b)\nend\n");
             return sb.ToString();
         }
 
@@ -2740,9 +4168,9 @@ internal static class PlainTranslator
         var queue = new Queue<string>();
         void Want(string text)
         {
-            foreach (Match m in Called.Matches(text))
+            foreach (var method in Called(text))
                 foreach (var pair in defined)
-                    if (pair.Key.EndsWith("." + m.Groups[1].Value, StringComparison.Ordinal)) queue.Enqueue(pair.Key);
+                    if (pair.Key.EndsWith("." + method, StringComparison.Ordinal)) queue.Enqueue(pair.Key);
             var code = Strip(text);
             // a name the code declares for itself is its own, not the prelude's of the same spelling
             var own = new HashSet<string>(StringComparer.Ordinal);
@@ -2780,7 +4208,34 @@ internal static class PlainTranslator
 
     private static readonly Regex Names = new(@"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?", RegexOptions.Compiled);
     private static readonly Regex Locals = new(@"local\s+function\s+(\w+)|local\s+([\w\s,]+?)\s*(?:=|\n)|function\s*[\w.:]*\s*\(([\w\s,]*)\)", RegexOptions.Compiled);
-    private static readonly Regex Called =new(@"js_m\([^,]+,\s*""([A-Za-z_][A-Za-z0-9_]*)""", RegexOptions.Compiled);
+    /// <summary>
+    /// The method names code calls through the dispatcher, <c>js_m(receiver, "name", …)</c>, with the receiver
+    /// skipped however it nests: `js_m(js_array({ [0] = 1, 2 }, 2), "forEach", f)` calls forEach.
+    /// </summary>
+    internal static IEnumerable<string> Called(string code)
+    {
+        for (var at = code.IndexOf("js_m(", StringComparison.Ordinal); at >= 0; at = code.IndexOf("js_m(", at + 5, StringComparison.Ordinal))
+        {
+            var depth = 0;
+            var i = at + 5;
+            for (; i < code.Length; i++)
+            {
+                var c = code[i];
+                if (c is '"' or '\'')
+                {
+                    // a string: to its closing quote, past escaped ones
+                    for (i++; i < code.Length && code[i] != c; i++) if (code[i] == '\\') i++;
+                    continue;
+                }
+                if (c is '(' or '{' or '[') depth++;
+                else if (c is ')' or '}' or ']') { if (depth == 0) break; depth--; }
+                else if (c == ',' && depth == 0) break;
+            }
+            if (i < code.Length && code[i] == ',' && MethodName.Match(code, i + 1) is { Success: true } m) yield return m.Groups[1].Value;
+        }
+    }
+
+    private static readonly Regex MethodName = new(@"\G\s*""([A-Za-z_][A-Za-z0-9_]*)""", RegexOptions.Compiled);
     private static readonly Regex Start = new(
         @"^(?:local\s+function\s+(?<f>[\w.]+)|function\s+(?<f>[\w.]+)|local\s+(?<l>[\w,\s]+?)\s*(?:=|$)|(?<a>[A-Za-z_][\w.]*)(?:\[""(?<k>\w+)""\])?\s*=[^=])",
         RegexOptions.Compiled);

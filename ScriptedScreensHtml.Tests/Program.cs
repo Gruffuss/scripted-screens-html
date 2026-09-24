@@ -20,6 +20,12 @@ if (args.Length > 0 && args[0] == "--csslanguage") { ScriptedScreensHtml.Tests.C
 if (args.Length > 0 && args[0] == "--domlanguage") { ScriptedScreensHtml.Tests.DomLanguage.Run(args); return 0; }
 if (args.Length > 0 && args[0] == "--markup") { ScriptedScreensHtml.Tests.MarkupProbe.Run(args); return 0; }
 if (args.Length > 0 && args[0] == "--domwrites") { ScriptedScreensHtml.Tests.JsToLuaTests.Report(); return 0; }
+if (args.Length > 0 && args[0] == "--plain")
+{
+    ScriptedScreensHtml.Tests.PlainTranslatorTests.Run(Check);
+    Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");
+    return failures.Count == 0 ? 0 : 1;
+}
 Console.WriteLine("HtmlParser");
 {
     var warnings = new List<string>();

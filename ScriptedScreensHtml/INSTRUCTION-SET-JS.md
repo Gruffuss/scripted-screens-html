@@ -63,7 +63,7 @@ Rules and columns: see INSTRUCTION-SET.md.
 ### 3b. Expressions and operators
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
-| Addition (`+`) | | | | |
+| Addition (`+`) | ✅ | `js_add` (numbers add, a string on either side concatenates as JavaScript prints each side); with a null (written, or a read that gives null) `v_nadd`, which prints it "null" in a text and counts it 0 in a sum. A variable holding null prints as undefined: Lua's nil is both | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a method called on a literal array, and null as text in a larger expression, a template and String()" | |
 | Subtraction (`-`) | | | | |
 | Multiplication (`*`) | | | | |
 | Division (`/`) | | | | |
@@ -151,7 +151,7 @@ Rules and columns: see INSTRUCTION-SET.md.
 | `this` | | | | |
 | `super(...)` call form | | | | |
 | `super.prop` property access form | | | | |
-| Template literal (`` `text ${expr}` ``) | | | | |
+| Template literal (`` `text ${expr}` ``) | ✅ | the pieces concatenated, each value through `js_str`; a null (written, or a read that gives null) prints "null" | PlainTranslatorTests: toFixed and a template literal; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a method called on a literal array, and null as text in a larger expression, a template and String()" | |
 | Tagged template (`` tag`text ${expr}` ``) | | | | |
 | Regular expression literal (`/ab+c/i`) | | | | |
 | Object literal — shorthand properties (`{a}`) | | | | |
@@ -455,7 +455,7 @@ Each subtype's `.prototype` fully inherits `Error.prototype` (name/message/cause
 
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |
 |---|---|---|---|---|
-| String() (constructor) | | | | |
+| String() (constructor) | ✅ | called as a function: the prelude's `String`, which is `js_str`; a null (written, or a read that gives null) is "null" | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a method called on a literal array, and null as text in a larger expression, a template and String()" | |
 | String.fromCharCode | | | | |
 | String.fromCodePoint | | | | |
 | String.raw | | | | |
@@ -574,7 +574,7 @@ Each subtype's `.prototype` fully inherits `Error.prototype` (name/message/cause
 | Array.prototype.findLastIndex | | | | |
 | Array.prototype.flat | | | | |
 | Array.prototype.flatMap | | | | |
-| Array.prototype.forEach | | | | |
+| Array.prototype.forEach | ✅ | the prelude's `ArrayMethods.forEach` through `js_m`, carried into the chunk when the script calls it - on a name or on an array written in place (`[1, 2].forEach(f)`) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a method called on a literal array, and null as text in a larger expression, a template and String()"; PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "querySelector and querySelectorAll: a list's length, item(), an index and forEach" | |
 | Array.prototype.map | | | | |
 | Array.prototype.reduce | | | | |
 | Array.prototype.reduceRight | | | | |
