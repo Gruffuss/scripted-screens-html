@@ -750,7 +750,7 @@ internal static partial class PlainTranslator
                         if (Holes(marked, vals, w.At) is not { } holes) return;
                         // drawn as part of an element's rich text: its attribute values are the text's shapes
                         foreach (var (v, attr, on) in holes)
-                            if (attr != null && Folds(on)) expand.Add(v);
+                            if (attr != null && Folds(on, rules)) expand.Add(v);
                         parsed.Add((w, shape, vals, marked));
                     }
                     if (expand.Count == 0 || round == 1) break;
@@ -831,14 +831,15 @@ internal static partial class PlainTranslator
         }
 
         /// <summary>Markup of only text and text-level tags that fold into it: what the page draws as its element's text.</summary>
-        private static bool TextOnly(HtmlNode root, List<CssRule> rules) => Below(root).All(n => n.IsText || Folds(n));
+        private static bool TextOnly(HtmlNode root, List<CssRule> rules) => Below(root).All(n => n.IsText || Folds(n, rules));
 
         /// <summary>
         /// A text-level tag the renderer folds into its element's rich text: no id (a data target) and no class
-        /// (a styled box), which keep an element of their own (HtmlRenderer.KeepsOwnElement).
+        /// (a styled box), which keep an element of their own (HtmlRenderer.KeepsOwnElement), and not made a box by
+        /// the cascade - its own display, or a flex or grid container around it (HtmlRenderer.Blockified).
         /// </summary>
-        private static bool Folds(HtmlNode n)
-            => TextTags.Contains(n.Tag!) && n.Attr("id") == null && n.Attr("class") == null && !HtmlRenderer.Blockified(n);
+        private static bool Folds(HtmlNode n, List<CssRule> rules)
+            => TextTags.Contains(n.Tag!) && n.Attr("id") == null && n.Attr("class") == null && !HtmlRenderer.Blockified(n, rules);
 
         /// <summary>Text markup: each shape one rich text of the element, written as textContent is.</summary>
         private void Text(MarkupOf of, List<(MarkupWrite W, List<Mk> Shape, List<MkVal> Vals, HtmlNode Marked)> parsed)

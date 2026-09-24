@@ -2326,13 +2326,19 @@ internal static class HtmlRenderer
     /// <summary>An inline tag whose inline style makes it a box: position absolute/fixed, float, or a block-level display.</summary>
     internal static bool Blockified(HtmlNode c) => Blockified(c, null);
 
-    /// <summary>An inline tag whose cascaded display, position or float makes it a box (stylesheet rules count, as in a browser).</summary>
+    /// <summary>
+    /// An inline tag whose cascaded display, position or float makes it a box (stylesheet rules count, as in a
+    /// browser), or whose parent is a flex or grid container: CSS blockifies every item of one, so it is never
+    /// part of a line of text.
+    /// </summary>
     internal static bool Blockified(HtmlNode c, List<CssRule>? rules)
     {
+        if (c.Parent is { IsText: false } parent && Display(parent, rules) is { } pd
+            && (pd.StartsWith("flex") || pd.StartsWith("grid") || pd.StartsWith("inline-flex") || pd.StartsWith("inline-grid"))) return true;
+        var disp = Display(c, rules);
+        if (disp != null && (disp.StartsWith("block") || disp.StartsWith("flex") || disp.StartsWith("grid") || disp.StartsWith("table") || disp.StartsWith("inline-block") || disp.StartsWith("inline-flex") || disp.StartsWith("inline-grid"))) return true;
         if (rules != null)
         {
-            var disp = CascadedValue(c, rules, "display")?.Trim().ToLowerInvariant();
-            if (disp != null && (disp.StartsWith("block") || disp.StartsWith("flex") || disp.StartsWith("grid") || disp.StartsWith("table") || disp.StartsWith("inline-block") || disp.StartsWith("inline-flex") || disp.StartsWith("inline-grid"))) return true;
             var pos = CascadedValue(c, rules, "position")?.Trim().ToLowerInvariant();
             if (pos is "absolute" or "fixed") return true;
             var fl = CascadedValue(c, rules, "float")?.Trim().ToLowerInvariant();
@@ -2341,14 +2347,17 @@ internal static class HtmlRenderer
         if (c.Attr("style") is not { } st) return false;
         var s = st.ToLowerInvariant();
         if (s.IndexOf("position:", StringComparison.Ordinal) >= 0 && (s.Contains("absolute") || s.Contains("fixed"))) return true;
-        if (s.IndexOf("float:", StringComparison.Ordinal) >= 0 && !s.Contains("float:none")) return true;
+        return s.IndexOf("float:", StringComparison.Ordinal) >= 0 && !s.Contains("float:none");
+    }
+
+    /// <summary>A node's display: cascaded when the rules are given, else from its inline style alone; null when neither says.</summary>
+    private static string? Display(HtmlNode n, List<CssRule>? rules)
+    {
+        if (rules != null) return CascadedValue(n, rules, "display")?.Trim().ToLowerInvariant();
+        if (n.Attr("style") is not { } st) return null;
+        var s = st.ToLowerInvariant();
         var d = s.IndexOf("display:", StringComparison.Ordinal);
-        if (d >= 0)
-        {
-            var v = s.Substring(d + 8).TrimStart();
-            if (v.StartsWith("block") || v.StartsWith("flex") || v.StartsWith("grid") || v.StartsWith("table") || v.StartsWith("inline-block") || v.StartsWith("inline-flex") || v.StartsWith("inline-grid")) return true;
-        }
-        return false;
+        return d >= 0 ? s.Substring(d + 8).TrimStart() : null;
     }
 
     /// <summary>column-count, or the count column-width gives for the block's width; 0 when neither.</summary>
@@ -2426,7 +2435,7 @@ internal static class HtmlRenderer
     }
 
     /// <summary>Attributes the mod keeps on a node for itself (click region, list and control markers); markup never carries them.</summary>
-    private static readonly HashSet<string> InternalAttributes = new(StringComparer.OrdinalIgnoreCase) { "data-click", "data-listed", "data-control", "data-touched" };
+    internal static readonly HashSet<string> InternalAttributes = new(StringComparer.OrdinalIgnoreCase) { "data-click", "data-listed", "data-control", "data-touched" };
 
     private static bool SameAttributes(HtmlNode o, HtmlNode n)
     {
@@ -2908,40 +2917,16 @@ internal static class HtmlRenderer
         }
         if (css.TryGetValue("row-gap", out var rg)) rowGap = StyleApplier.Num(rg);
         if (css.TryGetValue("column-gap", out var cg)) colGap = StyleApplier.Num(cg);
-        if (rowGap <= 0f && colGap <= 0f) return;
-        // remembered: children a script appends later, and a re-cascade that rewrites the margins, get the gap again
+        // gap spaces the items of a flex container (and of an inline-grid, laid out here as one); a block's children it leaves alone
+        var flex = display != null && display.Trim() is "flex" or "inline-flex" or "inline-grid";
+        if (!flex) rowGap = colGap = 0f;
+        if (rowGap <= 0f && colGap <= 0f && !result.GapContainers.Contains(ve)) return;
+        // remembered: a re-cascade that changes the gap sets it again
         result.GapContainers.Add(ve);
-        var dir = ve.style.flexDirection.value;
-        var row = dir == FlexDirection.Row || dir == FlexDirection.RowReverse;
-        var wrap = ve.style.flexWrap.value == UnityEngine.UIElements.Wrap.Wrap;
-        var count = ve.childCount;
-        for (var i = 0; i < count; i++)
-        {
-            var child = ve[i];
-            var last = i == count - 1;
-            // the child's own margin from its record, so applying the gap twice adds it once
-            var own = result.CssOf(child);
-            var right = row ? (!last ? colGap : 0f) : (wrap ? colGap : 0f);
-            var bottom = row ? (wrap ? rowGap : 0f) : (!last ? rowGap : 0f);
-            if ((row || wrap) && DeclaredSide(own, "right") is { } mr) child.style.marginRight = mr + right;
-            if ((!row || wrap) && DeclaredSide(own, "bottom") is { } mb) child.style.marginBottom = mb + bottom;
-        }
-    }
-
-    /// <summary>A margin side as the element's CSS declares it, in px; null for auto (left alone).</summary>
-    private static float? DeclaredSide(Dictionary<string, string> css, string side)
-    {
-        string? v = null;
-        if (css.TryGetValue("margin-" + side, out var s)) v = s;
-        else if (css.TryGetValue("margin", out var m))
-        {
-            var p = m.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (p.Length > 0) v = side == "right" ? (p.Length > 1 ? p[1] : p[0]) : (p.Length > 2 ? p[2] : p[0]);
-        }
-        if (v == null) return 0f;
-        v = v.Trim();
-        if (v == "auto") return null;
-        return StyleApplier.Num(v);
+        // the layout's own gap, between the items in flow only: an item that is display: none leaves no gap
+        // behind, as in a browser (the children's margins, which this used to add to, counted hidden ones too)
+        Yoga.YGNodeStyleAPI.YGNodeStyleSetGap(ve.Node, Yoga.YGGutter.Column, Math.Max(0f, colGap));
+        Yoga.YGNodeStyleAPI.YGNodeStyleSetGap(ve.Node, Yoga.YGGutter.Row, Math.Max(0f, rowGap));
     }
 
     private static void ApplyStyles(VisualElement ve, HtmlNode node, List<CssRule> rules, Result result)

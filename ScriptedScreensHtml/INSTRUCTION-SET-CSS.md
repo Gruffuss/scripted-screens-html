@@ -107,7 +107,7 @@ Sourced from the W3C canonical machine-readable list (`https://www.w3.org/Style/
 | flex-grow (CRD) | | | | |
 | flex-shrink (CRD) | | | | |
 | flex-wrap (CRD) | | | | |
-| gap (CRD) | | | | |
+| gap (CRD) | ✅ | laid out once at the compile, as positions in the scene: the layout's own gap, between the items shown only, so rows a state shows or hides (a list's rows, a row's shapes) keep it between those shown and none after the last, as margins would; a block's children get none | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "a flex gap between list rows that have two shapes, the last row's shape changing: the gap is between the rows shown, as margins would be", plain-flex.lua; "plain gap: between the flex items shown and none on a block's children" | |
 | justify-content (CRD) | | | | |
 | order (CRD) | | | | |
 
@@ -479,6 +479,7 @@ Sourced from the W3C canonical machine-readable list (`https://www.w3.org/Style/
 |---|---|---|---|---|
 | clear (WD) | | | | |
 | display (WD, Level 4) | | | | |
+| display: flex / grid — its items blockified (Display §2.7) | ✅ | each child of a flex or grid container is an item with a box of its own, never folded into its parent's text: a span in one keeps its own shapes, so a value only known at run time may sit in its attributes (the program's attribute table) | PlainTranslatorTests, each at 460x460, 1036x460 and 460x1036: "the children of a flex or grid container are items with boxes of their own, never text: spans with no id or class in a grid row and in a display:flex span carry attributes only known at run time, read back with getAttribute", plain-flex.lua | |
 
 #### Filter Effects
 | Feature | Status | Maps to (vector / Lua) | Test | Reason (❌ only) |

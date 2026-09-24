@@ -1002,6 +1002,60 @@ internal static class PlainTranslatorTests
               "document.getElementById('rot').addEventListener('click', () => { const first = items.shift(); if (items.length < 3) items.push(first); });" +
               "render();"),
          Steps("r0", "rot", "r0", "add", "ta", "r1", "tb", "add"), new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8 }),
+
+        ("an attribute the page never wrote reads null on an element markup makes, a click listener on it and the compile's own click region with it",
+         Page(".b { width: 90px; height: 24px; background: #234; }", "<div id=\"box\"></div><p id=\"out\">-</p>",
+              "let n = 0;" +
+              "function draw() {" +
+              "  document.getElementById('box').innerHTML = '<div id=\"m\" class=\"b\" data-k=\"x\">M ' + n + '</div>';" +
+              "  const els = document.querySelectorAll('.b');" +
+              "  for (let i = 0; i < els.length; i++) els[i].addEventListener('click', () => { n++; draw(); });" +
+              "  document.getElementById('out').textContent = 'click ' + els[0].getAttribute('data-click') + ', k ' + els[0].getAttribute('data-k') + ', has ' + els[0].hasAttribute('data-click') + ', sel ' + document.querySelectorAll('[data-click]').length;" +
+              "}" +
+              "draw();"),
+         Steps("m", "m"), new[] { 0, 1, 2 }),
+
+        ("the children of a flex or grid container are items with boxes of their own, never text: spans with no id or class in a grid row " +
+         "and in a display:flex span carry attributes only known at run time, read back with getAttribute",
+         Page(".row { display: grid; grid-template-columns: 60px 1fr 60px; gap: 8px; height: 26px; margin-bottom: 4px; background: #1a2230; }",
+              "<div id=\"list\"></div><p id=\"out\">-</p>",
+              "const log = [{ t: '02:14', tag: 'INFO', color: '#888888' }, { t: '02:13', tag: 'WARN', color: '#ff8800' }];" +
+              "let k = 0;" +
+              "function show() {" +
+              "  document.getElementById('list').innerHTML = log.map((e, i) => '<div class=\"row\"><span data-at=\"' + (k + i) + '\">' + e.t + '</span>'" +
+              "    + '<span style=\"display:flex;gap:4px\"><span style=\"font-size:11px\">tag</span><span data-at=\"' + (k * 2 + i) + '\" style=\"color:' + e.color + '\">' + e.tag + '</span></span>'" +
+              "    + '<span>' + e.t + '</span></div>').join('');" +
+              "  document.getElementById('out').textContent = 'at ' + document.querySelectorAll('[data-at]')[1].getAttribute('data-at');" +
+              "}" +
+              "setInterval(() => { k++; show(); }, 500);" +
+              "show();"),
+         Ticks(3), new[] { 0, 1, 2, 3 }),
+
+        ("a flex gap between list rows that have two shapes, the last row's shape changing: the gap is between the rows shown, as margins would be",
+         Page("#list { display: flex; flex-direction: column; gap: 6px; } #chips { display: flex; gap: 10px; } .row { height: 26px; background: #1a2230; } .row.on { background: #2f855a; } .chip { width: 50px; height: 20px; background: #345; } .chip.on { background: #6a4; }",
+              "<div id=\"list\"></div><div id=\"chips\"></div><p>end</p>",
+              "const items = [{ n: 'Pump', on: true }, { n: 'Fan', on: false }, { n: 'Vent', on: true }];" +
+              "let k = 0;" +
+              "function show() {" +
+              "  document.getElementById('list').innerHTML = items.map((g) => g.on ? '<div class=\"row on\">' + g.n + ' on</div>' : '<div class=\"row\">' + g.n + '</div>').join('');" +
+              "  document.getElementById('chips').innerHTML = items.map((g) => g.on ? '<div class=\"chip on\"></div>' : '<div class=\"chip\"></div>').join('');" +
+              "}" +
+              "setInterval(() => { k++; items[k % 3].on = !items[k % 3].on; show(); }, 500);" +
+              "show();"),
+         Ticks(4), new[] { 0, 1, 2, 3, 4 }),
+
+        ("a text beside rows whose shape choice changes in the same markup write, the text changed or not: it reads its value, never its stand-in",
+         Page(".big { height: 30px; background: #232833; } .row { height: 24px; background: #2b3a55; color: #889; } .row.on { color: #6d9; }",
+              "<div id=\"panel\"></div><p>end</p>",
+              "const items = [{ n: 'Pump', pick: true }, { n: 'Fan', pick: false }, { n: 'Vent', pick: true }];" +
+              "let n = 0, k = 0;" +
+              "function render() {" +
+              "  document.getElementById('panel').innerHTML = '<div id=\"add\" class=\"big\">ADD ' + n + '</div>'" +
+              "    + items.map((g) => '<div class=\"row' + (g.pick ? ' on' : '') + '\">' + g.n + '</div>').join('');" +
+              "}" +
+              "setInterval(() => { k++; if (k % 2) n++; const first = items.shift(); if (items.length < 3) items.push(first); render(); }, 500);" +
+              "render();"),
+         Ticks(4), new[] { 0, 1, 2, 3, 4 }),
     };
 
     /// <summary>Features outside what is translated, each refused by name - the page keeps its old path.</summary>
@@ -1102,8 +1156,13 @@ internal static class PlainTranslatorTests
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-events.lua"), Steps("a", "b", "d", "e", "d", "o", "o", "a"),
          new[] { 0, 1, 2, 3, 5, 6, 7, 8 }),
         // clicks kept as functions in an array, found by [data-act]: not yet seen in game. The second row's boxes (no id) are clicked in game only.
-        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-acts.lua"), Steps("r0", "rot", "r0", "add", "ta", "r1", "tb", "add"),
-         new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8 }),
+        // and after the last ADD, ROTATE then a row: the render where the rows' shapes change and ADD's text does not (seen in
+        // game reading "ADD 0" there; the Lua sends nothing for it, as here)
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-acts.lua"), Steps("r0", "rot", "r0", "add", "ta", "r1", "tb", "add", "rot", "r0"),
+         new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10 }),
+        // flex and grid items with attributes only known at run time, and a flex gap around rows of two shapes: not yet seen in game
+        (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-flex.lua"), Steps(0.5, "tog", 0.5, "tog", "tog", 0.5, "tog"),
+         new[] { 0, 1, 2, 3, 5, 6, 7 }),
         // a page whose only code is in onclick attributes: not yet seen in game
         (System.IO.Path.Combine("ScriptedScreensHtml.Tests", "ingame", "plain-noscript.lua"), Steps("on", "box", "off", "box", "on"), new[] { 0, 1, 2, 3, 5 }),
     };
@@ -1157,6 +1216,7 @@ internal static class PlainTranslatorTests
         Eligibility(root, check);
         Sizes(check);
         HiddenRule(check);
+        Gaps(check);
         foreach (var (feature, page, reason) in Refusals)
         {
             CompiledPage.Result compiled;
@@ -1353,6 +1413,24 @@ internal static class PlainTranslatorTests
     }
 
     /// <summary>The page as built: an element hidden by its attribute is not drawn, unless the page's own CSS gives it a display.</summary>
+    /// <summary>
+    /// gap as a browser lays it: between a flex container's items shown (one display: none leaves no gap behind, and
+    /// none after the last), and nothing on a block's children.
+    /// </summary>
+    private static void Gaps(Action<bool, string> check)
+    {
+        ResolvedStyle.DefaultFace = FontLibrary.Default();
+        var built = HtmlRenderer.Build(Page("#f { display: flex; flex-direction: column; gap: 10px; } #b { gap: 10px; } .i { height: 20px; }",
+            "<div id=\"f\"><div id=\"f1\" class=\"i\"></div><div id=\"f2\" class=\"i\"></div><div id=\"f3\" class=\"i\"></div></div>" +
+            "<div id=\"b\"><div id=\"b1\" class=\"i\"></div><div id=\"b2\" class=\"i\"></div></div>", ""), FontLibrary.Default());
+        built.ById["f3"].style.display = DisplayStyle.None;
+        new Panel(built.Root).Layout(460, 460);
+        float Y(string id) => built.ById[id].layout.y;
+        float H(string id) => built.ById[id].layout.height;
+        check(Y("f2") - Y("f1") == 30 && H("f") == 50 && Y("b2") - Y("b1") == 20,
+              $"plain gap: between the flex items shown and none on a block's children (f2 at +{Y("f2") - Y("f1")}, flex box {H("f")} high, b2 at +{Y("b2") - Y("b1")})");
+    }
+
     private static void HiddenRule(Action<bool, string> check)
     {
         ResolvedStyle.DefaultFace = FontLibrary.Default();

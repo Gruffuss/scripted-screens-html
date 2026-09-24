@@ -4201,9 +4201,18 @@ internal static partial class PlainTranslator
                 var v = t.AttrTable + "[" + (name != null ? Q(name) : "string.lower(js_str(" + tr(byName!) + "))") + "]";
                 return has ? "(" + v + " ~= nil)" : (read != null && Numbered(read) ? "v_attrnum(" : "v_attr(") + v + ")";
             }
-            var own = SourceNode(t).Attr(name!);
+            var node = SourceNode(t);
+            var own = Marker(t, node, name!) ? null : node.Attr(name!);
             return has ? (own != null ? "true" : "false") : own != null ? Q(own) : "nil";
         }
+
+        /// <summary>
+        /// One of the mod's own markers (a click region's data-click and the like) on the live node of an element
+        /// markup makes, which is where its attributes are read from: the page never wrote it, so it never reads it.
+        /// </summary>
+        // ponytail: a marker the page wrote itself into markup is hidden too; tell them apart by the markup's text if one matters
+        private static bool Marker(Target t, HtmlNode node, string key)
+            => ReferenceEquals(node, t.Node) && HtmlRenderer.InternalAttributes.Contains(key);
 
         /// <summary>Whether a read is turned straight into a number: `Number(x)` or `+x`.</summary>
         private bool Numbered(Node read)
@@ -4235,6 +4244,7 @@ internal static partial class PlainTranslator
                 {
                     var key = pair.Key.ToLowerInvariant();
                     if (key is "id" or "class" or "style") continue;
+                    if (Marker(t, node, key)) continue;
                     pairs.Add((key, Q(pair.Value)));
                 }
             return Table(pairs);

@@ -113,6 +113,17 @@ Newest first. The workshop page is a short overview; this file has the full hist
   no longer stops a lookup by its presence from compiling.
 - A page whose only code is in `onclick` attributes, with no `<script>`, runs them: it was treated as a
   page driven by data alone, and its clicks did nothing.
+- The children of a flex or grid container are items with boxes of their own, as CSS makes them: a
+  `<span>` with no id or class in a `display: flex` span or a grid row was folded into its parent's
+  text, so a value only known at run time in its attributes (`style="color:' + e.color + '"`) stopped
+  the page from compiling.
+- `gap` in a flex container is laid out by the layout itself, between the items shown: rows of a list
+  whose shape changes with their item (two shapes of one size) were refused as "another size" when a gap
+  spaced them, and now compile as they did with margins. `gap` on a block's children (not a flex box)
+  no longer adds space, as in a browser, and a wrapping flex row takes its gaps between lines and items
+  exactly.
+- `getAttribute('data-click')` and `hasAttribute` on an element markup makes read null and false, as for
+  any attribute the page never wrote: they read the compile's own click-region marker.
 
 ## 0.2.0
 
