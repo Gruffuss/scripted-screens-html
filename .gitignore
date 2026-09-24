@@ -13,6 +13,9 @@ decompiled/
 # It sits beside this one on disk because the HTML mod drives it at runtime.
 ScriptedScreensVector/
 
+# The HTML translator (the compile-once successor to this mod) has its own repository too.
+ScriptedScreensHtmlTranslator/
+
 # The Fonts mod has its own repository too: github.com/Gruffuss/scripted-screens-fonts.
 # It sits beside this one on disk because the HTML mod draws in its typefaces at runtime.
 StationeersLuaAddonTemplate-main/
