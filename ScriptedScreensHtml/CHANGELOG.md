@@ -2,6 +2,10 @@
 
 Newest first. The workshop page is a short overview; this file has the full history.
 
+## 0.2.1
+
+- Works with ScriptedScreens 1.1, which added a screen host parameter to `DispatchUiInput` and `ApplyElementInternal`. 0.2.0 called the 1.0 signatures directly, so on 1.1 every click on any ScriptedScreens console failed before reaching its chip (`MissingMethodException` in the pointer dispatch), and a page's images, video and audio were not placed. Both calls now bind to whichever ScriptedScreens version is loaded; the click forward keeps the original call's own arguments, the screen host included.
+
 ## 0.2.0
 
 - Pages are laid out by a layout engine inside the mod instead of Unity's UI Toolkit, and each
