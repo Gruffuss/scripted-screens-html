@@ -508,6 +508,29 @@ internal sealed class HtmlSurface : MonoBehaviour
     /// <summary>What each external element was last applied with, so an unchanged one is not re-sent (a re-send re-downloads an image).</summary>
     private readonly Dictionary<string, string> _externalState = new(StringComparer.Ordinal);
 
+    private static readonly MethodInfo ApplyElementMethod =
+        typeof(SS).GetMethod("ApplyElementInternal", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)!;
+
+    /// <summary>
+    /// ScriptedScreens' ApplyElementInternal, whatever its version: 1.1 added an optional parameter (the screen host
+    /// device), so a call compiled against either signature fails to load on the other. Newer parameters get their
+    /// defaults.
+    /// </summary>
+    private static void ApplyElement(Motherboard? board, CartridgeIntegratedCircuitLua? cartridge, ProgrammableVisorGlasses? visor,
+        SS.BoardState state, string surface, SS.UiElement element)
+    {
+        var parameters = ApplyElementMethod.GetParameters();
+        object?[] given = { board, cartridge, visor, state, surface, element };
+        var args = new object?[parameters.Length];
+        for (var i = 0; i < args.Length; i++)
+            args[i] = i < given.Length ? given[i] : parameters[i].HasDefaultValue ? parameters[i].DefaultValue : null;
+        try { ApplyElementMethod.Invoke(null, args); }
+        catch (TargetInvocationException e) when (e.InnerException != null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e.InnerException).Throw();
+        }
+    }
+
     /// <summary>
     /// img, video and audio: a ScriptedScreens image / media / sound element for each,
     /// applied through the real ApplyElementInternal. The id is hierarchical
@@ -597,7 +620,7 @@ internal sealed class HtmlSurface : MonoBehaviour
                 if (model != null)
                     lock (model.PendingOpsLock)
                         model.Elements[id] = element;
-                SS.ApplyElementInternal(Board as Motherboard, Cartridge as CartridgeIntegratedCircuitLua, Visor as ProgrammableVisorGlasses, state, Surface, element);
+                ApplyElement(Board as Motherboard, Cartridge as CartridgeIntegratedCircuitLua, Visor as ProgrammableVisorGlasses, state, Surface, element);
                 _externals.Add(id);
                 if (state.SurfaceElementRoots.TryGetValue(Surface, out var roots) && roots.TryGetValue(id, out var host) && host != null)
                     host.transform.SetAsLastSibling();

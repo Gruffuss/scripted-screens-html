@@ -3,10 +3,12 @@
   <Name>ScriptedScreens Html [StationeersLaunchPad]</Name>
   <ModID>gruffuss.stationeers.scriptedscreens.html</ModID>
   <Author>Gruffuss</Author>
-  <Version>0.2.0.0</Version>
+  <Version>0.2.1.0</Version>
   <Description>
 [h1]ScriptedScreens Html[/h1]
 [i]Write a console screen as a web page. Client-side only.[/i]
+
+[img]https://raw.githubusercontent.com/Gruffuss/badges/main/ai-assisted.png[/img]
 
 Adds an [b]html[/b] element to ScriptedScreens consoles: give it HTML, CSS and, if you like, JavaScript, and ScriptedScreens Vector draws it as sharp geometry at any size, in real game fonts. A page written from browser habit works as written.
 
@@ -23,11 +25,10 @@ Adds an [b]html[/b] element to ScriptedScreens consoles: give it HTML, CSS and, 
 [h2]Getting started[/h2]
 The mod folder holds seven examples that run on paste (one is a small game), three complete console mockups, a one-page QUICKSTART.md, the guide (README.md), the support list (SUPPORT.md) and the release history (CHANGELOG.md), also [url=https://github.com/Gruffuss/scripted-screens-html/tree/main/ScriptedScreensHtml]on GitHub[/url]. With StationeersLua installed, AI editors can read and search the same docs through its MCP server.
 
-[h2]What's new in 0.2.0[/h2]
+[h2]What's new in 0.2.1[/h2]
 [list]
-[*] Pages lay out and animate on their own threads with a built-in layout engine
-[*] More pages written for a browser render as written: fonts, subscripts, layered backgrounds
-[*] Docs, examples and mockups for AI editors through StationeersLua's MCP server
+[*] Works with ScriptedScreens 1.1: clicks reach every console again, and pages place their images, video and audio (0.2.0 broke both on 1.1)
+[*] Still works with ScriptedScreens 1.0
 [/list]
 Full history: [url=https://github.com/Gruffuss/scripted-screens-html/blob/main/ScriptedScreensHtml/CHANGELOG.md]CHANGELOG.md[/url].
 

@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using HarmonyLib;
 using SS = ScriptedScreens.ScriptableUi.ScriptedScreensScriptableUiSystem;
 using Motherboard = Assets.Scripts.Objects.Items.Motherboard;
@@ -18,7 +19,8 @@ namespace ScriptedScreensHtml;
 [HarmonyPatch(typeof(SS), "DispatchUiInput")]
 internal static class HtmlInputPatch
 {
-    private static bool Prefix(Motherboard? board, CartridgeIntegratedCircuitLua? cartridge, ProgrammableVisorGlasses? visor, string text)
+    private static bool Prefix(Motherboard? board, CartridgeIntegratedCircuitLua? cartridge, ProgrammableVisorGlasses? visor, string text,
+        MethodBase __originalMethod, object?[] __args)
     {
         try
         {
@@ -43,7 +45,7 @@ internal static class HtmlInputPatch
                     owner.OnPageClick(input.Value);
                     return true;
                 }
-                SS.DispatchUiInput(board, cartridge, visor, SS.SerializeUiInput(new SS.UiInput { Surface = surface, Id = id, Event = "change", Value = cname + "=" + cvalue }));
+                Redispatch(__originalMethod, __args, SS.SerializeUiInput(new SS.UiInput { Surface = surface, Id = id, Event = "change", Value = cname + "=" + cvalue }));
                 return false;
             }
             if (slash == 0 || slash == id.Length - 1)
@@ -56,7 +58,7 @@ internal static class HtmlInputPatch
             if (!page.OnExternalInput(key, input.Event ?? string.Empty, input.Value ?? string.Empty, out var name, out var value))
                 return true;
             var forward = new SS.UiInput { Surface = surface, Id = pageId, Event = "change", Value = name + "=" + value };
-            SS.DispatchUiInput(board, cartridge, visor, SS.SerializeUiInput(forward));
+            Redispatch(__originalMethod, __args, SS.SerializeUiInput(forward));
             return true;
         }
         catch (Exception ex)
@@ -64,5 +66,19 @@ internal static class HtmlInputPatch
             ScriptedScreensHtmlPlugin.Log?.LogWarning($"html: control event failed: {ex}");
             return true;
         }
+    }
+
+    /// <summary>
+    /// Dispatches again with this call's own arguments and a new text. ScriptedScreens 1.1 added a parameter (the
+    /// screen host device), so a call compiled against either version's signature fails to load on the other.
+    /// </summary>
+    private static void Redispatch(MethodBase original, object?[] args, string text)
+    {
+        var copy = (object?[])args.Clone();
+        var parameters = original.GetParameters();
+        for (var i = 0; i < parameters.Length; i++)
+            if (parameters[i].Name == "text")
+                copy[i] = text;
+        original.Invoke(null, copy);
     }
 }
